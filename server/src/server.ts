@@ -4,6 +4,7 @@ import { join } from "node:path";
 import express from "express";
 import { WebSocketServer } from "ws";
 import { loadConfig, loadApps, loadTokens, githubPatPath, resolveShareSecret, type App, type Config } from "./config.ts";
+import { watchApps } from "./appsWatcher.ts";
 import { TokenAuthenticator } from "./auth.ts";
 import { AuditLog } from "./audit.ts";
 import { StateStore } from "./state.ts";
@@ -175,6 +176,15 @@ export function createServer(): DeckhandServer {
       // sweeping idle previews for as long as we run.
       await engine.reapOrphans().catch(() => {});
       engine.startJanitor();
+      // Registering an app must not cost a restart — a restart tears down every
+      // booted simulator on the machine.
+      watchApps(apps, {
+        onReload: (_apps, { added, removed }) => {
+          for (const id of added) console.log(`apps.yaml: registered "${id}"`);
+          for (const id of removed) console.log(`apps.yaml: removed "${id}"`);
+        },
+        onError: (err) => console.error(`apps.yaml: keeping the previous list — ${(err as Error).message}`),
+      });
     },
   };
 }
