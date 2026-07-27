@@ -136,6 +136,42 @@ describe("watchApps", () => {
     );
   });
 
+  it("refuses a reload that would empty the registry", async () => {
+    // `apps:` defaults to [], so a truncated file PARSES — loadApps never throws
+    // and the shared array would be spliced empty, leaving every start_preview
+    // answering "no such app".
+    writeAtomic(yaml("one", "two"));
+    const apps: App[] = [
+      { id: "one", path: "/tmp/one", type: "expo", defaultBranch: "main", allowForkPRs: false, env: {} } as App,
+      { id: "two", path: "/tmp/two", type: "expo", defaultBranch: "main", allowForkPRs: false, env: {} } as App,
+    ];
+
+    for (const truncated of ["", "   \n", "apps:\n"]) {
+      const errored = new Promise<unknown>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("no error within 3s")), 3000);
+        const stop = watchApps(apps, {
+          file,
+          debounceMs: 10,
+          pollMs: 50,
+          onError: (err) => {
+            clearTimeout(timeout);
+            resolve(err);
+          },
+          onReload: () => assert.fail("a zero-app parse must not reload"),
+        });
+        stops.push(stop);
+      });
+      writeAtomic(truncated);
+      await errored;
+      assert.deepEqual(
+        apps.map((a) => a.id),
+        ["one", "two"],
+        `"${truncated}" must not deregister every app`,
+      );
+      stops.pop()!();
+    }
+  });
+
   it("stays quiet when the file is rewritten with identical content", async () => {
     writeAtomic(yaml("one"));
     // The in-memory list already matches the file — exactly the state add_app

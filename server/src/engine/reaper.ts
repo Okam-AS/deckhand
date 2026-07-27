@@ -11,9 +11,12 @@ import type { AndroidManager } from "../devices/android.ts";
 // because its in-memory preview map starts empty.
 //
 // So: on boot, sweep. Deckhand binds a single loopback port, so only one server
-// runs at a time and *every* deckhand-named device found at startup is by
-// definition an orphan. Devices in `keep` (a live preview's, when sweeping
-// mid-run) are spared.
+// runs at a time and every deckhand-named device it does NOT know about is an
+// orphan. "Does not know about" is passed in as `keep` rather than assumed from
+// an empty preview map: the boot reap runs after the port is bound (so that a
+// second `serve` dies on EADDRINUSE before deleting the live server's devices),
+// which means a start_preview can already be creating a simulator by the time
+// the sweep runs.
 // ---------------------------------------------------------------------------
 
 /** Simulator names deckhand creates: `deckhand-<previewId>-<deviceId>`. */
@@ -28,8 +31,12 @@ export function isPooled(name: string): boolean {
   return name.startsWith(POOL_SIM_PREFIX) || name.startsWith(POOL_AVD_PREFIX);
 }
 
-export function orphanSims(devices: SimDevice[], keep: ReadonlySet<string> = new Set()): SimDevice[] {
-  return devices.filter((d) => d.name.startsWith(SIM_PREFIX) && !keep.has(d.udid));
+export function orphanSims(
+  devices: SimDevice[],
+  keep: ReadonlySet<string> = new Set(),
+  keepNames: ReadonlySet<string> = new Set(),
+): SimDevice[] {
+  return devices.filter((d) => d.name.startsWith(SIM_PREFIX) && !keep.has(d.udid) && !keepNames.has(d.name));
 }
 
 export function orphanAvds(names: string[], keep: ReadonlySet<string> = new Set()): string[] {
@@ -70,12 +77,16 @@ export class Reaper {
    * `keep`, plus the helper processes bound to them. Never throws: a reap
    * failure must not stop the server from coming up.
    */
-  async reap(keep: { udids?: Iterable<string>; avds?: Iterable<string> } = {}): Promise<ReapReport> {
+  async reap(keep: { udids?: Iterable<string>; avds?: Iterable<string>; names?: Iterable<string> } = {}): Promise<ReapReport> {
     const keepUdids = new Set(keep.udids ?? []);
     const keepAvds = new Set(keep.avds ?? []);
+    // A device being created right now has no UDID yet, but its name is already
+    // leased. Sparing by name closes the window between `simctl create` and the
+    // engine recording what it got back.
+    const keepNames = new Set(keep.names ?? []);
     const report: ReapReport = { sims: [], avds: [], keptPooled: [] };
 
-    const sims = orphanSims(await this.list(() => this.d.simctl.listDevices(), []), keepUdids);
+    const sims = orphanSims(await this.list(() => this.d.simctl.listDevices(), []), keepUdids, keepNames);
     for (const sim of sims) {
       // The helper streams from the UDID; kill it before the device disappears.
       await this.kill(`serve-sim ${sim.udid}`).catch(() => {});
@@ -91,7 +102,7 @@ export class Reaper {
       report.sims.push(sim.udid);
     }
 
-    const avds = orphanAvds(await this.list(() => this.d.android.listAvds(), []), keepAvds);
+    const avds = orphanAvds(await this.list(() => this.d.android.listAvds(), []), new Set([...keepAvds, ...keepNames]));
     for (const avd of avds) {
       // `adb emu kill` needs a reachable console port; orphans often collide on
       // one (each process restarts port allocation at 5554), so kill the QEMU

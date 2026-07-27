@@ -873,6 +873,91 @@ describe("PreviewEngine idle sweep", () => {
     }
   });
 
+  it("does not call a long build stuck while it is still producing output", async () => {
+    // The phases are coarse: a cold CocoaPods/Gradle build sits in "building"
+    // for well over stuckMinutes while streaming healthy output. Judging
+    // progress by phase transitions alone tore it down mid-build.
+    let releaseBuild: (() => void) | null = null;
+    const building = new Promise<void>((r) => (releaseBuild = r));
+    const h = makeEngine({
+      now: () => clock.t,
+      genPreviewId: () => `pv${++ids.n}`,
+      genShareId: () => `share-${ids.n}`,
+      runStep: async (step: CommandStep, opts?: { onLog?: (line: string, src: string) => void }) => {
+        if (step.name !== "build") return { code: 0, timedOut: false, aborted: false };
+        for (let i = 0; i < 4; i++) {
+          clock.t += 30 * 60_000; // half an hour between lines; stuckMinutes is 90
+          opts?.onLog?.(`Compiling chunk ${i}`, "stdout");
+          assert.deepEqual(await h.engine.sweepIdle(), [], "output means it is alive");
+        }
+        await building;
+        return { code: 0, timedOut: false, aborted: false };
+      },
+    } as unknown as Partial<PreviewEngineDeps>);
+
+    h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "ios" }],
+      access: "public",
+    });
+    await waitForPhase(h.engine, "pv1", ["building", "ready", "failed"]);
+    // Now go quiet past the window: silence IS stuck.
+    clock.t += 100 * 60_000;
+    assert.deepEqual(await h.engine.sweepIdle(), ["pv1"]);
+    releaseBuild!();
+  });
+
+  it("releases a device whose boot finished after the sweep collected its preview", async () => {
+    // `simctl create` can't be cancelled. If it returns after teardown already
+    // ran and saw no udid, the simulator survives as an orphan — and with
+    // pooling on, as a slot a newer preview can lease and boot underneath.
+    let releaseCreate: (() => void) | null = null;
+    const creating = new Promise<void>((r) => (releaseCreate = r));
+    const simCalls: string[] = [];
+    const h = makeEngine({
+      now: () => clock.t,
+      genPreviewId: () => `pv${++ids.n}`,
+      genShareId: () => `share-${ids.n}`,
+      simctl: {
+        listRuntimes: async () => [{ identifier: "rt.26", name: "iOS 26.0", version: "26.0", isAvailable: true }],
+        listDeviceTypes: async () => [{ identifier: "dt.16pro", name: "iPhone 16 Pro" }],
+        listDevices: async () => [],
+        create: async (name: string) => {
+          simCalls.push(`create ${name}`);
+          await creating; // still running when the sweep collects the preview
+          return "UDID-LATE";
+        },
+        bootAndWait: async () => void simCalls.push("boot"),
+        appContainer: async () => "/path/to/App.app",
+        install: async () => {},
+        launch: async () => {},
+        openUrl: async () => {},
+        shutdown: async (u: string) => void simCalls.push(`shutdown ${u}`),
+        delete: async (u: string) => void simCalls.push(`delete ${u}`),
+      } as unknown as PreviewEngineDeps["simctl"],
+    } as unknown as Partial<PreviewEngineDeps>);
+
+    h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "ios" }],
+      access: "public",
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    await h.engine.stopPreview("pv1"); // aborts mid-create
+
+    releaseCreate!();
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.ok(simCalls.includes("create deckhand-pv1-ios-0"));
+    assert.ok(!simCalls.includes("boot"), "an abandoned device must not go on to boot");
+    assert.ok(simCalls.includes("shutdown UDID-LATE"), "the late simulator is shut down");
+    assert.ok(simCalls.includes("delete UDID-LATE"), "…and deleted, not left as an orphan");
+  });
+
   it("tears a failed preview down only after its rebuild grace window", async () => {
     const h = makeSwept((step) => ({ code: step.name === "build" ? 1 : 0, timedOut: false, aborted: false }));
     h.engine.startPreview({
@@ -916,6 +1001,193 @@ describe("PreviewEngine idle sweep", () => {
         }),
       /device capacity reached/,
     );
+  });
+
+  it("spares an in-flight device from the boot reap with pooling OFF", async () => {
+    // With pooling off there is no lease to spare the device by, and the boot
+    // reap runs after the port is bound — so a start_preview mid-`simctl create`
+    // had its brand-new simulator shut down and deleted underneath it.
+    let releaseCreate: (() => void) | null = null;
+    const creating = new Promise<void>((r) => (releaseCreate = r));
+    let keepSeen: { udids?: Iterable<string>; avds?: Iterable<string>; names?: Iterable<string> } = {};
+    const h = makeEngine({
+      config: { ...config, limits: { ...config.limits, reuseDevices: false } },
+      reaper: {
+        reap: async (keep: typeof keepSeen = {}) => {
+          keepSeen = keep;
+          return { sims: [], avds: [], keptPooled: [] };
+        },
+      } as unknown as PreviewEngineDeps["reaper"],
+      simctl: {
+        listRuntimes: async () => [{ identifier: "rt.26", name: "iOS 26.0", version: "26.0", isAvailable: true }],
+        listDeviceTypes: async () => [{ identifier: "dt.16pro", name: "iPhone 16 Pro" }],
+        listDevices: async () => [],
+        create: async () => {
+          await creating;
+          return "UDID-LATE";
+        },
+        bootAndWait: async () => {},
+        appContainer: async () => "/path/to/App.app",
+        install: async () => {},
+        launch: async () => {},
+        openUrl: async () => {},
+        shutdown: async () => {},
+        delete: async () => {},
+      } as unknown as PreviewEngineDeps["simctl"],
+    } as unknown as Partial<PreviewEngineDeps>);
+
+    h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "ios" }],
+      access: "public",
+    });
+    await new Promise((r) => setTimeout(r, 20)); // now parked inside create()
+    await h.engine.reapOrphans();
+
+    assert.ok(
+      [...(keepSeen.names ?? [])].includes("deckhand-pv1-ios-0"),
+      "the name must be spared even though no UDID exists yet",
+    );
+    releaseCreate!();
+  });
+
+  it("kills the emulator by port when its boot throws, before freeing the port", async () => {
+    // bootEmulator launches QEMU detached and only waits here. On a throw,
+    // record.serial was never set, so nothing else can address the running
+    // emulator — and returning the port to the pool lets the next preview
+    // collide with it and stream the abandoned device.
+    const androidCalls: string[] = [];
+    const h = makeEngine({
+      android: {
+        listSystemImages: async () => [{ pkg: "system-images;android-34;google_apis;arm64-v8a", api: 34 }],
+        listAvds: async () => [],
+        createAvd: async () => void androidCalls.push("createAvd"),
+        bootEmulator: async () => {
+          androidCalls.push("bootEmulator");
+          throw new Error("did not finish booting");
+        },
+        shutdown: async (serial: string) => void androidCalls.push(`shutdown ${serial}`),
+        deleteAvd: async (n: string) => void androidCalls.push(`deleteAvd ${n}`),
+        packagePath: async () => "/data/app/base.apk",
+        installApk: async () => {},
+        launch: async () => {},
+        findApk: async () => "/wt/app-debug.apk",
+        describe: async () => "tree",
+      } as unknown as PreviewEngineDeps["android"],
+    } as unknown as Partial<PreviewEngineDeps>);
+
+    h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "android" }],
+      access: "public",
+    });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "failed");
+
+    assert.ok(
+      androidCalls.some((c) => c.startsWith("shutdown emulator-")),
+      `the abandoned emulator must be killed by its port — saw ${JSON.stringify(androidCalls)}`,
+    );
+  });
+
+  it("does not over-admit when the failed preview never booted anything", async () => {
+    // A clone/build failure has no device to await, so its release completes
+    // synchronously and is already out of `tearingDown`. Discounting it a second
+    // time let the retry start more devices than the machine allows.
+    const h = makeEngine(
+      { config: { ...config, limits: { ...config.limits, maxTotalDevices: 4 } } },
+      (step) => ({ code: step.name === "checkout" || step.name === "install-deps" ? 1 : 0, timedOut: false, aborted: false }),
+    );
+    h.engine.startPreview({
+      app: { ...rnApp, id: "app-a" },
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "ios" }],
+      access: "public",
+    });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "failed");
+
+    // Fill 3 of 4 with a healthy second app.
+    const h2 = h; // same engine
+    h2.engine.startPreview({
+      app: { ...rnApp, id: "app-b" },
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "ios" }, { platform: "ios" }, { platform: "ios" }],
+      access: "public",
+    });
+
+    // Retrying app-a for 2 devices would be 3 + 2 = 5 > 4. It must be refused,
+    // not admitted by discounting a device that was never booted or held.
+    assert.throws(
+      () =>
+        h.engine.startPreview({
+          app: { ...rnApp, id: "app-a" },
+          source: "git",
+          spec: { kind: "branch", branch: "main" },
+          devices: [{ platform: "ios" }, { platform: "ios" }],
+          access: "public",
+        }),
+      /device capacity reached/,
+    );
+  });
+
+  it("lets a failed preview be retried immediately, even while its teardown drags", async () => {
+    // Android's shutdown polls `get-state` for up to 20 s per device. Charging
+    // the whole preview to `tearingDown` until the LAST device finished made the
+    // retry throw "device capacity reached" — the exact flow reapTerminalForApp
+    // exists to serve. Devices must be uncharged one at a time, as each lands.
+    let releaseSecond: (() => void) | null = null;
+    const gate = new Promise<void>((r) => (releaseSecond = r));
+    let shutdowns = 0;
+    const h = makeEngine(
+      {
+        simctl: {
+          listRuntimes: async () => [{ identifier: "rt.26", name: "iOS 26.0", version: "26.0", isAvailable: true }],
+          listDeviceTypes: async () => [{ identifier: "dt.16pro", name: "iPhone 16 Pro" }],
+          listDevices: async () => [],
+          create: async () => `udid-${++shutdowns}`,
+          bootAndWait: async () => {},
+          appContainer: async () => "/path/to/App.app",
+          install: async () => {},
+          launch: async () => {},
+          openUrl: async () => {},
+          // The second device's shutdown hangs, standing in for the 20 s poll.
+          shutdown: async (u: string) => {
+            if (u.endsWith("2")) await gate;
+          },
+          delete: async () => {},
+        } as unknown as PreviewEngineDeps["simctl"],
+      },
+      (step) => ({ code: step.name === "build" ? 1 : 0, timedOut: false, aborted: false }),
+    );
+
+    h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "ios" }, { platform: "ios" }], // fills maxTotalDevices (2)
+      access: "public",
+    });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "failed");
+
+    // Same app, so reapTerminalForApp releases the failed preview in background.
+    // The first device is already torn down; only the second is still in flight,
+    // so there is room for one.
+    await new Promise((r) => setTimeout(r, 20));
+    assert.doesNotThrow(() =>
+      h.engine.startPreview({
+        app: rnApp,
+        source: "git",
+        spec: { kind: "branch", branch: "main" },
+        devices: [{ platform: "ios" }],
+        access: "public",
+      }),
+    );
+    releaseSecond!();
   });
 });
 

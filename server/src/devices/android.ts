@@ -18,7 +18,7 @@ export interface ExecResult {
   stderr: string;
   code: number;
 }
-export type Exec = (cmd: string, args: string[], opts?: { timeoutMs?: number; env?: NodeJS.ProcessEnv }) => Promise<ExecResult>;
+export type Exec = (cmd: string, args: string[], opts?: { timeoutMs?: number; env?: NodeJS.ProcessEnv; signal?: AbortSignal }) => Promise<ExecResult>;
 
 function makeDefaultExec(): Exec {
   const env = safeAndroidEnv();
@@ -27,7 +27,7 @@ function makeDefaultExec(): Exec {
       execFile(
         cmd,
         args,
-        { encoding: "buffer", timeout: opts?.timeoutMs, env: opts?.env ?? env, maxBuffer: 64 * 1024 * 1024 },
+        { encoding: "buffer", timeout: opts?.timeoutMs, env: opts?.env ?? env, signal: opts?.signal, maxBuffer: 64 * 1024 * 1024 },
         (err, stdout, stderr) => {
           const code = err ? ((err as NodeJS.ErrnoException & { code?: number }).code ?? 1) : 0;
           resolve({
@@ -156,10 +156,14 @@ export function compactUiAutomatorXml(xml: string): string {
 export class AndroidManager {
   constructor(private readonly exec: Exec = makeDefaultExec()) {}
 
-  private async run(cmd: string, args: string[], opts?: { timeoutMs?: number }): Promise<ExecResult> {
+  private async run(cmd: string, args: string[], opts?: { timeoutMs?: number; signal?: AbortSignal }): Promise<ExecResult> {
     return this.exec(cmd, args, opts);
   }
-  private async adb(serial: string | null, args: string[], opts?: { timeoutMs?: number }): Promise<ExecResult> {
+  private async adb(
+    serial: string | null,
+    args: string[],
+    opts?: { timeoutMs?: number; signal?: AbortSignal },
+  ): Promise<ExecResult> {
     return this.run("adb", serial ? ["-s", serial, ...args] : args, opts);
   }
 
@@ -198,7 +202,7 @@ export class AndroidManager {
     avdName: string,
     consolePort: number,
     timeoutMs = 240_000,
-    opts: { wipeData?: boolean } = {},
+    opts: { wipeData?: boolean; signal?: AbortSignal } = {},
   ): Promise<string> {
     const serial = serialForPort(consolePort);
     // Detached: the emulator runs for the life of the preview.
@@ -212,10 +216,15 @@ export class AndroidManager {
       "-no-snapshot",
       ...(opts.wipeData ? ["-wipe-data"] : []),
     ]);
-    await this.adb(serial, ["wait-for-device"], { timeoutMs });
+    // The waits below take minutes. Without a signal, a preview collected by
+    // the idle sweep mid-boot left this loop running: it finished later against
+    // a device nothing tracked any more, and (with pooling on) against a slot a
+    // newer preview may already have leased.
+    await this.adb(serial, ["wait-for-device"], { timeoutMs, signal: opts.signal });
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      const res = await this.adb(serial, ["shell", "getprop", "sys.boot_completed"]);
+      if (opts.signal?.aborted) throw new AndroidError(`emulator ${avdName} boot aborted`);
+      const res = await this.adb(serial, ["shell", "getprop", "sys.boot_completed"], { signal: opts.signal });
       if (res.code === 0 && bootCompleted(res.stdout.toString())) return serial;
       await new Promise((r) => setTimeout(r, 2000));
     }

@@ -15,7 +15,7 @@ import {
 import { hashPassword, verifyPassword } from "../share/shares.ts";
 import { WorktreeManager, type RefSpec, refDescription } from "./worktree.ts";
 import { Simctl, selectRuntime, selectDeviceType, deviceLabel, type SimDevice } from "../devices/ios.ts";
-import { AndroidManager, selectSystemImage, portForSerial } from "../devices/android.ts";
+import { AndroidManager, selectSystemImage, portForSerial, serialForPort } from "../devices/android.ts";
 import { Reaper, POOL_SIM_PREFIX, POOL_AVD_PREFIX } from "./reaper.ts";
 import { MetroManager } from "./metro.ts";
 import { buildPlan, usesMetroDeepLink, nativescriptDevRun, webDevRun, webRootDevRun, GENERAL_IDLE_MS } from "./recipes.ts";
@@ -69,6 +69,14 @@ interface LiveDevice {
   abort: AbortController;
   /** Pool slot held by this device (see leaseName) — released, not deleted, on teardown. */
   poolName?: string;
+  /**
+   * The simulator/AVD name deckhand asked for, pooled or not. Recorded before
+   * the create that may not return, so the reaper can spare a device that
+   * exists on the machine but has no handle in our records yet.
+   */
+  deviceName?: string;
+  /** Emulator console port, reserved before the boot that may never return one. */
+  androidPort?: number;
 }
 
 interface LivePreview {
@@ -85,6 +93,15 @@ interface LivePreview {
   compare?: CompareSession;
   /** Epoch ms of the last viewer/agent touch — the idle sweep's clock. */
   lastActivityAt: number;
+  /**
+   * Epoch ms of the last sign of forward motion — the stuck sweep's clock.
+   * Deliberately NOT `record.updatedAt`: that only moves on phase transitions,
+   * and the phases are coarse. A cold CocoaPods or Gradle build sits in
+   * "building" for well over an hour while streaming healthy output, and used
+   * to be torn down mid-build, worktree and all. Build output counts as
+   * progress; it just doesn't get persisted on every line.
+   */
+  lastProgressAt: number;
 }
 
 // An agent-driven test run: the brain (the coding agent) reports what it's
@@ -544,8 +561,17 @@ export class PreviewEngine {
   }
 
   private touch(p: LivePreview): void {
+    p.lastProgressAt = this.d.now!();
     this.recomputePreviewPhase(p);
     this.persist();
+  }
+
+  /**
+   * A sign of life from a running build. Cheap on purpose — it moves the stuck
+   * clock without persisting, so it can be called per log line.
+   */
+  private noteProgress(p: LivePreview): void {
+    p.lastProgressAt = this.d.now!();
   }
 
   // --- start -----------------------------------------------------------------
@@ -580,7 +606,7 @@ export class PreviewEngine {
 
     // The daily loop: an equivalent live preview is THE preview — return it
     // (same shareId, same URL) instead of minting a second simulator.
-    this.reapTerminalForApp(req.app.id);
+    const stillReleasing = this.reapTerminalForApp(req.app.id);
     const existing = this.findReusable(req);
     if (existing) return this.resultFor(existing, true);
 
@@ -590,7 +616,11 @@ export class PreviewEngine {
         "request fewer devices or raise limits.maxDevicesPerPreview",
       );
     }
-    const totalActive = this.devicesInUse();
+    // Devices still being released for THIS app are already spoken for by this
+    // request — don't make it queue behind its own teardown. Only what is still
+    // held is discounted; releases that already completed are out of the tally
+    // anyway, and discounting them twice would over-admit.
+    const totalActive = Math.max(0, this.devicesInUse() - stillReleasing());
     if (totalActive + req.devices.length > this.d.config.limits.maxTotalDevices) {
       throw new PreviewError(
         `device capacity reached (${totalActive}/${this.d.config.limits.maxTotalDevices} in use)`,
@@ -642,6 +672,7 @@ export class PreviewEngine {
       devices,
       attached: new Map(),
       lastActivityAt: this.d.now!(),
+      lastProgressAt: this.d.now!(),
     };
     this.previews.set(previewId, preview);
     this.persist();
@@ -691,24 +722,49 @@ export class PreviewEngine {
    * A failed preview still holds a booted simulator/AVD, so release the devices
    * before forgetting it — dropping the record first made them unreachable
    * (nothing left to stop) and leaked them for the life of the machine.
+   *
+   * Returns a live count of how many of the released devices are STILL held.
+   * The caller needs it for the capacity check: the teardown is asynchronous and
+   * starts in this very tick, so those devices can still be counted in
+   * `tearingDown` when the retry that caused their release is checked — and
+   * "start it again after it failed" would fail with "device capacity reached"
+   * on a machine whose only devices are the ones being freed.
+   *
+   * Live, not a fixed count: a preview that failed before booting anything has
+   * nothing to await, so its release completes synchronously inside this call
+   * and `tearingDown` is already back down by the time the caller reads it.
+   * Subtracting a fixed `p.devices.length` on top of that under-counted, and let
+   * a retry start more devices than the machine is allowed to run.
    */
-  private reapTerminalForApp(appId: string): void {
+  private reapTerminalForApp(appId: string): () => number {
+    const held: (() => number)[] = [];
     for (const [id, p] of this.previews) {
       if (p.record.appId === appId && (p.record.phase === "failed" || p.record.phase === "stopped")) {
         this.previews.delete(id);
-        if (p.record.phase === "failed") this.releaseInBackground(p);
+        if (p.record.phase === "failed") held.push(this.releaseInBackground(p));
       }
     }
+    return () => held.reduce((n, stillHeld) => n + stillHeld(), 0);
   }
 
   /**
    * Release everything a forgotten preview still holds — dev processes, devices,
    * worktree — without blocking the caller (startPreview is synchronous). The
    * device count is held in `tearingDown` for the duration so a preview starting
-   * right now can't claim capacity that is still occupied.
+   * right now can't claim capacity that is still occupied — but released one
+   * device at a time, not all at the end. Android's shutdown polls `get-state`
+   * for up to 20 s per device; charging the whole preview for that whole window
+   * made the immediate retry of a failed preview fail with "device capacity
+   * reached", which is precisely the flow this path exists to serve.
    */
-  private releaseInBackground(p: LivePreview): void {
-    this.tearingDown += p.devices.length;
+  private releaseInBackground(p: LivePreview): () => number {
+    let held = p.devices.length;
+    this.tearingDown += held;
+    const releaseOne = (): void => {
+      if (held <= 0) return;
+      held--;
+      this.tearingDown--;
+    };
     // Nothing awaits this, so an escaping rejection is fatal to the process:
     // devProcs.stop() or an AndroidManager constructor throw would turn an
     // ordinary "start it again after it failed" into a server crash.
@@ -720,14 +776,16 @@ export class PreviewEngine {
             this.d.devProcs?.stop(devKey(p.app.id, platform));
           }
         }
-        await this.teardownDevices(p);
+        await this.teardownDevices(p, releaseOne);
         if (p.record.source !== "local") {
           await this.d.worktrees.removeWorktree(p.app, p.record.previewId).catch(() => {});
         }
       } finally {
-        this.tearingDown -= p.devices.length;
+        // Whatever teardownDevices didn't reach (it threw part-way through).
+        while (held > 0) releaseOne();
       }
     })().catch(() => {});
+    return () => held;
   }
 
   /**
@@ -816,7 +874,13 @@ export class PreviewEngine {
       // (leaked slots push every later preview onto `…-2`, `…-3` forever).
       const name = this.leaseName(POOL_SIM_PREFIX, `${deviceType.name}-${runtime.name}`, "-");
       dev.poolName = name;
-      const existing = (await safeList<SimDevice>(() => this.d.simctl.listDevices())).find((d) => d.name === name);
+      dev.deviceName = name;
+      // "Couldn't list" is not "no such device": swallowing a transient simctl
+      // failure into [] used to fall through to create(), and simctl will
+      // happily make a *second* simulator with the same name. From then on the
+      // lookup picks one arbitrarily and the other is an untracked orphan.
+      const devices = await this.d.simctl.listDevices();
+      const existing = devices.find((d) => d.name === name);
       if (existing) {
         udid = existing.udid;
         // Unknown predecessor (a restart lost the tenant map) ⇒ factory reset.
@@ -826,16 +890,50 @@ export class PreviewEngine {
       }
       this.poolTenants.set(name, p.app.id);
     } else {
-      udid = await this.d.simctl.create(
-        `deckhand-${p.record.previewId}-${dev.record.deviceId}`,
-        deviceType.identifier,
-        runtime.identifier,
-      );
+      // Record before creating: with pooling off there is no lease to spare it
+      // by, and the reap that runs just after the port is bound would otherwise
+      // delete a simulator whose `create` has not returned yet.
+      const name = `deckhand-${p.record.previewId}-${dev.record.deviceId}`;
+      dev.deviceName = name;
+      udid = await this.d.simctl.create(name, deviceType.identifier, runtime.identifier);
     }
     dev.record.udid = udid;
+    // The sweep may have collected this preview while `create` was running. Its
+    // teardown already ran and saw no udid, so unless we release the device here
+    // it survives as an orphan — and, with pooling on, as a device a newer
+    // preview can lease and boot underneath us.
+    await this.abandonIfAborted(dev, async () => {
+      await this.d.simctl.shutdown(udid).catch(() => {});
+      if (!dev.poolName) await this.d.simctl.delete(udid).catch(() => {});
+    });
     this.setPhase(p, dev, "booting", "booting simulator");
-    await this.d.simctl.bootAndWait(udid);
+    await this.d.simctl.bootAndWait(udid, undefined, dev.abort.signal);
+    await this.abandonIfAborted(dev, async () => {
+      await this.d.simctl.shutdown(udid).catch(() => {});
+      if (!dev.poolName) await this.d.simctl.delete(udid).catch(() => {});
+    });
     return udid;
+  }
+
+  /**
+   * Throw if this device's preview was collected while an un-cancellable step
+   * was in flight, running `release` first so whatever that step produced does
+   * not outlive the preview that asked for it.
+   */
+  private async abandonIfAborted(dev: LiveDevice, release: () => Promise<void>): Promise<void> {
+    if (!dev.abort.signal.aborted) return;
+    await release().catch(() => {});
+    if (dev.poolName) {
+      this.leased.delete(dev.poolName);
+      dev.poolName = undefined;
+    }
+    if (dev.androidPort != null) {
+      this.androidPorts.delete(dev.androidPort);
+      dev.androidPort = undefined;
+    }
+    dev.record.udid = undefined;
+    dev.record.serial = undefined;
+    throw new PreviewError("preview was stopped while its device was starting");
   }
 
   private async bootAndroid(p: LivePreview, dev: LiveDevice): Promise<string> {
@@ -847,22 +945,49 @@ export class PreviewEngine {
     if (this.pooling()) {
       avdName = this.leaseName(POOL_AVD_PREFIX, `${profile}_api${image.api}`, "_");
       dev.poolName = avdName; // claim before createAvd, which can throw — see bootIos
+      dev.deviceName = avdName;
       const exists = (await safeList<string>(() => android.listAvds())).includes(avdName);
       wipeData = this.poolTenants.get(avdName) !== p.app.id;
       if (!exists) await android.createAvd(avdName, image, profile);
       this.poolTenants.set(avdName, p.app.id);
     } else {
       avdName = `deckhand_${p.record.previewId}_${dev.record.deviceId}`.replace(/[^A-Za-z0-9_]/g, "_");
+      dev.deviceName = avdName; // see bootIos: spare it by name while createAvd runs
       await android.createAvd(avdName, image, profile);
     }
     dev.record.udid = avdName; // remember the AVD name for teardown
     dev.record.model = profile;
     dev.record.runtime = `Android ${image.api}`;
     dev.record.label = `${profile} · Android ${image.api}`;
+    // Remember the port on the device, not just via its serial: bootEmulator can
+    // time out (240 s) or throw, and a port only released when a serial came back
+    // is a port lost for the life of the process.
     const port = this.allocAndroidPort();
+    dev.androidPort = port;
+    // createAvd can't be cancelled, so check before paying for a 240 s boot.
+    await this.abandonIfAborted(dev, async () => {
+      if (!dev.poolName) await android.deleteAvd(avdName).catch(() => {});
+    });
     this.setPhase(p, dev, "booting", "booting emulator");
-    const serial = await android.bootEmulator(avdName, port, undefined, { wipeData });
+    let serial: string;
+    try {
+      serial = await android.bootEmulator(avdName, port, undefined, { wipeData, signal: dev.abort.signal });
+    } catch (err) {
+      // bootEmulator launches QEMU detached and only *waits* here, so a throw —
+      // abort or timeout — leaves an emulator running that nothing can address:
+      // record.serial was never set, so teardown can't reach it either. Kill it
+      // by the port we know before that port goes back in the pool, or the next
+      // preview allocates 5554, collides, and streams the abandoned device.
+      await android.shutdown(serialForPort(port)).catch(() => {});
+      this.androidPorts.delete(port);
+      dev.androidPort = undefined;
+      throw err;
+    }
     dev.record.serial = serial;
+    await this.abandonIfAborted(dev, async () => {
+      await android.shutdown(serial).catch(() => {});
+      if (!dev.poolName) await android.deleteAvd(avdName).catch(() => {});
+    });
     return serial;
   }
 
@@ -1095,7 +1220,10 @@ export class PreviewEngine {
       args,
       cwd,
       env: appEnv,
-      onLog: (line) => this.appendLog(dev, "build", `[livesync] ${line}`),
+      onLog: (line) => {
+        this.appendLog(dev, "build", `[livesync] ${line}`);
+        this.noteProgress(p);
+      },
     });
   }
 
@@ -1160,7 +1288,10 @@ export class PreviewEngine {
       args,
       cwd,
       env: appEnv,
-      onLog: (line) => this.appendLog(dev, "build", `[web] ${line}`),
+      onLog: (line) => {
+        this.appendLog(dev, "build", `[web] ${line}`);
+        this.noteProgress(p);
+      },
     });
   }
 
@@ -1222,7 +1353,10 @@ export class PreviewEngine {
     for (const step of plan) {
       const res = await this.d.runStep!(step, {
         signal: dev.abort.signal,
-        onLog: (line) => this.appendLog(dev, "build", `[${step.name}] ${line}`),
+        onLog: (line) => {
+          this.appendLog(dev, "build", `[${step.name}] ${line}`);
+          this.noteProgress(p);
+        },
       });
       if (res.code !== 0 && !step.optional) {
         throw new PreviewError(
@@ -1673,14 +1807,16 @@ export class PreviewEngine {
    */
   async reapOrphans(): Promise<{ sims: number; avds: number; previews: number }> {
     const stale = this.d.store.load().previews.filter((p) => p.phase !== "stopped");
-    // The in-memory map is empty at boot, so every deckhand-named device on the
-    // machine is an orphan: sweep them all, keeping nothing.
+    // Spare whatever is already live. The map is normally empty at boot, but
+    // this runs *after* the port is bound (see server.ts) — so an agent's
+    // start_preview can already be mid-`simctl create`, and sweeping "everything
+    // deckhand-named" would delete the simulator it is booting right now.
     // Guard the construction too: `new AndroidManager()` resolves tool env and
     // can throw, and that must never cost us the stale-preview cleanup below.
     const report = await (async () => {
       try {
         const reaper = this.d.reaper ?? new Reaper({ simctl: this.d.simctl, android: this.android() });
-        return await reaper.reap();
+        return await reaper.reap(this.liveDeviceHandles());
       } catch {
         return { sims: [], avds: [], keptPooled: [] };
       }
@@ -1695,6 +1831,28 @@ export class PreviewEngine {
       });
     }
     return { sims: report.sims.length, avds: report.avds.length, previews: stale.length };
+  }
+
+  /**
+   * Every device handle a live preview holds or is about to hold. Pool leases
+   * are included by name because a device between `simctl create` and the
+   * engine recording its UDID has a name but no handle yet.
+   */
+  private liveDeviceHandles(): { udids: string[]; avds: string[]; names: string[] } {
+    const udids: string[] = [];
+    const avds: string[] = [];
+    // Pool leases cover the pooled config; `deviceName` covers both, including
+    // the non-pooled `deckhand-<previewId>-<n>` names that no lease ever holds.
+    const names = new Set<string>(this.leased);
+    for (const p of this.previews.values()) {
+      for (const dev of p.devices) {
+        if (dev.deviceName) names.add(dev.deviceName);
+        if (!dev.record.udid) continue;
+        // record.udid holds the AVD name on Android, the simulator UDID on iOS.
+        (dev.record.platform === "android" ? avds : udids).push(dev.record.udid);
+      }
+    }
+    return { udids, avds, names: [...names] };
   }
 
   /** Note that someone is actually watching this preview (resets the idle clock). */
@@ -1733,9 +1891,11 @@ export class PreviewEngine {
       }
       // A build in flight is never idle — nobody watches a preview that isn't up
       // yet — but one that has stopped making progress entirely is wedged, and
-      // holds its devices until something collects it.
+      // holds its devices until something collects it. "Progress" means build
+      // output, not just phase changes: the phases are coarse enough that a
+      // cold pod/gradle build stays in one of them for hours.
       if (ph !== "ready") {
-        if (stuckMinutes > 0 && sinceProgress > stuckMinutes * 60_000) doomed.push({ id, reason: "stuck" });
+        if (stuckMinutes > 0 && now - p.lastProgressAt > stuckMinutes * 60_000) doomed.push({ id, reason: "stuck" });
         continue;
       }
       if (idleMinutes > 0 && now - p.lastActivityAt > idleMinutes * 60_000) doomed.push({ id, reason: "idle" });
@@ -1788,7 +1948,7 @@ export class PreviewEngine {
    * delete the simulator/AVD deckhand created for it. Idempotent — the handles
    * are cleared, so a second call (stop after an idle sweep) is a no-op.
    */
-  private async teardownDevices(p: LivePreview): Promise<void> {
+  private async teardownDevices(p: LivePreview, onReleased?: () => void): Promise<void> {
     for (const dev of p.devices) {
       const stream = p.attached.get(dev.record.deviceId);
       if (stream) await stream.detach().catch(() => {});
@@ -1796,6 +1956,7 @@ export class PreviewEngine {
       if (dev.record.platform === "web") {
         if (dev.record.webPort) this.webPorts.delete(dev.record.webPort);
         dev.record.webPort = undefined;
+        onReleased?.();
         continue; // no simulator/emulator to tear down; the dev process is stopped by the caller
       }
       // A pooled device is released, not destroyed: the next preview of the same
@@ -1807,6 +1968,9 @@ export class PreviewEngine {
           await this.android().shutdown(dev.record.serial).catch(() => {});
           this.androidPorts.delete(portForSerial(dev.record.serial));
         }
+        // Reserved before the boot, so it must be freed even when no serial ever
+        // came back (boot timeout, emulator crash).
+        if (dev.androidPort != null) this.androidPorts.delete(dev.androidPort);
         if (dev.record.udid && !pooled) await this.android().deleteAvd(dev.record.udid).catch(() => {}); // udid holds the AVD name
       } else if (dev.record.udid) {
         await this.d.simctl.shutdown(dev.record.udid).catch(() => {});
@@ -1818,6 +1982,8 @@ export class PreviewEngine {
       }
       dev.record.udid = undefined;
       dev.record.serial = undefined;
+      dev.androidPort = undefined;
+      onReleased?.();
     }
     await this.trimPool();
   }

@@ -14,14 +14,14 @@ export interface ExecResult {
   stderr: string;
   code: number;
 }
-export type Exec = (cmd: string, args: string[], opts?: { timeoutMs?: number }) => Promise<ExecResult>;
+export type Exec = (cmd: string, args: string[], opts?: { timeoutMs?: number; signal?: AbortSignal }) => Promise<ExecResult>;
 
 const defaultExec: Exec = (cmd, args, opts) =>
   new Promise((resolve) => {
     execFile(
       cmd,
       args,
-      { encoding: "buffer", timeout: opts?.timeoutMs, maxBuffer: 64 * 1024 * 1024 },
+      { encoding: "buffer", timeout: opts?.timeoutMs, signal: opts?.signal, maxBuffer: 64 * 1024 * 1024 },
       (err, stdout, stderr) => {
         const code = err ? ((err as NodeJS.ErrnoException & { code?: number }).code ?? 1) : 0;
         resolve({
@@ -158,7 +158,7 @@ export function deviceLabel(deviceType: DeviceType, runtime: Runtime): string {
 export class Simctl {
   constructor(private readonly exec: Exec = defaultExec) {}
 
-  private async run(args: string[], opts?: { timeoutMs?: number }): Promise<ExecResult> {
+  private async run(args: string[], opts?: { timeoutMs?: number; signal?: AbortSignal }): Promise<ExecResult> {
     return this.exec("xcrun", ["simctl", ...args], opts);
   }
 
@@ -189,10 +189,18 @@ export class Simctl {
     return udid;
   }
 
-  /** Boot (idempotent — "already booted" is fine) and wait for full boot. */
-  async bootAndWait(udid: string, timeoutMs = 180_000): Promise<void> {
+  /**
+   * Boot (idempotent — "already booted" is fine) and wait for full boot.
+   *
+   * `bootstatus -b` blocks for up to three minutes. Without a signal, a preview
+   * collected by the idle sweep mid-boot left this call running, so the boot
+   * completed against a device nothing tracked any more.
+   */
+  async bootAndWait(udid: string, timeoutMs = 180_000, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw new SimctlError(`device ${udid} boot aborted`);
     await this.run(["boot", udid]); // ignore "already booted"
-    const status = await this.run(["bootstatus", udid, "-b"], { timeoutMs });
+    const status = await this.run(["bootstatus", udid, "-b"], { timeoutMs, signal });
+    if (signal?.aborted) throw new SimctlError(`device ${udid} boot aborted`);
     if (status.code !== 0 && !(await this.isBooted(udid))) {
       throw new SimctlError(`device ${udid} failed to reach booted state`);
     }

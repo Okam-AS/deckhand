@@ -64,6 +64,19 @@ describe("Reaper.reap", () => {
     assert.ok(!calls.some((c) => c.includes("CCC")));
   });
 
+  it("spares a device that is being created right now, by name", async () => {
+    // The boot reap runs after the port is bound, so a start_preview can already
+    // hold a lease and be mid-`simctl create` — the name exists before any UDID
+    // the engine could pass in `udids`.
+    const { reaper, calls } = makeReaper();
+    const report = await reaper.reap({ names: ["deckhand-pv1-ios-0", "deckhand_pv1_android_0"] });
+
+    assert.deepEqual(report.sims, ["BBB"], "the in-flight simulator survives");
+    assert.deepEqual(report.avds, ["deckhand_pv2_android_1"]);
+    assert.ok(!calls.some((c) => c.includes("AAA")), "no shutdown, no delete, no helper kill");
+    assert.ok(!calls.some((c) => c.includes("deckhand_pv1_android_0")));
+  });
+
   it("shuts pooled devices down but leaves them on disk to be reused", async () => {
     const pooledSims: SimDevice[] = [{ udid: "PPP", name: "deckhand-pool-iphone-16-pro-ios-26-0", state: "Booted" }];
     const seen: string[] = [];

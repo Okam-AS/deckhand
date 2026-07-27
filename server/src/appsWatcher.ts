@@ -66,6 +66,25 @@ export function watchApps(apps: App[], opts: WatchAppsOptions = {}): () => void 
       opts.onError?.(err);
       return;
     }
+    // `apps:` defaults to [], so a truncated or 0-byte file parses *successfully*
+    // as "no apps" — and an editor that truncates before writing would briefly
+    // deregister everything, leaving start_preview to answer "no such app" with
+    // nothing but a "removed" line to explain it. Dropping every app at once is
+    // treated as a half-written file, not an intentional edit; emptying the
+    // registry for real takes a restart.
+    // The trade-off: an operator who MEANS to deregister everything (a revert, a
+    // config-management rewrite) gets the old list until a restart. That is the
+    // safer side to err on, so the message has to say so rather than read as a
+    // parse failure.
+    if (next.length === 0 && apps.length > 0) {
+      opts.onError?.(
+        new Error(
+          `${file} parsed as zero apps — keeping the ${apps.length} already registered, ` +
+            `since a truncated file looks the same. Restart deckhand if you really meant to deregister them.`,
+        ),
+      );
+      return;
+    }
     const before = new Set(apps.map((a) => a.id));
     const after = new Set(next.map((a) => a.id));
     const added = [...after].filter((id) => !before.has(id));

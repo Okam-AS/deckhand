@@ -662,6 +662,17 @@ change eases in/out — nothing snaps.
    144-bit `shareId` (+ optional password) is the gate rather than a narrow allow-list. The
    upstream is confined to that share's own loopback dev-server port (no SSRF/traversal),
    still binds `127.0.0.1`, and is still idle-reaped — see §8 "Web proxy".
+
+   **Accepted risk — cookie isolation between web shares (2026-07-27).** The web proxy
+   forwards request headers by denylist (only `deck_unlock` is stripped), so the whole
+   `cookie` and `authorization` headers reach the app's dev server. Every share lives on
+   the same public hostname, so a cookie set by the app under `/s/A/web/` is sent by the
+   browser to a *different* app under `/s/B/web/`. Reviewed and **accepted**: all shares
+   on this deployment are the operator's own apps behind a PIN, and the alternatives
+   (path-scoped cookies, per-share name prefixes, or returning to a header allow-list)
+   each cost more than the exposure is worth today. Revisit before any deployment where
+   two mutually-untrusted parties can hold shares on one hostname — the fix is to scope
+   the cookie jar per share, not to re-narrow the header list.
 7. **Host hygiene** (documented in runbook, not code): dedicated macOS user, no personal
    credentials on the machine, FileVault on.
 
