@@ -71,6 +71,7 @@ const webHits: string[] = [];
 let proxy: Server;
 let proxyBase: string;
 const restartCalls: string[] = [];
+const streamTrace: string[] = [];
 
 before(async () => {
   // Fake helper: send a header + a chunk, then abruptly kill the socket.
@@ -113,6 +114,9 @@ before(async () => {
     shareState: (shareId: string) => (shareId === "share1" || shareId === "web-share" ? { ready: true, devices: [] } : null),
     pinInfoForShare: fakePinInfo,
     verifyPin: fakeVerifyPin,
+    logStreamEvent: (shareId: string, deviceId: string, line: string) => {
+      streamTrace.push(`${shareId}/${deviceId} ${line}`);
+    },
   } as unknown as PreviewEngine;
 
   const app = express();
@@ -126,6 +130,48 @@ after(() => {
   helper?.close();
   webHelper?.close();
   proxy?.close();
+});
+
+describe("stream diagnostics", () => {
+  // A viewer stuck on "Connecting…" is the hardest failure to debug remotely:
+  // nothing is on screen and, before this, nothing was in any log either.
+  it("records why a stream request could not be routed", async () => {
+    streamTrace.length = 0;
+    await fetch(`${proxyBase}/s/share1/dev/ghost-0/stream.mjpeg`);
+    const line = streamTrace.find((l) => l.includes("ghost-0"));
+    assert.ok(line, "the miss is traced");
+    assert.match(line!, /404/);
+    assert.match(line!, /no device "ghost-0"/);
+    assert.match(line!, /has: ios-0/); // tells the agent what to ask for instead
+  });
+
+  it("records the helper's answer for a request that did route", async () => {
+    streamTrace.length = 0;
+    const res = await fetch(`${proxyBase}/s/share1/dev/ios-0/stream.mjpeg`);
+    await res.arrayBuffer().catch(() => {});
+    assert.ok(
+      streamTrace.some((l) => /GET stream\.mjpeg → helper 200 in \d+ms/.test(l)),
+      `expected an upstream trace, got: ${streamTrace.join(" | ")}`,
+    );
+  });
+
+  it("accepts the viewer's own report and rejects junk", async () => {
+    streamTrace.length = 0;
+    const ok = await fetch(`${proxyBase}/s/share1/dev/ios-0/clientlog`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ event: "avcc no first frame", detail: "nothing decoded within 4000ms" }),
+    });
+    assert.equal(ok.status, 204);
+    assert.ok(streamTrace.some((l) => l.includes("viewer: avcc no first frame — nothing decoded within 4000ms")));
+
+    const bad = await fetch(`${proxyBase}/s/share1/dev/ios-0/clientlog`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ event: "<script>alert(1)</script>" }),
+    });
+    assert.equal(bad.status, 400);
+  });
 });
 
 describe("share proxy resilience", () => {

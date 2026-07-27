@@ -77,6 +77,27 @@ export const configSchema = z.object({
     .object({
       maxDevicesPerPreview: z.number().int().positive().default(4),
       maxTotalDevices: z.number().int().positive().default(6),
+      // Auto-teardown. A preview nobody is watching still costs a booted
+      // simulator (~1.5 GB) and, on Android, a QEMU process burning a core —
+      // and previews were only ever stopped by an explicit stop_preview, so
+      // they piled up. 0 disables either sweep.
+      /** Stop a ready/running preview after this many minutes with no viewer traffic. */
+      idleMinutes: z.number().int().nonnegative().default(45),
+      /** Tear down a failed preview's devices after this many minutes (a Rebuild grace window). */
+      failedGraceMinutes: z.number().int().nonnegative().default(15),
+      /**
+       * Give up on a preview that has made no progress at all for this long. A
+       * build that is still moving updates its phase and never trips this; a
+       * wedged one (a dev server that never binds, a hung emulator) would
+       * otherwise hold its devices forever, since it is neither ready nor failed.
+       */
+      stuckMinutes: z.number().int().nonnegative().default(90),
+      /**
+       * Reuse simulators/AVDs across previews (named by device shape, kept on
+       * disk between runs) instead of creating and deleting one per preview.
+       * Set false to go back to a throwaway device per preview.
+       */
+      reuseDevices: z.boolean().default(true),
       disk: z
         .object({
           watch: z.number().positive().default(50),
@@ -90,6 +111,10 @@ export const configSchema = z.object({
     .default({
       maxDevicesPerPreview: 4,
       maxTotalDevices: 6,
+      idleMinutes: 45,
+      failedGraceMinutes: 15,
+      stuckMinutes: 90,
+      reuseDevices: true,
       disk: { watch: 50, pressure: 35, critical: 20 },
     }),
 });

@@ -22,6 +22,10 @@ const config: Config = {
   limits: {
     maxDevicesPerPreview: 4,
     maxTotalDevices: 2,
+    idleMinutes: 45,
+    failedGraceMinutes: 15,
+    stuckMinutes: 90,
+    reuseDevices: false,
     disk: { watch: 50, pressure: 35, critical: 20 },
   },
 };
@@ -785,5 +789,422 @@ describe("PreviewEngine compare session", () => {
 
     await h.engine.stopPreview(w2.previewId);
     assert.equal(h.engine.getStatus(ref.previewId), null); // last user gone → cascaded
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Auto-teardown. A preview only ever ended on an explicit stop_preview, so
+// forgotten ones kept a simulator booted (and, on Android, a QEMU process on a
+// core) until the machine ran out. The janitor collects them; failed previews
+// keep a short grace window so the viewer's Rebuild button still works.
+// ---------------------------------------------------------------------------
+
+describe("PreviewEngine idle sweep", () => {
+  const clock = { t: 1_700_000_000_000 };
+  const ids = { n: 0 };
+  const makeSwept = (runStepResult?: (step: CommandStep) => RunResult) =>
+    makeEngine(
+      { now: () => clock.t, genPreviewId: () => `pv${++ids.n}`, genShareId: () => `share-${ids.n}` },
+      runStepResult,
+    );
+
+  beforeEach(() => {
+    clock.t = 1_700_000_000_000;
+    ids.n = 0;
+  });
+
+  it("stops a ready preview nobody has watched for idleMinutes", async () => {
+    const h = makeSwept();
+    h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "ios" }],
+      access: "public",
+    });
+    await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
+
+    clock.t += 44 * 60_000; // still inside the window
+    assert.deepEqual(await h.engine.sweepIdle(), []);
+
+    clock.t += 2 * 60_000; // now past 45 minutes of silence
+    assert.deepEqual(await h.engine.sweepIdle(), ["pv1"]);
+    assert.equal(h.engine.findByShareId("share-1"), null);
+    assert.ok(h.simctlCalls.some((c) => c.startsWith("delete ")));
+  });
+
+  it("keeps a preview alive while the viewer is polling it", async () => {
+    const h = makeSwept();
+    h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "ios" }],
+      access: "public",
+    });
+    await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
+
+    for (let i = 0; i < 3; i++) {
+      clock.t += 40 * 60_000;
+      assert.ok(h.engine.shareState("share-1"), "viewer poll"); // resets the idle clock
+      assert.deepEqual(await h.engine.sweepIdle(), []);
+    }
+  });
+
+  it("keeps a preview alive while an agent drives it (no viewer, no status poll)", async () => {
+    const h = makeSwept();
+    h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "ios" }],
+      access: "public",
+    });
+    await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
+
+    // An agent's testing loop: logs/screenshot/test-run only. Nobody has the
+    // viewer open, so if these don't count as activity the sweep deletes the
+    // simulators out from under the run.
+    for (let i = 0; i < 3; i++) {
+      clock.t += 40 * 60_000;
+      assert.equal(typeof h.engine.logs("pv1", undefined, "build"), "string");
+      h.engine.startTestRun("pv1", "smoke", ["open app"]);
+      assert.deepEqual(await h.engine.sweepIdle(), []);
+    }
+  });
+
+  it("tears a failed preview down only after its rebuild grace window", async () => {
+    const h = makeSwept((step) => ({ code: step.name === "build" ? 1 : 0, timedOut: false, aborted: false }));
+    h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "ios" }],
+      access: "public",
+    });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "failed");
+
+    clock.t += 10 * 60_000; // inside the grace window: the sim stays for a Rebuild
+    assert.deepEqual(await h.engine.sweepIdle(), []);
+    assert.ok(!h.simctlCalls.some((c) => c.startsWith("delete ")));
+
+    clock.t += 10 * 60_000;
+    assert.deepEqual(await h.engine.sweepIdle(), ["pv1"]);
+    assert.ok(h.simctlCalls.some((c) => c.startsWith("delete ")));
+  });
+
+  it("counts a failed preview's still-booted devices against capacity", async () => {
+    const h = makeSwept((step) => ({ code: step.name === "build" ? 1 : 0, timedOut: false, aborted: false }));
+    h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "ios" }, { platform: "ios" }], // fills maxTotalDevices (2)
+      access: "public",
+    });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "failed");
+
+    // A different app, so the failed preview isn't reaped as "same app" first.
+    assert.throws(
+      () =>
+        h.engine.startPreview({
+          app: { ...rnApp, id: "other-app" },
+          source: "git",
+          spec: { kind: "branch", branch: "main" },
+          devices: [{ platform: "ios" }],
+          access: "public",
+        }),
+      /device capacity reached/,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Device pool. Creating a throwaway simulator/AVD per preview meant a full
+// create+delete cycle (and a fresh ~2 GB AVD image) every run. Pooled devices
+// are named by shape and outlive the preview that booted them.
+// ---------------------------------------------------------------------------
+
+describe("device pool", () => {
+  const poolConfig: Config = { ...config, limits: { ...config.limits, reuseDevices: true } };
+
+  /** A simctl/android pair backed by a mutable inventory, so reuse is observable. */
+  function makePooled() {
+    const sims: { udid: string; name: string; state: string }[] = [];
+    const avds: string[] = [];
+    const calls: string[] = [];
+    const simctl = {
+      listRuntimes: async () => [{ identifier: "rt.26", name: "iOS 26.0", version: "26.0", isAvailable: true }],
+      listDeviceTypes: async () => [{ identifier: "dt.16pro", name: "iPhone 16 Pro" }],
+      listDevices: async () => sims,
+      create: async (name: string) => {
+        calls.push(`create ${name}`);
+        const udid = `udid-${sims.length + 1}`;
+        sims.push({ udid, name, state: "Shutdown" });
+        return udid;
+      },
+      erase: async (u: string) => void calls.push(`erase ${u}`),
+      bootAndWait: async (u: string) => void calls.push(`boot ${u}`),
+      appContainer: async () => "/path/to/App.app",
+      install: async () => {},
+      launch: async () => {},
+      openUrl: async () => {},
+      shutdown: async (u: string) => void calls.push(`shutdown ${u}`),
+      delete: async (u: string) => {
+        calls.push(`delete ${u}`);
+        const i = sims.findIndex((s) => s.udid === u);
+        if (i >= 0) sims.splice(i, 1);
+      },
+    } as unknown as PreviewEngineDeps["simctl"];
+    const android = {
+      listSystemImages: async () => [{ pkg: "system-images;android-34;google_apis;arm64-v8a", api: 34 }],
+      listAvds: async () => avds,
+      createAvd: async (name: string) => {
+        calls.push(`avd create ${name}`);
+        avds.push(name);
+      },
+      bootEmulator: async (name: string, _port: number, _t: unknown, opts?: { wipeData?: boolean }) => {
+        calls.push(`avd boot ${name}${opts?.wipeData ? " wipe" : ""}`);
+        return "emulator-5554";
+      },
+      packagePath: async () => "/data/app/base.apk",
+      installApk: async () => {},
+      launch: async () => {},
+      findApk: async () => "/wt/app-debug.apk",
+      shutdown: async () => void calls.push("avd shutdown"),
+      deleteAvd: async (n: string) => {
+        calls.push(`avd delete ${n}`);
+        const i = avds.indexOf(n);
+        if (i >= 0) avds.splice(i, 1);
+      },
+    } as unknown as PreviewEngineDeps["android"];
+    return { simctl, android, calls, sims, avds };
+  }
+
+  const ids = { n: 0 };
+  beforeEach(() => {
+    ids.n = 0;
+  });
+
+  const start = async (h: Harness, app: App) => {
+    const res = h.engine.startPreview({
+      app,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "ios" }],
+      access: "public",
+    });
+    assert.equal(await waitForPhase(h.engine, res.previewId, ["ready", "failed"]), "ready");
+    return res.previewId;
+  };
+
+  it("names the simulator by shape and reuses it for the next preview", async () => {
+    const pooled = makePooled();
+    const h = makeEngine({
+      config: poolConfig,
+      ...pooled,
+      genPreviewId: () => `pv${++ids.n}`,
+      genShareId: () => `share-${ids.n}`,
+    });
+
+    const first = await start(h, rnApp);
+    assert.deepEqual(
+      pooled.sims.map((s) => s.name),
+      ["deckhand-pool-iphone-16-pro-ios-26-0"],
+    );
+    await h.engine.stopPreview(first);
+    // Released, not destroyed.
+    assert.equal(pooled.sims.length, 1);
+    assert.ok(pooled.calls.includes("shutdown udid-1"));
+    assert.ok(!pooled.calls.includes("delete udid-1"));
+
+    pooled.calls.length = 0;
+    await start(h, rnApp);
+    assert.ok(!pooled.calls.some((c) => c.startsWith("create ")), "second preview reuses the pooled simulator");
+    assert.ok(pooled.calls.includes("boot udid-1"));
+    assert.ok(!pooled.calls.some((c) => c.startsWith("erase ")), "same app keeps its state");
+  });
+
+  it("wipes a pooled device when it changes hands", async () => {
+    const pooled = makePooled();
+    const h = makeEngine({
+      config: poolConfig,
+      ...pooled,
+      genPreviewId: () => `pv${++ids.n}`,
+      genShareId: () => `share-${ids.n}`,
+    });
+    await h.engine.stopPreview(await start(h, rnApp));
+
+    pooled.calls.length = 0;
+    await start(h, { ...rnApp, id: "other-app" });
+    assert.ok(pooled.calls.includes("erase udid-1"), "a different app gets a factory-reset device");
+  });
+
+  it("gives two concurrent previews of one shape separate devices", async () => {
+    const pooled = makePooled();
+    const h = makeEngine({
+      config: poolConfig,
+      ...pooled,
+      genPreviewId: () => `pv${++ids.n}`,
+      genShareId: () => `share-${ids.n}`,
+    });
+    await start(h, rnApp);
+    await start(h, { ...rnApp, id: "other-app" });
+    assert.deepEqual(
+      pooled.sims.map((s) => s.name),
+      ["deckhand-pool-iphone-16-pro-ios-26-0", "deckhand-pool-iphone-16-pro-ios-26-0-2"],
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regressions found in review of the auto-teardown/pool change.
+// ---------------------------------------------------------------------------
+
+describe("auto-teardown edge cases", () => {
+  const clock = { t: 1_700_000_000_000 };
+  const ids = { n: 0 };
+  beforeEach(() => {
+    clock.t = 1_700_000_000_000;
+    ids.n = 0;
+  });
+  const makeSwept = (overrides: Partial<PreviewEngineDeps> = {}) =>
+    makeEngine({ now: () => clock.t, genPreviewId: () => `pv${++ids.n}`, genShareId: () => `share-${ids.n}`, ...overrides });
+
+  it("does not charge capacity for a preview that failed before booting anything", async () => {
+    // Boot itself fails (an unavailable runtime, a full disk): no simulator is
+    // ever created, so these devices occupy nothing on the machine.
+    const h = makeSwept({
+      simctl: {
+        listRuntimes: async () => [{ identifier: "rt.26", name: "iOS 26.0", version: "26.0", isAvailable: true }],
+        listDeviceTypes: async () => [{ identifier: "dt.16pro", name: "iPhone 16 Pro" }],
+        create: async () => {
+          throw new Error("simctl create failed: Invalid runtime");
+        },
+        shutdown: async () => {},
+        delete: async () => {},
+      } as unknown as PreviewEngineDeps["simctl"],
+    });
+    h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "ios" }, { platform: "ios" }], // would fill maxTotalDevices (2)
+      access: "public",
+    });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "failed");
+
+    // Nothing booted, so a different app must still be able to start.
+    assert.doesNotThrow(() =>
+      h.engine.startPreview({
+        app: { ...rnApp, id: "other-app" },
+        source: "git",
+        spec: { kind: "branch", branch: "main" },
+        devices: [{ platform: "ios" }],
+        access: "public",
+      }),
+    );
+  });
+
+  it("listing previews does not count as watching them", async () => {
+    const h = makeSwept();
+    h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "ios" }],
+      access: "public",
+    });
+    await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
+
+    clock.t += 46 * 60_000;
+    h.engine.list(); // an agent enumerating previews must not resurrect idle ones
+    assert.deepEqual(await h.engine.sweepIdle(), ["pv1"]);
+  });
+});
+
+describe("pool leases and wedged previews", () => {
+  const clock = { t: 1_700_000_000_000 };
+  const ids = { n: 0 };
+  beforeEach(() => {
+    clock.t = 1_700_000_000_000;
+    ids.n = 0;
+  });
+
+  it("releases the pool slot when the device fails to come up", async () => {
+    const created: string[] = [];
+    let failNext = true;
+    const h = makeEngine({
+      config: { ...config, limits: { ...config.limits, reuseDevices: true } },
+      now: () => clock.t,
+      genPreviewId: () => `pv${++ids.n}`,
+      genShareId: () => `share-${ids.n}`,
+      simctl: {
+        listRuntimes: async () => [{ identifier: "rt.26", name: "iOS 26.0", version: "26.0", isAvailable: true }],
+        listDeviceTypes: async () => [{ identifier: "dt.16pro", name: "iPhone 16 Pro" }],
+        listDevices: async () => [],
+        create: async (name: string) => {
+          created.push(name);
+          if (failNext) {
+            failNext = false;
+            throw new Error("simctl create failed: disk full");
+          }
+          return "udid-1";
+        },
+        erase: async () => {},
+        bootAndWait: async () => {},
+        appContainer: async () => "/path/to/App.app",
+        install: async () => {},
+        launch: async () => {},
+        openUrl: async () => {},
+        shutdown: async () => {},
+        delete: async () => {},
+      } as unknown as PreviewEngineDeps["simctl"],
+    });
+
+    h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "ios" }],
+      access: "public",
+    });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "failed");
+    await h.engine.stopPreview("pv1");
+
+    h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "ios" }],
+      access: "public",
+    });
+    assert.equal(await waitForPhase(h.engine, "pv2", ["ready", "failed"]), "ready");
+    // The retry takes the same slot back — a leaked lease would have pushed it to "…-2".
+    assert.deepEqual(created, ["deckhand-pool-iphone-16-pro-ios-26-0", "deckhand-pool-iphone-16-pro-ios-26-0"]);
+  });
+
+  it("collects a preview wedged mid-build so its devices come back", async () => {
+    const h = makeEngine(
+      { now: () => clock.t, genPreviewId: () => "pv1", genShareId: () => "share-1" },
+      // A build step that never returns: the preview stays "running" forever.
+      () => new Promise<RunResult>(() => {}) as unknown as RunResult,
+    );
+    h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "ios" }],
+      access: "public",
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(h.engine.getStatus("pv1")!.phase, "running");
+
+    clock.t += 60 * 60_000; // an hour in: a long build, still allowed
+    assert.deepEqual(await h.engine.sweepIdle(), []);
+
+    clock.t += 40 * 60_000; // past stuckMinutes with no phase change at all
+    assert.deepEqual(await h.engine.sweepIdle(), ["pv1"]);
+    assert.equal(h.engine.getStatus("pv1"), null);
   });
 });

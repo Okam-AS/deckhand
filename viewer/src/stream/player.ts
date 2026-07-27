@@ -26,6 +26,9 @@ const MAX_RECOVERY = 8;
 // Longest quiet gap seen on a live stream with a blinking caret is ~430 ms —
 // 600 ms only fires when the screen has truly gone still with frames owed.
 const STALL_MS = 600;
+// Enough to capture a whole failed connect + its retries; small enough that a
+// misbehaving stream can't turn the diagnostic channel into traffic of its own.
+const MAX_REPORTS = 40;
 
 export type PlayerStatus = "connecting" | "streaming" | "fallback" | "error";
 
@@ -53,6 +56,7 @@ export class DevicePlayer {
   private fed = 0;
   private delivered = 0;
   private stallTimer: ReturnType<typeof setTimeout> | null = null;
+  private reports = 0;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -64,11 +68,35 @@ export class DevicePlayer {
     this.ctx = ctx;
   }
 
+  /**
+   * Tell the server what the browser is seeing. The failure that matters most —
+   * a viewer stuck on "Connecting…" while the device is `ready` — is invisible
+   * server-side, so the player reports its own turning points into the device's
+   * `stream` log. Fire-and-forget, capped, and never carrying page content.
+   */
+  private report(event: string, detail?: string): void {
+    if (this.reports >= MAX_REPORTS) return;
+    this.reports += 1;
+    void fetch(`${this.baseUrl}/clientlog`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ event, detail }),
+      keepalive: true,
+    }).catch(() => {
+      /* diagnostics must never break playback */
+    });
+  }
+
   start(): void {
     if (this.disposed) return;
     this.cb.onStatus?.("connecting");
-    if (isAvccSupported()) this.startAvcc();
-    else this.startMjpeg();
+    if (isAvccSupported()) {
+      this.report("start", "avcc (WebCodecs)");
+      this.startAvcc();
+    } else {
+      this.report("start", "mjpeg (no WebCodecs support)");
+      this.startMjpeg();
+    }
   }
 
   setActive(active: boolean): void {
@@ -121,12 +149,16 @@ export class DevicePlayer {
     let gotFrame = false;
 
     this.firstFrameTimer = setTimeout(() => {
-      if (!gotFrame && !this.disposed && this.active) this.fallbackToMjpeg();
+      if (!gotFrame && !this.disposed && this.active) {
+        this.report("avcc no first frame", `nothing decoded within ${FIRST_FRAME_TIMEOUT_MS}ms — falling back to mjpeg`);
+        this.fallbackToMjpeg();
+      }
     }, FIRST_FRAME_TIMEOUT_MS);
 
     const markFrame = () => {
       if (!gotFrame) {
         gotFrame = true;
+        this.report("avcc streaming");
         this.cb.onStatus?.("streaming");
       }
     };
@@ -136,6 +168,7 @@ export class DevicePlayer {
         // serve-sim serves no H.264/avcc endpoint (404) — go straight to MJPEG
         // instead of waiting out the first-frame watchdog (no 4s black screen).
         if (res.status === 404) {
+          this.report("avcc 404", "no H.264 endpoint on this helper — using mjpeg");
           this.fallbackToMjpeg();
           return;
         }
@@ -158,10 +191,13 @@ export class DevicePlayer {
           }
         }
       })
-      .catch(() => {
+      .catch((e: unknown) => {
         // A deliberate teardown/reconnect aborted this fetch — only the still-
         // current connection may schedule recovery, or reconnects double up.
-        if (!this.disposed && this.active && this.abort === ac) this.scheduleReconnect();
+        if (!this.disposed && this.active && this.abort === ac) {
+          this.report("avcc connection lost", e instanceof Error ? e.message : String(e));
+          this.scheduleReconnect();
+        }
       });
   }
 
@@ -266,6 +302,7 @@ export class DevicePlayer {
 
   private scheduleReconnect(): void {
     if (this.recovery >= MAX_RECOVERY) {
+      this.report("gave up", `${MAX_RECOVERY} reconnects failed — the viewer now shows an error`);
       this.cb.onStatus?.("error");
       return;
     }
@@ -292,7 +329,11 @@ export class DevicePlayer {
     const parser = createMjpegFrameParser((jpeg) => this.paintImage(jpeg));
     fetch(`${this.baseUrl}/stream.mjpeg`, { signal: ac.signal })
       .then(async (res) => {
-        if (!res.ok || !res.body) throw new Error(`mjpeg ${res.status}`);
+        if (!res.ok || !res.body) {
+          this.report("mjpeg failed", `HTTP ${res.status}`);
+          throw new Error(`mjpeg ${res.status}`);
+        }
+        this.report("mjpeg streaming");
         this.cb.onStatus?.(this.mode === "mjpeg" ? "fallback" : "streaming");
         const reader = res.body.getReader();
         for (;;) {
@@ -301,8 +342,11 @@ export class DevicePlayer {
           if (value) parser.push(value);
         }
       })
-      .catch(() => {
-        if (!this.disposed && this.active && this.abort === ac) this.scheduleReconnect();
+      .catch((e: unknown) => {
+        if (!this.disposed && this.active && this.abort === ac) {
+          this.report("mjpeg connection lost", e instanceof Error ? e.message : String(e));
+          this.scheduleReconnect();
+        }
       });
   }
 

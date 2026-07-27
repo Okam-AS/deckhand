@@ -26,6 +26,36 @@ export interface ShareDeps {
 }
 
 /** Resolve the loopback upstream URL for a device subpath within a share, or null. */
+
+/**
+ * Record a diagnostic line on the device's `stream` log. Wrapped: diagnostics
+ * must never be able to fail a request they were only meant to explain.
+ */
+function trace(engine: PreviewEngine, shareId: string, deviceId: string, line: string): void {
+  try {
+    engine.logStreamEvent(shareId, deviceId, line);
+  } catch {
+    /* noop */
+  }
+}
+
+/** Why `resolveUpstream` returned null — the difference an agent needs to act. */
+function upstreamMissReason(engine: PreviewEngine, shareId: string, deviceId: string, sub: string): string {
+  if (!isAllowedSubpath(sub)) return `subpath "${sub}" is not on the allow-list`;
+  const found = engine.findByShareId(shareId);
+  if (!found) return "no live preview for this share (ended, or never started)";
+  const dev = found.devices.find((d) => d.deviceId === deviceId);
+  if (!dev) return `preview has no device "${deviceId}" (has: ${found.devices.map((d) => d.deviceId).join(", ")})`;
+  return "device has no attached stream (the helper never came up, or was detached)";
+}
+
+/** A short, safe label for a thrown value — never a stack, never a URL with a token. */
+function errLabel(e: unknown): string {
+  const code = (e as { code?: string; cause?: { code?: string } })?.code ?? (e as { cause?: { code?: string } })?.cause?.code;
+  const msg = e instanceof Error ? e.message : String(e);
+  return (code ? `${code} ${msg}` : msg).slice(0, 160);
+}
+
 function resolveUpstream(engine: PreviewEngine, shareId: string, deviceId: string, sub: string): string | null {
   if (!isAllowedSubpath(sub)) return null;
   const found = engine.findByShareId(shareId);
@@ -51,14 +81,44 @@ function resolveWebUpstream(engine: PreviewEngine, shareId: string, rest: string
   return `${dev.stream.origin}${dev.stream.helperBasePath}${path}`;
 }
 
-/** Request headers safe to forward to the dev server (drops hop-by-hop; adds x-forwarded-proto). */
+/** Headers never forwarded to the dev server: hop-by-hop, host (fetch sets its own),
+ *  accept-encoding/content-length (the body is re-streamed decoded/chunked). */
+const WEB_REQUEST_DROP = new Set([
+  "host",
+  "connection",
+  "keep-alive",
+  "transfer-encoding",
+  "upgrade",
+  "te",
+  "trailer",
+  "proxy-authorization",
+  "proxy-connection",
+  "accept-encoding",
+  "content-length",
+]);
+
+/** Request headers forwarded to the dev server: everything except the drop list, so app
+ *  requests keep content-type, authorization, cookies and custom API headers (an allowlist
+ *  here silently broke every POST — no content-type → 415 from typed backends). Adds
+ *  x-forwarded-proto/-host; strips the deck_unlock cookie so the HMAC never reaches the app. */
 function webRequestHeaders(req: express.Request): Record<string, string> {
-  const h: Record<string, string> = { "x-forwarded-proto": "https" };
-  if (req.headers.host) h["x-forwarded-host"] = req.headers.host;
-  for (const name of ["accept", "accept-language", "if-none-match", "if-modified-since", "user-agent"]) {
-    const v = req.headers[name];
-    if (typeof v === "string") h[name] = v;
+  const h: Record<string, string> = {};
+  for (const [name, v] of Object.entries(req.headers)) {
+    const n = name.toLowerCase();
+    if (WEB_REQUEST_DROP.has(n) || n.startsWith("x-forwarded-")) continue;
+    if (typeof v === "string") h[n] = v;
+    else if (Array.isArray(v)) h[n] = v.join(", ");
   }
+  if (h.cookie) {
+    const kept = h.cookie
+      .split(";")
+      .map((c) => c.trim())
+      .filter((c) => !c.startsWith(`${UNLOCK_COOKIE}=`));
+    if (kept.length) h.cookie = kept.join("; ");
+    else delete h.cookie;
+  }
+  h["x-forwarded-proto"] = "https";
+  if (req.headers.host) h["x-forwarded-host"] = req.headers.host;
   return h;
 }
 
@@ -372,13 +432,22 @@ export function createShareRouter(deps: ShareDeps): express.Router {
     }
     const target = resolveUpstream(deps.engine, shareId, deviceId, sub);
     if (!target) {
+      // Say WHICH of the three reasons it was: an agent debugging a stuck
+      // viewer cannot act on a bare 404.
+      trace(deps.engine, shareId, deviceId, `GET ${sub} → 404 (${upstreamMissReason(deps.engine, shareId, deviceId, sub)})`);
       res.status(404).end();
       return;
     }
+    const started = Date.now();
     try {
       const upstream = await fetch(target, {
         headers: { accept: req.headers.accept ?? "*/*", "x-forwarded-proto": "https" },
       });
+      trace(deps.engine, 
+        shareId,
+        deviceId,
+        `GET ${sub} → helper ${upstream.status} in ${Date.now() - started}ms (${upstream.headers.get("content-type") ?? "no content-type"})`,
+      );
       res.status(upstream.status);
       for (const h of ["content-type", "cache-control"]) {
         const v = upstream.headers.get(h);
@@ -391,15 +460,44 @@ export function createShareRouter(deps: ShareDeps): express.Router {
       // process (one preview's teardown must never take the server down).
       if (upstream.body) {
         const nodeStream = Readable.fromWeb(upstream.body as Parameters<typeof Readable.fromWeb>[0]);
-        pipeline(nodeStream, res, () => {
+        let bytes = 0;
+        nodeStream.on("data", (c: Buffer) => {
+          bytes += c.length;
+        });
+        pipeline(nodeStream, res, (err) => {
           // Errors here are ordinary disconnects/teardowns — swallow, don't throw.
+          // They are still the single most useful fact when a stream dies early,
+          // so record how far it got and why it ended.
+          trace(deps.engine, 
+            shareId,
+            deviceId,
+            `GET ${sub} ended after ${Date.now() - started}ms, ${bytes} bytes${err ? `: ${errLabel(err)}` : ""}`,
+          );
         });
       } else {
+        trace(deps.engine, shareId, deviceId, `GET ${sub} → empty body`);
         res.end();
       }
-    } catch {
+    } catch (e) {
+      trace(deps.engine, shareId, deviceId, `GET ${sub} → helper unreachable: ${errLabel(e)}`);
       if (!res.headersSent) res.status(502).end();
     }
+  });
+
+  // The viewer's own view of the stream. The browser is the only place that can
+  // tell "the helper is fine but WebCodecs never produced a picture" from "the
+  // request never arrived", and that difference is invisible server-side.
+  router.post("/:shareId/dev/:deviceId/clientlog", express.json({ limit: "2kb" }), (req, res) => {
+    const { shareId, deviceId } = req.params;
+    const body = req.body as { event?: unknown; detail?: unknown };
+    const event = typeof body?.event === "string" ? body.event.slice(0, 40) : "";
+    if (!/^[a-z0-9 :._-]{1,40}$/i.test(event)) {
+      res.status(400).end();
+      return;
+    }
+    const detail = typeof body?.detail === "string" ? body.detail.replace(/[\r\n]+/g, " ").slice(0, 200) : "";
+    trace(deps.engine, shareId, deviceId, `viewer: ${event}${detail ? ` — ${detail}` : ""}`);
+    res.status(204).end();
   });
 
   // Web preview: reverse-proxy the whole dev server under the share. The
@@ -547,9 +645,25 @@ export function handleShareUpgrade(
     const found = engine.findByShareId(shareId);
     const dev = found?.devices.find((d) => d.deviceId === deviceId);
     if (!found || !dev?.stream || !pinGate.allowed(req.headers.cookie, shareId)) {
+      // A destroyed upgrade is indistinguishable from a network problem in the
+      // browser — the viewer just retries forever. Record which gate rejected it.
+      trace(engine, 
+        shareId,
+        deviceId,
+        `ws upgrade REFUSED: ${
+          !found
+            ? "no live preview for this share"
+            : !dev
+              ? `no device "${deviceId}"`
+              : !dev.stream
+                ? "device has no attached stream"
+                : "share is PIN-locked (no valid unlock cookie)"
+        }`,
+      );
       socket.destroy();
       return true;
     }
+    trace(engine, shareId, deviceId, "ws upgrade accepted → bridging to helper");
     const targetOrigin = dev.stream.origin.replace(/^http/, "ws");
     bridgeSockets(wss, req, socket, head, `${targetOrigin}${dev.stream.helperBasePath}/ws`);
     return true;

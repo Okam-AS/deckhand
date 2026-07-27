@@ -721,15 +721,17 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Read a device's logs",
       description:
-        "Read deckhand's captured logs for a device in a preview — the fastest way to find out WHY a build failed or a screen came up wrong. `build` (default) carries the build/install step output plus the NativeScript livesync and web dev-server streams: compile errors, install failures, and dev-server crashes surface here. Pair with `describe`/`screenshot` when the app is up but misbehaving. Pass previewId or app id; deviceId defaults to the first/only device. Returns the last `tailLines` lines (500 are retained per source).",
+        "Read deckhand's captured logs for a device in a preview — the fastest way to find out WHY a build failed, why a screen came up wrong, or why the viewer will not show a picture. `build` (default) carries the build/install step output plus the NativeScript livesync and web dev-server streams: compile errors, install failures, and dev-server crashes surface here. **`stream` is the one to read when the viewer is stuck on \"Connecting…\" or shows a black screen while the device says ready** — it traces the whole browser→helper path: helper attach + first-frame probes, every proxied stream request with its upstream status and byte count, WebSocket upgrade accepts/refusals with the exact reason, and what the viewer's own player reports (fallback to MJPEG, decode failure, giving up). Pair with `describe`/`screenshot` when the app is up but misbehaving. Pass previewId or app id; deviceId defaults to the first/only device. Returns the last `tailLines` lines (500 are retained per source).",
       inputSchema: {
         previewId: z.string().optional().describe("from start_preview; or pass app instead"),
         app: z.string().optional().describe("app id — reads its running preview"),
         deviceId: z.string().optional().describe("defaults to the first/only device in the preview"),
         source: z
-          .enum(["build", "metro", "app"])
+          .enum(["build", "metro", "app", "stream"])
           .optional()
-          .describe("build (default): build/install + livesync + web dev-server output. metro/app runtime streams are reserved and not captured yet."),
+          .describe(
+            "build (default): build/install + livesync + web dev-server output. stream: the browser→helper streaming trace — read this for a viewer that never shows a picture. metro/app runtime streams are reserved and not captured yet.",
+          ),
         tailLines: z.number().int().positive().max(500).optional().describe("trailing lines to return (default 200)"),
       },
     },

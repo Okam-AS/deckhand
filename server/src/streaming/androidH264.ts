@@ -154,19 +154,32 @@ export class AvccSource {
     if (this.gopBytes > MAX_REPLAY_BYTES) {
       this.restartSegment();
     } else {
+      // A newcomer that backs up during catch-up is dropped like any other slow
+      // subscriber — and must be *closed*, or its response hangs open forever
+      // with no further bytes and the viewer only recovers via its watchdog.
       if (this.description && !sub.write(this.description)) {
-        this.subscribers.delete(sub);
+        this.drop(sub);
         return () => {};
       }
       for (const chunk of this.gop) {
         if (!sub.write(chunk)) {
-          this.subscribers.delete(sub);
+          this.drop(sub);
           return () => {};
         }
       }
     }
     this.start();
     return () => this.unsubscribe(sub);
+  }
+
+  private drop(sub: AvccSubscriber): void {
+    this.subscribers.delete(sub);
+    try {
+      sub.close();
+    } catch {
+      /* already gone */
+    }
+    this.scheduleStop();
   }
 
   private unsubscribe(sub: AvccSubscriber): void {

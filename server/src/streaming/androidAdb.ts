@@ -341,11 +341,22 @@ export class AndroidAdbBackend implements StreamingBackend {
     // Waiting on drain makes the capture rate the consumer's rate.
     const waitForDrain = () =>
       new Promise<void>((resolve) => {
-        if (res.writableLength <= MAX_SOCKET_BACKLOG_BYTES) {
+        if (closed || res.writableLength <= MAX_SOCKET_BACKLOG_BYTES) {
           resolve();
           return;
         }
-        res.once("drain", resolve);
+        // A viewer that disconnects while we are parked here never emits
+        // "drain", so wake on the socket ending too — otherwise this promise
+        // never settles and pins the capture loop (and `res`) in memory.
+        const done = () => {
+          res.off("drain", done);
+          res.off("close", done);
+          res.off("error", done);
+          resolve();
+        };
+        res.once("drain", done);
+        res.once("close", done);
+        res.once("error", done);
       });
 
     const tick = async () => {

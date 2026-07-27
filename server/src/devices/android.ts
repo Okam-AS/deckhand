@@ -118,6 +118,11 @@ export function serialForPort(port: number): string {
   return `emulator-${port}`;
 }
 
+/** The console port a serial was minted from, or NaN if it isn't an emulator serial. */
+export function portForSerial(serial: string): number {
+  return Number.parseInt(serial.replace(/^emulator-/, ""), 10);
+}
+
 /** True when getprop reports the emulator finished booting. */
 export function bootCompleted(getpropOutput: string): boolean {
   return getpropOutput.trim() === "1";
@@ -184,8 +189,17 @@ export class AndroidManager {
     if (res.code !== 0) throw new AndroidError(`avdmanager create failed: ${res.stderr.trim().slice(0, 200)}`);
   }
 
-  /** Boot an emulator on a fixed console port; returns the serial once fully booted. */
-  async bootEmulator(avdName: string, consolePort: number, timeoutMs = 240_000): Promise<string> {
+  /**
+   * Boot an emulator on a fixed console port; returns the serial once fully
+   * booted. `wipeData` factory-resets a reused (pooled) AVD whose previous
+   * tenant is unknown, so no stale app state carries over.
+   */
+  async bootEmulator(
+    avdName: string,
+    consolePort: number,
+    timeoutMs = 240_000,
+    opts: { wipeData?: boolean } = {},
+  ): Promise<string> {
     const serial = serialForPort(consolePort);
     // Detached: the emulator runs for the life of the preview.
     void this.run("emulator", [
@@ -196,6 +210,7 @@ export class AndroidManager {
       "-no-audio",
       "-no-boot-anim",
       "-no-snapshot",
+      ...(opts.wipeData ? ["-wipe-data"] : []),
     ]);
     await this.adb(serial, ["wait-for-device"], { timeoutMs });
     const deadline = Date.now() + timeoutMs;
@@ -276,8 +291,20 @@ export class AndroidManager {
     return null;
   }
 
-  async shutdown(serial: string): Promise<void> {
+  /**
+   * Kill an emulator and wait for it to actually be gone. `emu kill` returns
+   * immediately while QEMU takes seconds to exit, still holding its console port
+   * and the AVD's lock file — reusing either before then fails the next boot
+   * ("AVD is already running") or lands two emulators on one serial.
+   */
+  async shutdown(serial: string, timeoutMs = 20_000): Promise<void> {
     await this.adb(serial, ["emu", "kill"]).catch(() => {});
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const res = await this.adb(serial, ["get-state"]).catch(() => ({ code: 1 }) as ExecResult);
+      if (res.code !== 0) return; // adb no longer knows the serial: the emulator is gone
+      await new Promise((r) => setTimeout(r, 500));
+    }
   }
 
   async deleteAvd(name: string): Promise<void> {

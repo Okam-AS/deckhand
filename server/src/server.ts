@@ -157,11 +157,25 @@ export function createServer(): DeckhandServer {
     httpServer,
     engine,
     config,
-    listen: () =>
-      new Promise<void>((resolve) => {
+    listen: async () => {
+      // Bind FIRST. The reaper's "an empty preview map means every deckhand-named
+      // device is an orphan" assumption only holds if we are the only server, and
+      // the port is what proves it: a second `deckhand serve` must die on
+      // EADDRINUSE *before* it deletes the running server's sims and AVDs.
+      await new Promise<void>((resolve, reject) => {
         // Loopback only: the sole public path in is the Cloudflare tunnel.
-        httpServer.listen(config.port, "127.0.0.1", () => resolve());
-      }),
+        const onError = (err: Error) => reject(err);
+        httpServer.once("error", onError);
+        httpServer.listen(config.port, "127.0.0.1", () => {
+          httpServer.off("error", onError);
+          resolve();
+        });
+      });
+      // Now collect whatever the previous process left booted, then keep
+      // sweeping idle previews for as long as we run.
+      await engine.reapOrphans().catch(() => {});
+      engine.startJanitor();
+    },
   };
 }
 

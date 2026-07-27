@@ -14,8 +14,9 @@ import {
 } from "../state.ts";
 import { hashPassword, verifyPassword } from "../share/shares.ts";
 import { WorktreeManager, type RefSpec, refDescription } from "./worktree.ts";
-import { Simctl, selectRuntime, selectDeviceType, deviceLabel } from "../devices/ios.ts";
-import { AndroidManager, selectSystemImage } from "../devices/android.ts";
+import { Simctl, selectRuntime, selectDeviceType, deviceLabel, type SimDevice } from "../devices/ios.ts";
+import { AndroidManager, selectSystemImage, portForSerial } from "../devices/android.ts";
+import { Reaper, POOL_SIM_PREFIX, POOL_AVD_PREFIX } from "./reaper.ts";
 import { MetroManager } from "./metro.ts";
 import { buildPlan, usesMetroDeepLink, nativescriptDevRun, webDevRun, webRootDevRun, GENERAL_IDLE_MS } from "./recipes.ts";
 import { runStep as defaultRunStep, type RunResult } from "./procs.ts";
@@ -46,7 +47,12 @@ import { SimDeckControl, type SimDeckTarget, type DescribeOptions, type UiAction
 // ---------------------------------------------------------------------------
 
 const LOG_CAP = 500;
-export type LogSource = "build" | "metro" | "app";
+// "stream" is the diagnostic trace for the path between the browser and the
+// device: helper attach, first-frame probes, every proxied request and its
+// upstream result, WebSocket upgrades, and what the viewer's player reports back.
+// A device can be `ready` (deckhand saw a frame) while the viewer still says
+// "Connecting…", and without this source there was no way to tell the two apart.
+export type LogSource = "build" | "metro" | "app" | "stream";
 
 /** How long the first livesync build may take before we give up on install. */
 const DEV_INSTALL_TIMEOUT_MS = GENERAL_IDLE_MS;
@@ -61,6 +67,8 @@ interface LiveDevice {
   record: PersistedDevice;
   logs: Record<LogSource, string[]>;
   abort: AbortController;
+  /** Pool slot held by this device (see leaseName) — released, not deleted, on teardown. */
+  poolName?: string;
 }
 
 interface LivePreview {
@@ -75,6 +83,8 @@ interface LivePreview {
   testRun?: TestRun;
   /** Ephemeral: pairing + parity checklist for a compare session, surfaced to the viewer. */
   compare?: CompareSession;
+  /** Epoch ms of the last viewer/agent touch — the idle sweep's clock. */
+  lastActivityAt: number;
 }
 
 // An agent-driven test run: the brain (the coding agent) reports what it's
@@ -180,6 +190,8 @@ export interface PreviewEngineDeps {
   store: StateStore;
   audit: AuditLog;
   devProcs?: DevProcessManager;
+  /** Orphan sweeper (see reapOrphans). Constructed from simctl/android when absent. */
+  reaper?: Reaper;
   /** Agent-driven testing backend (describe/ui). Lazily constructed from config if absent. */
   simdeck?: SimDeckControl;
   runStep?: (step: CommandStep, opts?: { onLog?: (l: string, s: "stdout" | "stderr") => void; signal?: AbortSignal }) => Promise<RunResult>;
@@ -218,6 +230,14 @@ export class PreviewEngine {
   private readonly stableShareIds: Record<string, string>;
   /** appId → share PIN (scrypt), persisted so a bookmarked protected URL stays protected. */
   private readonly pins: Record<string, PinRecord>;
+  /** Idle-sweep timer (see startJanitor). */
+  private janitor?: ReturnType<typeof setInterval>;
+  /** Pool names currently held by a live preview (never two previews on one device). */
+  private readonly leased = new Set<string>();
+  /** poolName → the appId that last ran there, so a reused device is only wiped when it changes hands. */
+  private readonly poolTenants = new Map<string, string>();
+  /** Devices whose teardown is still in flight (they hold real resources until it finishes). */
+  private tearingDown = 0;
 
   constructor(deps: PreviewEngineDeps) {
     this.d = {
@@ -304,6 +324,7 @@ export class PreviewEngine {
   ): { previewId: string; devices: { deviceId: string; platform: Platform; stream?: AttachedStream }[] } | null {
     for (const p of this.previews.values()) {
       if (p.record.shareId === shareId) {
+        this.markActive(p); // a proxied request/stream attach means someone is watching
         return {
           previewId: p.record.previewId,
           devices: p.devices.map((dv) => ({
@@ -350,6 +371,11 @@ export class PreviewEngine {
   }
 
   private webOriginOf(p: LivePreview): { origin: string | null; ready: boolean; shareId: string } {
+    // Subdomain-hosted web is browsed at its own host, with no /s/<id> viewer
+    // polling behind it — this resolver is the only signal that anyone is using
+    // it, so it must reset the idle clock or the sweep would stop a preview
+    // someone is actively looking at.
+    this.markActive(p);
     const dev = p.devices[0];
     const stream = dev ? p.attached.get(dev.record.deviceId) : undefined;
     return {
@@ -399,6 +425,7 @@ export class PreviewEngine {
       }));
     for (const p of this.previews.values()) {
       if (p.record.shareId === shareId) {
+        this.markActive(p); // the viewer polls this — it is the idle clock's heartbeat
         // Pair the working preview with its reference and surface the checklist.
         // A live compare session (explicit reference + in-memory items) wins; else
         // fall back to the legacy migration path (migratesFrom + repo-file ledger).
@@ -563,10 +590,7 @@ export class PreviewEngine {
         "request fewer devices or raise limits.maxDevicesPerPreview",
       );
     }
-    const totalActive = [...this.previews.values()].reduce(
-      (n, p) => n + (p.record.phase === "stopped" || p.record.phase === "failed" ? 0 : p.devices.length),
-      0,
-    );
+    const totalActive = this.devicesInUse();
     if (totalActive + req.devices.length > this.d.config.limits.maxTotalDevices) {
       throw new PreviewError(
         `device capacity reached (${totalActive}/${this.d.config.limits.maxTotalDevices} in use)`,
@@ -594,7 +618,7 @@ export class PreviewEngine {
         model: dev.model,
         phase: "pending",
       },
-      logs: { build: [], metro: [], app: [] },
+      logs: { build: [], metro: [], app: [], stream: [] },
       abort: new AbortController(),
     }));
 
@@ -611,7 +635,14 @@ export class PreviewEngine {
       passwordProtected: req.access === "password",
       ...(webFramework ? { webFramework } : {}),
     };
-    const preview: LivePreview = { record, app: req.app, spec: req.spec, devices, attached: new Map() };
+    const preview: LivePreview = {
+      record,
+      app: req.app,
+      spec: req.spec,
+      devices,
+      attached: new Map(),
+      lastActivityAt: this.d.now!(),
+    };
     this.previews.set(previewId, preview);
     this.persist();
 
@@ -632,6 +663,7 @@ export class PreviewEngine {
   }
 
   private resultFor(p: LivePreview, alreadyRunning: boolean): StartPreviewResult {
+    this.markActive(p); // an idempotent start_preview is someone using it
     return {
       previewId: p.record.previewId,
       shareId: p.record.shareId,
@@ -654,13 +686,48 @@ export class PreviewEngine {
     return null;
   }
 
-  /** Drop terminal previews of an app so its stable shareId can be reclaimed. */
+  /**
+   * Drop terminal previews of an app so its stable shareId can be reclaimed.
+   * A failed preview still holds a booted simulator/AVD, so release the devices
+   * before forgetting it — dropping the record first made them unreachable
+   * (nothing left to stop) and leaked them for the life of the machine.
+   */
   private reapTerminalForApp(appId: string): void {
     for (const [id, p] of this.previews) {
       if (p.record.appId === appId && (p.record.phase === "failed" || p.record.phase === "stopped")) {
         this.previews.delete(id);
+        if (p.record.phase === "failed") this.releaseInBackground(p);
       }
     }
+  }
+
+  /**
+   * Release everything a forgotten preview still holds — dev processes, devices,
+   * worktree — without blocking the caller (startPreview is synchronous). The
+   * device count is held in `tearingDown` for the duration so a preview starting
+   * right now can't claim capacity that is still occupied.
+   */
+  private releaseInBackground(p: LivePreview): void {
+    this.tearingDown += p.devices.length;
+    // Nothing awaits this, so an escaping rejection is fatal to the process:
+    // devProcs.stop() or an AndroidManager constructor throw would turn an
+    // ordinary "start it again after it failed" into a server crash.
+    void (async () => {
+      try {
+        for (const dev of p.devices) dev.abort.abort();
+        if (p.record.source === "local") {
+          for (const platform of new Set(p.devices.map((d) => d.record.platform))) {
+            this.d.devProcs?.stop(devKey(p.app.id, platform));
+          }
+        }
+        await this.teardownDevices(p);
+        if (p.record.source !== "local") {
+          await this.d.worktrees.removeWorktree(p.app, p.record.previewId).catch(() => {});
+        }
+      } finally {
+        this.tearingDown -= p.devices.length;
+      }
+    })().catch(() => {});
   }
 
   /**
@@ -679,6 +746,12 @@ export class PreviewEngine {
   }
 
   private setPhase(p: LivePreview, dev: LiveDevice, phase: PersistedDevice["phase"], detail?: string): void {
+    // "failed" is terminal until a restart explicitly resets the device. Steps
+    // started before the failure (a boot racing a failed checkout) finish later
+    // and used to write their phase over it, leaving the preview stuck in
+    // "running" forever — never ready, never failed, and invisible to both the
+    // idle sweep and the grace-window sweep.
+    if (dev.record.phase === "failed" && phase !== "pending") return;
     dev.record.phase = phase;
     dev.record.detail = detail;
     this.touch(p);
@@ -736,7 +809,29 @@ export class PreviewEngine {
     dev.record.runtime = runtime.name;
     dev.record.model = deviceType.name;
 
-    const udid = await this.d.simctl.create(`deckhand-${p.record.previewId}-${dev.record.deviceId}`, deviceType.identifier, runtime.identifier);
+    let udid: string;
+    if (this.pooling()) {
+      // Record the lease on the device *before* anything that can throw, so a
+      // failed create releases the slot on teardown instead of stranding it
+      // (leaked slots push every later preview onto `…-2`, `…-3` forever).
+      const name = this.leaseName(POOL_SIM_PREFIX, `${deviceType.name}-${runtime.name}`, "-");
+      dev.poolName = name;
+      const existing = (await safeList<SimDevice>(() => this.d.simctl.listDevices())).find((d) => d.name === name);
+      if (existing) {
+        udid = existing.udid;
+        // Unknown predecessor (a restart lost the tenant map) ⇒ factory reset.
+        if (this.poolTenants.get(name) !== p.app.id) await this.d.simctl.erase(udid).catch(() => {});
+      } else {
+        udid = await this.d.simctl.create(name, deviceType.identifier, runtime.identifier);
+      }
+      this.poolTenants.set(name, p.app.id);
+    } else {
+      udid = await this.d.simctl.create(
+        `deckhand-${p.record.previewId}-${dev.record.deviceId}`,
+        deviceType.identifier,
+        runtime.identifier,
+      );
+    }
     dev.record.udid = udid;
     this.setPhase(p, dev, "booting", "booting simulator");
     await this.d.simctl.bootAndWait(udid);
@@ -747,17 +842,48 @@ export class PreviewEngine {
     const android = this.android();
     const image = selectSystemImage(await android.listSystemImages(), dev.record.runtime);
     const profile = dev.record.model ?? "pixel_7";
-    const avdName = `deckhand_${p.record.previewId}_${dev.record.deviceId}`.replace(/[^A-Za-z0-9_]/g, "_");
-    await android.createAvd(avdName, image, profile);
+    let avdName: string;
+    let wipeData = false;
+    if (this.pooling()) {
+      avdName = this.leaseName(POOL_AVD_PREFIX, `${profile}_api${image.api}`, "_");
+      dev.poolName = avdName; // claim before createAvd, which can throw — see bootIos
+      const exists = (await safeList<string>(() => android.listAvds())).includes(avdName);
+      wipeData = this.poolTenants.get(avdName) !== p.app.id;
+      if (!exists) await android.createAvd(avdName, image, profile);
+      this.poolTenants.set(avdName, p.app.id);
+    } else {
+      avdName = `deckhand_${p.record.previewId}_${dev.record.deviceId}`.replace(/[^A-Za-z0-9_]/g, "_");
+      await android.createAvd(avdName, image, profile);
+    }
     dev.record.udid = avdName; // remember the AVD name for teardown
     dev.record.model = profile;
     dev.record.runtime = `Android ${image.api}`;
     dev.record.label = `${profile} · Android ${image.api}`;
     const port = this.allocAndroidPort();
     this.setPhase(p, dev, "booting", "booting emulator");
-    const serial = await android.bootEmulator(avdName, port);
+    const serial = await android.bootEmulator(avdName, port, undefined, { wipeData });
     dev.record.serial = serial;
     return serial;
+  }
+
+  private pooling(): boolean {
+    return this.d.config.limits.reuseDevices;
+  }
+
+  /**
+   * Claim a pool slot for a device *shape* (model + runtime). Two previews
+   * wanting the same shape at once get `…`, `…2`, `…3` — a pooled device is
+   * reused across previews, never shared by two at the same time.
+   */
+  private leaseName(prefix: string, shape: string, sep: string): string {
+    const base = prefix + shape.toLowerCase().replace(/[^a-z0-9]+/g, sep).replace(new RegExp(`\\${sep}+$`), "");
+    for (let i = 1; ; i++) {
+      const name = i === 1 ? base : `${base}${sep}${i}`;
+      if (!this.leased.has(name)) {
+        this.leased.add(name);
+        return name;
+      }
+    }
   }
 
   private resolveBundleId(app: App, worktreePath: string, platform: Platform): string {
@@ -771,6 +897,30 @@ export class PreviewEngine {
       );
     }
     return detected;
+  }
+
+  /**
+   * Record a line on a device's `stream` trace, timestamped. This is the log an
+   * agent reads when the viewer is stuck on "Connecting…" — so it must say what
+   * was tried and what came back, never just that something failed.
+   */
+  private streamLog(dev: LiveDevice, line: string): void {
+    this.appendLog(dev, "stream", `${this.iso()} ${line}`);
+  }
+
+  /**
+   * Public entry point for the share proxy and the viewer's own client reports,
+   * addressed by shareId (the proxy has no previewId). Unknown share/device is
+   * silently ignored — a request for an ended preview must not throw in a
+   * request handler.
+   */
+  logStreamEvent(shareId: string, deviceId: string, line: string): void {
+    for (const p of this.previews.values()) {
+      if (p.record.shareId !== shareId) continue;
+      const dev = p.devices.find((d) => d.record.deviceId === deviceId);
+      if (dev) this.streamLog(dev, line);
+      return;
+    }
   }
 
   private appendLog(dev: LiveDevice, source: LogSource, line: string): void {
@@ -967,6 +1117,11 @@ export class PreviewEngine {
   private async orchestrateWebGroup(p: LivePreview, dev: LiveDevice, restart = false): Promise<void> {
     try {
       dev.record.error = undefined;
+      // "failed" is sticky in setPhase, so a Rebuild of a failed web preview has
+      // to clear it here — otherwise every phase below is a silent no-op and the
+      // device reads as failed forever (and stops being touched, so the idle
+      // sweep eventually kills a dev server that came back up fine).
+      dev.record.phase = "pending";
       this.setPhase(p, dev, "preparing", restart ? "restarting the dev server" : "starting the dev server");
       const sourceDir = await this.prepareSource(p); // local, in place — never wiped
       const appEnv = this.appEnv(p.app);
@@ -1085,10 +1240,25 @@ export class PreviewEngine {
       return;
     }
     const ref = platform === "android" ? { platform, udid: handle, serial: handle } : { platform, udid: handle };
-    const stream = await this.d.streaming.attach(ref);
+    const t0 = this.d.now!();
+    let stream: AttachedStream;
+    try {
+      stream = await this.d.streaming.attach(ref);
+    } catch (e) {
+      this.streamLog(dev, `attach FAILED after ${this.d.now!() - t0}ms: ${e instanceof Error ? e.message : String(e)}`);
+      throw e;
+    }
+    this.streamLog(dev, `attached in ${this.d.now!() - t0}ms → ${stream.origin}${stream.helperBasePath}`);
     p.attached.set(dev.record.deviceId, stream);
+    const t1 = this.d.now!();
     const framed = await stream.waitForFirstFrame();
-    if (!framed) throw new PreviewError("stream attached but produced no first frame");
+    this.streamLog(dev, `first frame ${framed ? "ok" : "NOT SEEN"} after ${this.d.now!() - t1}ms`);
+    if (!framed) {
+      throw new PreviewError(
+        "stream attached but produced no first frame",
+        "read the device's `stream` log (logs tool, source=stream) — it records the helper URL and every probe",
+      );
+    }
     this.setPhase(p, dev, "ready", undefined);
   }
 
@@ -1204,6 +1374,7 @@ export class PreviewEngine {
         // Clear terminal phases so failDevice/setPhase transitions apply cleanly.
         for (const dev of group) {
           dev.record.error = undefined;
+          dev.record.phase = "pending"; // clear the terminal "failed" so setPhase applies again
           this.setPhase(p, dev, "preparing", "restarting");
         }
         const handleOf = async (i: number): Promise<string> => {
@@ -1223,9 +1394,15 @@ export class PreviewEngine {
 
   // --- status / logs ---------------------------------------------------------
 
-  getStatus(previewId: string): PreviewStatus | null {
+  /**
+   * `touch: false` reads a preview without claiming it is in use — `list()`
+   * enumerates every preview, so touching from there would have let one agent's
+   * status poll reset the idle clock on all the others.
+   */
+  getStatus(previewId: string, opts: { touch?: boolean } = {}): PreviewStatus | null {
     const p = this.previews.get(previewId);
     if (!p) return null;
+    if (opts.touch !== false) this.markActive(p); // an agent polling this preview counts as use
     const ready = p.record.phase === "ready";
     return {
       previewId,
@@ -1245,7 +1422,7 @@ export class PreviewEngine {
   }
 
   logs(previewId: string, deviceId: string | undefined, source: LogSource, tailLines = 200): string | null {
-    const p = this.previews.get(previewId);
+    const p = this.active(previewId);
     if (!p) return null;
     const dev = deviceId ? p.devices.find((d) => d.record.deviceId === deviceId) : p.devices[0];
     if (!dev) return null;
@@ -1254,7 +1431,7 @@ export class PreviewEngine {
 
   /** The simulator UDID for a device (for the screenshot/ui tools). */
   udidFor(previewId: string, deviceId: string): string | null {
-    const p = this.previews.get(previewId);
+    const p = this.active(previewId);
     const dev = p?.devices.find((d) => d.record.deviceId === deviceId);
     return dev?.record.udid ?? null;
   }
@@ -1301,10 +1478,7 @@ export class PreviewEngine {
     } catch {
       apiLevels = []; // Android SDK not installed / not configured
     }
-    const inUse = [...this.previews.values()].reduce(
-      (n, p) => n + (p.record.phase === "stopped" || p.record.phase === "failed" ? 0 : p.devices.length),
-      0,
-    );
+    const inUse = this.devicesInUse();
     return {
       ios: {
         runtimes: runtimes.filter((r) => r.isAvailable).map((r) => ({ version: r.version, name: r.name })),
@@ -1332,7 +1506,7 @@ export class PreviewEngine {
 
   /** PNG screenshot of a device (for the screenshot tool). */
   async screenshot(previewId: string, deviceId: string): Promise<Buffer> {
-    const p = this.previews.get(previewId);
+    const p = this.active(previewId);
     const dev = p?.devices.find((d) => d.record.deviceId === deviceId);
     if (!dev) throw new PreviewError(`device ${deviceId} not found in preview ${previewId}`);
     if (dev.record.platform === "web") {
@@ -1350,7 +1524,7 @@ export class PreviewEngine {
   }
 
   attachedFor(previewId: string, deviceId: string): AttachedStream | null {
-    return this.previews.get(previewId)?.attached.get(deviceId) ?? null;
+    return this.active(previewId)?.attached.get(deviceId) ?? null;
   }
 
   // --- agent-driven testing: describe (eyes) + ui (hands), via SimDeck --------
@@ -1368,7 +1542,7 @@ export class PreviewEngine {
 
   /** Resolve a device to the way SimDeck addresses it: iOS UDID, or `android:<avd>`. */
   private simdeckTarget(previewId: string, deviceId: string): SimDeckTarget {
-    const p = this.previews.get(previewId);
+    const p = this.active(previewId);
     const dev = p?.devices.find((d) => d.record.deviceId === deviceId);
     if (!dev) throw new PreviewError(`device ${deviceId} not found in preview ${previewId}`);
     if (dev.record.platform === "web") {
@@ -1397,7 +1571,7 @@ export class PreviewEngine {
 
   /** Begin a test run on a preview (replacing any prior one). Steps start pending. */
   startTestRun(previewId: string, title: string, steps: string[] = []): { runId: string } {
-    const p = this.previews.get(previewId);
+    const p = this.active(previewId);
     if (!p) throw new PreviewError(`no active preview "${previewId}"`);
     const id = this.d.genPreviewId!();
     p.testRun = {
@@ -1415,7 +1589,7 @@ export class PreviewEngine {
     previewId: string,
     patch: { step?: { n?: number; label?: string; status: TestStepStatus; detail?: string }; runStatus?: TestRunStatus },
   ): void {
-    const run = this.previews.get(previewId)?.testRun;
+    const run = this.active(previewId)?.testRun;
     if (!run) throw new PreviewError(`no test run for preview "${previewId}"`, "call start_test_run first");
     if (patch.step) {
       const s = patch.step;
@@ -1435,7 +1609,7 @@ export class PreviewEngine {
 
   /** Conclude a test run with a verdict + one-line summary. */
   finishTestRun(previewId: string, status: TestRunStatus, summary?: string): void {
-    const run = this.previews.get(previewId)?.testRun;
+    const run = this.active(previewId)?.testRun;
     if (!run) throw new PreviewError(`no test run for preview "${previewId}"`, "call start_test_run first");
     run.status = status;
     if (summary != null) run.summary = summary;
@@ -1460,7 +1634,7 @@ export class PreviewEngine {
 
   /** Link a working preview to a reference preview + seed the item checklist (replacing any prior). */
   startCompare(previewId: string, reference: CompareReference, items: string[] = [], referencePreviewId?: string): CompareCounts {
-    const p = this.previews.get(previewId);
+    const p = this.active(previewId);
     if (!p) throw new PreviewError(`no active preview "${previewId}"`);
     const seen = new Set<string>();
     const uniq = items.map((s) => s.trim()).filter((s) => s.length > 0 && !seen.has(s) && (seen.add(s), true));
@@ -1470,7 +1644,7 @@ export class PreviewEngine {
 
   /** Set one item's verdict (by exact name; appends if new). Returns the new counts. */
   setCompareItem(previewId: string, patch: { item: string; verdict: CompareVerdict; note?: string }): CompareCounts {
-    const c = this.previews.get(previewId)?.compare;
+    const c = this.active(previewId)?.compare;
     if (!c) throw new PreviewError(`no compare session for preview "${previewId}"`, "call compare_start first");
     let item = c.items.find((x) => x.name === patch.item);
     if (!item) {
@@ -1484,12 +1658,211 @@ export class PreviewEngine {
 
   /** The current compare session (reference + items + counts), or null. */
   compareStatus(previewId: string): { reference: CompareReference; items: CompareItem[]; counts: CompareCounts } | null {
-    const c = this.previews.get(previewId)?.compare;
+    const c = this.active(previewId)?.compare;
     if (!c) return null;
     return { reference: c.reference, items: c.items, counts: PreviewEngine.countCompare(c.items) };
   }
 
+  // --- reaping / idle sweep --------------------------------------------------
+
+  /**
+   * Clear out whatever the previous process left behind. Deckhand's devices do
+   * not survive its own exit — a crash or a plain `serve` restart orphans every
+   * booted simulator, emulator and helper it owned, and nothing ever collected
+   * them. Called once, before the server starts listening.
+   */
+  async reapOrphans(): Promise<{ sims: number; avds: number; previews: number }> {
+    const stale = this.d.store.load().previews.filter((p) => p.phase !== "stopped");
+    // The in-memory map is empty at boot, so every deckhand-named device on the
+    // machine is an orphan: sweep them all, keeping nothing.
+    // Guard the construction too: `new AndroidManager()` resolves tool env and
+    // can throw, and that must never cost us the stale-preview cleanup below.
+    const report = await (async () => {
+      try {
+        const reaper = this.d.reaper ?? new Reaper({ simctl: this.d.simctl, android: this.android() });
+        return await reaper.reap();
+      } catch {
+        return { sims: [], avds: [], keptPooled: [] };
+      }
+    })();
+    if (stale.length) this.persist(); // drops the stale previews, keeps shareIds + pins
+    if (stale.length || report.sims.length || report.avds.length) {
+      this.d.audit.record({
+        actor: "engine",
+        tool: "reap_orphans",
+        args: { previews: stale.length, sims: report.sims.length, avds: report.avds.length },
+        result: "ok",
+      });
+    }
+    return { sims: report.sims.length, avds: report.avds.length, previews: stale.length };
+  }
+
+  /** Note that someone is actually watching this preview (resets the idle clock). */
+  private markActive(p: LivePreview): void {
+    p.lastActivityAt = this.d.now!();
+  }
+
+  /**
+   * Look up a preview and count the lookup as activity. An agent driving a
+   * preview purely through screenshot/describe/ui/logs — no browser tab, no
+   * status poll — is using it just as much as a viewer is, and used to get its
+   * simulators deleted out from under it mid-run by the idle sweep.
+   */
+  private active(previewId: string): LivePreview | undefined {
+    const p = this.previews.get(previewId);
+    if (p) this.markActive(p);
+    return p;
+  }
+
+  /**
+   * Stop previews nobody is using: idle ones (no viewer traffic for
+   * `limits.idleMinutes`) and failed ones past their Rebuild grace window.
+   * Returns the previewIds stopped.
+   */
+  async sweepIdle(): Promise<string[]> {
+    const { idleMinutes, failedGraceMinutes, stuckMinutes } = this.d.config.limits;
+    const now = this.d.now!();
+    const doomed: { id: string; reason: string }[] = [];
+    for (const [id, p] of this.previews) {
+      const ph = p.record.phase;
+      if (ph === "stopped" || ph === "stopping") continue;
+      const sinceProgress = now - Date.parse(p.record.updatedAt);
+      if (ph === "failed") {
+        if (failedGraceMinutes > 0 && sinceProgress > failedGraceMinutes * 60_000) doomed.push({ id, reason: "failed" });
+        continue;
+      }
+      // A build in flight is never idle — nobody watches a preview that isn't up
+      // yet — but one that has stopped making progress entirely is wedged, and
+      // holds its devices until something collects it.
+      if (ph !== "ready") {
+        if (stuckMinutes > 0 && sinceProgress > stuckMinutes * 60_000) doomed.push({ id, reason: "stuck" });
+        continue;
+      }
+      if (idleMinutes > 0 && now - p.lastActivityAt > idleMinutes * 60_000) doomed.push({ id, reason: "idle" });
+    }
+    for (const { id, reason } of doomed) {
+      this.d.audit.record({ actor: "engine", tool: "auto_stop", args: { preview: id, reason }, result: "ok" });
+      await this.stopPreview(id).catch(() => {});
+    }
+    return doomed.map((d) => d.id);
+  }
+
+  /** Run `sweepIdle` on a timer. The handle is unref'd, so it never holds the process open. */
+  startJanitor(everyMs = 60_000): void {
+    if (this.janitor) return;
+    this.janitor = setInterval(() => void this.sweepIdle().catch(() => {}), everyMs);
+    this.janitor.unref?.();
+  }
+
+  stopJanitor(): void {
+    if (this.janitor) clearInterval(this.janitor);
+    this.janitor = undefined;
+  }
+
   // --- stop ------------------------------------------------------------------
+
+  /**
+   * Devices currently occupying the machine — counted from what is actually
+   * booted, not from what was requested. A `failed` preview's devices count
+   * while they still hold a handle (they stay booted for the Rebuild grace
+   * window); a preview that failed during clone or build never booted anything
+   * and must not consume capacity. Teardowns in flight count too: they are
+   * asynchronous, and dropping them from the tally let a new preview start on
+   * top of simulators that were still shutting down.
+   */
+  private devicesInUse(): number {
+    let n = this.tearingDown;
+    for (const p of this.previews.values()) {
+      if (p.record.phase === "stopped") continue;
+      for (const dev of p.devices) {
+        const booted = Boolean(dev.record.udid ?? dev.record.serial ?? dev.record.webPort);
+        // A device still working toward ready has a slot reserved for it.
+        if (booted || (dev.record.phase !== "failed" && p.record.phase !== "failed")) n++;
+      }
+    }
+    return n;
+  }
+
+  /**
+   * Release every device of a preview: detach the stream, then shut down and
+   * delete the simulator/AVD deckhand created for it. Idempotent — the handles
+   * are cleared, so a second call (stop after an idle sweep) is a no-op.
+   */
+  private async teardownDevices(p: LivePreview): Promise<void> {
+    for (const dev of p.devices) {
+      const stream = p.attached.get(dev.record.deviceId);
+      if (stream) await stream.detach().catch(() => {});
+      p.attached.delete(dev.record.deviceId);
+      if (dev.record.platform === "web") {
+        if (dev.record.webPort) this.webPorts.delete(dev.record.webPort);
+        dev.record.webPort = undefined;
+        continue; // no simulator/emulator to tear down; the dev process is stopped by the caller
+      }
+      // A pooled device is released, not destroyed: the next preview of the same
+      // shape boots it again instead of paying for a create (and, on Android, a
+      // fresh ~2 GB AVD image) every single time.
+      const pooled = dev.poolName != null;
+      if (dev.record.platform === "android") {
+        if (dev.record.serial) {
+          await this.android().shutdown(dev.record.serial).catch(() => {});
+          this.androidPorts.delete(portForSerial(dev.record.serial));
+        }
+        if (dev.record.udid && !pooled) await this.android().deleteAvd(dev.record.udid).catch(() => {}); // udid holds the AVD name
+      } else if (dev.record.udid) {
+        await this.d.simctl.shutdown(dev.record.udid).catch(() => {});
+        if (!pooled) await this.d.simctl.delete(dev.record.udid).catch(() => {});
+      }
+      if (dev.poolName) {
+        this.leased.delete(dev.poolName);
+        dev.poolName = undefined;
+      }
+      dev.record.udid = undefined;
+      dev.record.serial = undefined;
+    }
+    await this.trimPool();
+  }
+
+  /**
+   * Keep the pool bounded. Idle pooled devices cost disk (an AVD image is
+   * ~2 GB), so the pool never holds more devices than the machine is allowed to
+   * run at once — `maxTotalDevices` across both platforms, leased ones
+   * included. iOS is trimmed first: an erased simulator is cheap to recreate,
+   * an AVD image is not.
+   */
+  private async trimPool(): Promise<void> {
+    if (!this.pooling()) return;
+    // Both lists are best-effort: a machine with no Xcode or no Android SDK
+    // simply has no pool of that kind, and trimming must not fail teardown.
+    const sims = (await safeList<SimDevice>(() => this.d.simctl.listDevices())).filter((d) =>
+      d.name.startsWith(POOL_SIM_PREFIX),
+    );
+    const avds = (await safeList<string>(() => this.android().listAvds())).filter((n) => n.startsWith(POOL_AVD_PREFIX));
+    // Leased devices belong to a live preview and are never trimmed; they still
+    // occupy the budget, so a busy machine keeps no idle spares at all.
+    let budget = this.d.config.limits.maxTotalDevices - this.leased.size;
+    const keepAvds = Math.max(0, Math.min(budget, avds.filter((n) => !this.leased.has(n)).length));
+    budget -= keepAvds;
+    let simsKept = 0;
+    for (const sim of sims) {
+      if (this.leased.has(sim.name)) continue;
+      if (simsKept < budget) {
+        simsKept++;
+        continue;
+      }
+      await this.d.simctl.delete(sim.udid).catch(() => {});
+      this.poolTenants.delete(sim.name);
+    }
+    let avdsKept = 0;
+    for (const avd of avds) {
+      if (this.leased.has(avd)) continue;
+      if (avdsKept < keepAvds) {
+        avdsKept++;
+        continue;
+      }
+      await this.android().deleteAvd(avd).catch(() => {});
+      this.poolTenants.delete(avd);
+    }
+  }
 
   async stopPreview(previewId: string): Promise<boolean> {
     const p = this.previews.get(previewId);
@@ -1509,21 +1882,7 @@ export class PreviewEngine {
       }
     }
 
-    for (const dev of p.devices) {
-      const stream = p.attached.get(dev.record.deviceId);
-      if (stream) await stream.detach().catch(() => {});
-      if (dev.record.platform === "web") {
-        if (dev.record.webPort) this.webPorts.delete(dev.record.webPort);
-        continue; // no simulator/emulator to tear down; the dev process was stopped above
-      }
-      if (dev.record.platform === "android") {
-        if (dev.record.serial) await this.android().shutdown(dev.record.serial).catch(() => {});
-        if (dev.record.udid) await this.android().deleteAvd(dev.record.udid).catch(() => {}); // udid holds the AVD name
-      } else if (dev.record.udid) {
-        await this.d.simctl.shutdown(dev.record.udid).catch(() => {});
-        await this.d.simctl.delete(dev.record.udid).catch(() => {});
-      }
-    }
+    await this.teardownDevices(p);
     if (p.record.source !== "local") {
       await this.d.worktrees.removeWorktree(p.app, previewId).catch(() => {});
     }
@@ -1544,7 +1903,7 @@ export class PreviewEngine {
 
   /** Snapshot of all live previews (for list/limits). */
   list(): PreviewStatus[] {
-    return [...this.previews.keys()].map((id) => this.getStatus(id)!).filter(Boolean);
+    return [...this.previews.keys()].map((id) => this.getStatus(id, { touch: false })!).filter(Boolean);
   }
 }
 
@@ -1553,5 +1912,14 @@ function safeReadJson(file: string): { expo?: { slug?: string }; slug?: string }
     return JSON.parse(readFileSync(file, "utf8"));
   } catch {
     return null;
+  }
+}
+
+/** List helper that swallows both a missing tool (sync throw) and a failed call. */
+async function safeList<T>(fn: () => Promise<T[]>): Promise<T[]> {
+  try {
+    return await fn();
+  } catch {
+    return [];
   }
 }

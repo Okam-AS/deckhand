@@ -160,6 +160,10 @@ allowPublicRepos: false           # public repos from owners without an app inst
 limits:
   maxDevicesPerPreview: 4
   maxTotalDevices: 6
+  idleMinutes: 45                 # auto-stop a ready preview after this long with no viewer traffic (0 = never)
+  failedGraceMinutes: 15          # a failed preview keeps its devices this long, so Rebuild still works (0 = never)
+  stuckMinutes: 90                # give up on a preview that has made no progress at all for this long (0 = never)
+  reuseDevices: true              # pool simulators/AVDs by device shape instead of one throwaway per preview
   disk:                           # free-space tiers (GiB); at critical, refuse new previews
     watch: 50
     pressure: 35
@@ -377,9 +381,10 @@ env-signature; restart only when env changes or health (`GET /status`) fails. En
 
 ### Devices
 
-- **iOS**: enumerate `xcrun simctl list runtimes devicetypes -j`. Create per preview:
-  `simctl create "deckhand-<previewId>-<n>" <deviceType> <runtime>`; `boot` + `bootstatus -b`;
-  delete on teardown. serve-sim attaches to any booted simulator.
+- **iOS**: enumerate `xcrun simctl list runtimes devicetypes -j`, then `simctl create` +
+  `boot` + `bootstatus -b`. serve-sim attaches to any booted simulator. Naming and teardown
+  follow the pooling rules below (a per-preview `deckhand-<previewId>-<n>` device, deleted on
+  teardown, only when `limits.reuseDevices` is off).
 - **Android (P2)**: enumerate installed system images (`sdkmanager --list_installed`); create
   AVD via `avdmanager create avd --force --name Deckhand_<...> --package <sysimg>`; **deckhand
   boots the emulator itself**: `emulator -avd <name> -no-audio -no-boot-anim` (headless flags
@@ -388,6 +393,71 @@ env-signature; restart only when env changes or health (`GET /status`) fails. En
   (`emulator-<port>`). Install with `ANDROID_SERIAL=<serial>`.
 - Tool env resolution (JAVA_HOME/ANDROID_HOME/PATH) is fiddly on macOS — port the approach
   described in the learnings doc.
+
+### Streaming diagnostics — the `stream` log source (amendment 2026-07-27)
+
+A viewer stuck on "Connecting…" was the hardest failure to debug remotely: the device
+reports `ready` (deckhand saw a first frame), the proxy answered a bare 404/502 with no
+message, `catch {}` swallowed every error, and the browser reported nothing at all. An
+agent on the machine had no thread to pull.
+
+Every device now carries a fourth log source, **`stream`**, readable via the `logs` MCP
+tool — the browser→device path end to end:
+
+- **attach**: helper URL and how long attach took; each first-frame probe and its outcome.
+- **proxy**: every stream request with its upstream status, duration and byte count; when a
+  request cannot be routed, *which* of the three reasons applied (no live preview / no such
+  device, with the ids that do exist / no attached stream); helper-unreachable errors with
+  their errno.
+- **WebSocket**: upgrades accepted, and refusals with the exact gate that rejected them
+  (a destroyed upgrade is indistinguishable from a network fault in the browser).
+- **viewer**: the player POSTs its own turning points to `…/dev/<id>/clientlog` — transport
+  chosen, MJPEG fallback and why, connection lost, giving up. Validated and length-capped
+  server-side, bounded per player, and behind the same PIN gate as the rest of the share.
+
+Rules: diagnostics never fail the request they explain (every trace call is wrapped), and
+they carry no secrets — no tokens, no cookies, no PINs, no request bodies (§11).
+
+### Device lifecycle — pooling + auto-teardown (amendment 2026-07-27)
+
+Devices used to be created per preview and released only by an explicit `stop_preview`.
+Two holes followed, and both were observed on the dev Mac (4 booted simulators, 9 AVDs,
+4 emulator processes — for **one** live preview):
+
+1. **Nothing survives a restart, and nothing collected the leftovers.** A crash or a plain
+   `deckhand serve` restart orphaned every booted simulator, emulator and serve-sim helper.
+   `staleOnBoot()` was written for this and never called.
+2. **Nothing ever expired.** A preview nobody watched, or one that failed to build, held its
+   devices forever — and failed previews were counted as using *zero* devices, so capacity
+   never pushed back.
+
+The contract now:
+
+- **Reap on boot** (`engine/reaper.ts`, called from `listen()` before binding): deckhand binds
+  a single loopback port, so exactly one server runs at a time and every `deckhand-…` device on
+  the machine at startup is by definition an orphan. Helpers are killed first (`serve-sim <udid>`;
+  emulators by their `-avd` argument, since orphans collide on console port 5554), then the
+  device is shut down. Devices the developer created themselves are never touched.
+- **Pooled devices** (`limits.reuseDevices`, default on) are named by *shape*, not by preview:
+  `deckhand-pool-<model>-<runtime>` / `deckhand_pool_<profile>_api<n>`. They are shut down on
+  teardown and kept on disk for the next preview of that shape (concurrent previews of one shape
+  get `…-2`, `…-3` — reused across previews, never shared by two at once). A pooled device is
+  factory-reset (`simctl erase` / `emulator -wipe-data`) only when it changes hands — including
+  after a restart, when the tenant map is gone. The pool is trimmed to `maxTotalDevices`.
+- **Auto-teardown** (janitor, 60 s): a `ready` preview with no viewer traffic for
+  `limits.idleMinutes` is stopped; a `failed` one is torn down after `limits.failedGraceMinutes`,
+  which keeps the viewer's Rebuild button working on a broken build; one that has made no
+  progress at all for `limits.stuckMinutes` is collected as wedged (it is neither ready nor
+  failed, so nothing else would ever reclaim it). Viewer polls, proxied requests — including
+  the subdomain-web host resolver, which has no viewer page behind it — and per-preview
+  `preview_status` calls count as traffic; `list()` deliberately does not, or one agent's
+  enumeration would keep every idle preview alive. Each sweep takes 0 to disable.
+- **Capacity counts what is actually booted**: devices holding a handle (a failed preview's
+  included, since they stay booted for the grace window) plus teardowns still in flight. A
+  preview that failed during clone or build never booted anything and must not consume a slot.
+- **`failed` is terminal for a device.** A step still in flight when the device fails (a boot
+  racing a failed checkout) must not write its phase over it — that left previews stuck in
+  `running` forever, invisible to every sweep. Only an explicit restart resets it.
 
 ## 8. Streaming backends (the swappable layer)
 

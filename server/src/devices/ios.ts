@@ -70,6 +70,26 @@ export function parseRuntimes(json: unknown): Runtime[] {
   return out;
 }
 
+/** An existing simulator, as reported by `simctl list devices -j`. */
+export interface SimDevice {
+  udid: string;
+  name: string;
+  state: string; // "Booted" | "Shutdown" | …
+}
+
+export function parseDevices(json: unknown): SimDevice[] {
+  const byRuntime = (json as { devices?: Record<string, unknown[]> }).devices ?? {};
+  const out: SimDevice[] = [];
+  for (const list of Object.values(byRuntime)) {
+    for (const d of list ?? []) {
+      const dev = d as Record<string, unknown>;
+      const udid = String(dev.udid ?? "");
+      if (udid) out.push({ udid, name: String(dev.name ?? ""), state: String(dev.state ?? "") });
+    }
+  }
+  return out;
+}
+
 export function parseDeviceTypes(json: unknown): DeviceType[] {
   const types = (json as { devicetypes?: unknown[] }).devicetypes ?? [];
   return types
@@ -178,13 +198,13 @@ export class Simctl {
     }
   }
 
+  /** Every simulator known to simctl (all runtimes), with its name and state. */
+  async listDevices(): Promise<SimDevice[]> {
+    return parseDevices(await this.json(["list", "devices"]));
+  }
+
   async isBooted(udid: string): Promise<boolean> {
-    const data = (await this.json(["list", "devices"])) as {
-      devices: Record<string, Array<{ udid: string; state: string }>>;
-    };
-    return Object.values(data.devices)
-      .flat()
-      .some((d) => d.udid === udid && d.state === "Booted");
+    return (await this.listDevices()).some((d) => d.udid === udid && d.state === "Booted");
   }
 
   async install(udid: string, appPath: string): Promise<void> {
@@ -227,6 +247,17 @@ export class Simctl {
 
   async shutdown(udid: string): Promise<void> {
     await this.run(["shutdown", udid]);
+  }
+
+  /**
+   * Wipe a simulator back to factory state (apps, data, settings). Used when a
+   * pooled device is handed to a preview whose predecessor is unknown — i.e.
+   * after a crash — so no stale app state leaks between tenants.
+   */
+  async erase(udid: string): Promise<void> {
+    await this.run(["shutdown", udid]); // erase requires a shut-down device
+    const res = await this.run(["erase", udid]);
+    if (res.code !== 0) throw new SimctlError(`simctl erase failed: ${res.stderr.trim().slice(0, 200)}`);
   }
 
   async delete(udid: string): Promise<void> {
