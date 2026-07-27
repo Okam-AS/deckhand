@@ -1,5 +1,5 @@
 import { randomBytes, createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { publicBaseUrl, type App, type AppType, type Config } from "../config.ts";
 import type { AuditLog } from "../audit.ts";
@@ -28,6 +28,7 @@ import {
   webHostingMode,
   expoSlug,
   expoDevClientUrl,
+  resolveExpoConfigFromDir,
   type WebFramework,
 } from "./detect.ts";
 import { loadSecretsEnv } from "../secrets.ts";
@@ -1014,6 +1015,12 @@ export class PreviewEngine {
     let bundleId: string;
     let appEnv: Record<string, string>;
     let builderHandle: string;
+    // Expo's dev-client launch deep-links into Metro, which needs the app's slug.
+    // Resolved once per build (launch() runs per device, so resolving there spawned
+    // `expo config` N times for an N-device preview) — and only after the build,
+    // since evaluating a dynamic app.config.* needs the project's own installed
+    // Expo CLI, which doesn't exist in a fresh worktree until deps are installed.
+    let slug: string | null = null;
 
     try {
       appEnv = this.appEnv(p.app);
@@ -1025,6 +1032,7 @@ export class PreviewEngine {
         this.setPhase(p, dev, "building", dev === builder ? "building the app" : "building the app (shared)");
       }
       await this.runBuildPlan(p, builder, platform, builderHandle, sourceDir, appEnv, local);
+      if (platform === "ios" && usesMetroDeepLink(p.app.type)) slug = await this.resolveExpoSlug(sourceDir, appEnv);
 
       if (local && p.app.type === "nativescript") {
         // Livesync builds, installs, launches, then keeps watching for saves.
@@ -1038,7 +1046,7 @@ export class PreviewEngine {
         this.setPhase(p, builder, "installing-app", "verifying install");
         await this.verifyInstalled(platform, builderHandle, bundleId);
         this.setPhase(p, builder, "launching", "launching app");
-        await this.launch(p, builder, builderHandle, bundleId, sourceDir, appEnv);
+        await this.launch(p, builder, builderHandle, bundleId, sourceDir, appEnv, slug);
       }
 
       await this.attachAndReady(p, builder, platform, builderHandle);
@@ -1070,7 +1078,7 @@ export class PreviewEngine {
           await this.installProduct(platform, handle, appPath);
           await this.verifyInstalled(platform, handle, bundleId);
           this.setPhase(p, dev, "launching", "launching app");
-          await this.launch(p, dev, handle, bundleId, sourceDir, appEnv);
+          await this.launch(p, dev, handle, bundleId, sourceDir, appEnv, slug);
           await this.attachAndReady(p, dev, platform, handle);
         } catch (e) {
           this.failDevice(p, dev, e);
@@ -1286,6 +1294,24 @@ export class PreviewEngine {
     );
   }
 
+  /**
+   * The Expo slug that the dev-client deep link is built from. Resolved through
+   * app.config.* when the project has one (see resolveExpoConfigFromDir), with the
+   * evaluation failure surfaced as the error's hint — otherwise a broken
+   * app.config.js reads as a bare "could not resolve the slug".
+   */
+  private async resolveExpoSlug(sourceDir: string, appEnv: Record<string, string>): Promise<string> {
+    const { config, error } = await resolveExpoConfigFromDir(sourceDir, appEnv);
+    const slug = expoSlug(config);
+    if (slug) return slug;
+    throw new PreviewError(
+      "could not resolve the Expo slug from app.json or app.config.*",
+      error
+        ? `\`expo config --json\` failed in ${sourceDir}: ${error}`
+        : `add a slug to app.json, or make sure \`expo config --json\` runs in ${sourceDir}`,
+    );
+  }
+
   private async launch(
     p: LivePreview,
     dev: LiveDevice,
@@ -1293,6 +1319,8 @@ export class PreviewEngine {
     bundleId: string,
     worktreePath: string,
     appEnv: Record<string, string>,
+    /** Pre-resolved Expo slug (once per build); required for metro-deep-link apps. */
+    slug: string | null,
   ): Promise<void> {
     if (dev.record.platform === "android") {
       // The build already launched the builder; (re)launch is idempotent and
@@ -1301,8 +1329,7 @@ export class PreviewEngine {
       return;
     }
     if (usesMetroDeepLink(p.app.type)) {
-      const slug = expoSlug(safeReadJson(join(worktreePath, "app.json")));
-      if (!slug) throw new PreviewError("could not read the Expo slug from app.json");
+      if (!slug) throw new PreviewError("could not resolve the Expo slug from app.json or app.config.*");
       const metro = await this.d.metro.ensure(p.app.id, worktreePath, appEnv);
       await this.d.simctl.openUrl(handle, expoDevClientUrl(slug, metro.manifestUrl));
     } else {
@@ -1904,14 +1931,6 @@ export class PreviewEngine {
   /** Snapshot of all live previews (for list/limits). */
   list(): PreviewStatus[] {
     return [...this.previews.keys()].map((id) => this.getStatus(id, { touch: false })!).filter(Boolean);
-  }
-}
-
-function safeReadJson(file: string): { expo?: { slug?: string }; slug?: string } | null {
-  try {
-    return JSON.parse(readFileSync(file, "utf8"));
-  } catch {
-    return null;
   }
 }
 

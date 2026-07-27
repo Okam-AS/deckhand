@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AppType } from "../config.ts";
@@ -152,6 +153,107 @@ export function expoBundleId(config: ExpoConfig | null, platform: "ios" | "andro
 /** Expo project slug (used to build the dev-client deep link). */
 export function expoSlug(config: ExpoConfig | null): string | null {
   return config?.expo?.slug ?? config?.slug ?? null;
+}
+
+/** Dynamic Expo config filenames — evaluated by the Expo CLI, not statically readable. */
+const EXPO_DYNAMIC_CONFIG_FILES = ["app.config.ts", "app.config.js", "app.config.cjs", "app.config.mjs"];
+
+/** True if the project defines a dynamic Expo config (app.config.*) only the Expo CLI can resolve. */
+function hasExpoDynamicConfig(dir: string): boolean {
+  return EXPO_DYNAMIC_CONFIG_FILES.some((f) => existsSync(join(dir, f)));
+}
+
+export interface ExpoConfigResolution {
+  config: ExpoConfig | null;
+  /**
+   * Why evaluation failed, when it did. The config may still be non-null (the
+   * static read stood in), so this is a diagnostic to carry into the operator's
+   * error, not a signal that resolution produced nothing.
+   */
+  error?: string;
+}
+
+/** Evaluator seam: `(dir, env) => resolution`. Injectable so the rules are testable without Expo. */
+export type ExpoConfigEvaluator = (dir: string, env: Record<string, string>) => Promise<ExpoConfigResolution>;
+
+/** First couple of non-empty lines of a tool's output, for a one-line error detail. */
+function firstLines(text: string, max = 2): string {
+  const lines = text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  return lines.slice(0, max).join("; ").slice(0, 500);
+}
+
+/**
+ * Evaluate a project's Expo config by shelling out to the Expo CLI (`expo config --json`),
+ * which runs app.config.js/ts and merges app.json. Returns the resolved config (slug/ios/
+ * android live at the top level of the CLI's output), or a null config plus the reason when
+ * the CLI is unavailable or errors — a silent null leaves the operator with "could not
+ * resolve the slug" and no cause. Prefers the project-local expo binary; falls back to
+ * `npx --no-install expo`.
+ */
+export function evaluateExpoConfig(dir: string, env: Record<string, string> = {}): Promise<ExpoConfigResolution> {
+  // Only ever the project's own Expo CLI. `npx --no-install expo` looks like a
+  // harmless fallback but resolves a *globally* installed legacy expo-cli when the
+  // project has none, and that answers with "legacy expo-cli does not support Node
+  // +17" instead of the real config error — a misleading diagnostic is worse than a
+  // clear absence. Modern Expo is always a project dependency.
+  const localBin = join(dir, "node_modules", ".bin", "expo");
+  if (!existsSync(localBin)) {
+    return Promise.resolve({
+      config: null,
+      error: "no expo CLI in this project (node_modules/.bin/expo is missing — install dependencies first)",
+    });
+  }
+  return new Promise((resolve) => {
+    execFile(
+      localBin,
+      ["config", "--json"],
+      // The same env the build steps and Metro get (procs.ts / metro.ts spread
+      // process.env then appEnv). app.config.js routinely branches on APP_ENV or
+      // API_BASE_URL, so evaluating under a different env can yield a different
+      // config than the build actually produced.
+      { cwd: dir, env: { ...process.env, ...env }, timeout: 60_000, maxBuffer: 32 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err) {
+          const killed = (err as NodeJS.ErrnoException & { killed?: boolean }).killed;
+          return resolve({
+            config: null,
+            error: killed ? "`expo config --json` timed out after 60s" : firstLines(String(stderr) || err.message),
+          });
+        }
+        const parsed = parseJsonSafe(stdout.toString()) as ExpoConfig | null;
+        if (!parsed) return resolve({ config: null, error: "`expo config --json` did not return JSON" });
+        resolve({ config: { slug: parsed.slug, ios: parsed.ios, android: parsed.android } });
+      },
+    );
+  });
+}
+
+/**
+ * Resolve a project's effective Expo config from a directory.
+ *
+ * With no dynamic `app.config.*`, static app.json is the whole truth and nothing is
+ * spawned. When a dynamic config *does* exist it is always evaluated, even if app.json
+ * looks complete: app.config.js receives app.json as its input and may override any
+ * field, including the slug, so trusting a complete-looking app.json can hand back a
+ * slug the project doesn't actually use. Evaluation costs one ~0.7s spawn and only
+ * happens for projects that have a dynamic config at all.
+ *
+ * Falls back to the static read when evaluation fails, carrying the reason so the
+ * caller can report it. `evaluate` is injectable for tests.
+ */
+export async function resolveExpoConfigFromDir(
+  dir: string,
+  env: Record<string, string> = {},
+  evaluate: ExpoConfigEvaluator = evaluateExpoConfig,
+): Promise<ExpoConfigResolution> {
+  const staticCfg = readJsonSafe(join(dir, "app.json")) as ExpoConfig | null;
+  if (!hasExpoDynamicConfig(dir)) return { config: staticCfg };
+  const evaluated = await evaluate(dir, env);
+  if (evaluated.config) return evaluated;
+  return { config: staticCfg, error: evaluated.error };
 }
 
 interface NativeScriptConfig {

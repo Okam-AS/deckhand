@@ -152,9 +152,15 @@ async function cmdAppAdd(id: string | undefined, repo: string | undefined, flags
   if (path) {
     // Local dev mode: the folder is right here — detect what the CLI can.
     if (!existsSync(path)) fail(`--path ${path} does not exist`);
-    const { detectAppTypeFromDir, detectBundleIdFromDir } = await import("./engine/detect.ts");
+    const { detectAppTypeFromDir, detectBundleIdFromDir, resolveExpoConfigFromDir, expoBundleId } =
+      await import("./engine/detect.ts");
     type = type ?? detectAppTypeFromDir(path) ?? undefined;
-    if (type === "expo" || type === "react-native" || type === "nativescript") {
+    if (type === "expo") {
+      // Expo apps may declare the bundle id in a dynamic app.config.* — resolve it.
+      const { config, error } = await resolveExpoConfigFromDir(path);
+      bundleId = bundleId ?? expoBundleId(config, "ios") ?? undefined;
+      if (!bundleId && error) console.error(`warning: could not evaluate this project's Expo config: ${error}`);
+    } else if (type === "react-native" || type === "nativescript") {
       bundleId = bundleId ?? detectBundleIdFromDir(path, type) ?? undefined;
     }
     // Auto-detect the checkout's origin remote (unless overridden or web) so this
