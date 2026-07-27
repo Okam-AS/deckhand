@@ -47,23 +47,70 @@ export interface BuildPlanInput {
 }
 
 /**
- * A project's lockfile decides its package manager, and bun has to be checked
- * first: a bun project's private-registry scopes live in `bunfig.toml`, which
- * npm cannot read. Running npm there resolves those scopes against the public
- * registry and 404s, which reads as a missing package rather than the wrong
- * tool. Deckhand does not install package managers — a bun.lock with no `bun`
- * on PATH is reported as exactly that.
+ * The package managers deckhand installs with, in detection order. A project is
+ * installed with the manager that owns the lockfile it actually ships.
+ *
+ * bun has to be checked before npm: a bun project's private-registry scopes live
+ * in `bunfig.toml`, which npm cannot read. Running npm there resolves those
+ * scopes against the public registry and 404s, which reads as a missing package
+ * rather than the wrong tool. yarn and pnpm are here for the same reason — being
+ * forced through `npm ci`/`npm install` misreports whatever their own manager
+ * would have tolerated. npm is last, as the fallback.
+ *
+ * `frozen` installs exactly what the lockfile pins and never rewrites it.
+ * `loose` may update the lockfile, so it is only ever reachable in a disposable
+ * git worktree — never in a borrowed local checkout.
+ *
+ * Detection stays in the emitted shell rather than being resolved here: this
+ * module is a pure command builder (no filesystem access), and the test is `-f`
+ * in the step's own cwd at run time.
  */
-const BUN_GUARD = "[ -f bun.lock ] || [ -f bun.lockb ]";
-const BUN_MISSING = 'echo "bun.lock found but bun is not installed — install it (brew install oven-sh/bun/bun)" >&2; exit 127';
-const bunOr = (bunArgs: string, fallback: string): string =>
-  `if ${BUN_GUARD}; then command -v bun >/dev/null || { ${BUN_MISSING}; }; bun install ${bunArgs}; else ${fallback}; fi`;
+const PACKAGE_MANAGERS = [
+  { name: "bun", test: "[ -f bun.lock ] || [ -f bun.lockb ]", frozen: "bun install --frozen-lockfile", loose: "bun install" },
+  { name: "yarn", test: "[ -f yarn.lock ]", frozen: "yarn install --frozen-lockfile", loose: "yarn install" },
+  { name: "pnpm", test: "[ -f pnpm-lock.yaml ]", frozen: "pnpm install --frozen-lockfile", loose: "pnpm install" },
+  { name: "npm", test: "[ -f package-lock.json ]", frozen: "npm ci", loose: "npm install" },
+] as const;
 
-/** The dependency-install step, guarded to use `npm ci` only when a lockfile exists. */
+/**
+ * Deckhand does not install package managers. A lockfile whose manager is not on
+ * PATH exits 127 saying exactly that, rather than silently falling through to npm
+ * and failing later with an unrelated error — or dying as a bare "command not
+ * found" in the middle of a build log.
+ */
+const PM_HELPERS = [
+  'pm_need() { command -v "$1" >/dev/null 2>&1 || { echo "deckhand: this project ships a $1 lockfile, but $1 is not installed on this host — install it (e.g. brew install $1), or enable corepack" >&2; exit 127; }; }',
+];
+
+/**
+ * Build the lockfile-dispatch chain. `policy` renders the install for one
+ * manager, so the disposable-worktree and borrowed-checkout rules stay separate
+ * (the difference between them is a correctness invariant, not a flag).
+ */
+function installChain(policy: (pm: (typeof PACKAGE_MANAGERS)[number]) => string, noLockfile: string): string {
+  const branches = PACKAGE_MANAGERS.map(
+    (pm, i) => `${i === 0 ? "if" : "elif"} ${pm.test}; then pm_need ${pm.name}; ${policy(pm)}`,
+  );
+  return [...PM_HELPERS, ...branches, `else ${noLockfile}; fi`].join("\n");
+}
+
+/**
+ * The dependency-install step for a disposable git worktree: install what the
+ * lockfile pins, and if the lockfile is out of sync with package.json (a frozen
+ * install fails hard on that), fall back to an updating install rather than
+ * bricking the preview. Rewriting a lockfile is harmless here — the worktree is
+ * thrown away — and previewing a branch whose lockfile lags is exactly the case
+ * deckhand exists to serve.
+ */
 export function installDepsStep(worktreePath: string, env: Record<string, string>): CommandStep {
+  const script = installChain(
+    (pm) =>
+      `${pm.frozen} || { echo "deckhand: ${pm.name} could not install from the lockfile as-is (it is probably out of sync with package.json); retrying with an updating install" >&2; ${pm.loose}; }`,
+    "npm install",
+  );
   return {
     name: "install-deps",
-    run: { kind: "shell", script: bunOr("--frozen-lockfile", "[ -f package-lock.json ] && npm ci || npm install") },
+    run: { kind: "shell", script },
     cwd: worktreePath,
     env,
     idleTimeoutMs: GENERAL_IDLE_MS,
@@ -72,20 +119,22 @@ export function installDepsStep(worktreePath: string, env: Record<string, string
 
 /**
  * Local-mode dependency install: leave an existing node_modules alone (it's the
- * dev's). Borrow-never-own extends to git: when a lockfile exists we use the
- * read-only `npm ci` (never rewrites package-lock.json); with no lockfile we add
- * `--no-package-lock` so we don't drop a stray, untracked lockfile into the
- * developer's checkout. bun gets `--frozen-lockfile` for the same reason — it
- * resolves from bun.lock without ever writing it back. node_modules itself is
- * gitignored, so this leaves the tracked tree untouched.
+ * dev's). Borrow-never-own extends to git, so this path has **no** updating
+ * fallback — every manager runs in its frozen/read-only mode and a stale lockfile
+ * fails with an instruction instead of deckhand editing a tracked file. With no
+ * lockfile at all, `--no-package-lock` keeps npm from dropping a stray untracked
+ * lockfile into the checkout. node_modules itself is gitignored, so the tracked
+ * tree is untouched either way.
  */
 export function installDepsIfMissingStep(worktreePath: string, env: Record<string, string>): CommandStep {
+  const chain = installChain(
+    (pm) =>
+      `${pm.frozen} || { echo "deckhand: ${pm.name} could not install from this checkout's lockfile, and deckhand will not modify a borrowed checkout — run '${pm.loose}' here yourself, then retry" >&2; exit 1; }`,
+    "npm install --no-package-lock",
+  );
   return {
     name: "install-deps",
-    run: {
-      kind: "shell",
-      script: `[ -d node_modules ] || { ${bunOr("--frozen-lockfile", "[ -f package-lock.json ] && npm ci || npm install --no-package-lock")}; }`,
-    },
+    run: { kind: "shell", script: `if [ -d node_modules ]; then exit 0; fi\n${chain}` },
     cwd: worktreePath,
     env,
     idleTimeoutMs: GENERAL_IDLE_MS,
