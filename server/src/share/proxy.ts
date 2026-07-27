@@ -33,11 +33,17 @@ export interface ShareDeps {
  */
 function trace(engine: PreviewEngine, shareId: string, deviceId: string, line: string): void {
   try {
-    engine.logStreamEvent(shareId, deviceId, line);
+    // Sanitize HERE, not at the call sites: these lines interpolate URL path
+    // segments the share holder chooses, and the reader is an agent acting on
+    // what the `logs` tool shows it. A %0A in a subpath forged extra log lines.
+    engine.logStreamEvent(shareId, deviceId, line.replace(/[\r\n]+/g, " ").slice(0, TRACE_LINE_CAP));
   } catch {
     /* noop */
   }
 }
+
+/** Long enough for a helper URL plus a reason; short enough that one line can't flood the buffer. */
+const TRACE_LINE_CAP = 500;
 
 /** Why `resolveUpstream` returned null — the difference an agent needs to act. */
 function upstreamMissReason(engine: PreviewEngine, shareId: string, deviceId: string, sub: string): string {
@@ -47,6 +53,21 @@ function upstreamMissReason(engine: PreviewEngine, shareId: string, deviceId: st
   const dev = found.devices.find((d) => d.deviceId === deviceId);
   if (!dev) return `preview has no device "${deviceId}" (has: ${found.devices.map((d) => d.deviceId).join(", ")})`;
   return "device has no attached stream (the helper never came up, or was detached)";
+}
+
+/**
+ * A proxy fetch that cancels cleanly when the browser disconnects. Without an
+ * explicit abort, undici surfaces a client-torn socket mid-stream as an
+ * *uncaughtException* ("TypeError: terminated" from Fetch.onAborted) — a routine
+ * disconnect that would otherwise reach the process-level handler. Tying an
+ * AbortController to res 'close' gives undici an abort reason, so it cancels the
+ * fetch and its body stream quietly. (res 'close' after a normal end is a no-op
+ * abort.) Pair with `pipeline(...)`, which handles the Node-stream side.
+ */
+function proxyFetch(res: express.Response, target: string, init: RequestInit & { duplex?: string } = {}): Promise<Response> {
+  const ac = new AbortController();
+  res.once("close", () => ac.abort());
+  return fetch(target, { ...init, signal: ac.signal } as RequestInit);
 }
 
 /** A short, safe label for a thrown value — never a stack, never a URL with a token. */
@@ -77,8 +98,15 @@ function resolveWebUpstream(engine: PreviewEngine, shareId: string, rest: string
   const found = engine.findByShareId(shareId);
   const dev = found?.devices.find((d) => d.platform === "web");
   if (!found || !dev?.stream) return null;
-  const path = rest ? `/${rest}` : "/";
-  return `${dev.stream.origin}${dev.stream.helperBasePath}${path}`;
+  const base = dev.stream.helperBasePath;
+  // Validate AFTER normalization, never by blocklist: `%252e%252e` and `\..\..`
+  // both slip past a literal ".." check yet are still collapsed by WHATWG URL
+  // parsing. Building the URL first and then asserting the base prefix survives
+  // is the only check that sees what the upstream will actually receive.
+  const url = new URL(rest ? `${base}/${rest}` : `${base}/`, dev.stream.origin);
+  if (url.origin !== new URL(dev.stream.origin).origin) return null;
+  if (url.pathname !== base && !url.pathname.startsWith(`${base}/`)) return null;
+  return url.toString();
 }
 
 /** Headers never forwarded to the dev server: hop-by-hop, host (fetch sets its own),
@@ -167,6 +195,9 @@ export interface PinGateOptions {
   now?: () => number;
 }
 
+/** Far above any real share count; a bound, not a tuning knob. */
+const THROTTLE_MAX_ENTRIES = 1000;
+
 /** Build the shared PIN gate: cookie validation + a per-share attempt throttle. */
 export function createPinGate(engine: PreviewEngine, shareSecret: string, opts: PinGateOptions = {}): PinGate {
   const ttlMs = opts.ttlMs ?? UNLOCK_TTL_MS;
@@ -182,6 +213,20 @@ export function createPinGate(engine: PreviewEngine, shareSecret: string, opts: 
       return cookie ? verifyUnlockCookie(shareSecret, shareId, cookie, now()) : false;
     },
     attempt: (shareId, pin) => {
+      // Only track shares that exist. `POST /s/<anything>/unlock` used to mint a
+      // throttle entry for any attacker-chosen string — one free Map entry per
+      // request, unbounded — while verifyPin just returns false for unknown ids.
+      if (!engine.pinInfoForShare(shareId).required) return { ok: false, lockedMs: 0 };
+      // Cheap eviction backstop. Only drop entries whose LOCK has expired
+      // (lockedUntil > 0 and now past it) — a lapsed lock grants a fresh budget
+      // on its own, so forgetting it changes nothing. Entries mid-accumulation
+      // (lockedUntil === 0, fails 1..max-1) are the brute-force counter itself,
+      // so they must survive: evicting them hands the attacker a clean slate.
+      if (throttle.size > THROTTLE_MAX_ENTRIES) {
+        for (const [id, entry] of throttle) {
+          if (entry.lockedUntil > 0 && entry.lockedUntil <= now()) throttle.delete(id);
+        }
+      }
       const t = throttle.get(shareId) ?? { fails: 0, lockedUntil: 0 };
       const remaining = t.lockedUntil - now();
       if (remaining > 0) return { ok: false, lockedMs: remaining };
@@ -311,12 +356,12 @@ export function createHostWebProxyMiddleware(engine: PreviewEngine, pinGate: Pin
     const method = (req.method ?? "GET").toUpperCase();
     const hasBody = method !== "GET" && method !== "HEAD";
     try {
-      const upstream = await fetch(target, {
+      const upstream = await proxyFetch(res, target, {
         method,
         headers: webRequestHeaders(req),
         redirect: "manual",
         ...(hasBody ? { body: req as unknown as ReadableStream, duplex: "half" } : {}),
-      } as RequestInit & { duplex?: string });
+      });
       res.status(upstream.status);
       for (const name of WEB_RESPONSE_HEADERS) {
         const v = upstream.headers.get(name);
@@ -388,7 +433,12 @@ export function createShareRouter(deps: ShareDeps): express.Router {
   // content routes below, so only they are gated; the viewer shell (/:shareId) is
   // a single segment and never matches this.
   router.use((req, res, next) => {
-    const m = /^\/([^/]+)\/(dev|web|restart)(?:\/|$)/.exec(req.path);
+    // The `i` is load-bearing. Express dispatches STRING routes
+    // case-insensitively by default (this router is built with no options and
+    // nothing sets "case sensitive routing"), so a case-sensitive gate in front
+    // of them gates nothing: `/s/<id>/Dev/<dev>/ax` reached the live screen and
+    // accessibility tree of a PIN-locked share with no PIN at all.
+    const m = /^\/([^/]+)\/(dev|web|restart)(?:\/|$)/i.exec(req.path);
     if (!m) return next();
     const shareId = m[1]!;
     if (deps.pinGate.allowed(req.headers.cookie, shareId)) return next();
@@ -440,7 +490,7 @@ export function createShareRouter(deps: ShareDeps): express.Router {
     }
     const started = Date.now();
     try {
-      const upstream = await fetch(target, {
+      const upstream = await proxyFetch(res, target, {
         headers: { accept: req.headers.accept ?? "*/*", "x-forwarded-proto": "https" },
       });
       trace(deps.engine, 
@@ -518,7 +568,7 @@ export function createShareRouter(deps: ShareDeps): express.Router {
     try {
       // redirect: manual so a dev-server 3xx is forwarded to the browser (which
       // stays on the tunnel), not chased server-side to a loopback URL.
-      const upstream = await fetch(target, { headers: webRequestHeaders(req), redirect: "manual" });
+      const upstream = await proxyFetch(res, target, { headers: webRequestHeaders(req), redirect: "manual" });
       res.status(upstream.status);
       for (const name of WEB_RESPONSE_HEADERS) {
         const v = upstream.headers.get(name);

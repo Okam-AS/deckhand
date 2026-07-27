@@ -187,6 +187,35 @@ describe("MCP server (end-to-end over HTTP)", () => {
     await admin.close();
   });
 
+  it("compare_start does not let a scoped member escape owner scoping or the admin gate", async () => {
+    // compare_start is a member-role tool, and its worktree/repo branches used
+    // to skip resolveApp() entirely — so a token scoped to one org could clone
+    // any repo deckhand can read, run its install scripts, and publish a
+    // PIN-less share of the live simulator. That is the exact capability
+    // requireAdmin() guards on add_app.
+    const member = await client(MEMBER);
+
+    const worktree = parse(
+      await member.callTool({
+        name: "compare_start",
+        arguments: { app: "app-a", against: { worktree: "/tmp/anything" }, share: { access: "public" } },
+      }),
+    );
+    assert.equal(worktree.ok, false);
+    assert.equal((worktree.error as { code: string }).code, "forbidden");
+
+    const repo = parse(
+      await member.callTool({
+        name: "compare_start",
+        arguments: { app: "app-a", against: { repo: "acme/proj", ref: "main" }, share: { access: "public" } },
+      }),
+    );
+    assert.equal(repo.ok, false, "acme is outside this token's owners");
+    assert.equal((repo.error as { code: string }).code, "forbidden");
+
+    await member.close();
+  });
+
   it("compare_start against the same app boots the reference on a distinct shareId (no self-pair)", async () => {
     const admin = await client(ADMIN);
     const res = parse(await admin.callTool({ name: "compare_start", arguments: { app: "app-a", against: { app: "app-a" }, share: { access: "public" } } }));

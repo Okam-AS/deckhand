@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { DeviceFrame } from "./DeviceFrame.tsx";
 import { repoName, type ShareLedgerScreen, type ShareState } from "./api.ts";
+import { useIsMobile } from "./useIsMobile.ts";
 
 /**
  * The compare view: the REFERENCE app (the oracle to match) and the WORKING app
@@ -9,53 +10,105 @@ import { repoName, type ShareLedgerScreen, type ShareState } from "./api.ts";
  * all video/input rides the existing per-share proxy (no new streaming code).
  * Shown when the working share's state carries `pairedWith`. (Migration is one
  * preset of compare — reference = the source app.)
+ *
+ * On a phone there's no room for two devices side by side (they'd each be a
+ * squished sliver), so mobile shows ONE device with a Reference⇄Working switch.
+ * Desktop keeps both, sized by height so each keeps its true aspect ratio.
  */
 export function CompareView({ shareId, state }: { shareId: string; state: ShareState }) {
   // The reference pane may be absent (reference not live yet) — then it's just
   // the working pane plus the checklist, and there's nothing to show/hide.
   const paired = state.pairedWith;
   const [showRef, setShowRef] = useState(true);
+  const [mobileSide, setMobileSide] = useState<"reference" | "working">("working");
+  const isMobile = useIsMobile();
   const screens = state.ledger?.screens ?? [];
   const refShown = !!paired && showRef;
+
+  const refPane = paired && (
+    <section className="mig-col">
+      <header className="mig-col-head">
+        <span className="mig-col-tag mig-col-tag--source">Reference</span>
+        <span className="mig-col-meta">
+          {repoName(paired.repo)} · {paired.ref}
+        </span>
+      </header>
+      <div className="mig-col-stage">
+        {paired.devices.map((d) => (
+          <DeviceFrame key={`s-${d.deviceId}`} shareId={paired.shareId} device={d} repo={paired.repo} branch={paired.ref} variant="grid" />
+        ))}
+      </div>
+    </section>
+  );
+
+  const workPane = (
+    <section className="mig-col">
+      <header className="mig-col-head">
+        <span className="mig-col-tag mig-col-tag--target">Working</span>
+        <span className="mig-col-meta">
+          {repoName(state.repo)} · {state.ref}
+        </span>
+        {paired && !isMobile && (
+          <button type="button" className="mig-toggle" onClick={() => setShowRef((v) => !v)}>
+            {showRef ? "Hide reference" : "Show reference"}
+          </button>
+        )}
+      </header>
+      <div className="mig-col-stage">
+        {state.devices.map((d) => (
+          <DeviceFrame key={`t-${d.deviceId}`} shareId={shareId} device={d} repo={state.repo} branch={state.ref} variant="grid" testRun={state.testRun} />
+        ))}
+      </div>
+    </section>
+  );
+
+  // Mobile with a reference available: one device at a time + a segmented switch.
+  // Both panes stay mounted (streams keep running) — only visibility toggles, so
+  // switching is instant and neither device has to reconnect.
+  if (isMobile && paired) {
+    return (
+      <>
+        <main className="app app--mig app--mig-mobile">
+          {screens.length > 0 && <Ledger screens={screens} />}
+          <div className="mig-switch" role="tablist" aria-label="Which app to view">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mobileSide === "reference"}
+              className={`mig-switch-btn ${mobileSide === "reference" ? "is-active" : ""}`}
+              onClick={() => setMobileSide("reference")}
+            >
+              Reference
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mobileSide === "working"}
+              className={`mig-switch-btn ${mobileSide === "working" ? "is-active" : ""}`}
+              onClick={() => setMobileSide("working")}
+            >
+              Working
+            </button>
+          </div>
+          <div className="mig-cols mig-cols--solo">
+            <div hidden={mobileSide !== "reference"}>{refPane}</div>
+            <div hidden={mobileSide !== "working"}>{workPane}</div>
+          </div>
+        </main>
+        <aside className="brand" aria-label="Deckhand">
+          <span className="brand-name">Deckhand</span>
+        </aside>
+      </>
+    );
+  }
 
   return (
     <>
       <main className="app app--mig">
         {screens.length > 0 && <Ledger screens={screens} />}
         <div className={`mig-cols ${refShown ? "" : "mig-cols--solo"}`}>
-          {refShown && (
-            <section className="mig-col">
-              <header className="mig-col-head">
-                <span className="mig-col-tag mig-col-tag--source">Reference</span>
-                <span className="mig-col-meta">
-                  {repoName(paired.repo)} · {paired.ref}
-                </span>
-              </header>
-              <div className="mig-col-stage">
-                {paired.devices.map((d) => (
-                  <DeviceFrame key={`s-${d.deviceId}`} shareId={paired.shareId} device={d} repo={paired.repo} branch={paired.ref} variant="grid" />
-                ))}
-              </div>
-            </section>
-          )}
-          <section className="mig-col">
-            <header className="mig-col-head">
-              <span className="mig-col-tag mig-col-tag--target">Working</span>
-              <span className="mig-col-meta">
-                {repoName(state.repo)} · {state.ref}
-              </span>
-              {paired && (
-                <button type="button" className="mig-toggle" onClick={() => setShowRef((v) => !v)}>
-                  {showRef ? "Hide reference" : "Show reference"}
-                </button>
-              )}
-            </header>
-            <div className="mig-col-stage">
-              {state.devices.map((d) => (
-                <DeviceFrame key={`t-${d.deviceId}`} shareId={shareId} device={d} repo={state.repo} branch={state.ref} variant="grid" testRun={state.testRun} />
-              ))}
-            </div>
-          </section>
+          {refShown && refPane}
+          {workPane}
         </div>
       </main>
       <aside className="brand" aria-label="Deckhand">

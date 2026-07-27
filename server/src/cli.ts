@@ -49,12 +49,40 @@ Usage:
   deckhand app list
   deckhand env set <appId> KEY=VALUE`;
 
+/**
+ * Keep one bad request from taking every live preview down with it.
+ *
+ * This one process runs the spawn-heavy build/device/WS-bridge code, two
+ * byte-stream parsers fed by device-controlled input, AND undici-backed proxy
+ * fetches. All three routinely produce ASYNC faults that are NOT process-fatal:
+ * a stray rejection in a WS bridge, a parse fault on a malformed NAL, and —
+ * observed in the wild — undici surfacing a client-aborted proxy fetch as an
+ * *uncaughtException* ("TypeError: terminated" from Fetch.onAborted). Every one
+ * of those would otherwise drop every simulator on the machine.
+ *
+ * So both handlers log and keep serving. An earlier version exited on
+ * uncaughtException for a "clean launchd restart" — but the dominant
+ * uncaughtException here is a routine client-disconnect, so exiting turned every
+ * dropped stream into a full server restart storm. launchd still catches genuine
+ * process death; it must not be triggered by transient I/O. (The real fix is
+ * catching those fetch/stream errors at the source; this is the backstop.)
+ *
+ * `serve` only: a CLI command that throws SHOULD still exit non-zero.
+ */
+function installCrashGuards(): void {
+  const log = (kind: string, e: unknown) =>
+    console.error(`[deckhand] ${kind} (kept serving): ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
+  process.on("unhandledRejection", (reason) => log("unhandled rejection", reason));
+  process.on("uncaughtException", (err) => log("uncaught exception", err));
+}
+
 async function main(): Promise<void> {
   const { _, flags } = parseArgs(process.argv.slice(2));
   const [cmd, sub] = _;
 
   switch (cmd) {
     case "serve": {
+      installCrashGuards();
       const { createServer } = await import("./server.ts");
       const s = createServer();
       await s.listen();
@@ -115,7 +143,9 @@ function cmdInit(flags: Args["flags"]): void {
     allowPublicRepos: false,
     limits: { maxDevicesPerPreview: 4, maxTotalDevices: 6, disk: { watch: 50, pressure: 35, critical: 20 } },
   };
-  writeFileSync(paths.config(), toYaml(config));
+  // 0600: the schema permits an inline `shareSecret`, and that key signs every
+  // unlock cookie. Cheaper to protect the file than to rely on nobody using it.
+  writeFileSync(paths.config(), toYaml(config), { mode: 0o600 });
   if (!existsSync(paths.apps())) writeApps([]);
   if (!existsSync(paths.tokens())) writeTokens([]);
   console.log(`initialized ${paths.home()}`);

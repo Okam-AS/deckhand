@@ -1,10 +1,11 @@
 import { execFile } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { createPrivateKey } from "node:crypto";
+import { join, dirname } from "node:path";
 import { loadConfig, loadApps, loadTokens, githubPatPath, githubPrivateKeyPath, type App, type Config } from "../config.ts";
 import { GitHubAppAuth } from "../github/appAuth.ts";
 import { Simctl, selectRuntime, selectDeviceType } from "../devices/ios.ts";
-import { ServeSimBackend } from "../streaming/serveSim.ts";
+import { ServeSimBackend, vendoredServeSimBin } from "../streaming/serveSim.ts";
 import { detectWebFrameworkFromDir, webHostingMode } from "../engine/detect.ts";
 
 // ---------------------------------------------------------------------------
@@ -44,14 +45,52 @@ async function checkToolchains(): Promise<Check[]> {
   return checks;
 }
 
-async function checkServeSim(config: Config): Promise<Check> {
-  // serve-sim has no --version; `-l` (list streams) exits 0 when installed.
-  const r = await which("serve-sim", ["-l"]);
-  return {
-    name: `serve-sim (pinned ${config.streaming.serveSim.version})`,
-    ok: r.ok,
-    detail: r.ok ? "installed" : "not installed — run `deckhand init`",
-  };
+function checkServeSim(): Check {
+  // Deckhand runs its OWN vendored serve-sim, patched to strip the host
+  // shell-exec routes (see server.ts). Check THAT copy — a serve-sim on PATH is
+  // irrelevant, and would be unpatched. Verify it exists and that the patch is
+  // actually applied (patch-package can silently no-op after a version bump).
+  // Read the version from the vendored package itself, not config — config's
+  // serveSim.version is display-only and drifts from the real pin on a bump.
+  let name = "serve-sim (vendored)";
+  try {
+    const bin = vendoredServeSimBin();
+    if (!existsSync(bin)) return { name, ok: false, detail: "not installed — run `npm install`" };
+    // Best-effort version for the label; a truncated package.json must not mask
+    // the real state of the bundle (which we check next), so don't let it throw.
+    const pkgRoot = dirname(dirname(bin)); // .../dist/serve-sim.js → .../dist → pkg root
+    let version = "unknown version";
+    try {
+      version = JSON.parse(readFileSync(join(pkgRoot, "package.json"), "utf8")).version ?? version;
+    } catch {
+      /* keep the fallback label */
+    }
+    name = `serve-sim (vendored, ${version})`;
+    const patched = readFileSync(bin, "utf8").includes("deckhand:exec disabled");
+    return patched
+      ? { name, ok: true, detail: "installed, exec routes stripped" }
+      : { name, ok: false, detail: "UNPATCHED (exec route present) — run `npx patch-package`" };
+  } catch {
+    return { name, ok: false, detail: "not resolvable — run `npm install`" };
+  }
+}
+
+/**
+ * The LaunchAgents that keep deckhand + the tunnel alive across crash/sleep/
+ * reboot. Advisory (⚠, never fails doctor): a dev machine may run them by hand.
+ * But it TELLS a setup agent the step exists — ops/install-services.sh — which
+ * nothing runs automatically (auto-loading agents on npm install would restart
+ * the server mid-work).
+ */
+async function checkServices(): Promise<Check> {
+  const name = "auto-restart services (launchd)";
+  const loaded = await Promise.all(
+    ["no.deckhand.server", "no.deckhand.tunnel"].map(async (label) => (await which("launchctl", ["list", label])).ok),
+  );
+  const [server, tunnel] = loaded;
+  if (server && tunnel) return { name, ok: true, detail: "server + tunnel agents loaded" };
+  const missing = [!server && "server", !tunnel && "tunnel"].filter(Boolean).join(" + ");
+  return { name, ok: false, warn: true, detail: `${missing} not loaded — run \`./ops/install-services.sh\` so it survives sleep/reboot` };
 }
 
 async function checkGitHub(config: Config): Promise<Check> {
@@ -143,7 +182,8 @@ export async function runDoctor(opts: { smoke?: boolean } = {}): Promise<{ check
   checks.push(...(await checkToolchains()));
 
   if (config) {
-    checks.push(await checkServeSim(config));
+    checks.push(checkServeSim());
+    checks.push(await checkServices());
     checks.push(await checkGitHub(config));
     checks.push(checkWebHost(config, apps));
     if (opts.smoke) checks.push(await smokeTest(config));

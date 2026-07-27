@@ -6,18 +6,7 @@ import { WebFrame } from "./WebFrame.tsx";
 import { PinGate } from "./PinGate.tsx";
 import { CompareView } from "./CompareView.tsx";
 import { fetchShareState, shareIdFromPath, type ShareState } from "./api.ts";
-
-/** Phone-sized viewports get the one-device-at-a-time layout with the corner menu. */
-function useIsMobile(): boolean {
-  const [mobile, setMobile] = useState(() => window.matchMedia("(max-width: 700px)").matches);
-  useEffect(() => {
-    const mq = window.matchMedia("(max-width: 700px)");
-    const onChange = () => setMobile(mq.matches);
-    mq.addEventListener("change", onChange);
-    return () => mq.removeEventListener("change", onChange);
-  }, []);
-  return mobile;
-}
+import { useIsMobile } from "./useIsMobile.ts";
 
 export function App() {
   const shareId = shareIdFromPath();
@@ -104,7 +93,19 @@ export function App() {
   });
 
   if (!shareId) return <Centered>Open a preview link to view a device.</Centered>;
-  if (gone) return <Centered>This preview has ended.</Centered>;
+  if (gone) {
+    return (
+      <Centered>
+        <div className="ended">
+          <p className="ended-title">This preview is paused</p>
+          <p className="ended-body">
+            Deckhand pauses a preview after a while with no one watching, to free the simulator. Ask your agent to start
+            it again — this same link will come right back.
+          </p>
+        </div>
+      </Centered>
+    );
+  }
   if (!state) {
     return (
       <Centered>
@@ -136,7 +137,10 @@ export function App() {
   // their own shareIds. Also taken when only the checklist is present (the
   // reference isn't live yet) so the ledger still shows. (Migration is one
   // preset — reference = the source app.)
-  if (state.pairedWith || state.ledger) return <CompareView shareId={shareId} state={state} />;
+  // `?solo` forces the plain single-device view even for a paired preview — a
+  // diagnostic escape hatch to test the working device outside the compare DOM.
+  const soloOverride = new URLSearchParams(location.search).has("solo");
+  if (!soloOverride && (state.pairedWith || state.ledger)) return <CompareView shareId={shareId} state={state} />;
 
   const devices = state.devices ?? [];
   const isWeb = devices.some((d) => d.platform === "web");

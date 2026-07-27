@@ -1,5 +1,22 @@
 import { execFile } from "node:child_process";
+import { createRequire } from "node:module";
+import { join, dirname } from "node:path";
 import { allocatePort, type AttachedStream, type StreamDeviceRef, type StreamingBackend } from "./backend.ts";
+
+/**
+ * Absolute path to the VENDORED serve-sim binary — deckhand ships serve-sim as
+ * a pinned dependency and patch-package strips its host shell-exec routes
+ * (/exec, /exec-ws), so a share holder reaching the helper over the simulator's
+ * shared loopback finds no code-execution channel. A serve-sim on PATH is
+ * unpatched, so both the server (to spawn it) and `doctor` (to verify it) must
+ * resolve THIS copy. The bundle isn't an exported subpath, so resolve a public
+ * one (`middleware`) and walk to the package root: `dist/<middleware> → dist → pkg`.
+ */
+export function vendoredServeSimBin(): string {
+  const require = createRequire(import.meta.url);
+  const pkgRoot = dirname(dirname(require.resolve("serve-sim/middleware")));
+  return join(pkgRoot, "dist", "serve-sim.js");
+}
 
 // ---------------------------------------------------------------------------
 // serve-sim iOS backend — verified on-device against serve-sim 0.1.44

@@ -401,6 +401,12 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       spec = source === "git" ? parseRefSpec({ ref: base.defaultBranch }) : undefined;
       key = `app:${resolved.id}`;
     } else if (a.worktree) {
+      // Admin only: an arbitrary local path has no owner to scope against, and
+      // booting it runs that checkout's install/build scripts as the deckhand
+      // user. That is exactly the capability requireAdmin() guards on add_app —
+      // a member token must not reach it through the side door.
+      const denied = requireAdmin();
+      if (denied) return denied;
       if (!a.worktree.startsWith("/")) return fail("bad_request", "against.worktree must be an absolute path");
       base = { ...workingApp, path: a.worktree, repo: undefined };
       source = "local";
@@ -413,7 +419,18 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           'pass against: { repo, ref } — e.g. ref: "main".',
         );
       }
-      base = { ...workingApp, repo: a.repo, path: undefined };
+      // Owner scoping applies to an arbitrary repo too: check the synthetic app
+      // the reference would boot, or a token scoped to one org could clone and
+      // build any repo deckhand's credential can read.
+      const probe: App = { ...workingApp, repo: a.repo, path: undefined };
+      if (!canAccessApp(principal, probe)) {
+        return fail(
+          "forbidden",
+          `you don't have access to repo "${a.repo}"`,
+          "this token is scoped to specific repo owners",
+        );
+      }
+      base = probe;
       source = "git";
       spec = parseRefSpec({ ref: a.ref });
       key = `repo:${a.repo}@${a.ref}`;

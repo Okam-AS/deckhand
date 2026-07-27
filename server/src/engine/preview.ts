@@ -884,7 +884,35 @@ export class PreviewEngine {
       if (existing) {
         udid = existing.udid;
         // Unknown predecessor (a restart lost the tenant map) ⇒ factory reset.
-        if (this.poolTenants.get(name) !== p.app.id) await this.d.simctl.erase(udid).catch(() => {});
+        //
+        // NOT best-effort. Pooling keys devices by shape, not by app or owner,
+        // so this erase is the ONLY thing separating two tenants. Swallowing a
+        // failure handed app B a simulator still holding app A's container,
+        // keychain and cookies — across owner scopes, silently. If the reset
+        // won't complete, throw the device away and build a clean one.
+        // (Android is already correct here: a failed wipe fails the boot.)
+        if (this.poolTenants.get(name) !== p.app.id) {
+          try {
+            await this.d.simctl.erase(udid);
+          } catch (err) {
+            // Erase failed — the device may still hold the prior tenant's data.
+            // Delete it and build fresh. But `delete` must SUCCEED before we
+            // create, or a wedged simctl leaves the old device AND a new one
+            // sharing this name — two devices, one name, the untracked-orphan /
+            // cross-tenant hazard again. If delete fails too, refuse the reuse.
+            this.poolTenants.delete(name);
+            try {
+              await this.d.simctl.delete(udid);
+            } catch (delErr) {
+              throw new PreviewError(
+                `couldn't reset pooled simulator "${name}" for a new tenant (erase and delete both failed)`,
+                "the machine's simulator state is wedged — `xcrun simctl shutdown all` / restart, or disable reuseDevices",
+              );
+            }
+            udid = await this.d.simctl.create(name, deviceType.identifier, runtime.identifier);
+            this.appendLog(dev, "build", `[pool] reset of ${name} failed (${String(err)}); rebuilt it clean`);
+          }
+        }
       } else {
         udid = await this.d.simctl.create(name, deviceType.identifier, runtime.identifier);
       }

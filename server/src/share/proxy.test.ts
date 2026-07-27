@@ -354,6 +354,18 @@ describe("PIN gate (path-based share)", () => {
     assert.equal(res.status, 401);
   });
 
+  it("locked: the PIN gate is case-insensitive, because Express routing is", async () => {
+    // Express dispatches string routes case-insensitively by default, so a
+    // case-SENSITIVE gate in front of them gated nothing: /Dev/ served the live
+    // screen and the accessibility tree of a PIN-locked share with no PIN.
+    for (const seg of ["DEV", "Dev", "dEv"]) {
+      const res = await fetch(`${base()}/s/share1/${seg}/ios-0/ax`);
+      assert.equal(res.status, 401, `/${seg}/ must be gated exactly like /dev/`);
+    }
+    const restart = await fetch(`${base()}/s/share1/RESTART`, { method: "POST" });
+    assert.equal(restart.status, 401, "/RESTART must be gated exactly like /restart");
+  });
+
   it("wrong PIN → 401; right PIN → cookie that unlocks /state", async () => {
     const bad = await fetch(`${base()}/s/share1/unlock`, {
       method: "POST",

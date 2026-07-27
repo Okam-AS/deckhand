@@ -82,7 +82,7 @@ export const configSchema = z.object({
       // and previews were only ever stopped by an explicit stop_preview, so
       // they piled up. 0 disables either sweep.
       /** Stop a ready/running preview after this many minutes with no viewer traffic. */
-      idleMinutes: z.number().int().nonnegative().default(45),
+      idleMinutes: z.number().int().nonnegative().default(60),
       /** Tear down a failed preview's devices after this many minutes (a Rebuild grace window). */
       failedGraceMinutes: z.number().int().nonnegative().default(15),
       /**
@@ -111,7 +111,7 @@ export const configSchema = z.object({
     .default({
       maxDevicesPerPreview: 4,
       maxTotalDevices: 6,
-      idleMinutes: 45,
+      idleMinutes: 60,
       failedGraceMinutes: 15,
       stuckMinutes: 90,
       reuseDevices: true,

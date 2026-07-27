@@ -102,7 +102,12 @@ export class SimDeckControl {
     if (opts.interactiveOnly) q.set("interactiveOnly", "true");
     if (opts.maxDepth != null) q.set("maxDepth", String(opts.maxDepth));
     const url = `${origin}/api/simulators/${enc(target.udid)}/accessibility-tree?${q.toString()}`;
-    const res = await this.fetchImpl(url); // loopback GET needs no auth
+    // SimDeck's own API is unauthenticated and accepts ANY udid. Deckhand's
+    // callers are scoped (simdeckTarget resolves previewId+deviceId to a device
+    // of that preview), so nothing here widens it — but the daemon is not a
+    // trust boundary. Anything that reaches loopback can drive every booted
+    // device directly, bypassing this client entirely.
+    const res = await this.fetchImpl(url);
     const body = await readJson(res);
     if (!res.ok) throw new SimDeckActionError(errText(body, `describe failed (${res.status})`), res.status);
     return body;

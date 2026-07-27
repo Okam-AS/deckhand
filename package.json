@@ -17,6 +17,10 @@
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "build": "npm run build --workspace @deckhand/viewer && npm run build --workspace @deckhand/landing -- --outDir ../dist && node landing/scripts/prepare-hosting.mjs",
-    "dev": "npm run dev --workspace @deckhand/server"
+    "dev": "npm run dev --workspace @deckhand/server",
+    "postinstall": "patch-package"
+  },
+  "devDependencies": {
+    "patch-package": "^8.0.1"
   }
 }

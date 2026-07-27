@@ -1327,6 +1327,40 @@ describe("device pool", () => {
       ["deckhand-pool-iphone-16-pro-ios-26-0", "deckhand-pool-iphone-16-pro-ios-26-0-2"],
     );
   });
+
+  it("refuses to reuse a pooled device when both erase AND delete fail (no duplicate)", async () => {
+    // Tenant separation rests on the erase. If it fails, we delete + rebuild —
+    // but only if delete SUCCEEDS. A wedged simctl where both throw must fail the
+    // boot, not create() a second device sharing the name (two devices, one name
+    // → the untracked-orphan / cross-tenant hazard the erase exists to prevent).
+    const pooled = makePooled();
+    (pooled.simctl as unknown as { erase: () => Promise<void> }).erase = async () => {
+      throw new Error("erase wedged");
+    };
+    (pooled.simctl as unknown as { delete: () => Promise<void> }).delete = async () => {
+      throw new Error("delete wedged");
+    };
+    const h = makeEngine({
+      config: poolConfig,
+      ...pooled,
+      genPreviewId: () => `pv${++ids.n}`,
+      genShareId: () => `share-${ids.n}`,
+    });
+    await h.engine.stopPreview(await start(h, rnApp)); // app A leases + releases the pooled sim
+
+    pooled.calls.length = 0;
+    // app B wants the same shape → tenant mismatch → erase (fails) → delete (fails) → must fail.
+    h.engine.startPreview({
+      app: { ...rnApp, id: "other-app" },
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "ios" }],
+      access: "public",
+    });
+    assert.equal(await waitForPhase(h.engine, "pv2", ["ready", "failed"]), "failed");
+    assert.ok(!pooled.calls.some((c) => c.startsWith("create ")), "must NOT create a duplicate of the wedged device");
+    assert.equal(pooled.sims.length, 1, "still exactly one device with this name");
+  });
 });
 
 // ---------------------------------------------------------------------------

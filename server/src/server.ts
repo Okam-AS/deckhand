@@ -13,7 +13,7 @@ import { WorktreeManager } from "./engine/worktree.ts";
 import { MetroManager } from "./engine/metro.ts";
 import { Simctl } from "./devices/ios.ts";
 import { AndroidManager } from "./devices/android.ts";
-import { ServeSimBackend } from "./streaming/serveSim.ts";
+import { ServeSimBackend, vendoredServeSimBin } from "./streaming/serveSim.ts";
 import { AndroidAdbBackend } from "./streaming/androidAdb.ts";
 import { WebBackend } from "./streaming/web.ts";
 import { StreamingRouter } from "./streaming/router.ts";
@@ -118,7 +118,7 @@ export function createServer(): DeckhandServer {
   const [lo, hi] = config.streaming.serveSim.helperPortRange;
   const mid = Math.floor((lo + hi) / 2);
   const streaming = new StreamingRouter(
-    new ServeSimBackend({ portRange: [lo, mid] }),
+    new ServeSimBackend({ portRange: [lo, mid], bin: vendoredServeSimBin() }),
     new AndroidAdbBackend({ portRange: [mid + 1, hi] }),
     new WebBackend(),
   );

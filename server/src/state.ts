@@ -119,7 +119,10 @@ export class StateStore {
     const state: PersistedState = { version: 1, previews, shareIds, pins };
     mkdirSync(dirname(this.file), { recursive: true });
     const tmp = `${this.file}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify(state, null, 2));
+    // 0600: this file holds every share's PIN hash. A 4-6 digit keyspace at
+    // scrypt N=16384 cracks offline in well under a second, so world-readable
+    // means every PIN on the machine is readable by any local user.
+    writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
     renameSync(tmp, this.file);
   }
 }
