@@ -43,7 +43,7 @@ the machine.
 │  auth → mcp tools → preview engine → devices → streaming        │
 │           │             │               │          │            │
 │       audit log    git worktrees    simctl /   serve-sim (iOS)  │
-│                    + build recipes  adb        adb-screencap    │
+│                    + build recipes  adb        screenrecord     │
 │                                                (Android)        │
 └─────────────────────────────────────────────────────────────────┘
 
@@ -57,7 +57,7 @@ the machine.
 | `server/src/mcp/` | The MCP surface: previews, screenshots, UI tree, test runs, app registration |
 | `server/src/engine/` | Preview state machine, build recipes (Expo / RN / NativeScript), app-type detection, worktrees, dev-server lifecycle |
 | `server/src/devices/` | iOS (`simctl`) and Android (`avdmanager`/`emulator`/`adb`) control, tool env resolution |
-| `server/src/streaming/` | Swappable `StreamingBackend` seam — serve-sim H.264 for iOS, adb-screencap for Android (scrcpy is the planned upgrade) |
+| `server/src/streaming/` | Swappable `StreamingBackend` seam — H.264 both sides: serve-sim on iOS, `adb screenrecord` repackaged Annex-B→AVCC on Android, with an `adb screencap` PNG fallback for system images whose encoder is broken |
 | `server/src/share/` | Share ids, PIN protection, and the scoped HTTP+WS proxy (video + input, nothing else) |
 | `server/src/github/` | Credential ladder: PAT → GitHub App → ambient `gh` → anonymous (public repos) |
 | `server/src/cli.ts` | `deckhand` CLI: init, serve, doctor, token, app, env |

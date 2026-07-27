@@ -73,15 +73,24 @@ export function parseAvdList(text: string): string[] {
   return names;
 }
 
-/** Parse installed `system-images;android-NN;...` packages from `sdkmanager --list_installed`. */
+/**
+ * Parse installed `system-images;android-NN;...` packages from
+ * `sdkmanager --list_installed`.
+ *
+ * API levels are not always integers — minor platform releases ship as
+ * `android-36.1`, and matching only `\d+` skipped those images entirely. On a
+ * machine whose only other image was API 29 that silently pinned every preview
+ * to Android 10, whose emulator has no working AVC encoder, forcing the
+ * multi-megabyte PNG fallback for video. Parse the level as a decimal.
+ */
 export function parseSystemImages(text: string): SystemImage[] {
   const out: SystemImage[] = [];
   const seen = new Set<string>();
   for (const line of text.split("\n")) {
-    const m = /(system-images;android-(\d+);[^\s|]+)/.exec(line);
+    const m = /(system-images;android-(\d+(?:\.\d+)*);[^\s|]+)/.exec(line);
     if (m && !seen.has(m[1]!)) {
       seen.add(m[1]!);
-      out.push({ pkg: m[1]!, api: Number(m[2]) });
+      out.push({ pkg: m[1]!, api: Number.parseFloat(m[2]!) });
     }
   }
   return out;
@@ -91,8 +100,10 @@ export function parseSystemImages(text: string): SystemImage[] {
 export function selectSystemImage(images: SystemImage[], requested?: string): SystemImage {
   if (images.length === 0) throw new AndroidError("no Android system images installed");
   if (requested) {
-    const want = Number(String(requested).replace(/[^\d]/g, ""));
-    const matches = images.filter((i) => i.api === want);
+    // Keep the decimal point: stripping non-digits turned "36.1" into 361.
+    const want = Number.parseFloat(String(requested).replace(/[^\d.]/g, ""));
+    // "36" should accept 36.1 when that is the only 36.x image installed.
+    const matches = images.filter((i) => i.api === want || Math.trunc(i.api) === want);
     if (matches.length === 0) {
       throw new AndroidError(`no installed Android system image for API ${want} (have: ${images.map((i) => i.api).join(", ")})`);
     }

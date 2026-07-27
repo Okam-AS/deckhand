@@ -2,28 +2,39 @@ import { createServer, type Server } from "node:http";
 import { execFile } from "node:child_process";
 import { WebSocketServer, type WebSocket } from "ws";
 import { allocatePort, helperBasePath, type AttachedStream, type StreamDeviceRef, type StreamingBackend } from "./backend.ts";
+import { AvccSource } from "./androidH264.ts";
 
 // ---------------------------------------------------------------------------
-// Android streaming backend (Phase 2 decision-gate outcome).
+// Android streaming backend.
 //
-// scrcpy's raw H.264 wire protocol needs extensive on-device iteration to get
-// right, and cannot be validated without an emulator here. So the initial
-// Android backend uses **adb screencap → multipart PNG ("MJPEG") + adb input**:
-// it reuses Deckhand's existing viewer verbatim (the MJPEG parser slices by
-// Content-Length and createImageBitmap decodes PNG), carries input over the
-// same `/ws` [tag][JSON] protocol translated to `adb input` (0x03 touch,
-// 0x04 button → keyevent, 0x07 orientation → user_rotation), and has ZERO
-// scrcpy-protocol risk. Smooth scrcpy H.264 is a documented follow-up upgrade
-// behind this same StreamingBackend seam — nothing outside streaming/ changes
-// when it lands.
+// Video has two tiers, both behind this one StreamingBackend seam:
 //
-// Pure helpers (gesture classification, pixel mapping, wm-size parsing) are
-// unit-tested; the per-device HTTP/WS server and adb calls are validated
-// on-device.
+//   /stream.avcc   H.264 from `adb exec-out screenrecord`, repackaged to AVCC
+//                  (see androidH264.ts). Primary path. ~12 KB/s for continuous
+//                  scrolling on a 1080x2400 screen.
+//   /stream.mjpeg  `adb screencap` PNG frames. Fallback for system images with
+//                  no working AVC encoder — notably the API 29 emulator, where
+//                  MediaCodec throws. ~4 MB/s, i.e. unusable over mobile, which
+//                  is why it is no longer the default.
+//
+// The viewer needs no platform switch: it asks for /stream.avcc first and
+// already treats a 404 as "use MJPEG", which is exactly what an encoder-less
+// device returns.
+//
+// Input is unchanged — the same `/ws` [tag][JSON] protocol serve-sim speaks on
+// iOS, translated to `adb input` (0x03 touch, 0x04 button → keyevent,
+// 0x07 orientation → user_rotation).
+//
+// Pure helpers (gesture classification, pixel mapping, wm-size parsing,
+// Annex-B→AVCC) are unit-tested; the per-device HTTP/WS server and adb calls
+// are validated on-device.
 // ---------------------------------------------------------------------------
 
-const FRAME_INTERVAL_MS = 150; // ~6-7 fps screencap
+const FRAME_INTERVAL_MS = 150; // ~6-7 fps screencap (MJPEG fallback only)
 const MJPEG_BOUNDARY = "deckhandframe";
+/** Unsent bytes tolerated on a viewer socket before we stop feeding it. Past
+ *  this the consumer is slower than the device and buffering only adds latency. */
+const MAX_SOCKET_BACKLOG_BYTES = 2 * 1024 * 1024;
 
 export interface AndroidAdbOptions {
   portRange: [number, number];
@@ -158,6 +169,7 @@ interface Helper {
   port: number;
   server: Server;
   wss: WebSocketServer;
+  avcc: AvccSource;
   stop: () => void;
 }
 
@@ -195,10 +207,16 @@ export class AndroidAdbBackend implements StreamingBackend {
     const size = await this.screenSize(serial);
     const natural = { ...size };
 
+    const avcc = new AvccSource(serial);
+
     const server = createServer((req, res) => {
       const url = (req.url ?? "").split("?")[0]!;
       if (url === `${base}/health`) {
         res.writeHead(200).end("ok");
+        return;
+      }
+      if (url === `${base}/stream.avcc`) {
+        void this.serveAvcc(avcc, res);
         return;
       }
       if (url === `${base}/stream.mjpeg`) {
@@ -224,8 +242,10 @@ export class AndroidAdbBackend implements StreamingBackend {
       port,
       server,
       wss,
+      avcc,
       stop: () => {
         try {
+          avcc.dispose();
           wss.close();
           server.close();
         } catch {
@@ -257,6 +277,47 @@ export class AndroidAdbBackend implements StreamingBackend {
     };
   }
 
+  /**
+   * H.264 over the same `[len][tag][payload]` wire format serve-sim uses for
+   * iOS, so the viewer decodes Android with the identical WebCodecs path and no
+   * platform switch. A device whose image cannot encode (the API 29 emulator
+   * throws inside MediaCodec) answers 404, which the player already treats as
+   * "go straight to MJPEG" — no watchdog wait, no black screen.
+   */
+  private async serveAvcc(source: AvccSource, res: import("node:http").ServerResponse): Promise<void> {
+    let supported: boolean;
+    try {
+      supported = await source.ready();
+    } catch {
+      supported = false;
+    }
+    if (!supported) {
+      if (!res.headersSent) res.writeHead(404).end();
+      return;
+    }
+    if (res.destroyed) return;
+
+    res.writeHead(200, {
+      "content-type": "application/octet-stream",
+      "cache-control": "no-cache",
+      connection: "close",
+    });
+
+    // Deltas cannot be dropped selectively — one missing chunk corrupts every
+    // frame until the next IDR. So when a viewer falls too far behind we cut
+    // the connection instead of buffering: the player reconnects and is caught
+    // up from the replay buffer, which is both correct and bounded.
+    const unsubscribe = source.subscribe({
+      write: (chunk) => {
+        if (res.destroyed) return false;
+        res.write(chunk);
+        return res.writableLength <= MAX_SOCKET_BACKLOG_BYTES;
+      },
+      close: () => res.destroy(),
+    });
+    res.on("close", unsubscribe);
+  }
+
   private serveMjpeg(serial: string, res: import("node:http").ServerResponse): void {
     res.writeHead(200, {
       // NOT multipart/x-mixed-replace: Safari's fetch() refuses to stream a
@@ -273,15 +334,35 @@ export class AndroidAdbBackend implements StreamingBackend {
     res.on("close", () => {
       closed = true;
     });
+    // Capture → write → *wait for the socket to actually take it* → capture
+    // again. The previous version fired a screencap every 150 ms regardless,
+    // so a viewer pulling 1 MB/s while the device produced ~4 MB/s of PNG fell
+    // permanently behind with the overflow parked in this process's memory.
+    // Waiting on drain makes the capture rate the consumer's rate.
+    const waitForDrain = () =>
+      new Promise<void>((resolve) => {
+        if (res.writableLength <= MAX_SOCKET_BACKLOG_BYTES) {
+          resolve();
+          return;
+        }
+        res.once("drain", resolve);
+      });
+
     const tick = async () => {
-      if (closed) return;
-      const shot = await this.adb(serial, ["exec-out", "screencap", "-p"], { timeoutMs: 5000 });
-      if (!closed && shot.code === 0 && shot.stdout.length > 0) {
-        res.write(`--${MJPEG_BOUNDARY}\r\nContent-Type: image/png\r\nContent-Length: ${shot.stdout.length}\r\n\r\n`);
-        res.write(shot.stdout);
-        res.write("\r\n");
+      while (!closed) {
+        const startedAt = Date.now();
+        const shot = await this.adb(serial, ["exec-out", "screencap", "-p"], { timeoutMs: 5000 });
+        if (closed) return;
+        if (shot.code === 0 && shot.stdout.length > 0) {
+          res.write(`--${MJPEG_BOUNDARY}\r\nContent-Type: image/png\r\nContent-Length: ${shot.stdout.length}\r\n\r\n`);
+          res.write(shot.stdout);
+          res.write("\r\n");
+          await waitForDrain();
+          if (closed) return;
+        }
+        const elapsed = Date.now() - startedAt;
+        if (elapsed < FRAME_INTERVAL_MS) await new Promise((r) => setTimeout(r, FRAME_INTERVAL_MS - elapsed));
       }
-      if (!closed) setTimeout(tick, FRAME_INTERVAL_MS);
     };
     void tick();
   }

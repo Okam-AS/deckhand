@@ -144,6 +144,42 @@ describe("parseSystemImages / selectSystemImage", () => {
     assert.throws(() => selectSystemImage(parseSystemImages(listing), "99"), (e) => e instanceof AndroidError);
     assert.throws(() => selectSystemImage([]), (e) => e instanceof AndroidError);
   });
+
+  // Minor platform releases ship as `android-36.1`. An integer-only parse
+  // dropped them, which silently pinned machines to whatever older image they
+  // also happened to have installed.
+  describe("dotted API levels", () => {
+    const dotted = [
+      "  system-images;android-29;google_apis_playstore;arm64-v8a   | 9 | ...",
+      "  system-images;android-36.1;google_apis_playstore;arm64-v8a | 4 | ...",
+    ].join("\n");
+
+    it("parses a minor platform release", () => {
+      const imgs = parseSystemImages(dotted);
+      assert.deepEqual(
+        imgs.map((i) => i.api).sort((a, b) => a - b),
+        [29, 36.1],
+      );
+      assert.match(imgs.find((i) => i.api === 36.1)!.pkg, /android-36\.1/);
+    });
+
+    it("picks the dotted image as newest rather than falling back to the older one", () => {
+      assert.equal(selectSystemImage(parseSystemImages(dotted)).api, 36.1);
+    });
+
+    it("matches a dotted request exactly", () => {
+      assert.equal(selectSystemImage(parseSystemImages(dotted), "36.1").api, 36.1);
+      assert.equal(selectSystemImage(parseSystemImages(dotted), "android 36.1").api, 36.1);
+    });
+
+    it("matches a major-only request against its minor release", () => {
+      assert.equal(selectSystemImage(parseSystemImages(dotted), "36").api, 36.1);
+    });
+
+    it("still rejects an API level that is not installed", () => {
+      assert.throws(() => selectSystemImage(parseSystemImages(dotted), "31"), (e) => e instanceof AndroidError);
+    });
+  });
 });
 
 describe("serialForPort / bootCompleted", () => {
