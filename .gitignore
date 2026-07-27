@@ -1,0 +1,20 @@
+node_modules/
+dist/
+build/
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# local deckhand runtime state should never be committed
+.deckhand/
+/tmp/
+
+# editor
+.vscode/
+.idea/
+*.tsbuildinfo
+
+# isolated Codex feature worktrees
+.worktrees/

@@ -1,0 +1,1443 @@
+:root {
+  /* auto-mate "Warm Dusk Lounge" tokens (dark-only, warm). */
+  --bg: #241b20;
+  --bg-2: #2a1f23;
+  --bg-3: #31242a;
+  --panel: #33262c;
+  --panel-2: #2c2025;
+  --line: rgba(242, 232, 220, 0.07);
+  --line-strong: rgba(242, 232, 220, 0.12);
+  --ink: #f2e8dc;
+  --ink-soft: #c9baae;
+  --ink-faint: #9a8b82;
+  --amber: #e0a971;
+  --coral: #d98873;
+  --sage: #9fb7a6;
+  --gold: #e8b86d;
+  --accent: var(--amber);
+  --card-grad: linear-gradient(165deg, #33262c, #2c2025);
+  --shadow: 0 16px 38px rgba(0, 0, 0, 0.32);
+  --shadow-lg: 0 28px 60px rgba(0, 0, 0, 0.42);
+  --serif: "New York", "Iowan Old Style", Georgia, ui-serif, serif;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  font-family: "SF Pro Rounded", ui-rounded, "Hiragino Maru Gothic ProN", system-ui, -apple-system, sans-serif;
+  color: var(--ink);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  /* Nothing on this page is meaningful to select or long-press-copy; without
+     this, touch-dragging the sim starts selecting the captions around it. */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Fixed warm glow underlay (auto-mate body::before). */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background:
+    radial-gradient(62% 55% at 12% -5%, rgba(224, 169, 113, 0.12), transparent 60%),
+    radial-gradient(55% 50% at 105% 105%, rgba(217, 136, 115, 0.1), transparent 62%),
+    linear-gradient(165deg, var(--bg-3), var(--bg));
+}
+
+.app {
+  /* Full window width so side-by-side spreads across all available space
+     (more devices fit per row on a wide monitor) instead of capping at a column. */
+  margin: 0 auto;
+  padding: clamp(1.4rem, 4vw, 3rem) clamp(1.2rem, 4vw, 2.5rem) clamp(4rem, 10vw, 6rem);
+  animation: rise 0.6s var(--ease, cubic-bezier(0.2, 0.7, 0.2, 1)) both;
+}
+.app.has-picker {
+  padding-top: clamp(4.6rem, 8vw, 6rem); /* clear the top-center layout control */
+}
+
+/* ---- Brand: the Deckhand wordmark, always the same lockup, pinned bottom-right ---- */
+.brand {
+  position: fixed;
+  z-index: 20;
+  pointer-events: none; /* purely a label — never blocks the devices */
+  bottom: clamp(0.9rem, 2.4vw, 1.7rem);
+  right: clamp(1rem, 2.4vw, 1.9rem);
+  animation: fade 0.8s ease both;
+}
+.brand-name {
+  position: relative;
+  display: inline-block;
+  font-family: var(--serif);
+  font-weight: 650;
+  font-size: clamp(1.1rem, 2.2vw, 1.55rem);
+  line-height: 0.95;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  padding-bottom: 7px;
+  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.55); /* legible over a device — no chip */
+}
+.brand-name::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, var(--gold), transparent);
+}
+
+/* ---- Rebuild button (local dev previews): pill pinned bottom-left ---- */
+.refresh {
+  position: fixed;
+  z-index: 20;
+  bottom: clamp(0.9rem, 2.4vw, 1.7rem);
+  left: clamp(1rem, 2.4vw, 1.9rem);
+  animation: fade 0.8s ease both;
+}
+.refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.5rem 0.9rem;
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--ink-soft);
+  background: color-mix(in srgb, var(--panel) 90%, transparent);
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  transition:
+    color 0.15s ease,
+    border-color 0.15s ease,
+    opacity 0.2s ease,
+    transform 0.12s ease;
+}
+.refresh-btn:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: color-mix(in srgb, var(--amber) 34%, transparent);
+}
+.refresh-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+.refresh-btn:disabled {
+  cursor: default;
+  opacity: 0.75;
+}
+.spinner--btn {
+  width: 0.85em;
+  height: 0.85em;
+  border-width: 2px;
+}
+
+/* ---- Layout picker: top-center pill + animated popover ---- */
+.picker {
+  position: fixed;
+  z-index: 30;
+  top: clamp(0.9rem, 2.2vw, 1.5rem);
+  left: 50%;
+  transform: translateX(-50%);
+}
+.picker-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.9rem;
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--ink-soft);
+  background: color-mix(in srgb, var(--panel) 90%, transparent);
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  transition:
+    color 0.15s ease,
+    border-color 0.15s ease,
+    transform 0.12s ease;
+}
+.picker-btn:hover {
+  color: var(--ink);
+  border-color: color-mix(in srgb, var(--amber) 34%, transparent);
+}
+.picker-btn:active {
+  transform: scale(0.97);
+}
+.picker-count {
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+.picker-btn .chev {
+  transition: transform 0.25s var(--ease-settle, ease);
+}
+.picker-btn .chev.flip {
+  transform: rotate(180deg);
+}
+
+.picker-menu {
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  left: 50%;
+  min-width: 250px;
+  padding: 0.4rem;
+  transform: translateX(-50%) translateY(-8px) scale(0.96);
+  transform-origin: top center;
+  opacity: 0;
+  pointer-events: none;
+  background: var(--card-grad);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  transition:
+    opacity 0.2s var(--ease-settle, ease),
+    transform 0.22s var(--ease-settle, ease);
+}
+.picker-menu.open {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(-50%) translateY(0) scale(1);
+}
+.picker-section {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--ink-faint);
+  font-weight: 600;
+  padding: 0.5rem 0.6rem 0.35rem;
+}
+.seg {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  margin: 0 0.2rem;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+}
+.seg-btn {
+  flex: 1;
+  padding: 0.4rem 0.5rem;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--ink-soft);
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  transition:
+    background 0.2s var(--ease-settle, ease),
+    color 0.15s ease;
+}
+.seg-btn.on {
+  color: #2a1c16;
+  background: linear-gradient(150deg, var(--amber), var(--coral));
+}
+.picker-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  width: 100%;
+  padding: 0.55rem 0.6rem;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.82rem;
+  border-radius: 10px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s ease;
+}
+.picker-row:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+}
+.picker-row:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+.picker-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.switch {
+  position: relative;
+  flex: none;
+  width: 38px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--line-strong);
+  transition:
+    background 0.22s var(--ease-settle, ease),
+    border-color 0.2s ease;
+}
+.switch.on {
+  background: linear-gradient(150deg, var(--amber), var(--coral));
+  border-color: transparent;
+}
+.switch .knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+  transition: transform 0.22s var(--ease-settle, ease);
+}
+.switch.on .knob {
+  transform: translateX(16px);
+}
+
+/* ---- Stage: layouts for the shown devices (always centered) ---- */
+.stage {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: flex-start;
+  gap: clamp(1.2rem, 3.5vw, 2.4rem);
+}
+
+.device {
+  margin: 0;
+  animation: rise 0.6s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  will-change: transform; /* FLIP moves the figure between layouts */
+}
+
+/* Side by side: each device at a comfortable natural size, wrapping + centered. */
+.stage--grid .device {
+  width: min(400px, 88vw);
+}
+
+/* Focus: one big device on its own row + a bottom-aligned strip of thumbnails below. */
+.stage--focus {
+  align-items: flex-end;
+}
+.stage--focus .device--focus {
+  order: -1;
+  flex: 0 0 100%;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.stage--focus .device--focus .device-screen {
+  /* Cap height by the width fit too (92vw * h/w) so a wide device keeps its ratio
+     instead of being clamped by max-width while height stays fixed. */
+  height: min(68vh, 700px, calc(92vw * var(--dev-h, 19.5) / var(--dev-w, 9)));
+  width: auto; /* aspect-ratio derives width from the definite height */
+  max-width: 92vw;
+}
+/* Thumbnails are sized by a COMMON HEIGHT (≈ the iPad thumbnail), with width
+   derived from each device's own aspect ratio — so a tall phone becomes a
+   narrow thumbnail of the same height instead of towering over the tablet.
+   The whole strip is bottom-aligned (see .stage--focus above) so every device
+   sits on one baseline. */
+.stage--focus .device--thumb {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  cursor: pointer;
+  transition: transform 0.2s var(--ease-settle, ease);
+}
+.stage--focus .device--thumb .device-screen {
+  height: clamp(120px, 16vh, 156px);
+  width: auto; /* aspect-ratio derives the width from the definite height */
+  border-width: 1.5px;
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+}
+.stage--focus .device--thumb:hover {
+  transform: translateY(-4px);
+}
+.stage--focus .device--thumb:hover .device-screen {
+  border-color: color-mix(in srgb, var(--amber) 55%, transparent);
+}
+.stage--focus .device--thumb:focus-visible {
+  outline: none;
+}
+.stage--focus .device--thumb:focus-visible .device-screen {
+  border-color: color-mix(in srgb, var(--gold) 70%, transparent);
+}
+.thumb-cap {
+  margin-top: 0.4rem;
+  font-size: 0.66rem;
+  font-weight: 600;
+  color: var(--ink-faint);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+/* Tighter, cohesive thumbnail strip below the focused device. */
+.stage--focus {
+  gap: clamp(0.9rem, 2vw, 1.5rem);
+}
+
+/* The frame auto-fits each device: aspect + corner radius are set from JS
+   (real frame dimensions), with a sensible default until the first frame. */
+.device-screen {
+  position: relative;
+  aspect-ratio: var(--device-aspect, 9 / 19.5);
+  border-radius: var(--device-radius, 18px);
+  overflow: hidden;
+  background: linear-gradient(180deg, #1a1218, #22181d);
+  border: 2.5px solid rgba(242, 232, 220, 0.14);
+  box-shadow:
+    var(--shadow-lg),
+    0 0 0 1px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 0 42px color-mix(in srgb, var(--amber) 11%, transparent);
+  transition:
+    box-shadow 0.4s ease,
+    aspect-ratio 0.4s ease;
+}
+.canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* fill, not contain: the box aspect already equals the frame's (set from
+     onResize), and the 2.5px border makes the content box a few px off — with
+     `contain` that tiny mismatch showed as ~3px black letterbox bars top and
+     bottom. `fill` covers the box exactly (sub-0.5% stretch, invisible) and
+     makes normalized input map 1:1 with no top/bottom offset. */
+  object-fit: fill;
+  transition: opacity 0.6s ease;
+  outline: none; /* focus is shown on the frame (.kb-live), not the canvas */
+}
+/* Click-to-type: the focused device glows and its topbar shows a ⌨ chip. */
+.device-screen.kb-live {
+  border-color: color-mix(in srgb, var(--amber) 55%, transparent);
+}
+.kb-chip {
+  display: inline-flex;
+  align-items: center;
+  margin-right: auto; /* sits left while the buttons keep right */
+  padding: 0 6px;
+  color: var(--amber);
+  animation: fade 0.2s ease both;
+}
+.canvas.hidden {
+  opacity: 0;
+}
+.canvas.ready {
+  opacity: 1;
+}
+
+/* ---- Control row above the sim (never over its screen) ---- */
+.device-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  height: 34px; /* reserve the row even when empty, so sims line up */
+  margin-bottom: 10px;
+  padding: 0 2px;
+}
+.ctrl-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  background: color-mix(in srgb, var(--panel-2) 82%, transparent);
+  color: var(--ink-soft);
+  border-radius: 10px;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    border-color 0.15s ease,
+    transform 0.12s ease;
+}
+.ctrl-btn:hover {
+  background: var(--panel);
+  color: var(--ink);
+  border-color: color-mix(in srgb, var(--amber) 36%, transparent);
+}
+.ctrl-btn:active {
+  transform: scale(0.94);
+}
+.ctrl-btn:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--gold) 70%, transparent);
+  outline-offset: 2px;
+}
+
+/* ---- Fullscreen the whole card (native API only — browsers without element
+        fullscreen never see the button, so no CSS imitation exists) ---- */
+.device:fullscreen {
+  width: 100vw;
+  height: 100dvh;
+  max-width: none;
+  margin: 0;
+  background: #000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+}
+.device:fullscreen .device-topbar {
+  margin-bottom: 0;
+}
+.device:fullscreen .device-screen {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  aspect-ratio: auto;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.device:fullscreen .canvas {
+  width: auto;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+}
+.device:fullscreen .ctrl-btn {
+  width: 40px;
+  height: 40px;
+}
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.9rem;
+  color: var(--ink-soft);
+  font-size: 0.95rem;
+  text-align: center;
+  padding: 1.5rem;
+  animation: fade 0.5s ease both;
+}
+.overlay p {
+  margin: 0;
+  max-width: 20ch;
+}
+.overlay-failed {
+  color: var(--coral);
+}
+
+.badge {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: color-mix(in srgb, var(--panel-2) 80%, transparent);
+  border: 1px solid var(--line-strong);
+  color: var(--ink-soft);
+  font-size: 0.72rem;
+  padding: 0.3rem 0.7rem;
+  border-radius: 999px;
+  backdrop-filter: blur(8px);
+  animation: fade 0.4s ease both;
+}
+
+figcaption {
+  margin-top: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  line-height: 1.3;
+}
+.cap-model {
+  color: var(--ink-soft);
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.cap-repo {
+  color: var(--ink-faint);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  word-break: break-all;
+  text-align: center;
+}
+.cap-branch {
+  color: var(--amber);
+}
+
+.centered {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+}
+.centered-inner {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--ink-soft);
+  background: var(--card-grad);
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  padding: 1.1rem 1.6rem;
+  box-shadow: var(--shadow);
+  animation: rise 0.6s ease both;
+}
+
+.spinner {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid var(--line-strong);
+  border-top-color: var(--amber);
+  animation: spin 0.9s linear infinite;
+  display: inline-block;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ---- Mobile chrome (rendered only ≤700px): no top strip — the sim owns the
+        full height; everything lives in the bottom action dock. ---- */
+/* The action dock: Switch · Home · Rotate · Keyboard · Info (· Rebuild). */
+.mdock {
+  position: fixed;
+  z-index: 40;
+  /* Lower than the safe-area gutter so it sits centered between the sim above
+     and the screen edge below, not hugging the sim. */
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 0.35rem);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 0.6rem;
+  animation: fade 0.25s ease both;
+}
+.dock-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 42px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  color: var(--ink-soft);
+  border-radius: 12px;
+  cursor: pointer;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  transition:
+    color 0.15s ease,
+    transform 0.12s ease;
+}
+.dock-btn:active:not(:disabled) {
+  transform: scale(0.94);
+  color: var(--ink);
+}
+.dock-btn:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+/* Info anchor: no box of its own — the popover positions against the dock.
+   Double-class selectors so these beat the base .mmenu rules regardless of
+   order (fixed inside the transformed dock would resolve against the dock box
+   and land off-screen). */
+.minfo {
+  display: contents;
+}
+.mmenu.mmenu--up {
+  position: absolute;
+  top: auto;
+  bottom: calc(100% + 0.55rem);
+  left: 50%;
+  transform: translate(-50%, 8px) scale(0.96);
+  transform-origin: bottom center;
+}
+.mmenu.mmenu--up.open {
+  transform: translate(-50%, 0) scale(1);
+}
+.info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+  padding: 0.5rem 0.6rem;
+}
+.info-key {
+  flex: none;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-weight: 600;
+  color: var(--ink-faint);
+}
+.info-val {
+  font-size: 0.8rem;
+  color: var(--ink);
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- Mobile typing bar: the phone's keyboard types into the sim ---- */
+.typebar {
+  position: fixed;
+  z-index: 45;
+  left: 0.6rem;
+  right: 0.6rem;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 0.6rem);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem;
+  background: var(--card-grad);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  animation: rise 0.25s ease both;
+  transition: transform 0.15s ease;
+}
+.typebar input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: inherit;
+  font-size: 16px; /* <16px makes iOS Safari zoom the page on focus */
+  color: var(--ink);
+  background: var(--panel-2);
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  padding: 0.5rem 0.65rem;
+  outline: none;
+  -webkit-user-select: auto; /* the page disables selection; the input needs it back */
+  user-select: auto;
+}
+.typebar input:focus {
+  border-color: color-mix(in srgb, var(--amber) 40%, transparent);
+}
+.typebar input::placeholder {
+  color: var(--ink-faint);
+}
+.typebar-note {
+  flex: none;
+  max-width: 34%;
+  font-size: 0.68rem;
+  color: var(--coral);
+  line-height: 1.25;
+}
+.mmenu {
+  position: fixed;
+  z-index: 40;
+  top: calc(env(safe-area-inset-top, 0px) + 0.55rem + 42px);
+  left: 50%;
+  min-width: 240px;
+  max-width: calc(100vw - 1.4rem);
+  padding: 0.4rem;
+  transform: translate(-50%, -8px) scale(0.96);
+  transform-origin: top center;
+  opacity: 0;
+  pointer-events: none;
+  background: var(--card-grad);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  transition:
+    opacity 0.2s var(--ease-settle, ease),
+    transform 0.22s var(--ease-settle, ease);
+}
+.mmenu.open {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(-50%, 0) scale(1);
+}
+/* Menu rows lead with an icon; the active device row ends with a check. */
+.mrow {
+  justify-content: flex-start;
+  gap: 0.6rem;
+  min-height: 42px; /* comfortable touch targets */
+}
+.mrow svg {
+  flex: none;
+  opacity: 0.85;
+}
+.mrow .picker-label {
+  flex: 1 1 auto;
+}
+.mrow-check {
+  display: inline-flex;
+  color: var(--amber);
+}
+.mrow:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+@media (max-width: 700px) {
+  /* The sim fills the viewport between the notch and the dock, centered, at the
+     largest size that fits both dimensions — no top strip, minimal margins. */
+  .app {
+    height: 100dvh;
+    display: flex;
+    padding: calc(env(safe-area-inset-top, 0px) + 0.35rem) 0.35rem
+      calc(env(safe-area-inset-bottom, 0px) + 0.5rem + 42px + 0.4rem);
+  }
+  .stage {
+    flex: 1;
+    min-height: 0;
+    gap: 0;
+    align-items: center;
+    justify-content: center;
+    container-type: size; /* so the device can size to cqw/cqh (the real available box) */
+  }
+  .stage .device {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  /* The largest box of the device's OWN aspect ratio that fits both axes of the
+     stage: height is the smaller of the full height and the height that makes the
+     width exactly fill (100cqw * h/w). width is then derived from aspect-ratio. So
+     a wide iPad is letterboxed top/bottom at the correct ratio, never stretched. */
+  .device-screen {
+    height: min(100cqh, calc(100cqw * var(--dev-h, 19.5) / var(--dev-w, 9)));
+    width: auto;
+    max-width: 100cqw;
+    max-height: 100cqh;
+    margin: 0;
+  }
+  .device-topbar {
+    display: none; /* home/rotate live in the dock on mobile */
+  }
+  figcaption {
+    display: none; /* the info popover names the device instead */
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* ---- Web preview: a single dev-server iframe, browser-window sized ---- */
+.stage--web {
+  display: flex;
+  justify-content: center;
+}
+.web-frame {
+  margin: 0;
+  width: min(100%, 1200px);
+  animation: rise 0.6s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+.web-screen {
+  position: relative;
+  aspect-ratio: 16 / 10;
+  border-radius: 16px;
+  overflow: hidden;
+  background: linear-gradient(180deg, #1a1218, #22181d);
+  border: 2.5px solid rgba(242, 232, 220, 0.14);
+  box-shadow:
+    var(--shadow-lg),
+    0 0 0 1px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 0 42px color-mix(in srgb, var(--amber) 11%, transparent);
+}
+.web-iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+@media (max-width: 700px) {
+  .web-screen {
+    aspect-ratio: auto;
+    height: calc(100dvh - 9rem);
+  }
+}
+
+/* ---- PIN gate: the numeric pad shown before a protected preview ---- */
+.pinpad {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 22px;
+  padding: clamp(26px, 5vw, 38px) clamp(24px, 5vw, 34px);
+  border-radius: 22px;
+  background: var(--card-grad, linear-gradient(165deg, #33262c, #2c2025));
+  box-shadow: var(--shadow-lg), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--line, rgba(242, 232, 220, 0.08));
+  animation: rise 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+.pin-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--ink-soft, #c9bcae);
+}
+.pin-dots {
+  display: flex;
+  gap: 14px;
+  height: 16px;
+}
+.pin-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1.5px solid var(--line-strong, rgba(242, 232, 220, 0.28));
+  transition: background 0.18s, border-color 0.18s, transform 0.18s;
+}
+.pin-dot.on {
+  background: linear-gradient(150deg, var(--amber), var(--coral));
+  border-color: transparent;
+  transform: scale(1.05);
+}
+.pin-dots.err {
+  animation: shake 0.4s;
+}
+.pin-keys {
+  display: grid;
+  grid-template-columns: repeat(3, 68px);
+  gap: 12px;
+}
+.pin-key {
+  display: grid;
+  place-items: center;
+  height: 60px;
+  border: 0;
+  border-radius: 16px;
+  background: rgba(242, 232, 220, 0.06);
+  color: var(--ink);
+  font: 300 25px system-ui, -apple-system, sans-serif;
+  cursor: pointer;
+  transition: background 0.12s, transform 0.1s;
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+.pin-key:hover {
+  background: rgba(242, 232, 220, 0.11);
+}
+.pin-key:active {
+  transform: scale(0.94);
+}
+.pin-key:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--amber) 60%, transparent);
+  outline-offset: 2px;
+}
+.pin-key--blank {
+  background: transparent;
+  pointer-events: none;
+}
+.pin-msg {
+  min-height: 18px;
+  margin: 0;
+  font-size: 13px;
+  color: var(--coral);
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.pin-msg.show {
+  opacity: 1;
+}
+@keyframes shake {
+  10%, 90% { transform: translateX(-2px); }
+  30%, 70% { transform: translateX(5px); }
+  50% { transform: translateX(-8px); }
+}
+
+/* ---- Control icons rotate in sync with the device orientation ---- */
+.device-topbar .ctrl-btn svg,
+.mdock .dock-btn svg {
+  transform: rotate(var(--icon-rot, 0deg));
+  transition: transform 0.45s cubic-bezier(0.16, 0.84, 0.34, 1);
+}
+
+/* ---- Agent test run: a control-row button (spinning border while running,
+        ✓/✗ when done) + a step popover. Sits among the other device controls —
+        the bottom dock on mobile, the top control row on desktop. ---- */
+.trun {
+  --tr-pass: var(--sage);
+  --tr-fail: var(--coral);
+  --tr-run: var(--amber);
+}
+/* Desktop: a positioned box so the popover anchors under the button (opens down).
+   Mobile: display:contents so the button joins the dock row directly and the
+   popover anchors to the (fixed) dock and stays on screen (opens up). */
+.trun--topbar {
+  position: relative;
+  display: inline-flex;
+}
+.trun--dock {
+  display: contents;
+}
+.trun-btn {
+  position: relative;
+  overflow: visible;
+}
+.trun-count {
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--tr-run);
+  letter-spacing: -0.02em;
+}
+/* Running: a comet sweeps along the border. The ring itself never moves — the
+   mask keeps it glued to the button's rounded shape; what animates is the
+   conic-gradient's *angle* (a registered @property, so it interpolates). Never
+   transform-rotate this pseudo-element: rotating a rounded rect swings the arc
+   out of the button's outline. */
+@property --trun-sweep {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+.trun-btn--running {
+  border-color: transparent;
+  color: var(--tr-run);
+}
+.trun-btn--running::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  background: conic-gradient(
+    from var(--trun-sweep),
+    transparent 0 62%,
+    var(--tr-run) 88%,
+    transparent
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: trun-sweep 0.85s linear infinite;
+  pointer-events: none;
+}
+@keyframes trun-sweep {
+  to {
+    --trun-sweep: 360deg;
+  }
+}
+.trun-btn--passed {
+  color: var(--tr-pass);
+  border-color: color-mix(in srgb, var(--tr-pass) 55%, transparent);
+}
+.trun-btn--failed {
+  color: var(--tr-fail);
+  border-color: color-mix(in srgb, var(--tr-fail) 60%, transparent);
+}
+.spinner--tr {
+  width: 14px;
+  height: 14px;
+  border-width: 2px;
+}
+
+/* The step popover. */
+.trun-pop {
+  position: absolute;
+  width: min(19rem, 78vw);
+  max-height: min(60vh, 30rem);
+  overflow-y: auto;
+  padding: 0.5rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 0.16s ease,
+    transform 0.2s cubic-bezier(0.16, 0.84, 0.34, 1);
+  z-index: 50;
+}
+.trun--topbar .trun-pop {
+  top: calc(100% + 0.5rem);
+  right: 0;
+  transform-origin: top right;
+  transform: translateY(-6px) scale(0.97);
+}
+.trun--dock .trun-pop {
+  bottom: calc(100% + 0.6rem);
+  left: 50%;
+  transform-origin: bottom center;
+  transform: translate(-50%, 8px) scale(0.96);
+}
+.trun-pop.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+.trun--topbar .trun-pop.open {
+  transform: translateY(0) scale(1);
+}
+.trun--dock .trun-pop.open {
+  transform: translate(-50%, 0) scale(1);
+}
+.trun-head {
+  padding: 0.3rem 0.45rem 0.5rem;
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--ink);
+}
+.trun-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+.trun-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  padding: 0.4rem 0.45rem;
+  border-radius: 9px;
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+}
+.trun-pop.open .trun-step {
+  animation: rise 0.3s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  animation-delay: calc(var(--i, 0) * 32ms);
+}
+.trun-step-ico {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.trun-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1.5px solid var(--ink-faint);
+  opacity: 0.6;
+}
+.trun-step-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+  min-width: 0;
+}
+.trun-step-detail {
+  font-size: 0.72rem;
+  color: var(--ink-faint);
+}
+.trun-step--pending {
+  color: var(--ink-faint);
+}
+.trun-step--running .trun-step-label {
+  color: var(--tr-run);
+}
+.trun-step--passed .trun-step-ico {
+  color: var(--tr-pass);
+}
+.trun-step--failed .trun-step-ico,
+.trun-step--failed .trun-step-label {
+  color: var(--tr-fail);
+}
+.trun-summary {
+  margin-top: 0.35rem;
+  padding: 0.5rem 0.5rem 0.35rem;
+  border-top: 1px solid var(--line);
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+}
+.trun-empty {
+  padding: 0.5rem 0.45rem;
+  color: var(--ink-faint);
+  font-size: 0.82rem;
+}
+
+/* ---- Migration view: source (old) and target (new) side by side ---------- */
+.app--mig {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(1rem, 2.5vw, 1.8rem);
+}
+.mig-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: clamp(1rem, 3vw, 2.4rem);
+  align-items: start;
+}
+.mig-cols--solo {
+  grid-template-columns: 1fr;
+  max-width: 34rem;
+  margin: 0 auto;
+}
+.mig-col {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  min-width: 0;
+}
+.mig-col-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0 0.2rem;
+}
+.mig-col-tag {
+  font-family: var(--serif);
+  font-size: 0.9rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  padding: 0.12rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+}
+.mig-col-tag--source {
+  color: var(--ink-soft);
+  background: var(--panel-2);
+}
+.mig-col-tag--target {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: transparent;
+}
+.mig-col-meta {
+  font-size: 0.82rem;
+  color: var(--ink-faint);
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mig-toggle {
+  margin-left: auto;
+  font: inherit;
+  font-size: 0.78rem;
+  color: var(--ink-soft);
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  padding: 0.2rem 0.7rem;
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s;
+}
+.mig-toggle:hover {
+  color: var(--ink);
+  border-color: var(--ink-faint);
+}
+.mig-col-stage {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  justify-content: center;
+}
+
+/* Parity ledger: a calm, collapsible checklist above the two panes. */
+.mig-ledger {
+  align-self: center;
+  width: min(46rem, 100%);
+  background: var(--card-grad);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.mig-ledger-head {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  width: 100%;
+  padding: 0.8rem 1.1rem;
+  font: inherit;
+  color: var(--ink);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+}
+.mig-ledger-title {
+  font-family: var(--serif);
+  font-weight: 650;
+  font-size: 1rem;
+}
+.mig-ledger-count {
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+.mig-ledger-dots {
+  margin-left: auto;
+  display: flex;
+  gap: 0.35rem;
+}
+.mig-dot {
+  min-width: 1.35rem;
+  text-align: center;
+  font-size: 0.72rem;
+  font-weight: 650;
+  padding: 0.08rem 0.4rem;
+  border-radius: 999px;
+  color: var(--bg);
+}
+.mig-dot--matches {
+  background: var(--sage);
+}
+.mig-dot--in-progress {
+  background: var(--gold);
+}
+.mig-dot--differs {
+  background: var(--coral);
+}
+.mig-dot--not-started {
+  background: var(--ink-faint);
+}
+/* compare verdicts */
+.mig-dot--matches,
+.mig-dot--adjusted {
+  background: var(--sage);
+}
+.mig-dot--adjusted {
+  background: var(--amber);
+}
+.mig-dot--regression {
+  background: var(--coral);
+}
+.mig-dot--doing {
+  background: var(--gold);
+}
+.mig-dot--pending {
+  background: var(--ink-faint);
+}
+.mig-ledger-list {
+  list-style: none;
+  margin: 0;
+  padding: 0.2rem 0.6rem 0.7rem;
+  border-top: 1px solid var(--line);
+}
+.mig-screen {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.5rem 0.55rem;
+  border-radius: 10px;
+}
+.mig-screen + .mig-screen {
+  border-top: 1px solid var(--line);
+}
+.mig-screen-ico {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  flex: none;
+  background: var(--ink-faint);
+}
+.mig-screen--matches .mig-screen-ico {
+  background: var(--sage);
+}
+.mig-screen--in-progress .mig-screen-ico {
+  background: var(--gold);
+}
+.mig-screen--differs .mig-screen-ico {
+  background: var(--coral);
+}
+.mig-screen--adjusted .mig-screen-ico {
+  background: var(--amber);
+}
+.mig-screen--regression .mig-screen-ico {
+  background: var(--coral);
+}
+.mig-screen--doing .mig-screen-ico {
+  background: var(--gold);
+}
+.mig-screen--pending .mig-screen-ico {
+  background: var(--ink-faint);
+}
+.mig-screen-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+.mig-screen-name {
+  font-size: 0.9rem;
+  color: var(--ink);
+}
+.mig-screen-note {
+  font-size: 0.78rem;
+  color: var(--ink-faint);
+}
+.mig-screen-status {
+  margin-left: auto;
+  font-size: 0.72rem;
+  color: var(--ink-soft);
+  font-family: var(--mono);
+}
+
+@media (max-width: 760px) {
+  .mig-cols {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "deckhand",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP server on a Mac mini that boots simulators for any branch/PR and returns a live, controllable browser link",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "server",
+    "viewer",
+    "landing"
+  ],
+  "scripts": {
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "build": "npm run build --workspace @deckhand/viewer && npm run build --workspace @deckhand/landing -- --outDir ../dist && node landing/scripts/prepare-hosting.mjs",
+    "dev": "npm run dev --workspace @deckhand/server"
+  }
+}
