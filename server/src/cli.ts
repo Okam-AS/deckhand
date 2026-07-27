@@ -5,7 +5,15 @@ import { join } from "node:path";
 import { stringify as toYaml } from "yaml";
 import { loadConfig, loadApps, loadTokens, parseRepo, type Role } from "./config.ts";
 import { paths } from "./paths.ts";
-import { addTokenEntry, addAppEntry, parseEnvAssignment, writeTokens, writeApps, writeSecretEnv } from "./cli/configWrite.ts";
+import {
+  addTokenEntry,
+  addAppEntry,
+  buildInitConfig,
+  parseEnvAssignment,
+  writeTokens,
+  writeApps,
+  writeSecretEnv,
+} from "./cli/configWrite.ts";
 import { runDoctor, formatChecks } from "./cli/doctor.ts";
 
 // Minimal, dependency-free arg parsing: positionals + `--key value` / `--flag`.
@@ -40,7 +48,9 @@ const USAGE = `deckhand — simulator previews over MCP
 Usage:
   deckhand serve                                   run the server
   deckhand doctor [--smoke]                        verify the install
-  deckhand init --hostname H --github-app-id N --github-app-pem P [--port 4300]
+  deckhand init --hostname H [--github-app-id N --github-app-pem P] [--port 4300]
+                                                   the App is optional: without it
+                                                   deckhand uses your gh CLI session
   deckhand token add <name> [--role admin|member] [--owners a,b]
   deckhand token list
   deckhand app add <id> <repo> --type expo|react-native|nativescript [--branch main] [--bundle-id ID]
@@ -94,31 +104,29 @@ async function main(): Promise<void> {
 }
 
 function cmdInit(flags: Args["flags"]): void {
-  const hostname = str(flags.hostname);
-  const appId = Number(flags["github-app-id"]);
-  const pemPath = str(flags["github-app-pem"]);
-  if (!hostname || !appId || !pemPath) {
-    fail("init requires --hostname, --github-app-id, and --github-app-pem");
-  }
+  const { config, pemPath } = buildInitConfig({
+    hostname: str(flags.hostname),
+    port: str(flags.port),
+    githubAppId: str(flags["github-app-id"]),
+    githubAppPem: str(flags["github-app-pem"]),
+  });
   mkdirSync(paths.home(), { recursive: true });
   mkdirSync(paths.secretsDir(), { recursive: true });
-  // Copy the PEM into ~/.deckhand (0600).
-  const pem = readFileSync(pemPath!, "utf8");
-  writeFileSync(join(paths.home(), "github-app.pem"), pem, { mode: 0o600 });
 
-  const config = {
-    hostname,
-    port: Number(flags.port) || 4300,
-    streaming: { serveSim: { version: "0.1.34", codec: "auto", helperPortRange: [3100, 3199] } },
-    githubApp: { appId, privateKeyPath: "github-app.pem" },
-    githubAmbient: true,
-    allowPublicRepos: false,
-    limits: { maxDevicesPerPreview: 4, maxTotalDevices: 6, disk: { watch: 50, pressure: 35, critical: 20 } },
-  };
+  const homePem = join(paths.home(), "github-app.pem");
+  if (pemPath) {
+    // Copy the PEM into ~/.deckhand (0600).
+    writeFileSync(homePem, readFileSync(pemPath, "utf8"), { mode: 0o600 });
+  } else if (existsSync(homePem)) {
+    console.log(`note: ${homePem} is still on disk but this config has no githubApp — it will be ignored.`);
+  }
   writeFileSync(paths.config(), toYaml(config));
   if (!existsSync(paths.apps())) writeApps([]);
   if (!existsSync(paths.tokens())) writeTokens([]);
   console.log(`initialized ${paths.home()}`);
+  if (!config.githubApp) {
+    console.log("no GitHub App configured — deckhand will use your `gh` CLI session (githubAmbient) to read repos.");
+  }
   console.log("next: `deckhand token add <you> --role admin`, then set up the cloudflared tunnel (Phase 4 automates this).");
 }
 

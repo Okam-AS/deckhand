@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { addTokenEntry, addAppEntry, parseEnvAssignment, generateToken } from "./configWrite.ts";
+import { addTokenEntry, addAppEntry, buildInitConfig, parseEnvAssignment, generateToken } from "./configWrite.ts";
 import type { App, TokenEntry } from "../config.ts";
 
 describe("generateToken", () => {
@@ -43,6 +43,52 @@ describe("addAppEntry", () => {
     ];
     assert.throws(() => addAppEntry(existing, { id: "a", repo: "x/a", type: "expo" }), /already exists/);
     assert.throws(() => addAppEntry([], { id: "Bad_Id", repo: "x/a", type: "expo" }));
+  });
+});
+
+describe("buildInitConfig", () => {
+  const app = { hostname: "h.example", githubAppId: "42", githubAppPem: "/tmp/k.pem" };
+
+  it("omits githubApp entirely when neither flag is given, and asks for no pem", () => {
+    const { config, pemPath } = buildInitConfig({ hostname: "h.example" });
+    assert.equal(config.githubApp, undefined);
+    assert.equal(pemPath, undefined);
+    assert.equal(config.hostname, "h.example");
+    assert.equal(config.githubAmbient, true);
+    assert.equal(config.port, 4300);
+  });
+
+  it("configures the App and returns the pem to copy when both flags are given", () => {
+    const { config, pemPath } = buildInitConfig(app);
+    assert.deepEqual(config.githubApp, { appId: 42, privateKeyPath: "github-app.pem" });
+    assert.equal(pemPath, "/tmp/k.pem");
+  });
+
+  it("requires a hostname", () => {
+    assert.throws(() => buildInitConfig({}), /requires --hostname/);
+  });
+
+  it("rejects either App flag on its own", () => {
+    assert.throws(() => buildInitConfig({ hostname: "h", githubAppId: "42" }), /must be given together/);
+    assert.throws(() => buildInitConfig({ hostname: "h", githubAppPem: "/tmp/k.pem" }), /must be given together/);
+  });
+
+  // A non-integer app id used to be caught for free by `if (!appId)` on the coerced
+  // number; once the flag is kept as a string it must be checked explicitly, or NaN
+  // reaches the YAML as `.nan` and every later command dies on config load.
+  it("rejects an app id that is not a positive integer", () => {
+    for (const bad of ["abc", "0", "-5", "1.5", "1e999", ""]) {
+      assert.throws(
+        () => buildInitConfig({ ...app, githubAppId: bad }),
+        /must be a positive integer|must be given together/,
+        `expected "${bad}" to be rejected`,
+      );
+    }
+  });
+
+  it("honours an explicit port and falls back to 4300 on junk", () => {
+    assert.equal(buildInitConfig({ hostname: "h", port: "8080" }).config.port, 8080);
+    assert.equal(buildInitConfig({ hostname: "h", port: "junk" }).config.port, 4300);
   });
 });
 

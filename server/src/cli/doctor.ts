@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { createPrivateKey } from "node:crypto";
 import { loadConfig, loadApps, loadTokens, githubPatPath, githubPrivateKeyPath, type App, type Config } from "../config.ts";
 import { GitHubAppAuth } from "../github/appAuth.ts";
+import { ghCliToken } from "../github/credentials.ts";
 import { Simctl, selectRuntime, selectDeviceType } from "../devices/ios.ts";
 import { ServeSimBackend } from "../streaming/serveSim.ts";
 import { detectWebFrameworkFromDir, webHostingMode } from "../engine/detect.ts";
@@ -65,7 +66,19 @@ async function checkGitHub(config: Config): Promise<Check> {
 
   const pemPath = githubPrivateKeyPath(config);
   if (!pemPath || !config.githubApp) {
-    return { name: "github credential", ok: false, detail: "none configured — paste a PAT via the setup URL or run `deckhand init` with a GitHub App" };
+    if (config.githubAmbient) {
+      const gh = await ghCliToken();
+      // A token exists; its scopes and host are not checked here, so say so rather
+      // than implying every repo will resolve.
+      if (gh) return { name: "github credential", ok: true, detail: "ambient gh CLI session (scopes not verified)" };
+    }
+    return {
+      name: "github credential",
+      ok: false,
+      detail: config.githubAmbient
+        ? "no PAT, no GitHub App, and no gh CLI session on this machine — run `gh auth login`, paste a PAT via the setup URL, or run `deckhand init` with a GitHub App"
+        : "none configured — paste a PAT via the setup URL or run `deckhand init` with a GitHub App",
+    };
   }
   let pem: string;
   try {
