@@ -98,7 +98,8 @@ The complete build plan lives in [PLAN.md](./PLAN.md); background knowledge in
 ```sh
 npm install
 npm run build --workspace @deckhand/viewer      # build the viewer once
-deckhand init --hostname <host> --github-app-id <id> --github-app-pem <path.pem>
+deckhand init --hostname <host>                 # add --github-app-id/--github-app-pem
+                                                # for a GitHub App; omit to use `gh`
 deckhand token add <you> --role admin           # prints your connector URL
 deckhand app add <id> github.com/owner/repo     # or: --path <local-checkout>
 npm run dev                                     # or: deckhand serve
