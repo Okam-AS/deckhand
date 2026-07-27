@@ -1,5 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   detectAppType,
   detectFromRepo,
@@ -9,6 +12,7 @@ import {
   expoSlug,
   nativescriptBundleId,
   expoDevClientUrl,
+  resolveExpoConfigFromDir,
 } from "./detect.ts";
 
 /** A read/hasEntry pair backed by an in-memory file map (paths → contents). */
@@ -150,5 +154,78 @@ describe("expoDevClientUrl", () => {
     const parsed = new URL(url);
     assert.equal(parsed.searchParams.get("url"), "http://127.0.0.1:8081");
     assert.equal(parsed.searchParams.get("disableOnboarding"), "1");
+  });
+});
+
+describe("resolveExpoConfigFromDir", () => {
+  const mkDir = () => mkdtempSync(join(tmpdir(), "deckhand-expo-"));
+  const never = (): Promise<never> => {
+    throw new Error("evaluate should not be called");
+  };
+  const yields = (config: Record<string, unknown>) => async () => ({ config });
+
+  it("returns the static app.json without spawning when there is no dynamic config", async () => {
+    const dir = mkDir();
+    writeFileSync(join(dir, "app.json"), JSON.stringify({ expo: { slug: "demo", ios: { bundleIdentifier: "com.demo.app" } } }));
+    const { config } = await resolveExpoConfigFromDir(dir, {}, never);
+    assert.equal(expoSlug(config), "demo");
+    assert.equal(expoBundleId(config, "ios"), "com.demo.app");
+  });
+
+  it("evaluates the dynamic app.config when there is no app.json", async () => {
+    const dir = mkDir();
+    writeFileSync(join(dir, "app.config.js"), "module.exports = () => ({})");
+    const { config } = await resolveExpoConfigFromDir(dir, {}, yields({ slug: "dyn", ios: { bundleIdentifier: "no.vg.lab.zapp" } }));
+    assert.equal(expoSlug(config), "dyn");
+    assert.equal(expoBundleId(config, "ios"), "no.vg.lab.zapp");
+  });
+
+  it("evaluates when app.json is present but missing the slug (dynamic config fills the gap)", async () => {
+    const dir = mkDir();
+    writeFileSync(join(dir, "app.json"), JSON.stringify({ expo: { ios: { bundleIdentifier: "com.partial.app" } } }));
+    writeFileSync(join(dir, "app.config.ts"), "export default () => ({})");
+    const { config } = await resolveExpoConfigFromDir(dir, {}, yields({ slug: "dyn", ios: { bundleIdentifier: "com.dyn.app" } }));
+    assert.equal(expoSlug(config), "dyn");
+    assert.equal(expoBundleId(config, "ios"), "com.dyn.app");
+  });
+
+  // app.config.js receives app.json as its input and may override any field, so a
+  // complete-looking app.json is not authority when a dynamic config exists.
+  it("still evaluates when app.json looks complete, and the dynamic config wins", async () => {
+    const dir = mkDir();
+    writeFileSync(join(dir, "app.json"), JSON.stringify({ expo: { slug: "stale", ios: { bundleIdentifier: "com.stale.app" } } }));
+    writeFileSync(join(dir, "app.config.js"), "module.exports = ({config}) => ({...config, slug: 'live'})");
+    const { config } = await resolveExpoConfigFromDir(dir, {}, yields({ slug: "live", ios: { bundleIdentifier: "com.live.app" } }));
+    assert.equal(expoSlug(config), "live");
+    assert.equal(expoBundleId(config, "ios"), "com.live.app");
+  });
+
+  it("passes the app env through to evaluation (app.config.js branches on APP_ENV)", async () => {
+    const dir = mkDir();
+    writeFileSync(join(dir, "app.config.js"), "module.exports = () => ({})");
+    let seen: Record<string, string> | undefined;
+    await resolveExpoConfigFromDir(dir, { APP_ENV: "staging" }, async (_d, env) => {
+      seen = env;
+      return { config: { slug: "s" } };
+    });
+    assert.deepEqual(seen, { APP_ENV: "staging" });
+  });
+
+  it("returns null without evaluating when there is neither app.json nor a dynamic config", async () => {
+    const dir = mkDir();
+    assert.deepEqual(await resolveExpoConfigFromDir(dir, {}, never), { config: null });
+  });
+
+  it("falls back to the static config when evaluation fails, and carries the reason", async () => {
+    const dir = mkDir();
+    writeFileSync(join(dir, "app.json"), JSON.stringify({ expo: { ios: { bundleIdentifier: "com.partial.app" } } }));
+    writeFileSync(join(dir, "app.config.js"), "module.exports = () => ({})");
+    const { config, error } = await resolveExpoConfigFromDir(dir, {}, async () => ({
+      config: null,
+      error: "SyntaxError: Unexpected token",
+    }));
+    assert.equal(expoSlug(config), null);
+    assert.equal(expoBundleId(config, "ios"), "com.partial.app");
+    assert.equal(error, "SyntaxError: Unexpected token", "the cause must survive for the operator-facing error");
   });
 });
