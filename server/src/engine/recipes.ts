@@ -46,11 +46,24 @@ export interface BuildPlanInput {
   local?: boolean;
 }
 
+/**
+ * A project's lockfile decides its package manager, and bun has to be checked
+ * first: a bun project's private-registry scopes live in `bunfig.toml`, which
+ * npm cannot read. Running npm there resolves those scopes against the public
+ * registry and 404s, which reads as a missing package rather than the wrong
+ * tool. Deckhand does not install package managers — a bun.lock with no `bun`
+ * on PATH is reported as exactly that.
+ */
+const BUN_GUARD = "[ -f bun.lock ] || [ -f bun.lockb ]";
+const BUN_MISSING = 'echo "bun.lock found but bun is not installed — install it (brew install oven-sh/bun/bun)" >&2; exit 127';
+const bunOr = (bunArgs: string, fallback: string): string =>
+  `if ${BUN_GUARD}; then command -v bun >/dev/null || { ${BUN_MISSING}; }; bun install ${bunArgs}; else ${fallback}; fi`;
+
 /** The dependency-install step, guarded to use `npm ci` only when a lockfile exists. */
 export function installDepsStep(worktreePath: string, env: Record<string, string>): CommandStep {
   return {
     name: "install-deps",
-    run: { kind: "shell", script: "[ -f package-lock.json ] && npm ci || npm install" },
+    run: { kind: "shell", script: bunOr("--frozen-lockfile", "[ -f package-lock.json ] && npm ci || npm install") },
     cwd: worktreePath,
     env,
     idleTimeoutMs: GENERAL_IDLE_MS,
@@ -62,15 +75,16 @@ export function installDepsStep(worktreePath: string, env: Record<string, string
  * dev's). Borrow-never-own extends to git: when a lockfile exists we use the
  * read-only `npm ci` (never rewrites package-lock.json); with no lockfile we add
  * `--no-package-lock` so we don't drop a stray, untracked lockfile into the
- * developer's checkout. node_modules itself is gitignored, so this leaves the
- * tracked tree untouched.
+ * developer's checkout. bun gets `--frozen-lockfile` for the same reason — it
+ * resolves from bun.lock without ever writing it back. node_modules itself is
+ * gitignored, so this leaves the tracked tree untouched.
  */
 export function installDepsIfMissingStep(worktreePath: string, env: Record<string, string>): CommandStep {
   return {
     name: "install-deps",
     run: {
       kind: "shell",
-      script: "[ -d node_modules ] || { [ -f package-lock.json ] && npm ci || npm install --no-package-lock; }",
+      script: `[ -d node_modules ] || { ${bunOr("--frozen-lockfile", "[ -f package-lock.json ] && npm ci || npm install --no-package-lock")}; }`,
     },
     cwd: worktreePath,
     env,

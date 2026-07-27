@@ -189,6 +189,19 @@ describe("buildPlan — local dev mode", () => {
     const script = plan[0]!.run.kind === "shell" ? (plan[0]!.run as { script: string }).script : "";
     assert.ok(!script.includes("[ -d node_modules ]"), "worktrees want the reproducible npm ci path");
   });
+
+  it("prefers bun when the project has a bun lockfile, in both modes", () => {
+    for (const local of [true, false]) {
+      const plan = buildPlan({ ...base, local, type: "expo" });
+      const script = plan[0]!.run.kind === "shell" ? (plan[0]!.run as { script: string }).script : "";
+      // bun is tested BEFORE npm: a bun project keeps its private-registry
+      // scopes in bunfig.toml, which npm can't read — npm resolves them against
+      // the public registry and 404s.
+      assert.ok(script.indexOf("bun.lock") < script.indexOf("package-lock.json"), "bun must be checked first");
+      assert.match(script, /bun install --frozen-lockfile/, "never rewrite the borrowed lockfile");
+      assert.match(script, /command -v bun/, "a missing bun must say so, not fall through to npm");
+    }
+  });
 });
 
 describe("buildPlan — web", () => {
