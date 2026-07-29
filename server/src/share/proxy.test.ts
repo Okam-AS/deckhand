@@ -5,6 +5,7 @@ import type { AddressInfo } from "node:net";
 import express from "express";
 import { createShareRouter, createHostWebProxyMiddleware, createPinGate } from "./proxy.ts";
 import { PreviewError, type PreviewEngine } from "../engine/preview.ts";
+import { hashPassword, type PasswordHash } from "./shares.ts";
 
 /** Togglable share PIN for the gate tests (current = null → no PIN required). */
 interface SharePin {
@@ -12,14 +13,32 @@ interface SharePin {
   length: number;
   pin: string;
 }
-const pinState: { current: SharePin | null } = { current: null };
+// `also` is the compare case: the reference share carries its OWN PIN, so one
+// slot can't express "both panes locked".
+const pinState: { current: SharePin | null; also: SharePin | null } = { current: null, also: null };
+const findPin = (shareId: string): SharePin | null =>
+  [pinState.current, pinState.also].find((p) => p?.shareId === shareId) ?? null;
 const fakePinInfo = (shareId: string): { required: boolean; length: number } => {
-  const p = pinState.current;
-  return p && p.shareId === shareId ? { required: true, length: p.length } : { required: false, length: 0 };
+  const p = findPin(shareId);
+  return p ? { required: true, length: p.length } : { required: false, length: 0 };
 };
 const fakeVerifyPin = (shareId: string, pin: string): boolean => {
-  const p = pinState.current;
-  return Boolean(p && p.shareId === shareId && p.pin === pin);
+  const p = findPin(shareId);
+  return Boolean(p && p.pin === pin);
+};
+// The gate folds the PIN record in force into the cookie, so the fake engine has
+// to produce a stable-per-PIN record the same way the real one does.
+const pinHashes = new Map<string, PasswordHash>();
+const fakePinRecord = (shareId: string): (PasswordHash & { length: number }) | null => {
+  const p = findPin(shareId);
+  if (!p) return null;
+  const key = `${shareId}:${p.pin}`;
+  let h = pinHashes.get(key);
+  if (!h) {
+    h = hashPassword(p.pin);
+    pinHashes.set(key, h);
+  }
+  return { ...h, length: p.length };
 };
 
 /** GET a loopback URL with an explicit Host header (fetch can't override Host reliably). */
@@ -113,7 +132,12 @@ before(async () => {
     },
     shareState: (shareId: string) => (shareId === "share1" || shareId === "web-share" ? { ready: true, devices: [] } : null),
     pinInfoForShare: fakePinInfo,
+    pinRecordForShare: fakePinRecord,
     verifyPin: fakeVerifyPin,
+    // "share1" and "paired-share" stand in for a live compare session: unlocking
+    // either has to unlock the other, or the reference pane hangs on "Connecting…".
+    pairedShareId: (shareId: string) =>
+      shareId === "share1" ? "paired-share" : shareId === "paired-share" ? "share1" : null,
     logStreamEvent: (shareId: string, deviceId: string, line: string) => {
       streamTrace.push(`${shareId}/${deviceId} ${line}`);
     },
@@ -264,6 +288,7 @@ describe("subdomain web hosting (host-based proxy)", () => {
         return isOurs ? { origin: ready ? devOrigin : null, ready, shareId: "web-share" } : null;
       },
       pinInfoForShare: fakePinInfo,
+      pinRecordForShare: fakePinRecord,
       verifyPin: fakeVerifyPin,
     } as unknown as PreviewEngine;
 
@@ -387,6 +412,104 @@ describe("PIN gate (path-based share)", () => {
     const unlocked = await fetch(`${base()}/s/share1/state`, { headers: { cookie } });
     const body = (await unlocked.json()) as { locked?: boolean };
     assert.equal(body.locked, false);
+  });
+
+  it("one PIN unlocks both panes of a compare session", async () => {
+    // The compare viewer is ONE page showing two shares, but the reference pane
+    // streams from its OWN shareId, so its own path-scoped cookie. Before this,
+    // unlocking the working share left the reference pane refusing every WS
+    // upgrade ("share is PIN-locked") — the pane sat on "Connecting…" forever
+    // with no pad and no error. `paired-share` is wired as share1's reference.
+    pinState.also = { shareId: "paired-share", length: 4, pin: "4321" };
+    try {
+      const locked = await fetch(`${base()}/s/paired-share/dev/ios-0/stream.mjpeg`);
+      assert.equal(locked.status, 401, "the reference pane starts gated");
+
+      const good = await fetch(`${base()}/s/share1/unlock`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pin: "1234" }),
+      });
+      assert.equal(good.status, 200);
+
+      // Two cookies, same name, distinct paths — so pick the partner's by Path.
+      const all = good.headers.getSetCookie?.() ?? [];
+      const partner = all.find((c) => c.includes("Path=/s/paired-share"));
+      assert.ok(partner, `expected an unlock cookie scoped to the reference, got: ${all.join(" | ")}`);
+      const cookie = `deck_unlock=${/deck_unlock=([^;]+)/.exec(partner)![1]}`;
+
+      const opened = await fetch(`${base()}/s/paired-share/dev/ios-0/stream.mjpeg`, { headers: { cookie } });
+      assert.notEqual(opened.status, 401, "the reference pane must no longer be PIN-gated");
+    } finally {
+      pinState.also = null;
+    }
+  });
+
+  it("tops up the partner's cookie on /state when the pair formed after the unlock", async () => {
+    // Unlocking mints the partner cookie — but only for a pair that EXISTS at
+    // that moment. Two previews that only became a pair once the second booted
+    // (or a cookie carried over from an earlier session) left the reference pane
+    // streaming from a shareId this browser had no cookie for, stuck on
+    // "Connecting…" with no way to unlock it: the pad only renders for the
+    // page's own share. /state is polled, so the pair self-heals in one poll.
+    const good = await fetch(`${base()}/s/share1/unlock`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pin: "1234" }),
+    });
+    assert.equal(good.status, 200);
+    const own = (good.headers.getSetCookie?.() ?? []).find((c) => c.includes("Path=/s/share1"))!;
+    const cookie = `deck_unlock=${/deck_unlock=([^;]+)/.exec(own)![1]}`;
+
+    // NOW the partner gets a PIN — i.e. the pair formed after the unlock.
+    pinState.also = { shareId: "paired-share", length: 4, pin: "4321" };
+    try {
+      assert.equal((await fetch(`${base()}/s/paired-share/dev/ios-0/stream.mjpeg`)).status, 401);
+
+      const state = await fetch(`${base()}/s/share1/state`, { headers: { cookie } });
+      assert.equal(state.status, 200);
+      const partner = (state.headers.getSetCookie?.() ?? []).find((c) => c.includes("Path=/s/paired-share"));
+      assert.ok(partner, "polling /state on an unlocked share must mint the partner's cookie");
+
+      const partnerCookie = `deck_unlock=${/deck_unlock=([^;]+)/.exec(partner)![1]}`;
+      const opened = await fetch(`${base()}/s/paired-share/dev/ios-0/stream.mjpeg`, { headers: { cookie: partnerCookie } });
+      assert.notEqual(opened.status, 401, "the reference pane must stream after the top-up");
+    } finally {
+      pinState.also = null;
+    }
+  });
+
+  it("does not mint a partner cookie for a LOCKED share's /state", async () => {
+    // The top-up must ride on an already-proven unlock, never hand one out.
+    pinState.also = { shareId: "paired-share", length: 4, pin: "4321" };
+    try {
+      const state = await fetch(`${base()}/s/share1/state`);
+      assert.equal(((await state.json()) as { locked?: boolean }).locked, true);
+      assert.equal((state.headers.getSetCookie?.() ?? []).length, 0, "a locked share must set no cookies");
+    } finally {
+      pinState.also = null;
+    }
+  });
+
+  it("does not mint a partner cookie for a PUBLIC share's /state", async () => {
+    // The hole this closes: a compare/migration reference pane is public by
+    // construction, and pairing is symmetric — so /state on the PUBLIC side used
+    // to hand any anonymous caller an unlock cookie for the PIN-protected
+    // working share, which is the whole PIN bypassed with just the public link.
+    const wasCurrent = pinState.current;
+    pinState.current = null; // share1 public
+    pinState.also = { shareId: "paired-share", length: 4, pin: "4321" };
+    try {
+      const state = await fetch(`${base()}/s/share1/state`);
+      assert.equal(state.status, 200);
+      assert.equal(((await state.json()) as { locked?: boolean }).locked, false);
+      const leaked = (state.headers.getSetCookie?.() ?? []).find((c) => c.includes("Path=/s/paired-share"));
+      assert.equal(leaked, undefined, "a public share must never unlock its protected partner");
+      assert.equal((await fetch(`${base()}/s/paired-share/dev/ios-0/stream.mjpeg`)).status, 401);
+    } finally {
+      pinState.also = null;
+      pinState.current = wasCurrent;
+    }
   });
 
   it("throttles after repeated wrong PINs → 429", async () => {

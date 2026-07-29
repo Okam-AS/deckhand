@@ -34,12 +34,11 @@ describe("addAppEntry", () => {
   it("adds an app and applies defaults", () => {
     const apps = addAppEntry([], { id: "my-app", repo: "github.com/x/my-app", type: "expo" });
     assert.equal(apps[0]!.defaultBranch, "main");
-    assert.equal(apps[0]!.allowForkPRs, false);
   });
 
   it("rejects a duplicate id and an invalid id", () => {
     const existing: App[] = [
-      { id: "a", repo: "x/a", type: "expo", defaultBranch: "main", allowForkPRs: false, env: {} },
+      { id: "a", repo: "x/a", type: "expo", defaultBranch: "main", env: {} },
     ];
     assert.throws(() => addAppEntry(existing, { id: "a", repo: "x/a", type: "expo" }), /already exists/);
     assert.throws(() => addAppEntry([], { id: "Bad_Id", repo: "x/a", type: "expo" }));

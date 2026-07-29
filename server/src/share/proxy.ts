@@ -6,13 +6,17 @@ import express from "express";
 import { WebSocket, WebSocketServer } from "ws";
 import { PreviewError, type PreviewEngine } from "../engine/preview.ts";
 import { isAllowedSubpath } from "../streaming/backend.ts";
-import { signUnlockCookie, verifyUnlockCookie } from "./shares.ts";
+import { signUnlockCookie, verifyUnlockCookie, pinFingerprint } from "./shares.ts";
 
 // ---------------------------------------------------------------------------
 // Share viewer + scoped proxy (PLAN §8/§9). The ONLY public path to a device:
 // forwards just the helper's video (stream.avcc/stream.mjpeg), ax, and input
 // (ws) subpaths, and only for a device that belongs to the share's preview.
-// serve-sim's other routes (exec, devtools, camera, grid) are never reachable.
+// serve-sim's other routes (devtools, camera, grid) are not reachable THROUGH HERE — but
+// this allow-list is not the boundary it reads as: a simulator shares the host's network
+// stack, so a share holder with device input can drive the helper on loopback directly,
+// never touching this proxy. serve-sim is vendored with its host shell-exec routes patched
+// out for exactly that reason (see streaming/serveSim.ts).
 // ---------------------------------------------------------------------------
 
 export interface ShareDeps {
@@ -186,6 +190,14 @@ export interface PinGate {
   allowed(cookieHeader: string | undefined, shareId: string): boolean;
   /** Try a PIN: on success returns the signed cookie value; on failure the lockout ms (0 = wrong PIN). */
   attempt(shareId: string, pin: string): { ok: true; cookie: string } | { ok: false; lockedMs: number };
+  /**
+   * Mint an unlock cookie for a share WITHOUT a PIN attempt, for the paired
+   * share of a compare session the caller has already unlocked. Never reachable
+   * from a request path on its own — the unlock route calls it only after
+   * `attempt` succeeded on the partner, and only for a live pairing.
+   * Returns null when the share has no PIN (nothing to unlock).
+   */
+  issue(shareId: string): string | null;
 }
 
 export interface PinGateOptions {
@@ -208,9 +220,20 @@ export function createPinGate(engine: PreviewEngine, shareSecret: string, opts: 
   return {
     info: (shareId) => engine.pinInfoForShare(shareId),
     allowed: (cookieHeader, shareId) => {
-      if (!engine.pinInfoForShare(shareId).required) return true;
+      const rec = engine.pinRecordForShare(shareId);
+      if (!rec) return true;
       const cookie = parseCookies(cookieHeader)[UNLOCK_COOKIE];
-      return cookie ? verifyUnlockCookie(shareSecret, shareId, cookie, now()) : false;
+      // Checked against the PIN in force RIGHT NOW, not just the signature: a
+      // cookie issued under a previous PIN (or under no PIN) must stop working
+      // the moment set_pin changes it, not 12 hours later.
+      return cookie ? verifyUnlockCookie(shareSecret, shareId, cookie, now(), pinFingerprint(shareSecret, rec)) : false;
+    },
+    issue: (shareId) => {
+      const rec = engine.pinRecordForShare(shareId);
+      if (!rec) return null;
+      // Bound to the PIN in force now, exactly like `attempt` — so set_pin on
+      // the partner invalidates this cookie too.
+      return signUnlockCookie(shareSecret, shareId, now() + ttlMs, pinFingerprint(shareSecret, rec));
     },
     attempt: (shareId, pin) => {
       // Only track shares that exist. `POST /s/<anything>/unlock` used to mint a
@@ -232,7 +255,8 @@ export function createPinGate(engine: PreviewEngine, shareSecret: string, opts: 
       if (remaining > 0) return { ok: false, lockedMs: remaining };
       if (engine.verifyPin(shareId, pin)) {
         throttle.delete(shareId);
-        return { ok: true, cookie: signUnlockCookie(shareSecret, shareId, now() + ttlMs) };
+        const fp = pinFingerprint(shareSecret, engine.pinRecordForShare(shareId));
+        return { ok: true, cookie: signUnlockCookie(shareSecret, shareId, now() + ttlMs, fp) };
       }
       t.fails += 1;
       if (t.fails >= maxFails) {
@@ -384,6 +408,17 @@ export function createHostWebProxyMiddleware(engine: PreviewEngine, pinGate: Pin
   };
 }
 
+/** Set the path-scoped unlock cookie for one share. */
+function setUnlockCookie(res: express.Response, req: express.Request, shareId: string, cookie: string): void {
+  res.cookie(UNLOCK_COOKIE, cookie, {
+    httpOnly: true,
+    secure: isHttps(req),
+    sameSite: "lax",
+    path: `/s/${shareId}`,
+    maxAge: UNLOCK_TTL_MS,
+  });
+}
+
 export function createShareRouter(deps: ShareDeps): express.Router {
   const router = express.Router();
 
@@ -397,6 +432,32 @@ export function createShareRouter(deps: ShareDeps): express.Router {
     if (info.required && !deps.pinGate.allowed(req.headers.cookie, shareId)) {
       res.json({ locked: true, pinLength: info.length });
       return;
+    }
+    // This share is PIN-protected and THIS browser proved the PIN — so top up
+    // the partner's cookie too. /unlock does this at PIN time, but a pair can
+    // form AFTER the unlock (two independently started previews that only became
+    // a pair once the second one booted, or a cookie from an earlier session).
+    // The reference pane then streamed from a shareId this browser had no cookie
+    // for and sat on "Connecting…" forever, with no way to unlock it: the pad
+    // only ever renders for the page's own share. This route is polled, so the
+    // pair self-heals within one poll.
+    //
+    // `info.required` is the whole authorization check: we only get here having
+    // already returned above when the PIN was required and unmet. Without it a
+    // PUBLIC share would mint its protected partner's cookie to any caller —
+    // and every compare/migration reference pane is public by construction
+    // (bootReference), so `GET /s/<publicReferenceId>/state` would have handed
+    // out an unlock cookie for the protected working share.
+    if (info.required) {
+      const partner = deps.engine.pairedShareId(shareId);
+      // The `allowed` term is belt-and-braces, not an optimisation: the
+      // partner's cookie is path-scoped to `/s/<partner>`, so the browser never
+      // sends it here and this is in practice always true — the partner's cookie
+      // is re-minted on every poll, identical each time.
+      if (partner && deps.pinGate.info(partner).required && !deps.pinGate.allowed(req.headers.cookie, partner)) {
+        const cookie = deps.pinGate.issue(partner);
+        if (cookie) setUnlockCookie(res, req, partner, cookie);
+      }
     }
     const state = deps.engine.shareState(shareId);
     if (!state) {
@@ -413,13 +474,22 @@ export function createShareRouter(deps: ShareDeps): express.Router {
     const pin = typeof (req.body as { pin?: unknown })?.pin === "string" ? (req.body as { pin: string }).pin : "";
     const r = deps.pinGate.attempt(shareId, pin);
     if (r.ok) {
-      res.cookie(UNLOCK_COOKIE, r.cookie, {
-        httpOnly: true,
-        secure: isHttps(req),
-        sameSite: "lax",
-        path: `/s/${shareId}`,
-        maxAge: UNLOCK_TTL_MS,
-      });
+      const setUnlock = (id: string, cookie: string) => setUnlockCookie(res, req, id, cookie);
+      setUnlock(shareId, r.cookie);
+      // A compare session is one page showing two shares side by side. The
+      // reference pane streams from its OWN shareId, so its own path-scoped
+      // cookie: without this, a PIN on either share left the other pane stuck
+      // on "Connecting…" while its WS was refused once a second. Unlocking one
+      // side of a live pair unlocks the other — the operator asked for one PIN,
+      // and the pair is only ever shown together.
+      const paired = deps.engine.pairedShareId(shareId);
+      // Mint the partner's cookie through ITS OWN gate, so a partner with a
+      // different PIN length/secret still gets a correctly-bound cookie, and a
+      // partner with no PIN at all is simply skipped.
+      if (paired && deps.pinGate.info(paired).required) {
+        const p = deps.pinGate.issue(paired);
+        if (p) setUnlock(paired, p);
+      }
       res.json({ ok: true });
     } else if (r.lockedMs > 0) {
       res.status(429).json({ ok: false, lockedMs: r.lockedMs });

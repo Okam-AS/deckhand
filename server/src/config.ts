@@ -127,7 +127,26 @@ export type Config = z.infer<typeof configSchema>;
 export const appTypeSchema = z.enum(["expo", "react-native", "nativescript", "web"]);
 export type AppType = z.infer<typeof appTypeSchema>;
 
+/**
+ * Keys that older apps.yaml files may still carry. Stripped before the strict
+ * parse so an existing file keeps loading after a field is dropped.
+ *
+ * `allowForkPRs` (removed 2026-07-27): it was parsed but never read anywhere,
+ * while PLAN.md promised "fork PRs rejected unless allowForkPRs". A flag that
+ * only reads as a protection is worse than none — previewing a fork PR runs
+ * that PR's install and build scripts on this machine either way, which is the
+ * accepted "builds are RCE by design" tradeoff (PLAN §11 item 7). If that ever
+ * needs gating, it must be gated for real, not by a boolean nobody consults.
+ */
+const LEGACY_APP_KEYS = ["allowForkPRs"] as const;
+
 export const appSchema = z
+  .preprocess((raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+    const rest = { ...(raw as Record<string, unknown>) };
+    for (const k of LEGACY_APP_KEYS) delete rest[k];
+    return rest;
+  }, z
   .object({
     id: z
       .string()
@@ -138,7 +157,6 @@ export const appSchema = z
     path: z.string().min(1).startsWith("/", "path must be absolute").optional(),
     type: appTypeSchema,
     defaultBranch: z.string().min(1).default("main"),
-    allowForkPRs: z.boolean().default(false),
     bundleId: z.string().min(1).optional(),
     /** web only: the npm script that starts the dev server (default "dev"). */
     devScript: z.string().min(1).optional(),
@@ -153,7 +171,7 @@ export const appSchema = z
   .refine((a) => a.repo || a.path, { message: "an app needs a repo, a local path, or both" })
   .refine((a) => a.type !== "web" || Boolean(a.path), {
     message: "a web app needs a local path — web previews are local dev servers, not git builds",
-  });
+  }));
 
 export type App = z.infer<typeof appSchema>;
 
@@ -272,7 +290,10 @@ export function githubPatPath(config: Config): string {
  */
 export function parseRepo(repo: string): { host: string; owner: string; name: string } {
   let s = repo.trim().replace(/\.git$/, "");
-  s = s.replace(/^https?:\/\//, "").replace(/^git@/, "");
+  // Strip the scheme, then any userinfo (`git@`, but also `user@` / `user:token@`
+  // in a pasted https URL) — leaving it in made the host `user@github.com`, which
+  // the askpass host pin rejects outright.
+  s = s.replace(/^https?:\/\//, "").replace(/^[^/]*@/, "");
   // Normalize the scp-style colon separator to a slash: host:owner/name.
   s = s.replace(":", "/");
   const parts = s.split("/").filter(Boolean);

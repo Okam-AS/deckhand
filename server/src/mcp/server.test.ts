@@ -32,11 +32,11 @@ const webDir = mkdtempSync(join(tmpdir(), "deckhand-mcp-web-"));
 const webNuxtDir = mkdtempSync(join(tmpdir(), "deckhand-mcp-nuxt-"));
 writeFileSync(join(webNuxtDir, "package.json"), JSON.stringify({ dependencies: { nuxt: "^2.14.11" } }));
 const apps: App[] = [
-  { id: "app-a", repo: "github.com/ainfrastructure/a", type: "react-native", defaultBranch: "main", allowForkPRs: false, bundleId: "com.a", env: {} },
-  { id: "app-b", repo: "github.com/other-org/b", type: "react-native", defaultBranch: "main", allowForkPRs: false, bundleId: "com.b", env: {} },
-  { id: "app-local", path: localDir, type: "nativescript", defaultBranch: "main", allowForkPRs: false, bundleId: "org.ns.local", env: {} },
-  { id: "app-web", path: webDir, type: "web", defaultBranch: "main", allowForkPRs: false, env: {} },
-  { id: "app-web-nuxt", path: webNuxtDir, type: "web", defaultBranch: "main", allowForkPRs: false, env: {} },
+  { id: "app-a", repo: "github.com/ainfrastructure/a", type: "react-native", defaultBranch: "main", bundleId: "com.a", env: {} },
+  { id: "app-b", repo: "github.com/other-org/b", type: "react-native", defaultBranch: "main", bundleId: "com.b", env: {} },
+  { id: "app-local", path: localDir, type: "nativescript", defaultBranch: "main", bundleId: "org.ns.local", env: {} },
+  { id: "app-web", path: webDir, type: "web", defaultBranch: "main", env: {} },
+  { id: "app-web-nuxt", path: webNuxtDir, type: "web", defaultBranch: "main", env: {} },
 ];
 
 const ADMIN = "a".repeat(64);
@@ -73,7 +73,7 @@ function fakeEngine(): PreviewEngine {
       screenshotPng: async () => Buffer.from([0x89, 0x50, 0x4e, 0x47]),
     } as unknown as PreviewEngineDeps["simctl"],
     streaming: { attach: async (_d: StreamDeviceRef) => fakeStream, reapOrphans: async () => {} } as unknown as PreviewEngineDeps["streaming"],
-    metro: { ensure: async () => ({ manifestUrl: "http://127.0.0.1:8081" }), stop: async () => {} } as unknown as PreviewEngineDeps["metro"],
+    metro: { ensure: async () => ({ manifestUrl: "http://127.0.0.1:8081" }), stop: async () => {}, stopApp: async () => {} } as unknown as PreviewEngineDeps["metro"],
     store: new StateStore(`/tmp/deckhand-mcp-${Math.random().toString(36).slice(2)}.json`),
     audit: { record: () => {} } as unknown as PreviewEngineDeps["audit"],
     devProcs: {
@@ -96,10 +96,11 @@ function fakeEngine(): PreviewEngine {
 
 let base: string;
 let server: ReturnType<typeof import("node:http").createServer>;
+let engine: PreviewEngine;
 
 before(async () => {
   const { createServer } = await import("node:http");
-  const engine = fakeEngine();
+  engine = fakeEngine();
   const app = createApp({
     engine,
     apps,
@@ -224,6 +225,66 @@ describe("MCP server (end-to-end over HTTP)", () => {
     assert.ok(reference.shareId);
     assert.notEqual(reference.shareId, res.shareId); // reference must not collide with the working app's shareId
     await admin.callTool({ name: "stop_preview", arguments: { previewId: res.previewId as string } }); // cascades to the reference
+    await admin.close();
+  });
+
+  it("tears the reference back down when the working boot fails (no orphaned devices)", async () => {
+    // The reference boots first and takes devices. If the working boot then
+    // throws — most likely BECAUSE of device capacity — leaving the reference up
+    // permanently holds the slots that caused the failure, with no MCP handle to
+    // reach it.
+    const admin = await client(ADMIN);
+    const devices = Array.from({ length: 4 }, () => ({ platform: "ios" as const })); // 4 + 4 > maxTotalDevices 6
+    const args = { app: "app-a", against: { app: "app-a" }, devices, share: { access: "public" } };
+    const res = await admin.callTool({ name: "compare_start", arguments: args });
+    assert.ok(res.isError || parse(res).ok === false, "the working boot must fail on capacity");
+
+    for (let i = 0; i < 100 && engine.list().length > 0; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(engine.list().map((p) => p.previewId), [], "the reference must not survive the failed compare");
+
+    // ...and the freed capacity is usable again.
+    const after = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-a", ref: "main", devices, share: { access: "public" } } }));
+    assert.equal(after.ok, true);
+    await admin.callTool({ name: "stop_preview", arguments: { previewId: after.previewId as string } });
+    await admin.close();
+  });
+
+  it("denies a preview whose app is no longer registered, and still allows a compare reference", async () => {
+    // previewOwnedByPrincipal used to SKIP the scope check when apps.find()
+    // missed, so any valid token could drive `logs` / `ui` / `stop_preview` on
+    // an orphaned preview. It now denies by default — and a compare reference
+    // (synthetic app id, never in apps.yaml, public by construction) stays
+    // reachable only because it is marked as a reference on the record.
+    const admin = await client(ADMIN);
+    const member = await client(MEMBER);
+
+    // A compare reference: allowed, and marked as such rather than inferred.
+    const cmp = parse(await admin.callTool({ name: "compare_start", arguments: { app: "app-a", against: { app: "app-a" }, share: { access: "public" } } }));
+    assert.equal(cmp.ok, true);
+    const refId = engine
+      .list()
+      .map((p) => p.previewId)
+      .find((id) => id !== cmp.previewId && (engine.appIdFor(id) ?? "").startsWith("cmp-"));
+    assert.ok(refId, "the compare reference booted");
+    assert.equal(engine.isReference(refId), true);
+    assert.equal(engine.isReference(cmp.previewId as string), false);
+
+    // An orphan: app-a's preview, with app-a no longer registered.
+    const own = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-a", ref: "main", devices: [{ platform: "ios" }], share: { access: "public" } } }));
+    assert.equal(own.ok, true);
+    const idx = apps.findIndex((a) => a.id === "app-a");
+    const [removed] = apps.splice(idx, 1);
+    try {
+      const orphan = parse(await member.callTool({ name: "logs", arguments: { previewId: own.previewId as string } }));
+      assert.equal(orphan.ok, false, "an orphaned preview must not be driveable");
+      assert.equal((orphan.error as { code: string }).code, "forbidden");
+    } finally {
+      apps.splice(idx, 0, removed!);
+    }
+
+    await member.close();
+    await admin.callTool({ name: "stop_preview", arguments: { previewId: cmp.previewId as string } });
+    await admin.callTool({ name: "stop_preview", arguments: { previewId: own.previewId as string } });
     await admin.close();
   });
 
@@ -518,6 +579,30 @@ describe("daily-loop contract (local previews, stable URLs)", () => {
     await admin.close();
   });
 
+  it("a failed start_preview does not leave the running share un-protected", async () => {
+    // The PIN is applied BEFORE the boot (the share url is stable per app), so a
+    // boot that throws afterwards must roll it back — otherwise the still-live
+    // share of this app silently goes public.
+    const admin = await client(ADMIN);
+    const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "pin", pin: "1234" } } }));
+    assert.equal(started.ok, true);
+    const shareId = String(started.shareId);
+    assert.equal(engine.pinInfoForShare(shareId).required, true);
+
+    // Two iOS devices on a local app is rejected inside startPreview.
+    const failed = parse(
+      await admin.callTool({
+        name: "start_preview",
+        arguments: { app: "app-local", share: { access: "public" }, devices: [{ platform: "ios" }, { platform: "ios" }] },
+      }),
+    );
+    assert.equal(failed.ok, false);
+    assert.equal(engine.pinInfoForShare(shareId).required, true, "the live share must still be PIN-protected");
+
+    await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } });
+    await admin.close();
+  });
+
   it("status/restart for an app with no running preview return an actionable no_preview", async () => {
     const admin = await client(ADMIN);
     const res = parse(await admin.callTool({ name: "preview_status", arguments: { app: "app-b" } }));
@@ -537,7 +622,7 @@ describe("daily-loop contract (local previews, stable URLs)", () => {
 describe("web previews (device-less, local dev server)", () => {
   it("start_preview of a web app is local, needs no devices, and hands over a stable url", async () => {
     const admin = await client(ADMIN);
-    const res = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-web", share: { access: "public" } } })) as {
+    const res = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-web", share: { access: "pin", pin: "4321" } } })) as {
       ok: boolean;
       source?: string;
       url?: string;
@@ -550,6 +635,32 @@ describe("web previews (device-less, local dev server)", () => {
     assert.equal(res.devices?.length, 1, "a web preview has exactly one pseudo-device");
     assert.equal(res.devices?.[0]?.deviceId, "web-0");
     assert.match(String(res.nextStep), /hot-reload|dev server/i);
+    await admin.close();
+  });
+
+  it("refuses to share a web app publicly, at the tool AND at the engine", async () => {
+    // A mobile share exposes four allow-listed helper subpaths; a web share
+    // exposes the dev server's whole route surface, and a subdomain-hosted
+    // framework serves at a bare public hostname with no shareId in the URL.
+    const admin = await client(ADMIN);
+    const res = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-web", share: { access: "public" } } }));
+    assert.equal(res.ok, false);
+    assert.equal((res.error as { code: string }).code, "web_needs_pin");
+
+    // The engine holds the line on its own, so no other caller can route around
+    // it. A fresh app id, so no PIN from an earlier test is in force for it.
+    const webApp = { ...apps.find((a) => a.id === "app-web")!, id: "app-web-unpinned" };
+    assert.throws(
+      () => engine.startPreview({ app: webApp, source: "local", devices: [{ platform: "web" }], access: "public" }),
+      /needs a share PIN/,
+    );
+
+    // And a live web share can't be un-protected after the fact.
+    const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-web", share: { access: "pin", pin: "4321" } } }));
+    assert.equal(started.ok, true);
+    const unlocked = parse(await admin.callTool({ name: "set_pin", arguments: { app: "app-web", remove: true } }));
+    assert.equal(unlocked.ok, false, "removing the PIN of a live web share must fail");
+    await admin.callTool({ name: "stop_preview", arguments: { previewId: started.previewId as string } });
     await admin.close();
   });
 
@@ -566,7 +677,7 @@ describe("web previews (device-less, local dev server)", () => {
 
   it("a Nuxt (subdomain-hosted) web app with no webHost gets a loopback url + an advisory", async () => {
     const admin = await client(ADMIN);
-    const res = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-web-nuxt", share: { access: "public" } } })) as {
+    const res = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-web-nuxt", share: { access: "pin", pin: "4321" } } })) as {
       ok: boolean;
       url?: string;
       nextStep?: string;
@@ -582,7 +693,7 @@ describe("web previews (device-less, local dev server)", () => {
 
   it("screenshot on a web preview fails with a clear, actionable error", async () => {
     const admin = await client(ADMIN);
-    const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-web", share: { access: "public" } } })) as {
+    const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-web", share: { access: "pin", pin: "4321" } } })) as {
       previewId: string;
     };
     const ready = await waitReadyByApp(admin, "app-web");

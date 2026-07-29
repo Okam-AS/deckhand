@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PreviewEngine, PreviewError, type PreviewEngineDeps } from "./preview.ts";
+import { PreviewEngine, PreviewError, buildStepDetail, redactForShare, type PreviewEngineDeps } from "./preview.ts";
 import type { SimDeckControl } from "../testing/control.ts";
 import type { App, Config } from "../config.ts";
 import type { RunResult } from "./procs.ts";
@@ -35,7 +35,7 @@ const rnApp: App = {
   repo: "github.com/ainfrastructure/my-app",
   type: "react-native", // avoids the app.json/metro path — fully fakeable
   defaultBranch: "main",
-  allowForkPRs: false,
+
   bundleId: "com.example.myapp",
   env: { EXPO_PUBLIC_API_URL: "https://staging" },
 };
@@ -48,6 +48,7 @@ interface Harness {
   worktreeCalls: string[];
   devProcCalls: string[];
   detached: string[];
+  audit: { tool: string; args: unknown }[];
 }
 
 function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (step: CommandStep) => RunResult = () => ({ code: 0, timedOut: false, aborted: false })): Harness {
@@ -57,6 +58,7 @@ function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (
   const worktreeCalls: string[] = [];
   const devProcCalls: string[] = [];
   const detached: string[] = [];
+  const audit: { tool: string; args: unknown }[] = [];
 
   const devAlive = new Set<string>();
   const devProcs = {
@@ -158,9 +160,9 @@ function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (
     } as unknown as PreviewEngineDeps["worktrees"],
     simctl,
     streaming: streaming as unknown as PreviewEngineDeps["streaming"],
-    metro: { ensure: async () => ({ manifestUrl: "http://127.0.0.1:8081" }), stop: async () => {} } as unknown as PreviewEngineDeps["metro"],
+    metro: { ensure: async () => ({ manifestUrl: "http://127.0.0.1:8081" }), stop: async () => {}, stopApp: async () => {} } as unknown as PreviewEngineDeps["metro"],
     store: new StateStore(`/tmp/deckhand-noop-${Math.random().toString(36).slice(2)}.json`),
-    audit: { record: () => {} } as unknown as PreviewEngineDeps["audit"],
+    audit: { record: (e: { tool: string; args: unknown }) => void audit.push({ tool: e.tool, args: e.args }) } as unknown as PreviewEngineDeps["audit"],
     devProcs,
     runStep: async (step, opts) => {
       buildEnvSeen.push(step.env);
@@ -172,7 +174,7 @@ function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (
     genShareId: () => "share-abc",
     ...overrides,
   };
-  return { engine: new PreviewEngine(deps), simctlCalls, buildEnvSeen, removedWorktrees, worktreeCalls, devProcCalls, detached };
+  return { engine: new PreviewEngine(deps), simctlCalls, buildEnvSeen, removedWorktrees, worktreeCalls, devProcCalls, detached, audit };
 }
 
 async function waitForPhase(engine: PreviewEngine, previewId: string, phases: string[], timeoutMs = 2000): Promise<string> {
@@ -184,6 +186,59 @@ async function waitForPhase(engine: PreviewEngine, previewId: string, phases: st
   }
   return engine.getStatus(previewId)?.phase ?? "gone";
 }
+
+describe("redactForShare", () => {
+  it("keeps the sentence and drops private repo names and host paths", () => {
+    // The reason reaches whoever holds the share link, PUBLIC shares included.
+    const out = redactForShare(
+      "submodule checkout failed for github.com/acme/app: fatal: repository 'https://github.com/acme/secret-design-system.git/' not found",
+    );
+    assert.ok(!out.includes("secret-design-system"), out);
+    assert.ok(out.startsWith("submodule checkout failed"), out);
+
+    const wt = redactForShare("worktree add failed: fatal: cannot create /Users/dana/.deckhand/worktrees/app-a/main");
+    assert.ok(!wt.includes("dana"), wt);
+    assert.ok(!wt.includes("/Users"), wt);
+    // The rest of the path stays: it is deckhand's own layout plus the app and
+    // ref the share holder is already looking at.
+    assert.ok(wt.includes("worktree add failed"), wt);
+  });
+
+  it("redacts a scheme-less repo reference too", () => {
+    const out = redactForShare("clone failed: github.com/acme/secret-design-system not found");
+    assert.ok(!out.includes("secret-design-system"), out);
+  });
+
+  it("redacts a path that is not preceded by a space or a quote", () => {
+    const out = redactForShare("ld: framework not found at [/Users/dana/.deckhand/worktrees/app-a/ios/Pods]");
+    assert.ok(!out.includes("dana"), out);
+    assert.ok(out.includes("framework not found"), out);
+  });
+
+  it("keeps the actionable half: file:line:col, and Android component names", () => {
+    // The reason is what a share holder relays back, so over-redaction costs as
+    // much as under-redaction: WHERE it broke is the useful part.
+    assert.equal(redactForShare("index.js:23:5: SyntaxError: unexpected token"), "index.js:23:5: SyntaxError: unexpected token");
+    const swift = redactForShare("/Users/dana/wt/App.swift:12:3: error: no such module 'Foo'");
+    assert.ok(!swift.includes("dana"), swift);
+    assert.ok(swift.includes("App.swift:12:3"), swift);
+    assert.equal(
+      redactForShare("Starting com.acme.app/.MainActivity"),
+      "Starting com.acme.app/.MainActivity",
+    );
+  });
+
+  it("strips a bare home directory and a self-hosted host", () => {
+    const home = redactForShare("HOME=/Users/dana is not writable");
+    assert.ok(!home.includes("dana"), home);
+    const gl = redactForShare("clone failed: gitlab.acme.internal/platform/private-core not found");
+    assert.ok(!gl.includes("private-core"), gl);
+  });
+
+  it("leaves an ordinary build error untouched", () => {
+    assert.equal(redactForShare("xcodebuild exited 65"), "xcodebuild exited 65");
+  });
+});
 
 describe("PreviewEngine.startPreview", () => {
   it("returns immediately with a viewer url and drives one iOS device to ready", async () => {
@@ -238,6 +293,24 @@ describe("PreviewEngine.startPreview", () => {
     const st = h.engine.getStatus("pv1")!;
     assert.match(st.devices[0]!.error ?? "", /build step "build" failed/);
     assert.ok((st.devices[0]!.logTail ?? "").length > 0);
+  });
+
+  it("fails the boot when the bundle id isn't a valid bundle id", async () => {
+    // bundleId comes from the previewed repo's own config and reaches multi-arg
+    // `adb shell` calls as an unquoted token adb joins into a shell command line.
+    const h = makeEngine();
+    h.engine.startPreview({
+      app: { ...rnApp, bundleId: "com.example.app; id > /data/local/tmp/pwned" },
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "ios" }],
+      access: "public",
+    });
+    const phase = await waitForPhase(h.engine, "pv1", ["failed"]);
+    assert.equal(phase, "failed");
+    assert.match(h.engine.getStatus("pv1")!.devices[0]!.error ?? "", /is not a valid bundle id/);
+    // Nothing was launched with it.
+    assert.equal(h.simctlCalls.filter((c) => c.startsWith("launch ")).length, 0);
   });
 
   it("builds once and installs to the second device (build-once-install-many)", async () => {
@@ -321,6 +394,40 @@ describe("PreviewEngine.startPreview", () => {
 });
 
 describe("PreviewEngine.stopPreview", () => {
+  it("stops the app's Metro once no preview needs it", async () => {
+    // Teardown killed the dev processes but never Metro: every finished Expo
+    // preview left one listening, and after a few app switches the whole
+    // 8081-8099 range was spoken for and previews failed to start at all.
+    const stoppedApps: string[] = [];
+    let n = 0;
+    const h = makeEngine({
+      genPreviewId: () => `pv${++n}`,
+      genShareId: () => `share-${n}`,
+      metro: {
+        ensure: async () => ({ manifestUrl: "http://127.0.0.1:8081" }),
+        stop: async () => {},
+        stopApp: async (appId: string) => void stoppedApps.push(appId),
+      } as unknown as PreviewEngineDeps["metro"],
+    });
+    // TWO live previews of the same app (different refs — one Metro serves
+    // whichever is current). Stopping the first must NOT pull the dev server
+    // out from under the second.
+    for (const branch of ["main", "feature"]) {
+      h.engine.startPreview({
+        app: rnApp,
+        source: "git",
+        spec: { kind: "branch", branch },
+        devices: [{ platform: "ios" }],
+        access: "public",
+      });
+      await waitForPhase(h.engine, `pv${n}`, ["ready", "failed"]);
+    }
+    await h.engine.stopPreview("pv1");
+    assert.deepEqual(stoppedApps, [], "another preview of this app is still live");
+    await h.engine.stopPreview("pv2");
+    assert.deepEqual(stoppedApps, [rnApp.id]);
+  });
+
   it("tears down the sim + worktree and forgets the preview", async () => {
     const h = makeEngine();
     h.engine.startPreview({
@@ -362,7 +469,7 @@ describe("local (dev-mode) previews", () => {
     path: localDir,
     type: "nativescript",
     defaultBranch: "main",
-    allowForkPRs: false,
+
     bundleId: "org.ns.demo",
     env: {},
   });
@@ -679,8 +786,8 @@ describe("PreviewEngine migration pairing", () => {
       let sh = 0;
       const h = makeEngine({ genPreviewId: () => `pv-${++pv}`, genShareId: () => `sh-${++sh}` });
 
-      const sourceApp: App = { id: "old-app", repo: "github.com/okam/old", type: "react-native", defaultBranch: "main", allowForkPRs: false, bundleId: "com.example.old", env: {} };
-      const targetApp: App = { id: "new-app", path: dir, repo: "github.com/okam/new", type: "react-native", defaultBranch: "main", allowForkPRs: false, bundleId: "com.example.new", migratesFrom: "old-app", env: {} };
+      const sourceApp: App = { id: "old-app", repo: "github.com/okam/old", type: "react-native", defaultBranch: "main", bundleId: "com.example.old", env: {} };
+      const targetApp: App = { id: "new-app", path: dir, repo: "github.com/okam/new", type: "react-native", defaultBranch: "main", bundleId: "com.example.new", migratesFrom: "old-app", env: {} };
 
       const src = h.engine.startPreview({ app: sourceApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
       await waitForPhase(h.engine, src.previewId, ["ready", "failed"]);
@@ -699,6 +806,38 @@ describe("PreviewEngine migration pairing", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("hides a migration source the target's viewer could never unlock", async () => {
+    // Two REGISTERED apps with independent PINs — unlike a compare reference,
+    // which is synthetic and always public. A public target must not carry a
+    // PIN-protected source's pane: unlock only propagates out of a proven PIN on
+    // the page's own share, so that pane would be refused every retry with no
+    // pad to type into, and minting its cookie anyway would hand the source's
+    // stream to anyone holding the target's public link.
+    let pv = 0;
+    let sh = 0;
+    const h = makeEngine({ genPreviewId: () => `pv-${++pv}`, genShareId: () => `sh-${++sh}` });
+    const sourceApp: App = { id: "old-app", repo: "github.com/okam/old", type: "react-native", defaultBranch: "main", bundleId: "com.example.old", env: {} };
+    const targetApp: App = { id: "new-app", repo: "github.com/okam/new", type: "react-native", defaultBranch: "main", bundleId: "com.example.new", migratesFrom: "old-app", env: {} };
+
+    const src = h.engine.startPreview({ app: sourceApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    await waitForPhase(h.engine, src.previewId, ["ready", "failed"]);
+    const tgt = h.engine.startPreview({ app: targetApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+
+    h.engine.setAppPin("old-app", "1234"); // source protected, target public
+    assert.equal(h.engine.shareState(tgt.shareId)!.pairedWith, undefined, "an unreachable source pane must not be advertised");
+    assert.equal(h.engine.pairedShareId(tgt.shareId), null, "and must not be handed an unlock cookie");
+
+    // Protect the target too and the pane comes back: the unlock now rides on a
+    // PIN this page actually proves, instead of being granted from nothing.
+    h.engine.setAppPin("new-app", "4321");
+    assert.equal(h.engine.shareState(tgt.shareId)!.pairedWith?.shareId, src.shareId);
+    assert.equal(h.engine.pairedShareId(tgt.shareId), src.shareId);
+
+    // The source's own page never renders a target pane, so it must never mint
+    // the target's cookie — that would be pure gratuitous widening.
+    assert.equal(h.engine.pairedShareId(src.shareId), null);
   });
 
   it("omits pairedWith and ledger for an ordinary (non-migration) app", async () => {
@@ -738,6 +877,28 @@ describe("PreviewEngine compare session", () => {
         ["Home", "pending"],
       ],
     );
+  });
+
+  it("reports the pairing from BOTH sides, so one PIN can unlock both panes", () => {
+    // The compare viewer streams the reference pane from the reference's own
+    // shareId, whose unlock cookie is path-scoped to it. The unlock route needs
+    // to find the partner from whichever side the viewer was opened on — else
+    // the second pane sits on "Connecting…" with its WS refused every second.
+    const h = makeEngine(uniqIds());
+    const ref = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    const work = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "feature" }, devices: [{ platform: "ios" }], access: "public" });
+    h.engine.startCompare(work.previewId, { shareId: ref.shareId, repo: "acme/app", ref: "main" }, []);
+
+    assert.equal(h.engine.pairedShareId(work.shareId), ref.shareId);
+    assert.equal(h.engine.pairedShareId(ref.shareId), work.shareId);
+    assert.equal(h.engine.pairedShareId("no-such-share"), null);
+  });
+
+  it("reports no pairing when the reference isn't live (nothing to unlock)", () => {
+    const h = makeEngine(uniqIds());
+    const work = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    h.engine.startCompare(work.previewId, { shareId: "not-live", repo: "r", ref: "main" }, ["A"]);
+    assert.equal(h.engine.pairedShareId(work.shareId), null);
   });
 
   it("sets a verdict, appends an unknown item, and recounts", () => {
@@ -1512,5 +1673,73 @@ describe("pool leases and wedged previews", () => {
     clock.t += 40 * 60_000; // past stuckMinutes with no phase change at all
     assert.deepEqual(await h.engine.sweepIdle(), ["pv1"]);
     assert.equal(h.engine.getStatus("pv1"), null);
+  });
+});
+
+describe("PreviewEngine share PIN records", () => {
+  it("keeps the stored record when the same PIN is set again (viewers stay unlocked)", () => {
+    // start_preview is idempotent and re-applies the PIN on every call, including
+    // "what's the link?" re-calls. Re-hashing would mint a new salt, hence a new
+    // pinFingerprint, hence reject every live unlock cookie mid-session.
+    const h = makeEngine();
+    h.engine.setAppPin("app-1", "1234");
+    const first = h.engine.pinRecordForApp("app-1");
+    h.engine.setAppPin("app-1", "1234");
+    assert.deepEqual(h.engine.pinRecordForApp("app-1"), first);
+
+    // ...but a genuinely different PIN must re-hash, revoking old cookies.
+    h.engine.setAppPin("app-1", "5678");
+    const changed = h.engine.pinRecordForApp("app-1");
+    assert.notDeepEqual(changed, first);
+  });
+
+  it("records a compensating audit entry when a PIN is rolled back", () => {
+    const h = makeEngine();
+    h.engine.setAppPin("app-2", "1234");
+    const rec = h.engine.pinRecordForApp("app-2");
+    h.engine.setAppPin("app-2", null); // the pre-boot "make it public" step
+    h.engine.restoreAppPin("app-2", rec); // ...boot threw
+    const entries = h.audit.filter((e) => e.tool === "set_pin" && (e.args as { app?: string }).app === "app-2");
+    const last = entries.at(-1)!;
+    assert.equal((last.args as { protected?: boolean }).protected, true);
+    assert.equal((last.args as { rollback?: boolean }).rollback, true);
+  });
+});
+
+describe("buildStepDetail", () => {
+  it("keeps the verb and the PACKAGE, not the churning file name", () => {
+    // The file after \u00bb changes many times a second and is an unbreakable
+    // 45-char token that overflows the device frame; the package does neither.
+    assert.equal(
+      buildStepDetail("\u001b[32m\u203a Compiling react-native-svg Pods/RNSVG \u00bb RNSVGUse.mm\u001b[0m"),
+      "Compiling react-native-svg",
+    );
+    assert.equal(
+      buildStepDetail("\u203a Packaging lottie-react-native Pods/lottie-react-native \u00bb liblottie-react-native.a"),
+      "Packaging lottie-react-native",
+    );
+    assert.equal(
+      buildStepDetail("\u203a Compiling @rnmapbox/maps Pods/rnmapbox-maps \u00bb RNMBXCustomLocationProviderComponentView.mm"),
+      "Compiling @rnmapbox/maps",
+    );
+  });
+
+  it("keeps a whole line that has no artifact separator", () => {
+    assert.equal(buildStepDetail("Installing pods..."), "Installing pods...");
+    assert.equal(buildStepDetail("Downloading dependencies"), "Downloading dependencies");
+  });
+
+  it("ignores lines that are not progress", () => {
+    // Warnings and stack-trace noise must not overwrite the last real step.
+    assert.equal(buildStepDetail(""), null);
+    assert.equal(buildStepDetail("\u26a0\ufe0f  Script has ambiguous dependencies"), null);
+    assert.equal(buildStepDetail("    at Object.onError (undici.js:12)"), null);
+    assert.equal(buildStepDetail("\u203a 0 error(s), and 2 warning(s)"), null);
+  });
+
+  it("never exceeds what the device frame can show", () => {
+    const d = buildStepDetail("Compiling " + "x".repeat(200))!;
+    assert.equal(d.length, 40);
+    assert.match(d, /\u2026$/);
   });
 });

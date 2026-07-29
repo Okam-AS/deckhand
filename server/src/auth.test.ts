@@ -12,7 +12,7 @@ const tokens: TokenEntry[] = [
 ];
 
 function app(id: string, repo: string): App {
-  return { id, repo, type: "expo", defaultBranch: "main", allowForkPRs: false, env: {} };
+  return { id, repo, type: "expo", defaultBranch: "main", env: {} };
 }
 
 describe("TokenAuthenticator", () => {

@@ -7,7 +7,7 @@ import { watchApps } from "./appsWatcher.ts";
 import type { App } from "./config.ts";
 
 const APP = (id: string): string =>
-  `  - id: ${id}\n    path: /tmp/${id}\n    type: expo\n    defaultBranch: main\n    allowForkPRs: false\n    env: {}\n`;
+  `  - id: ${id}\n    path: /tmp/${id}\n    type: expo\n    defaultBranch: main\n    env: {}\n`;
 
 const yaml = (...ids: string[]): string => `apps:\n${ids.map(APP).join("")}`;
 
@@ -50,7 +50,7 @@ describe("watchApps", () => {
 
   it("picks up a newly registered app without a restart, mutating the shared array", async () => {
     writeAtomic(yaml("one"));
-    const apps: App[] = [{ id: "one", path: "/tmp/one", type: "expo", defaultBranch: "main", allowForkPRs: false, env: {} } as App];
+    const apps: App[] = [{ id: "one", path: "/tmp/one", type: "expo", defaultBranch: "main", env: {} } as App];
     const shared = apps; // the exact reference createApp and the MCP tools hold
 
     const pending = nextReload(apps);
@@ -107,8 +107,8 @@ describe("watchApps", () => {
   it("keeps the previous list when the file is invalid", async () => {
     writeAtomic(yaml("one", "two"));
     const apps: App[] = [
-      { id: "one", path: "/tmp/one", type: "expo", defaultBranch: "main", allowForkPRs: false, env: {} } as App,
-      { id: "two", path: "/tmp/two", type: "expo", defaultBranch: "main", allowForkPRs: false, env: {} } as App,
+      { id: "one", path: "/tmp/one", type: "expo", defaultBranch: "main", env: {} } as App,
+      { id: "two", path: "/tmp/two", type: "expo", defaultBranch: "main", env: {} } as App,
     ];
 
     // Watcher first, THEN the write — otherwise there is no event to observe.
@@ -142,8 +142,8 @@ describe("watchApps", () => {
     // answering "no such app".
     writeAtomic(yaml("one", "two"));
     const apps: App[] = [
-      { id: "one", path: "/tmp/one", type: "expo", defaultBranch: "main", allowForkPRs: false, env: {} } as App,
-      { id: "two", path: "/tmp/two", type: "expo", defaultBranch: "main", allowForkPRs: false, env: {} } as App,
+      { id: "one", path: "/tmp/one", type: "expo", defaultBranch: "main", env: {} } as App,
+      { id: "two", path: "/tmp/two", type: "expo", defaultBranch: "main", env: {} } as App,
     ];
 
     for (const truncated of ["", "   \n", "apps:\n"]) {
@@ -178,7 +178,7 @@ describe("watchApps", () => {
     // leaves behind, since it mutates the array AND writes the file. That echo
     // must not re-announce.
     const apps: App[] = [
-      { id: "one", path: "/tmp/one", type: "expo", defaultBranch: "main", allowForkPRs: false, env: {} } as App,
+      { id: "one", path: "/tmp/one", type: "expo", defaultBranch: "main", env: {} } as App,
     ];
     let reloads = 0;
     const stop = watchApps(apps, { file, debounceMs: 10, pollMs: 50, onReload: () => reloads++ });

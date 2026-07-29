@@ -58,7 +58,10 @@ export interface TokenResolverDeps {
  * the ambient gh CLI session (unless `githubAmbient: false`), else throws
  * CredentialsMissingError. The App auth object is cached across owners.
  */
-export function buildTokenResolver(config: Config, deps: TokenResolverDeps = {}): (owner: string) => Promise<string> {
+export function buildTokenResolver(
+  config: Config,
+  deps: TokenResolverDeps = {},
+): (owner: string, repoName?: string, extraRepos?: string[]) => Promise<string> {
   let appAuth: GitHubAppAuth | null | undefined; // undefined = not yet attempted
 
   const getAppAuth = (): GitHubAppAuth | null => {
@@ -75,11 +78,15 @@ export function buildTokenResolver(config: Config, deps: TokenResolverDeps = {})
 
   const ambient = deps.ghToken ?? ghCliToken;
 
-  return async (owner: string): Promise<string> => {
+  return async (owner: string, repoName?: string, extraRepos?: string[]): Promise<string> => {
     const pat = readPat(config);
     if (pat) return pat;
     const auth = getAppAuth();
-    if (auth) return auth.installationToken(owner);
+    // repoName narrows the installation token to that one repo, widened by
+    // extraRepos for the repo's own submodules (see installationToken). PAT and
+    // ambient gh sessions carry their own scope and can't be narrowed here — the
+    // askpass host pin is what bounds those.
+    if (auth) return auth.installationToken(owner, repoName, extraRepos);
     if (config.githubAmbient) {
       const gh = await ambient();
       if (gh) return gh;

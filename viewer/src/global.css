@@ -550,12 +550,67 @@ body::before {
   padding: 1.5rem;
   animation: fade 0.5s ease both;
 }
+/* `overflow-wrap: anywhere` is load-bearing: build captions carry unbreakable
+   identifiers (`RNMBXCustomLocationProviderComponentView.mm`) that a plain
+   max-width happily overflows straight out of the device frame. */
 .overlay p {
   margin: 0;
   max-width: 20ch;
+  text-wrap: pretty;
+  overflow-wrap: anywhere;
 }
+/* The live build sub-step: quieter and smaller than the headline it sits under,
+   and it CROSS-FADES rather than snapping — it changes every few seconds, and an
+   instant swap reads as a flicker in an otherwise calm frame. Reserving the line
+   height keeps the headline from shifting as steps come and go. */
+/* Directly under the spinner, with a FIXED height: one line or two, the block
+   occupies the same space, so a longer caption can't re-centre the column and
+   shove the spinner upward. (Absolute positioning was tried first and put the
+   text beside the spinner — an abspos child of a flex container resolves against
+   its static position, not the frame.) Captions are capped at 40 chars server
+   side, which is at most two lines at this width. */
+.overlay-step {
+  margin: 0;
+  max-width: 26ch;
+  height: 2.7em;
+  color: var(--ink-faint, var(--ink-soft));
+  font-size: 0.76rem;
+  line-height: 1.35;
+  opacity: 0.72;
+  text-wrap: pretty;
+  overflow-wrap: anywhere;
+  animation: step-in 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes step-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 0.72;
+    transform: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .overlay-step {
+    animation: none;
+  }
+}
+
 .overlay-failed {
   color: var(--coral);
+}
+
+/* The failure reason under the headline: quieter than the verdict, and wrapped
+   rather than clipped — a build error is worth reading, not decoding. */
+.overlay-reason {
+  margin-top: 0.5rem;
+  max-width: 26ch;
+  color: var(--ink-soft);
+  font-size: 0.74rem;
+  line-height: 1.45;
+  text-wrap: pretty;
+  overflow-wrap: anywhere;
 }
 
 .badge {

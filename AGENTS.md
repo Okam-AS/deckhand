@@ -5,7 +5,7 @@
 Phases 0–2.5 are done (168 tests green, CI green). The server has config/auth/state/audit,
 GitHub App auth + git worktrees, build recipes + detection (Expo/RN/NativeScript, iOS +
 Android), iOS simctl control, Android device layer (avdmanager/emulator/adb, uiautomator
-describe, toolEnv), the streaming router (serve-sim for iOS, adb-screencap backend for
+describe, toolEnv), the streaming router (serve-sim for iOS, H.264/screencap backend for
 Android), the preview engine (**platform-grouped, build-once-install-many, parallel
 boots/installs**), the MCP server (9 tools, token auth) + scoped share proxy, and the CLI.
 The viewer is the calm WebCodecs page (reused for Android via multipart-PNG).
@@ -42,9 +42,11 @@ gh credential: iOS (iPhone 17 Pro + iPad Pro 13" M5, one shared build, parallel 
 and **Android (pixel_7 · API 29 emulator, first real NativeScript Android build+stream)**.
 Verified live over the tunnel share proxy on **both** platforms: touch/navigation, typing
 (iOS via HID usage, Android via `input text`), and backspace (iOS delete, Android
-KEYCODE_DEL). **Not yet validated on-device:** the local (`path`) livesync build path, and
-scrcpy H.264 for Android (still the adb-screencap backend, a few fps). **Android streaming is the adb-screencap backend (a few fps); scrcpy H.264 is
-a documented follow-up upgrade behind the same `StreamingBackend` seam** (PLAN §8).
+KEYCODE_DEL). **Not yet validated on-device:** the local (`path`) livesync build path.
+**Android streaming's primary path is H.264** (`adb exec-out screenrecord` repackaged to
+AVCC, `streaming/androidH264.ts`); the adb-screencap MJPEG backend is now only the fallback
+for system images with no working AVC encoder (notably the API 29 emulator). Both sit behind
+the same `StreamingBackend` seam (PLAN §8).
 
 **Migration features (2026-07-18):** deckhand can host an app→app migration (e.g.
 NativeScript → React Native) as a *parity harness*. A target app declares `migratesFrom`

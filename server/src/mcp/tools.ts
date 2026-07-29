@@ -1,4 +1,5 @@
-import { rmSync } from "node:fs";
+import { readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { hostname, userInfo } from "node:os";
 import { createHash } from "node:crypto";
 import { z } from "zod";
@@ -124,6 +125,35 @@ const uiActionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("query"), selector: selectorSchema }),
 ]);
 
+
+/**
+ * The checkouts belonging to a base clone, by reading each one's `.git` pointer
+ * file rather than matching its directory NAME.
+ *
+ * The checkout key is `<appId>-<ref>` slugified, so a name match for app `web`
+ * would also hit `dh-web-2-main-<hash>`, which belongs to app `web-2`. `base`
+ * must be a REALPATH: `git worktree add` records the resolved path, so under a
+ * symlinked DECKHAND_HOME an unresolved one matches nothing at all.
+ */
+export function checkoutsOfBase(worktreesDir: string, base: string): string[] {
+  let names: string[];
+  try {
+    names = readdirSync(worktreesDir);
+  } catch {
+    return [];
+  }
+  const out: string[] = [];
+  for (const name of names) {
+    const dir = join(worktreesDir, name);
+    try {
+      if (readFileSync(join(dir, ".git"), "utf8").includes(`${base}/`)) out.push(dir);
+    } catch {
+      // not a worktree (or unreadable) — leave it alone
+    }
+  }
+  return out;
+}
+
 export function registerTools(server: McpServer, ctx: ToolContext): void {
   const { engine, apps, config, principal, audit } = ctx;
   const persistApps = ctx.persistApps ?? (() => {});
@@ -157,8 +187,34 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   const previewOwnedByPrincipal = (previewId: string): CallToolResult | null => {
     const appId = engine.appIdFor(previewId);
     if (!appId) return fail("unknown_preview", `no active preview "${previewId}"`);
+    // Compare/migration reference panes are public by construction and run under
+    // a synthetic app id that is never in apps.yaml — the one legitimate miss.
+    // Public to VIEW is not the same as drivable: scope it to the repo it booted
+    // from, so a token scoped to another owner can't read its build logs or drive
+    // it. (An against.worktree reference has no repo and is admin-gated already.)
+    if (engine.isReference(previewId)) {
+      const refApp = engine.appFor(previewId);
+      if (isAdmin(principal) || (refApp && canAccessApp(principal, refApp))) return null;
+      return fail(
+        "forbidden",
+        `you don't have access to preview "${previewId}"`,
+        "this reference pane belongs to a repo owner this token isn't scoped to",
+      );
+    }
     const app = apps.find((a) => a.id === appId);
-    if (app && !canAccessApp(principal, app)) return fail("forbidden", `you don't have access to preview "${previewId}"`);
+    // Deny by DEFAULT on a miss — EXCEPT for admins. apps.yaml is hot-reloaded, so
+    // deleting an app while its preview runs orphans it; denying everyone left the
+    // devices booted against maxTotalDevices with no MCP way to reclaim them.
+    // Skipping the check entirely let any valid token drive `ui` / `screenshot` /
+    // `logs` / `stop_preview` on such a preview.
+    if (!app && isAdmin(principal)) return null;
+    if (!app || !canAccessApp(principal, app)) {
+      return fail(
+        "forbidden",
+        `you don't have access to preview "${previewId}"`,
+        "this token is scoped to specific repo owners; call list_apps to see what you can reach",
+      );
+    }
     return null;
   };
 
@@ -325,16 +381,41 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             "Ask the user for a 4–6 digit code, then call again with share.pin set. Don't repeat the PIN in chat.",
           );
         }
+        // Web shares are always PIN-protected. A mobile share exposes four
+        // allow-listed helper subpaths; a web share exposes a whole dev-server
+        // route surface, and for a subdomain-hosted framework the URL is a bare
+        // public hostname with no 144-bit shareId in it at all — discoverable
+        // from DNS or certificate transparency.
+        if (isWeb && access !== "pin") {
+          return fail(
+            "web_needs_pin",
+            `web app "${resolved.id}" can only be shared with a PIN`,
+            "Ask the user for a 4–6 digit code, then call again with share: { access: \"pin\", pin: \"<4-6 digits>\" }. Don't repeat the PIN in chat.",
+          );
+        }
 
-        const result = engine.startPreview({
-          app: resolved,
-          source,
-          spec,
-          devices,
-          access: access === "pin" ? "password" : "public",
-        });
-        // Apply the per-app PIN (also covers alreadyRunning: findReusable ignores access).
+        // PIN FIRST, then boot: the share URL is stable per app and the gate
+        // reads the live PIN record, so setting it afterwards leaves a window
+        // where the link is open. (Also covers alreadyRunning: findReusable
+        // ignores access.)
+        // ...but roll it back if the boot then throws (device caps, one-device-per-
+        // platform): the share id is stable per app, so a failed call must not leave
+        // an ALREADY-RUNNING share of this app newly public.
+        const priorPin = engine.pinRecordForApp(resolved.id);
         engine.setAppPin(resolved.id, access === "pin" ? args.share.pin! : null);
+        let result;
+        try {
+          result = engine.startPreview({
+            app: resolved,
+            source,
+            spec,
+            devices,
+            access: access === "pin" ? "password" : "public",
+          });
+        } catch (e) {
+          engine.restoreAppPin(resolved.id, priorPin);
+          throw e;
+        }
         const protectionNote =
           access === "pin"
             ? " This link is PIN-protected: viewers must enter the PIN the user set (don't repeat the PIN in chat)."
@@ -379,7 +460,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     workingApp: App,
     against: { app?: string; ref?: string; worktree?: string; repo?: string } | undefined,
     devices: { platform: "ios" | "android"; runtime?: string; model?: string }[],
-  ): { reference: CompareReference; previewId: string } | CallToolResult => {
+  ): { reference: CompareReference; previewId: string; booted: boolean } | CallToolResult => {
     const a = against ?? (workingApp.migratesFrom ? { app: workingApp.migratesFrom } : undefined);
     if (!a || (!a.app && !a.ref && !a.worktree && !a.repo)) {
       return fail(
@@ -455,10 +536,18 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     // and a public reference boot would wipe a registered app's persisted PIN. A
     // fresh id keyed by `key` stays stable across restarts (so compare is idempotent).
     const refApp: App = { ...base, id: shortHash(key), migratesFrom: undefined };
-    const result = engine.startPreview({ app: refApp, source, spec, devices, access: "public" });
+    const result = engine.startPreview({ app: refApp, source, spec, devices, access: "public", reference: true });
     engine.setAppPin(refApp.id, null);
     const ref = source === "local" ? "local" : refDescription(spec!);
-    return { reference: { shareId: result.shareId, repo: base.repo ?? refApp.id, ref }, previewId: result.previewId };
+    return {
+      reference: { shareId: result.shareId, repo: base.repo ?? refApp.id, ref },
+      previewId: result.previewId,
+      // Whether THIS call booted it. The reference app id is keyed by
+      // repo+ref alone, not by the working app, so a second compare against the
+      // same reference reuses the running one — and the rollback below must not
+      // tear down a pane another compare session is using.
+      booted: !result.alreadyRunning,
+    };
   };
 
   server.registerTool(
@@ -525,8 +614,26 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         // Reference first (public oracle), then the working app with the chosen access.
         const refBoot = bootReference(working, args.against, devices);
         if ("content" in refBoot) return refBoot;
-        const result = bootWorkingApp(working, devices, access === "pin" ? "password" : "public");
+        // PIN before boot (same reasoning as start_preview: the working share URL is
+        // stable per app, so applying it afterwards leaves the link open in between),
+        // rolled back if the boot throws.
+        const priorPin = engine.pinRecordForApp(working.id);
         engine.setAppPin(working.id, access === "pin" ? args.share.pin! : null);
+        let result;
+        try {
+          result = bootWorkingApp(working, devices, access === "pin" ? "password" : "public");
+        } catch (e) {
+          engine.restoreAppPin(working.id, priorPin);
+          // The reference pane already booted and took devices. The likeliest
+          // reason the working boot threw is device capacity — so leaving it up
+          // would permanently hold the slots that caused the failure, with no
+          // MCP handle to reach the orphan. Only if THIS call booted it, though:
+          // `bootReference` reuses a running reference across compare sessions,
+          // and stopping a shared one kills another session's live pane.
+          // best-effort: the original failure is what the caller needs to see
+          if (refBoot.booted) void engine.stopPreview(refBoot.previewId).catch(() => {});
+          throw e;
+        }
         const counts = engine.startCompare(result.previewId, refBoot.reference, args.items ?? [], refBoot.previewId);
 
         const protectionNote =
@@ -783,7 +890,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Set or remove a share PIN",
       description:
-        "Protect a running preview's share link with a numeric PIN, change it, or remove it (make the link public again) — the viewer URL stays the same. Ask the user for a 4–6 digit PIN and NEVER repeat it back in chat. Pass previewId or app id. To remove protection, pass remove:true.",
+        "Protect a running preview's share link with a numeric PIN, change it, or remove it (make the link public again) — the viewer URL stays the same. A web preview is the exception: its share is always PIN-protected, so remove:true is refused for one. Ask the user for a 4–6 digit PIN and NEVER repeat it back in chat. Pass previewId or app id. To remove protection, pass remove:true.",
       inputSchema: {
         previewId: z.string().optional().describe("from start_preview; or pass app instead"),
         app: z.string().optional().describe("app id — protects its running preview"),
@@ -964,7 +1071,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           }
         }
 
-        const probeFor = (b: string): App => ({ id, repo: args.repo, type: args.type ?? "react-native", defaultBranch: b, allowForkPRs: false, env: {} });
+        const probeFor = (b: string): App => ({ id, repo: args.repo, type: args.type ?? "react-native", defaultBranch: b, env: {} });
         let branch = args.branch ?? "main";
         let detected: { type: AppType | null; bundleId: string | null };
         try {
@@ -1062,11 +1169,34 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         if (denied) return denied;
         const idx = apps.findIndex((a) => a.id === args.id);
         if (idx < 0) return fail("unknown_app", `no app named "${args.id}"`, "call list_apps to see registered apps");
+        // Deleting the checkout under a live preview pulls the tree out from
+        // under a running xcodebuild/gradle. Unregistering alone is harmless, so
+        // only the disk half is gated.
+        if (args.deleteCheckout && engine.previewIdForApp(args.id)) {
+          return fail(
+            "preview_running",
+            `"${args.id}" has a running preview — deleting its checkout now would break the build in progress`,
+            "call stop_preview for it first, then remove_app again",
+          );
+        }
         const [removed] = apps.splice(idx, 1);
         persistApps(apps);
         if (args.deleteCheckout && removed) {
           try {
+            // realpath BEFORE deleting: `git worktree add` records the RESOLVED
+            // base path in each checkout's pointer file, so with a symlinked
+            // DECKHAND_HOME the raw path never matches and nothing at all gets
+            // deleted — while the response still claims it did.
+            let base = paths.repo(removed.id);
+            try {
+              base = realpathSync(base);
+            } catch {
+              // never cloned — the unresolved path is still the best guess
+            }
             rmSync(paths.repo(removed.id), { recursive: true, force: true });
+            for (const dir of checkoutsOfBase(paths.worktreesDir(), base)) {
+              rmSync(dir, { recursive: true, force: true });
+            }
           } catch {
             // best-effort; the registry change is what matters
           }

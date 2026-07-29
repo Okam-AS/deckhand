@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { isValidPin, hashPassword, verifyPassword, signUnlockCookie, verifyUnlockCookie } from "./shares.ts";
+import { isValidPin, hashPassword, verifyPassword, signUnlockCookie, verifyUnlockCookie, pinFingerprint } from "./shares.ts";
 
 describe("isValidPin", () => {
   it("accepts 4–6 digit numeric codes", () => {
@@ -25,18 +25,39 @@ describe("hashPassword / verifyPassword", () => {
 
 describe("unlock cookie", () => {
   const secret = "s3cr3t";
+  const pinA = hashPassword("1234");
+  const fpA = pinFingerprint(secret, pinA);
   it("round-trips a signed, unexpired cookie for the right share", () => {
     const now = 1_000_000;
-    const cookie = signUnlockCookie(secret, "share-x", now + 10_000);
-    assert.equal(verifyUnlockCookie(secret, "share-x", cookie, now), true);
+    const cookie = signUnlockCookie(secret, "share-x", now + 10_000, fpA);
+    assert.equal(verifyUnlockCookie(secret, "share-x", cookie, now, fpA), true);
   });
   it("rejects a wrong share, expired, tampered, or wrong-secret cookie", () => {
     const now = 1_000_000;
-    const cookie = signUnlockCookie(secret, "share-x", now + 10_000);
-    assert.equal(verifyUnlockCookie(secret, "share-y", cookie, now), false); // different share
-    assert.equal(verifyUnlockCookie(secret, "share-x", cookie, now + 20_000), false); // expired
-    assert.equal(verifyUnlockCookie("other", "share-x", cookie, now), false); // wrong secret
-    assert.equal(verifyUnlockCookie(secret, "share-x", cookie.slice(0, -2) + "xx", now), false); // tampered sig
-    assert.equal(verifyUnlockCookie(secret, "share-x", "garbage", now), false);
+    const cookie = signUnlockCookie(secret, "share-x", now + 10_000, fpA);
+    assert.equal(verifyUnlockCookie(secret, "share-y", cookie, now, fpA), false); // different share
+    assert.equal(verifyUnlockCookie(secret, "share-x", cookie, now + 20_000, fpA), false); // expired
+    assert.equal(verifyUnlockCookie("other", "share-x", cookie, now, fpA), false); // wrong secret
+    assert.equal(verifyUnlockCookie(secret, "share-x", cookie.slice(0, -2) + "xx", now, fpA), false); // tampered sig
+    assert.equal(verifyUnlockCookie(secret, "share-x", "garbage", now, fpA), false);
+  });
+  it("stops working when the PIN changes or is removed", () => {
+    // Setting a PIN to lock someone out used to leave their cookie valid for the
+    // full 12h TTL — and, because shareIds are stable per app, into the app's
+    // next preview.
+    const now = 1_000_000;
+    const cookie = signUnlockCookie(secret, "share-x", now + 10_000, fpA);
+    assert.equal(verifyUnlockCookie(secret, "share-x", cookie, now, pinFingerprint(secret, hashPassword("9999"))), false);
+    assert.equal(verifyUnlockCookie(secret, "share-x", cookie, now, pinFingerprint(secret, null)), false);
+    // Same PIN value, re-hashed with a fresh salt, is still a new fingerprint —
+    // re-setting the same digits revokes too. That is the safe direction.
+    assert.equal(verifyUnlockCookie(secret, "share-x", cookie, now, pinFingerprint(secret, hashPassword("1234"))), false);
+    // Unchanged record → still valid.
+    assert.equal(verifyUnlockCookie(secret, "share-x", cookie, now, pinFingerprint(secret, pinA)), true);
+  });
+  it("does not leak the stored hash into the cookie", () => {
+    const cookie = signUnlockCookie(secret, "share-x", 2_000_000, fpA);
+    assert.equal(cookie.includes(pinA.hash), false);
+    assert.equal(cookie.includes(pinA.salt), false);
   });
 });

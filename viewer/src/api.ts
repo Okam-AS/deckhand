@@ -5,6 +5,8 @@ export interface ShareDevice {
   label: string;
   phase: string;
   detail?: string;
+  /** The build sub-step ("Compiling react-native-svg") shown under the headline. */
+  step?: string;
 }
 
 export type TestStepStatus = "pending" | "running" | "passed" | "failed";
@@ -113,8 +115,37 @@ export function deviceWsUrl(shareId: string, deviceId: string): string {
   return `${proto}//${location.host}${deviceBase(shareId, deviceId)}/ws`;
 }
 
+/**
+ * One word for the pill at the top of the frame — the same chip the streaming
+ * states ("Connecting…") already use. It replaces the big centred headline: with
+ * a live build sub-step underneath the spinner, a full sentence in the middle of
+ * the frame was two competing status lines saying the same thing.
+ */
+export function phaseBadge(phase: string): string {
+  switch (phase) {
+    case "pending":
+    case "preparing":
+      return "Preparing…";
+    case "booting":
+      return "Booting…";
+    case "building":
+      return "Building…";
+    case "installing-app":
+      return "Installing…";
+    case "launching":
+      return "Launching…";
+    default:
+      return "Connecting…";
+  }
+}
+
 /** Friendly, calm status text for a device phase. */
 export function phaseLabel(phase: string, detail?: string): string {
+  // "failed" keeps its headline even with a detail — the detail is the REASON,
+  // rendered underneath, not a replacement. A bare error message where the
+  // status line should be read as noise; "This device didn't start." + the
+  // reason reads as an answer.
+  if (phase === "failed") return "This device didn't start.";
   if (detail) return detail;
   switch (phase) {
     case "pending":

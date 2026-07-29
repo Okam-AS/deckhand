@@ -22,8 +22,18 @@
   <string>__REPO__</string>
   <key>EnvironmentVariables</key>
   <dict>
+    <!-- A LaunchAgent gets none of the user's shell PATH, so every build tool
+         must be named here. CocoaPods in particular lives in a Ruby gem bin dir
+         (homebrew ruby, rbenv, ...) that is NOT /opt/homebrew/bin: without it
+         `ns run ios` reaches "Installing pods..." and exits 127. The installer
+         resolves pod/adb/emulator on the installing machine. -->
     <key>PATH</key>
-    <string>__NODE_DIR__:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>__PATH__</string>
+    <!-- Ruby tooling (CocoaPods) treats paths as ASCII-8BIT without a UTF-8
+         locale and `pod install` fails on unicode normalization. launchd gives
+         an agent no locale at all. -->
+    <key>LANG</key>
+    <string>en_US.UTF-8</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>

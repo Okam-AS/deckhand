@@ -98,10 +98,25 @@ describe("loadApps", () => {
     const apps = loadApps(f);
     assert.equal(apps.length, 1);
     assert.equal(apps[0]!.defaultBranch, "main");
-    assert.equal(apps[0]!.allowForkPRs, false);
     assert.deepEqual(apps[0]!.env, {});
 
     const bad = write("apps-bad.yaml", "apps:\n  - id: My_App\n    repo: x/y\n    type: expo");
+    assert.throws(() => loadApps(bad), (e) => e instanceof ConfigError);
+  });
+
+  it("still loads an apps.yaml carrying the removed allowForkPRs key", () => {
+    // The schema is .strict(), so dropping a field would otherwise break every
+    // existing installation's apps.yaml on the next start.
+    const f = write(
+      "apps-legacy.yaml",
+      ["apps:", "  - id: my-app", "    repo: github.com/ainfrastructure/my-app", "    type: expo", "    allowForkPRs: true"].join("\n"),
+    );
+    const apps = loadApps(f);
+    assert.equal(apps.length, 1);
+    assert.equal("allowForkPRs" in apps[0]!, false, "the legacy key is dropped, not carried forward");
+
+    // A genuinely unknown key is still rejected.
+    const bad = write("apps-unknown.yaml", "apps:\n  - id: a\n    repo: x/y\n    type: expo\n    nonsense: 1");
     assert.throws(() => loadApps(bad), (e) => e instanceof ConfigError);
   });
 
@@ -212,6 +227,16 @@ describe("parseRepo / repoOwner", () => {
     });
     assert.deepEqual(parseRepo("acme/app"), { host: "github.com", owner: "acme", name: "app" });
     assert.equal(repoOwner("github.com/ainfrastructure/x"), "ainfrastructure");
+  });
+
+  it("strips userinfo from an https URL (else the host is `user@github.com`)", () => {
+    // The askpass host pin rejects anything that isn't a plain hostname, so a
+    // pasted `https://user@host/...` used to throw instead of cloning.
+    assert.deepEqual(parseRepo("https://user@github.com/acme/app.git"), {
+      host: "github.com",
+      owner: "acme",
+      name: "app",
+    });
   });
 
   it("throws on an unparseable repo", () => {

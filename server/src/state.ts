@@ -35,6 +35,10 @@ export interface PersistedDevice {
   model?: string; // e.g. "iPhone 16 Pro"
   phase: DevicePhase;
   detail?: string; // short human status for the current phase
+  // The build sub-step ("Compiling react-native-svg"), under the phase headline.
+  // Churns per log line, so it is only ever written out incidentally, by the
+  // next persist() of the whole record — nothing schedules a write for it.
+  step?: string;
   error?: string;
   helperPort?: number; // serve-sim helper port (loopback)
   webPort?: number; // web only: the dev server's loopback port
@@ -55,6 +59,14 @@ export interface PersistedPreview {
   updatedAt: string; // ISO
   worktreePath?: string;
   passwordProtected: boolean;
+  /**
+   * True for a compare/migration reference pane: a preview booted under a
+   * synthetic app id that is deliberately NOT in apps.yaml, so it has no owner
+   * to scope against. Authorization denies by default when an app can't be
+   * resolved, so a reference must say so explicitly rather than being inferred
+   * from a failed lookup (which let any token drive any orphaned preview).
+   */
+  reference?: boolean;
   /** web only: the detected framework ("vite" | "nuxt" | "next" | "static"). Vite hosts
    *  path-based; the others host at the root of a per-share subdomain. */
   webFramework?: string;

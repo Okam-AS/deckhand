@@ -178,7 +178,6 @@ apps:
     repo: github.com/ainfrastructure/my-app
     type: expo                    # auto-detected: expo | react-native | nativescript
     defaultBranch: main
-    allowForkPRs: false
     bundleId: com.example.myapp   # auto-detected, overridable
     env:                          # NON-secret build/runtime env only
       EXPO_PUBLIC_API_URL: https://staging.example.com
@@ -316,8 +315,18 @@ translator. Three small additions close the gap:
    deckhand never writes to either repo (§11.4).
 
 Validation rules enforced server-side (never trust the model): app must exist; ref/PR must
-resolve in that app's repo; fork PRs rejected unless `allowForkPRs`; device count within
-limits; disk tier not critical; token owner-scope honored.
+resolve in that app's repo; device count within limits; disk tier not critical; token
+owner-scope honored.
+
+> **Fork PRs (audit 2026-07-27):** `allowForkPRs` was **removed**. It was parsed into the
+> app schema and never read anywhere, while this document claimed "fork PRs rejected unless
+> `allowForkPRs`" — a flag that only reads as a protection is worse than none. A fork PR
+> previews like any other ref, so treat "can open a PR against a previewed repo" as "can run
+> that PR's install and build scripts on the deckhand machine" — the accepted
+> builds-are-RCE-by-design tradeoff (§11 item 7). What *is* bounded: the git credential
+> offered alongside them (askpass host-pinned to the app's own repo host, App tokens minted
+> per repo). Existing apps.yaml files carrying the key still load; it is stripped on parse.
+> If fork PRs ever need gating, gate them for real.
 
 ## 7. Preview engine
 
@@ -570,7 +579,21 @@ dir is never touched).
   `/unlock` + the viewer shell stay public. `/unlock` is throttled per share (lockout after
   N wrong PINs). The viewer shows an elegant pad (auto-submits on the last digit, shakes on
   a wrong code); subdomain-web hosts get a self-contained vanilla pad since they have no
-  React viewer. **Deliberate §11.5 relaxation:** the user chose to set the PIN by telling
+  React viewer.
+  **Amended (audit 2026-07-27): a web share is ALWAYS PIN-protected.** `start_preview` on a
+  `web` app rejects `access: "public"` (`web_needs_pin`), the engine refuses to boot a web
+  device with no PIN record in force, and `set_pin --remove` fails while a web preview is
+  live — three layers, so no caller can route around it. Why web and not mobile: a mobile
+  share exposes four allow-listed helper subpaths, while a web share exposes the dev
+  server's whole route surface (including `@fs` if the previewed repo relaxed Vite's
+  `server.fs.strict`, which deckhand must not edit) — and a subdomain-hosted framework
+  serves at a bare public hostname with no 144-bit shareId in the URL at all, discoverable
+  from DNS or certificate transparency. Per-preview subdomains would have been the other
+  answer; Cloudflare Universal SSL covers only one wildcard level, so the PIN is the fix.
+  The cookie also binds the PIN in force (`pinFingerprint`), so changing or removing a PIN
+  revokes cookies issued under the old one instead of leaving them valid for the 12 h TTL —
+  which mattered because shareIds are stable per app and reused across stop/restart.
+  **Deliberate §11.5 relaxation:** the user chose to set the PIN by telling
   the agent (through MCP) rather than an out-of-band setup URL — so a share PIN (a low-value,
   shareable access code, not a standing bearer credential) may travel through MCP. It is
   **redacted from the audit log** (`summarizeArgs`), never stored in plaintext, and the tool
@@ -639,10 +662,23 @@ change eases in/out — nothing snaps.
 
 1. **Reachability**: deckhand and every streaming helper bind loopback; only cloudflared is
    exposed; TLS at Cloudflare's edge. No tokenless code path exists at all.
+   **Caveat (audit 2026-07-27):** loopback is *not* a boundary against a share holder. An
+   iOS Simulator shares the host's network stack (`127.0.0.1` inside it is the Mac's
+   loopback; Android's emulator aliases it as `10.0.2.2`), and a share grants real device
+   input — so anything a booted device can reach, a share holder can reach, bypassing the
+   proxy allow-list entirely. That is why serve-sim is vendored with its host shell-exec
+   routes patched out, and why PLAN §11 item 7's dedicated unprivileged user matters.
+   **Caveat (audit 2026-07-29):** the Expo/Metro dev server is the one helper that is *not*
+   loopback-bound — it binds the wildcard on its allocated port (8081-8099), because
+   `--localhost` binds IPv6 `::1` only and the simulator then cannot load the bundle
+   (`metro.ts`). It serves the previewed app's JS bundle to anything on the LAN for the
+   life of the preview. Item 7's dedicated user and a host firewall are the mitigations.
 2. **MCP auth**: per-person 256-bit path tokens, hashed lookup, constant-time compare,
    404 on miss, roles + optional owner scoping, JSONL audit of every call.
 3. **Capability bounding**: no arbitrary shell tool; only registered apps; only refs in
-   those repos; fork PRs opt-in; device-count + disk-tier limits.
+   those repos; device-count + disk-tier limits. (`compare_start`'s `against.worktree` /
+   `against.repo` reach past "registered apps" by design — both are gated: worktree on
+   `requireAdmin`, repo on the caller's owner scope. Fork PRs are *not* gated; see §6.)
 4. **GitHub**: App with Contents:Read-only — deckhand can never write to any repo. Hourly
    installation tokens, never persisted, never in argv/URLs/logs. **Ambient-credential
    note (2026-07-15):** with `githubAmbient` (no PAT/App configured, `gh` logged in on

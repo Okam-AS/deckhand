@@ -13,7 +13,8 @@ import {
   type PreviewSource,
 } from "../state.ts";
 import { hashPassword, verifyPassword } from "../share/shares.ts";
-import { WorktreeManager, type RefSpec, refDescription } from "./worktree.ts";
+import { WorktreeManager, worktreeKey, type RefSpec, refDescription } from "./worktree.ts";
+import { pruneDerivedData } from "./derivedData.ts";
 import { Simctl, selectRuntime, selectDeviceType, deviceLabel, type SimDevice } from "../devices/ios.ts";
 import { AndroidManager, selectSystemImage, portForSerial, serialForPort } from "../devices/android.ts";
 import { Reaper, POOL_SIM_PREFIX, POOL_AVD_PREFIX } from "./reaper.ts";
@@ -62,6 +63,47 @@ const DEV_INSTALL_TIMEOUT_MS = GENERAL_IDLE_MS;
 const WEB_READY_TIMEOUT_MS = 180_000;
 /** Loopback port range for web dev servers (Vite defaults to 5173). */
 const WEB_PORT_RANGE: [number, number] = [5170, 5199];
+
+/** Android's package grammar — dot-separated segments, each starting with a letter. */
+const ANDROID_PACKAGE_RE = /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/;
+/** Apple's bundle-id grammar — same shape, hyphens additionally allowed. Underscores
+ *  are legal too: NativeScript/Expo apps carry ids like `org.acme.my_app`, and the one
+ *  `id:` in nativescript.config.ts is used for BOTH platforms — rejecting `_` here
+ *  failed only the iOS half of such an app while Android booted fine. Each segment
+ *  must START alphanumeric: a leading `-` would reach `simctl install/launch` as a
+ *  positional argument the CLI parses as an option flag. */
+const IOS_BUNDLE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*(\.[A-Za-z0-9][A-Za-z0-9_-]*)+$/;
+
+/** Verbs a build tool uses for the work it is doing right now. */
+const BUILD_VERBS =
+  /^(compiling|packaging|linking|signing|executing|copying|installing|downloading|generating|bundling|building|analyzing|preparing|processing|fetching|resolving|planning|running|creating|writing|checking)\b/i;
+
+/**
+ * A short "what is it doing right now" label from a build log line, or null for
+ * a line that isn't progress. Feeds the viewer's build overlay: a spinner with
+ * a frozen caption is indistinguishable from a hang, and the whole log is far
+ * too wide for a phone-sized frame.
+ *
+ * Xcode/Expo lines look like `› Compiling react-native-svg Pods/RNSVG » RNSVGUse.mm`.
+ * Keep the verb and the PACKAGE, not the file after `»`: a per-file caption
+ * flickers many times a second and produces unbreakable 45-character tokens that
+ * overflow a phone-sized frame, while the package name changes at a readable
+ * pace and still proves the build is moving.
+ */
+const DETAIL_MAX = 40;
+
+export function buildStepDetail(line: string): string | null {
+  const clean = line
+    .replace(/\x1b\[[0-9;]*m/g, "") // ANSI colour
+    .replace(/^[\s›>❯•*-]+/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!clean || !BUILD_VERBS.test(clean)) return null;
+  // `<Verb> <package> Pods/<target> » <artifact>` → "<Verb> <package>".
+  const scoped = /^(\S+) (\S+) \S+ » /.exec(clean);
+  const text = scoped ? `${scoped[1]} ${scoped[2]}` : clean.split(" » ")[0]!.trim();
+  return text.length > DETAIL_MAX ? `${text.slice(0, DETAIL_MAX - 1)}…` : text;
+}
 
 interface LiveDevice {
   record: PersistedDevice;
@@ -169,6 +211,8 @@ export interface StartPreviewRequest {
   spec?: RefSpec;
   devices: DeviceRequest[];
   access: "public" | "password";
+  /** Mark this as a public compare/migration reference pane (see PersistedPreview.reference). */
+  reference?: boolean;
 }
 
 export interface StartPreviewResult {
@@ -226,6 +270,64 @@ export class PreviewError extends Error {
     super(message);
     this.name = "PreviewError";
   }
+}
+
+/**
+ * Strip host-identifying material out of a failure reason before it crosses
+ * into `shareState`.
+ *
+ * The reason is shown to whoever holds the share link — including a PUBLIC
+ * share — while the unredacted text stays on `dev.record.error` for MCP and the
+ * audit log. Left alone it hands out things the share holder has no business
+ * with: `fatal: repository 'https://github.com/acme/secret-design-system.git/'
+ * not found` names a private repo, and any `/Users/<user>/.deckhand/worktrees/…`
+ * names the operator's account and disk layout. Keep the sentence — "submodule
+ * checkout failed", "xcodebuild exited 65" is the part that helps — and drop
+ * the identifiers.
+ */
+export function redactForShare(text: string): string {
+  return (
+    // Bounded before the regexes run: the host pattern backtracks quadratically
+    // on a single very long dotted token, and this is called on the event loop
+    // from `failDevice`, which every live stream shares. The caller truncates to
+    // 160 anyway, so nothing readable is lost.
+    text
+      .slice(0, 400)
+      // scheme://host/path
+      .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s'"]+/gi, "<url>")
+      // scp-form git remote, git@github.com:acme/repo.git. The `user@` is what
+      // distinguishes it from `App.swift:12:3`, which MUST survive — a
+      // compiler error's file and line is the actionable half of the sentence.
+      .replace(/\b[\w.-]+@[\w.-]+\.[a-z]{2,}:[^\s'"]+/gi, "<url>")
+      // scheme-less host/path, as in "submodule checkout failed for
+      // github.com/acme/private-thing". The TLD list is deliberate rather than
+      // `[a-z]{2,}`: that also swallows Android component names
+      // (`com.acme.app/.MainActivity`), which are ours to show.
+      // (`internal`/`local`/`lan`/`corp` are in the list because a self-hosted
+      // GitLab is exactly where the private repo names are.)
+      .replace(
+        /\b[\w-]+(?:\.[\w-]+)*\.(?:com|net|org|io|dev|co|no|se|dk|uk|de|fr|nl|ch|ai|sh|gg|me|xyz|internal|local|lan|corp)\/[^\s'"]*/gi,
+        "<url>",
+      )
+      // A bare hostname, no path — the other half of "Failed to connect to
+      // gitlab.acme.internal port 443" and "Could not resolve hostname
+      // git.acme.internal", and of `mac-mini-dana.local`, which names the
+      // operator as squarely as a home directory does.
+      .replace(
+        /\b[\w-]+(?:\.[\w-]+)*\.(?:com|net|org|io|dev|co|no|se|dk|uk|de|fr|nl|ch|ai|sh|gg|me|xyz|internal|local|lan|corp)\b/gi,
+        "<host>",
+      )
+      // HOME directories only — anywhere in the line, not just after a space or
+      // a quote ("framework not found at [/Users/dana/…]", "error,/Users/dana/…"
+      // leak the account just as well). Deliberately NOT every absolute path:
+      // `/bin/sh: gradle: not found` and `Can't resolve '../../packages/x/src'`
+      // say where the build broke and name nobody.
+      .replace(/(^|[^\w])(?:~|\/(?:Users|home)\/[^\s'"/]+)(\/[^\s'"]*)?/g, (_m, lead: string, rest?: string) =>
+        // The rest of the path is kept: it is deckhand's own worktree layout and
+        // the previewed app's name, which the share holder is already looking at.
+        `${lead}…${rest ?? ""}`,
+      )
+  );
 }
 
 /** One dev process per app+platform. */
@@ -410,7 +512,7 @@ export class PreviewEngine {
     source: PreviewSource;
     /** Local previews can be rebuilt from the viewer's refresh button. */
     canRestart: boolean;
-    devices: { deviceId: string; platform: Platform; label: string; phase: string; detail?: string }[];
+    devices: { deviceId: string; platform: Platform; label: string; phase: string; detail?: string; step?: string }[];
     /** The agent's live test run (calm spinner + step popover in the viewer), if any. */
     testRun?: {
       status: TestRunStatus;
@@ -427,7 +529,7 @@ export class PreviewEngine {
       shareId: string;
       repo: string;
       ref: string;
-      devices: { deviceId: string; platform: Platform; label: string; phase: string; detail?: string }[];
+      devices: { deviceId: string; platform: Platform; label: string; phase: string; detail?: string; step?: string }[];
     };
     /** Migration target only: the agent-maintained parity ledger, if the file exists. */
     ledger?: { screens: { name: string; status: string; note?: string }[] };
@@ -439,6 +541,11 @@ export class PreviewEngine {
         label: d.record.label,
         phase: d.record.phase,
         detail: d.record.detail,
+        // Same treatment as `detail`: `step` is a raw build-tool line
+        // ("Copying /Users/<user>/.deckhand/worktrees/…", "Downloading
+        // https://github.com/acme/private-thing"), and this function is what
+        // stands between it and a public share holder.
+        step: d.record.step ? redactForShare(d.record.step) : d.record.step,
       }));
     for (const p of this.previews.values()) {
       if (p.record.shareId === shareId) {
@@ -464,7 +571,15 @@ export class PreviewEngine {
           }
         } else if (p.app.migratesFrom) {
           const src = this.livePreviewForApp(p.app.migratesFrom);
-          if (src) {
+          // A migration pairs two REAL apps, each with its own PIN — unlike a
+          // compare session, whose reference is a synthetic always-public app.
+          // So the source pane is only mountable when this page can actually
+          // unlock it: the unlock propagates from a proven PIN on this share,
+          // and the pad only ever renders for the page's own shareId. Showing
+          // the pane anyway (a public target beside a PIN-protected source) got
+          // its socket refused once a second, forever, with nothing on screen
+          // and no way to authenticate — so don't advertise it.
+          if (src && this.partnerIsReachable(p.record.shareId, src.record.shareId)) {
             pairedWith = {
               shareId: src.record.shareId,
               repo: src.app.repo ?? src.app.id,
@@ -500,6 +615,72 @@ export class PreviewEngine {
     return null;
   }
 
+  /**
+   * The shareId this share is paired with in a compare session, or null.
+   *
+   * The compare viewer is ONE page showing two shares: it renders the reference
+   * pane from the working share's `pairedWith`, but streams it from the
+   * reference's own shareId, whose unlock cookie is scoped to its own path. So
+   * a PIN on the working share left the reference pane stuck on "Connecting…"
+   * forever (the WS was refused once a second, silently). The unlock route uses
+   * this to mint the partner's cookie too — one PIN unlocks the pair.
+   *
+   * Symmetric on purpose: whichever side of the pair the viewer is opened from
+   * has to unlock the other.
+   */
+  pairedShareId(shareId: string): string | null {
+    for (const p of this.previews.values()) {
+      // Mirror shareState's two pairing sources: a live compare session wins,
+      // else the legacy migratesFrom link. Anything shareState will render as a
+      // second pane must be unlockable, or that pane hangs.
+      const compareRef = p.compare?.reference.shareId ?? null;
+      const migrationSrc = p.compare
+        ? null
+        : p.app.migratesFrom
+          ? (this.livePreviewForApp(p.app.migratesFrom)?.record.shareId ?? null)
+          : null;
+      const refShareId = compareRef ?? migrationSrc;
+      if (!refShareId) continue;
+      // Only a LIVE reference counts — the viewer never mounts a dead pane.
+      if (p.record.shareId === shareId) {
+        if (!this.liveByShareId(refShareId)) return null;
+        // A migration source pane is only advertised when it is reachable from
+        // here (see shareState) — don't mint a cookie for a pane we hid.
+        return migrationSrc && !this.partnerIsReachable(shareId, refShareId) ? null : refShareId;
+      }
+      // The reverse direction is a compare-session-only affair. A compare
+      // reference is a synthetic app the operator just booted as one half of
+      // one page, so unlocking either half unlocks the pair. `migratesFrom`
+      // instead names another REGISTERED app with its own PIN and its own repo
+      // — and only the target's page renders a source pane, never the other way
+      // round, so minting the target's cookie for whoever holds the source's
+      // PIN unlocks an app they were never given access to, for nothing.
+      if (compareRef === shareId) return p.record.shareId;
+    }
+    return null;
+  }
+
+  /**
+   * Whether a viewer on `shareId` may be shown — and handed the unlock cookie
+   * for — a migration source pane on `partnerShareId`.
+   *
+   * Unlock only ever propagates OUT of a PIN proven on the page's own share, so
+   * a PUBLIC target can never reach a protected source: advertising that pane
+   * would either hang it forever (refused every retry, and the pad only renders
+   * for the page's own shareId) or, if we minted the cookie anyway, hand the
+   * source's stream and input to anyone holding the target's public link.
+   *
+   * When both sides are protected the pane is shown and the unlock propagates.
+   * Residual, accepted: PIN records are salted per app, so "same PIN on both"
+   * is not detectable here — whoever holds the TARGET's PIN can therefore reach
+   * the source too. That is inherent to one page, two apps and one pad, and the
+   * operator asked for exactly that by declaring `migratesFrom`. What it must
+   * never do is grant access from nothing, which is the case above.
+   */
+  private partnerIsReachable(shareId: string, partnerShareId: string): boolean {
+    return !this.pinInfoForShare(partnerShareId).required || this.pinInfoForShare(shareId).required;
+  }
+
   private persist(): void {
     this.d.store.persist(
       [...this.previews.values()].map((p) => p.record),
@@ -520,11 +701,26 @@ export class PreviewEngine {
 
   /** Set (`pin`), change, or clear (`null`) an app's share PIN. Persists; does not re-orchestrate. */
   setAppPin(appId: string, pin: string | null): void {
+    if (pin == null && this.hasLiveWebPreview(appId)) {
+      throw new PreviewError(
+        `the web preview of "${appId}" cannot be made public`,
+        "web shares are always PIN-protected — set a new PIN instead, or stop the preview first",
+      );
+    }
     if (pin == null) {
       delete this.pins[appId];
     } else {
-      const { salt, hash } = hashPassword(pin);
-      this.pins[appId] = { salt, hash, length: pin.length };
+      const existing = this.pins[appId];
+      // Re-hashing an UNCHANGED pin would mint a fresh salt, hence a fresh
+      // pinFingerprint, hence reject every unlock cookie issued under the old
+      // one — kicking live viewers back to the PIN pad. start_preview is
+      // idempotent and sets the PIN on every call (including "what's the link?"
+      // re-calls), so that would happen in normal use. Keep the record when the
+      // PIN is the same.
+      if (!(existing && verifyPassword(pin, existing))) {
+        const { salt, hash } = hashPassword(pin);
+        this.pins[appId] = { salt, hash, length: pin.length };
+      }
     }
     for (const p of this.previews.values()) {
       if (p.record.appId === appId) p.record.passwordProtected = pin != null;
@@ -533,11 +729,53 @@ export class PreviewEngine {
     this.d.audit.record({ actor: "engine", tool: "set_pin", args: { app: appId, protected: pin != null }, result: "ok" });
   }
 
+  /**
+   * The stored PIN record for an app, for snapshot/restore around a boot that may
+   * throw. Share ids are stable per app, so clearing a PIN and then failing to boot
+   * would leave an already-live share open (see `restoreAppPin`).
+   */
+  pinRecordForApp(appId: string): PinRecord | null {
+    return this.pins[appId] ?? null;
+  }
+
+  /** Put back a record captured by `pinRecordForApp` verbatim (rollback path — no re-hashing). */
+  restoreAppPin(appId: string, rec: PinRecord | null): void {
+    if (rec) this.pins[appId] = rec;
+    else delete this.pins[appId];
+    for (const p of this.previews.values()) {
+      if (p.record.appId === appId) p.record.passwordProtected = rec != null;
+    }
+    this.persist();
+    // Compensating entry: setAppPin already recorded the (now undone) change, so
+    // without this the audit log claims a share was made public when it wasn't.
+    this.d.audit.record({ actor: "engine", tool: "set_pin", args: { app: appId, protected: rec != null, rollback: true }, result: "ok" });
+  }
+
   /** Whether the share behind `shareId` requires a PIN, and its digit length (for the pad). */
   pinInfoForShare(shareId: string): { required: boolean; length: number } {
     const appId = this.appIdForShare(shareId);
     const rec = appId ? this.pins[appId] : undefined;
     return rec ? { required: true, length: rec.length } : { required: false, length: 0 };
+  }
+
+  /** Whether the app has a live (non-terminal) preview serving a web device. */
+  private hasLiveWebPreview(appId: string): boolean {
+    for (const p of this.previews.values()) {
+      const ph = p.record.phase;
+      if (p.record.appId !== appId || ph === "stopped" || ph === "failed") continue;
+      if (p.devices.some((d) => d.record.platform === "web")) return true;
+    }
+    return false;
+  }
+
+  /**
+   * The PIN record in force for a share, or null when the share is public.
+   * The proxy folds this into every unlock cookie (see `pinFingerprint`) so a
+   * PIN change revokes cookies issued under the previous one.
+   */
+  pinRecordForShare(shareId: string): PinRecord | null {
+    const appId = this.appIdForShare(shareId);
+    return (appId ? this.pins[appId] : undefined) ?? null;
   }
 
   /** Verify a PIN attempt against the share's stored hash (timing-safe). */
@@ -589,6 +827,17 @@ export class PreviewEngine {
       throw new PreviewError(
         "web apps preview their local files only",
         "omit ref/pr — a web app previews its local working copy (a live dev server)",
+      );
+    }
+    // A web share is never public. Enforced HERE, not only in the MCP tool, so
+    // no caller can boot one PIN-less: a web preview exposes the dev server's
+    // whole route surface (including `@fs` if the repo relaxed Vite's
+    // `server.fs.strict`), and a subdomain-hosted framework serves at a bare
+    // public hostname with no shareId in the URL to keep it secret.
+    if (req.devices.some((d) => d.platform === "web") && !this.pins[req.app.id]) {
+      throw new PreviewError(
+        `web app "${req.app.id}" needs a share PIN before it can be previewed`,
+        "ask the user for a 4–6 digit PIN and pass share: { access: \"pin\", pin: \"<code>\" }",
       );
     }
     if (req.source === "local") {
@@ -663,6 +912,7 @@ export class PreviewEngine {
       createdAt: now,
       updatedAt: now,
       passwordProtected: req.access === "password",
+      ...(req.reference ? { reference: true } : {}),
       ...(webFramework ? { webFramework } : {}),
     };
     const preview: LivePreview = {
@@ -757,6 +1007,21 @@ export class PreviewEngine {
    * made the immediate retry of a failed preview fail with "device capacity
    * reached", which is precisely the flow this path exists to serve.
    */
+  /**
+   * Stop the app's Metro once nothing is using it any more.
+   *
+   * Teardown killed the dev processes but never Metro, so every finished Expo
+   * preview left one listening for the rest of the server's life and `freePort`
+   * simply moved to the next port — the 8081-8099 range emptied out over a few
+   * app switches and previews started failing with "no free Metro port".
+   * App-scoped on purpose: one manager, one Metro, and another app's live
+   * preview may be the one holding it.
+   */
+  private stopMetroIfUnused(appId: string): void {
+    for (const other of this.previews.values()) if (other.app.id === appId) return;
+    void this.d.metro.stopApp(appId).catch(() => {});
+  }
+
   private releaseInBackground(p: LivePreview): () => number {
     let held = p.devices.length;
     this.tearingDown += held;
@@ -777,6 +1042,7 @@ export class PreviewEngine {
           }
         }
         await this.teardownDevices(p, releaseOne);
+        this.stopMetroIfUnused(p.app.id);
         if (p.record.source !== "local") {
           await this.d.worktrees.removeWorktree(p.app, p.record.previewId).catch(() => {});
         }
@@ -812,11 +1078,20 @@ export class PreviewEngine {
     if (dev.record.phase === "failed" && phase !== "pending") return;
     dev.record.phase = phase;
     dev.record.detail = detail;
+    // The build sub-step belongs to the phase that produced it — leaving it up
+    // would caption "installing the app" with the last file that compiled.
+    dev.record.step = undefined;
     this.touch(p);
   }
 
   private appEnv(app: App): Record<string, string> {
-    return { ...app.env, ...this.d.secretsEnv!(app.id) };
+    // A UTF-8 locale, unless the environment already set one. Ruby-based build
+    // tooling reads paths as ASCII-8BIT without it: `pod install` dies with
+    // "Unicode Normalization not appropriate for ASCII-8BIT", which NativeScript
+    // reports only as a livesync exit code. A LaunchAgent inherits no locale from
+    // a login shell, so the server itself usually has none to pass on.
+    const locale: Record<string, string> = process.env.LC_ALL || process.env.LANG ? {} : { LANG: "en_US.UTF-8" };
+    return { ...locale, ...app.env, ...this.d.secretsEnv!(app.id) };
   }
 
   /**
@@ -1040,16 +1315,26 @@ export class PreviewEngine {
   }
 
   private resolveBundleId(app: App, worktreePath: string, platform: Platform): string {
-    if (app.bundleId) return app.bundleId;
+    const label = platform === "android" ? "package" : "bundle id";
     // Only reached for iOS/Android builds; web has no bundle id.
-    const detected = detectBundleIdFromDir(worktreePath, app.type, platform === "android" ? "android" : "ios");
-    if (!detected) {
+    const value = app.bundleId ?? detectBundleIdFromDir(worktreePath, app.type, platform === "android" ? "android" : "ios");
+    if (!value) {
       throw new PreviewError(
-        `could not determine the ${platform} ${platform === "android" ? "package" : "bundle id"} for ${app.id}`,
+        `could not determine the ${platform} ${label} for ${app.id}`,
         `set bundleId for app "${app.id}" (deckhand app ...) or ensure the config declares it`,
       );
     }
-    return detected;
+    // Validate before use: this value comes from the previewed repo's own
+    // config and reaches multi-arg `adb shell` calls (`pm path`,
+    // `resolve-activity`, `am start`, `monkey -p`) as an unquoted token that adb
+    // joins into a device-side shell command line.
+    if (!(platform === "android" ? ANDROID_PACKAGE_RE : IOS_BUNDLE_ID_RE).test(value)) {
+      throw new PreviewError(
+        `${platform} ${label} ${JSON.stringify(value)} for ${app.id} is not a valid ${label}`,
+        `set a valid bundleId for app "${app.id}" — reverse-DNS segments only, e.g. com.example.app`,
+      );
+    }
+    return value;
   }
 
   /**
@@ -1098,10 +1383,23 @@ export class PreviewEngine {
     return groups;
   }
 
+  /** First line of a failure, capped — enough to act on, short enough for a device frame. */
+  private failureDetail(error: string): string | undefined {
+    const first = error.split("\n").find((l) => l.trim().length)?.trim();
+    if (!first) return undefined;
+    const safe = redactForShare(first);
+    return safe.length > 160 ? `${safe.slice(0, 159)}…` : safe;
+  }
+
   private failDevice(p: LivePreview, dev: LiveDevice, e: unknown): void {
     if (dev.record.phase === "ready" || dev.record.phase === "failed") return;
     dev.record.error = e instanceof Error ? e.message : String(e);
-    this.setPhase(p, dev, "failed", undefined);
+    // Carry the reason into `detail`, the one field shareState sanitizes through
+    // to the viewer. Without it a failed device read as a bare "This device
+    // didn't start." with no way to tell a build error from a dead simulator —
+    // the share holder had nothing to relay and no next step. First line only,
+    // capped: a build error's stack is for `logs`, not for a device frame.
+    this.setPhase(p, dev, "failed", this.failureDetail(dev.record.error));
     this.d.audit.record({
       actor: "engine",
       tool: "device_failed",
@@ -1384,6 +1682,11 @@ export class PreviewEngine {
         onLog: (line) => {
           this.appendLog(dev, "build", `[${step.name}] ${line}`);
           this.noteProgress(p);
+          // Live build sub-step for the viewer: the phase headline alone can't be
+          // told apart from a hang. In-memory only — the viewer reads the live
+          // record, and persisting per log line would hammer state.json.
+          const sub = buildStepDetail(line);
+          if (sub && dev.record.phase === "building") dev.record.step = sub;
         },
       });
       if (res.code !== 0 && !step.optional) {
@@ -1577,6 +1880,7 @@ export class PreviewEngine {
         label: dv.record.label,
         phase: dv.record.phase,
         detail: dv.record.detail,
+        step: dv.record.step,
         error: dv.record.error,
         logTail: dv.record.phase === "failed" ? dv.logs.build.slice(-20).join("\n") : undefined,
       })),
@@ -1601,6 +1905,24 @@ export class PreviewEngine {
   /** The app id backing a preview (for owner-scope checks). */
   appIdFor(previewId: string): string | null {
     return this.previews.get(previewId)?.record.appId ?? null;
+  }
+
+  /**
+   * The app config a preview booted from. A reference pane's app is synthetic (not
+   * in apps.yaml) but still carries the real `repo`, which is what owner-scoping a
+   * reference has to check against.
+   */
+  appFor(previewId: string): App | null {
+    return this.previews.get(previewId)?.app ?? null;
+  }
+
+  /**
+   * Whether a preview is a compare/migration reference pane — deliberately
+   * public, and deliberately not backed by an app in apps.yaml. The only case
+   * where "no app found" is legitimate rather than a reason to deny.
+   */
+  isReference(previewId: string): boolean {
+    return this.previews.get(previewId)?.record.reference === true;
   }
 
   /** The live (non-terminal) preview for an app, if any — newest first. */
@@ -1850,11 +2172,28 @@ export class PreviewEngine {
       }
     })();
     if (stale.length) this.persist(); // drops the stale previews, keeps shareIds + pins
-    if (stale.length || report.sims.length || report.avds.length) {
+
+    // Disk: checkouts are keyed by app+ref and outlive the preview that made
+    // them (that's what keeps the next build warm), so nothing else reclaims
+    // them. Same for Xcode's DerivedData, which lives outside ~/.deckhand
+    // entirely. The checkout prune spares anything used recently as well as
+    // anything live — at boot the live set is empty, so an ungraced prune would
+    // delete exactly the warm checkouts it exists to preserve. The janitor
+    // repeats it (see sweepIdle); a server that runs for weeks must not need a
+    // restart to reclaim disk.
+    const { worktrees, derived } = await this.pruneDisk();
+
+    if (stale.length || report.sims.length || report.avds.length || worktrees.length || derived.length) {
       this.d.audit.record({
         actor: "engine",
         tool: "reap_orphans",
-        args: { previews: stale.length, sims: report.sims.length, avds: report.avds.length },
+        args: {
+          previews: stale.length,
+          sims: report.sims.length,
+          avds: report.avds.length,
+          worktrees: worktrees.length,
+          derivedData: derived.length,
+        },
         result: "ok",
       });
     }
@@ -1932,13 +2271,66 @@ export class PreviewEngine {
       this.d.audit.record({ actor: "engine", tool: "auto_stop", args: { preview: id, reason }, result: "ok" });
       await this.stopPreview(id).catch(() => {});
     }
+    // Teardown keeps the checkout (it is the next build's warm cache), so this
+    // sweep is the only thing that ever gives that disk back on a server that
+    // isn't restarted. It only touches checkouts idle past the grace window.
+    await this.pruneDisk();
     return doomed.map((d) => d.id);
   }
 
-  /** Run `sweepIdle` on a timer. The handle is unref'd, so it never holds the process open. */
+  /**
+   * Give back the disk that teardown deliberately keeps: checkouts that are
+   * neither live nor recently used, and the DerivedData trees of the checkouts
+   * that just went away.
+   *
+   * Both halves run together, in this order, on purpose. A DerivedData tree is
+   * only reclaimable once its project path is gone, so pruning it before the
+   * checkout would find nothing to do; and running the pair only at boot (as it
+   * used to) meant a LaunchAgent server up for a month never reclaimed a byte —
+   * the 22 GB of abandoned DerivedData that `derivedData.ts` exists for would
+   * simply accumulate until someone restarted the process.
+   */
+  private async pruneDisk(): Promise<{ worktrees: string[]; derived: string[] }> {
+    const liveKeys = new Set<string>();
+    for (const p of this.previews.values()) {
+      if (p.record.source === "git" && p.spec) liveKeys.add(worktreeKey(p.app.id, p.spec));
+    }
+    // Checkout dirs of everything still running: a build in flight can have its
+    // workspace missing for a moment (ns prepare / expo prebuild regenerate
+    // `platforms/ios` in place), which otherwise reads as an orphan. Collected
+    // AFTER the worktree pass, not before: that pass can wait on a checkout
+    // lock, and a preview started while it waited would be missing from a
+    // snapshot taken earlier — with its DerivedData deleted under the build.
+    const worktrees = (await this.d.worktrees.pruneWorktrees?.(liveKeys).catch(() => [])) ?? [];
+    const livePaths = new Set<string>();
+    for (const p of this.previews.values()) {
+      for (const dir of [p.sourceDir, p.record.worktreePath, p.app.path]) if (dir) livePaths.add(dir);
+    }
+    const derived = await pruneDerivedData({ livePaths: [...livePaths] }).catch(() => [] as string[]);
+    return { worktrees, derived };
+  }
+
+  /**
+   * Run `sweepIdle` on a timer. The handle is unref'd, so it never holds the
+   * process open.
+   *
+   * Ticks never overlap: the sweep reclaims disk now (a `plutil` per DerivedData
+   * tree, then multi-GB deletes) and can also wait on a checkout lock, so it is
+   * no longer guaranteed to finish inside one interval. Two passes over the same
+   * directories would spawn the work twice and race their own deletes.
+   */
   startJanitor(everyMs = 60_000): void {
     if (this.janitor) return;
-    this.janitor = setInterval(() => void this.sweepIdle().catch(() => {}), everyMs);
+    let sweeping = false;
+    this.janitor = setInterval(() => {
+      if (sweeping) return;
+      sweeping = true;
+      void this.sweepIdle()
+        .catch(() => {})
+        .finally(() => {
+          sweeping = false;
+        });
+    }, everyMs);
     this.janitor.unref?.();
   }
 
@@ -2085,6 +2477,7 @@ export class PreviewEngine {
     p.record.updatedAt = this.iso();
     this.persist();
     this.previews.delete(previewId);
+    this.stopMetroIfUnused(p.app.id);
     this.d.audit.record({ actor: "engine", tool: "stop_preview", args: { preview: previewId }, result: "ok" });
 
     // Cascade: stop the paired reference preview once no other live compare needs it.

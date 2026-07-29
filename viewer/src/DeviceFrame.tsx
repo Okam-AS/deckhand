@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { DevicePlayer, type PlayerStatus } from "./stream/player.ts";
 import { DeviceInput, ORIENTATION_CYCLE, type SpecialKey } from "./stream/input.ts";
-import { deviceBase, deviceWsUrl, phaseLabel, repoName, type ShareDevice, type ShareTestRun } from "./api.ts";
+import { deviceBase, deviceWsUrl, phaseBadge, phaseLabel, repoName, type ShareDevice, type ShareTestRun } from "./api.ts";
 import { CollapseIcon, ExpandIcon, HomeIcon, KeyboardIcon, RotateIcon } from "./icons.tsx";
 import { TestRunControl } from "./TestRunPopover.tsx";
 
@@ -231,10 +231,31 @@ export function DeviceFrame({ shareId, device, repo, branch, variant = "grid", o
         {!ready && (
           <div className={`overlay ${device.phase === "failed" ? "overlay-failed" : ""}`}>
             {device.phase !== "failed" && <span className="spinner" aria-hidden />}
-            {!isThumb && <p>{phaseLabel(device.phase, device.detail)}</p>}
+            {/* Only "failed" keeps a centred headline — every other phase is
+                named by the pill at the top of the frame, so the middle carries
+                just the spinner and the live sub-step. */}
+            {!isThumb && device.phase === "failed" && <p>{phaseLabel(device.phase, device.detail)}</p>}
+            {/* Keyed by its text so React remounts it on change and the fade-in
+                replays — the caption changes every few seconds and a hard swap
+                reads as a flicker. */}
+            {!isThumb && device.phase !== "failed" && device.step && (
+              <p className="overlay-step" key={device.step}>
+                {device.step}
+              </p>
+            )}
+            {!isThumb && device.phase === "failed" && device.detail && (
+              // The reason, not just the verdict — so the viewer can say what
+              // broke (build error vs. a simulator that never booted) instead of
+              // sending everyone to the logs to find out.
+              <p className="overlay-reason">{device.detail}</p>
+            )}
           </div>
         )}
+        {/* One pill, two sources: the boot/build phase before the stream exists,
+            then the streaming state once it does. Same chip either way, so the
+            frame's status never jumps between two different affordances. */}
         {showBadge && <div className="badge">{status === "fallback" ? "Reduced quality" : "Connecting…"}</div>}
+        {!ready && !isThumb && device.phase !== "failed" && <div className="badge">{phaseBadge(device.phase)}</div>}
       </div>
       {isThumb ? (
         <figcaption className="thumb-cap">{device.label.split(" · ")[0]}</figcaption>

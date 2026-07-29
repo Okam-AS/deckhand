@@ -48,22 +48,52 @@ export function generatePassword(): string {
 
 // --- signed unlock cookie ---------------------------------------------------
 
-/** Sign an unlock token for a share, valid until `expiresAtMs`. */
-export function signUnlockCookie(secret: string, shareId: string, expiresAtMs: number): string {
-  const payload = `${shareId}.${expiresAtMs}`;
+/**
+ * An opaque, secret-keyed fingerprint of the PIN currently in force for a share
+ * (or of "no PIN"). Bound into every unlock cookie so changing the PIN
+ * invalidates cookies issued under the old one.
+ *
+ * Without it, an unlock cookie was valid for its full 12-hour TTL no matter
+ * what: setting a PIN to lock someone out did nothing until it expired, and
+ * because shareIds are stable per app and reused across stop/restart, the old
+ * cookie kept working into the app's NEXT preview. The stored scrypt hash is
+ * never put in the cookie directly — a 4–6 digit keyspace cracks offline in
+ * under a second — so it goes through the HMAC first.
+ */
+export function pinFingerprint(secret: string, stored: PasswordHash | null | undefined): string {
+  const material = stored ? `${stored.salt}:${stored.hash}` : "none";
+  return createHmac("sha256", secret).update(`pinv1:${material}`).digest("base64url").slice(0, 16);
+}
+
+/** Sign an unlock token for a share, valid until `expiresAtMs`, bound to the PIN in force. */
+export function signUnlockCookie(secret: string, shareId: string, expiresAtMs: number, pinFp: string): string {
+  const payload = `${shareId}.${expiresAtMs}.${pinFp}`;
   const sig = createHmac("sha256", secret).update(payload).digest("base64url");
   return `${payload}.${sig}`;
 }
 
-/** Verify an unlock cookie for a share; returns true when valid and unexpired. */
-export function verifyUnlockCookie(secret: string, shareId: string, cookie: string, nowMs: number): boolean {
+/**
+ * Verify an unlock cookie for a share: correct share, unexpired, signed by us,
+ * and issued under the PIN that is in force RIGHT NOW (`pinFp`).
+ */
+export function verifyUnlockCookie(
+  secret: string,
+  shareId: string,
+  cookie: string,
+  nowMs: number,
+  pinFp: string,
+): boolean {
   const parts = cookie.split(".");
-  if (parts.length !== 3) return false;
-  const [cookieShare, expStr, sig] = parts as [string, string, string];
+  if (parts.length !== 4) return false;
+  const [cookieShare, expStr, cookieFp, sig] = parts as [string, string, string, string];
   if (cookieShare !== shareId) return false;
   const exp = Number(expStr);
   if (!Number.isFinite(exp) || exp < nowMs) return false;
-  const expected = createHmac("sha256", secret).update(`${cookieShare}.${expStr}`).digest("base64url");
+  // Constant-time on the fingerprint too: it is derived from the PIN record.
+  const fpA = Buffer.from(cookieFp);
+  const fpB = Buffer.from(pinFp);
+  if (fpA.length !== fpB.length || !timingSafeEqual(fpA, fpB)) return false;
+  const expected = createHmac("sha256", secret).update(`${cookieShare}.${expStr}.${cookieFp}`).digest("base64url");
   const a = Buffer.from(sig);
   const b = Buffer.from(expected);
   return a.length === b.length && timingSafeEqual(a, b);

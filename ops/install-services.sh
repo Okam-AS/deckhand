@@ -18,6 +18,28 @@ NODE="$(command -v node || true)"
 [ -n "$NODE" ] || { echo "error: node not on PATH — install Node (nvm) first" >&2; exit 1; }
 NODE_DIR="$(dirname "$NODE")"
 
+# The agent's PATH: a LaunchAgent inherits nothing from the user's shell, so
+# every build tool has to be named. Resolve the ones that live outside the
+# standard prefixes on this machine — CocoaPods (a Ruby gem bin dir; without it
+# `ns run ios` exits 127 at "Installing pods...") and the Android SDK tools.
+AGENT_PATH="$NODE_DIR"
+# `dirname` of a missing tool used to yield "/", which is a directory — so a Mac
+# without CocoaPods got a bare "/" component in the agent's PATH.
+POD_DIR="$(p="$(command -v pod 2>/dev/null)" && dirname "$p" || echo "")"
+RUBY_DIR="$(p="$(command -v ruby 2>/dev/null)" && dirname "$p" || echo "")"
+for d in \
+  "$POD_DIR" \
+  "$RUBY_DIR" \
+  "${ANDROID_HOME:-$HOME/Library/Android/sdk}/platform-tools" \
+  "${ANDROID_HOME:-$HOME/Library/Android/sdk}/emulator" \
+  "${ANDROID_HOME:-$HOME/Library/Android/sdk}/cmdline-tools/latest/bin" \
+  /opt/homebrew/bin /usr/local/bin /usr/bin /bin /usr/sbin /sbin
+do
+  [ -n "$d" ] || continue
+  case ":$AGENT_PATH:" in *":$d:"*) continue ;; esac   # de-dupe
+  [ -d "$d" ] && AGENT_PATH="$AGENT_PATH:$d"
+done
+
 CLOUDFLARED="$(command -v cloudflared || true)"
 CONFIG="$HOME/.cloudflared/config.yml"
 TUNNEL_ID=""
@@ -29,6 +51,7 @@ fill() { # template -> installed plist, substituting placeholders
   local tmpl="$1" out="$2"
   sed -e "s#__NODE__#$NODE#g" \
       -e "s#__NODE_DIR__#$NODE_DIR#g" \
+      -e "s#__PATH__#$AGENT_PATH#g" \
       -e "s#__REPO__#$REPO#g" \
       -e "s#__LOG_DIR__#$LOG_DIR#g" \
       -e "s#__CLOUDFLARED__#$CLOUDFLARED#g" \

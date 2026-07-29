@@ -14,7 +14,10 @@ import type { WebFramework } from "./detect.ts";
 /** ~6 min general idle timeout; ~3 min for stages known to stall silently (SPM). */
 export const GENERAL_IDLE_MS = 6 * 60_000;
 export const SPM_IDLE_MS = 3 * 60_000;
+/** Metro's conventional port, and the range deckhand falls back through when a
+ *  developer's own dev server already owns it (see MetroManager). */
 export const METRO_PORT = 8081;
+export const METRO_PORT_RANGE: [number, number] = [8081, 8099];
 
 export type StepRun =
   | { kind: "argv"; command: string; args: string[] }

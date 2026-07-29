@@ -1,6 +1,6 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9,6 +9,7 @@ import {
   fetchRefspec,
   isCommitSha,
   cloneUrl,
+  worktreeKey,
   RefError,
   WorktreeManager,
   type GitRunner,
@@ -23,7 +24,7 @@ const app: App = {
   repo: "github.com/ainfrastructure/my-app",
   type: "expo",
   defaultBranch: "main",
-  allowForkPRs: false,
+ 
   env: {},
 };
 
@@ -202,7 +203,7 @@ describe("WorktreeManager.prepareRef", () => {
   });
 
   it("updateWorktree fetches and hard-resets the existing worktree to the new tip", async () => {
-    mkdirSync(paths.worktree("pv-upd"), { recursive: true });
+    mkdirSync(paths.worktree(worktreeKey(app.id, parseRefSpec({ ref: "main" }))), { recursive: true });
     const seen: { args: string[]; cwd?: string }[] = [];
     const runner: GitRunner = async (args, opts) => {
       seen.push({ args, cwd: opts?.cwd });
@@ -210,11 +211,118 @@ describe("WorktreeManager.prepareRef", () => {
     };
     const mgr = new WorktreeManager({ tokenResolver: async () => "tok", git: runner });
     const res = await mgr.updateWorktree(app, "pv-upd", parseRefSpec({ ref: "main" }));
-    assert.equal(res.path, paths.worktree("pv-upd"));
+    assert.equal(res.path, paths.worktree(worktreeKey(app.id, parseRefSpec({ ref: "main" }))));
     assert.ok(seen.some((c) => c.args[0] === "fetch"));
     const reset = seen.find((c) => c.args[0] === "reset");
     assert.ok(reset, "must hard-reset the worktree");
     assert.deepEqual(reset!.args, ["reset", "--hard", "refs/remotes/origin/main"]);
-    assert.equal(reset!.cwd, paths.worktree("pv-upd"));
+    assert.equal(reset!.cwd, paths.worktree(worktreeKey(app.id, parseRefSpec({ ref: "main" }))));
+  });
+
+  it("widens the repo-scoped token to same-org submodules declared in .gitmodules", async () => {
+    // The installation token covers only the previewed repo, so a legitimate
+    // private submodule in the same org would 404 under it.
+    const wt = paths.worktree(worktreeKey(app.id, parseRefSpec({ ref: "main" })));
+    mkdirSync(wt, { recursive: true });
+    writeFileSync(
+      join(wt, ".gitmodules"),
+      `[submodule "shared"]\n\turl = https://github.com/ainfrastructure/shared.git\n` +
+        `[submodule "rel"]\n\turl = ../design-system.git\n` +
+        `[submodule "elsewhere"]\n\turl = https://gitlab.example/other/thing.git\n` +
+        `[submodule "otherorg"]\n\turl = https://github.com/someone-else/tool.git\n`,
+    );
+    const scopes: (string[] | undefined)[] = [];
+    const runner: GitRunner = async () => ({ stdout: "", stderr: "", code: 0 });
+    const mgr = new WorktreeManager({
+      tokenResolver: async (_o, _r, extra) => {
+        scopes.push(extra);
+        return "tok";
+      },
+      git: runner,
+    });
+    await mgr.updateWorktree(app, "pv-sub", parseRefSpec({ ref: "main" }));
+    // Only same-host, same-owner (and relative) urls; never another org or host.
+    assert.deepEqual(scopes.at(-1), ["shared", "design-system"]);
+  });
+
+  it("surfaces a failing submodule checkout instead of swallowing it", async () => {
+    const wt = paths.worktree(worktreeKey(app.id, parseRefSpec({ ref: "main" })));
+    mkdirSync(wt, { recursive: true });
+    writeFileSync(join(wt, ".gitmodules"), `[submodule "priv"]\n\turl = https://github.com/ainfrastructure/priv.git\n`);
+    const runner: GitRunner = async (args) =>
+      args[0] === "submodule"
+        ? { stdout: "", stderr: "fatal: repository not found", code: 128 }
+        : { stdout: "", stderr: "", code: 0 };
+    const mgr = new WorktreeManager({ tokenResolver: async () => "tok", git: runner });
+    await assert.rejects(
+      () => mgr.updateWorktree(app, "pv-subfail", parseRefSpec({ ref: "main" })),
+      (e) => e instanceof RefError && /submodule checkout failed/.test((e as Error).message) && /private/.test((e as Error).message),
+    );
+  });
+  it("reuses one checkout per app+ref instead of one per preview", async () => {
+    // A per-preview directory made every build cold: Xcode keys DerivedData on
+    // the project PATH, so a new path meant a full npm ci + pod install + ~600
+    // pod source files (~15 min) and a fresh 3.6 GB DerivedData tree each time.
+    const seen: string[][] = [];
+    const runner: GitRunner = async (args) => {
+      seen.push(args);
+      return { stdout: "", stderr: "", code: 0 };
+    };
+    const mgr = new WorktreeManager({ tokenResolver: async () => "tok", git: runner });
+    const a = await mgr.createWorktree(app, "preview-one", parseRefSpec({ ref: "main" }));
+    const b = await mgr.createWorktree(app, "preview-two", parseRefSpec({ ref: "main" }));
+    assert.equal(a.path, b.path, "the same app+ref must share one checkout");
+    assert.match(a.path, /dh-my-app-main-[0-9a-f]{8}$/);
+
+    // ...and a different ref must NOT share it.
+    const other = await mgr.createWorktree(app, "preview-three", parseRefSpec({ ref: "dev" }));
+    assert.notEqual(other.path, a.path);
+  });
+
+  it("prunes checkouts no live preview is using, and keeps the live ones", async () => {
+    const keep = worktreeKey(app.id, parseRefSpec({ ref: "main" }));
+    mkdirSync(paths.worktree(keep), { recursive: true });
+    mkdirSync(paths.worktree("my-app-gone-deadbeef"), { recursive: true });
+    const mgr = new WorktreeManager({ tokenResolver: async () => "tok", git: async () => ({ stdout: "", stderr: "", code: 0 }) });
+    const removed = await mgr.pruneWorktrees(new Set([keep]), 0);
+    assert.deepEqual(removed, ["dh-my-app-gone-deadbeef"]);
+    assert.equal(existsSync(paths.worktree(keep)), true, "a live checkout must survive");
+  });
+
+  it("keeps a recently used checkout even when no preview is live (warm-cache grace)", async () => {
+    // Boot is the case that matters: the live set is empty by definition there,
+    // so an ungraced prune deleted every warm checkout on the machine.
+    mkdirSync(paths.worktree("my-app-warm-deadbeef"), { recursive: true });
+    const mgr = new WorktreeManager({ tokenResolver: async () => "tok", git: async () => ({ stdout: "", stderr: "", code: 0 }) });
+    const removed = await mgr.pruneWorktrees(new Set());
+    assert.deepEqual(removed, []);
+    assert.equal(existsSync(paths.worktree("my-app-warm-deadbeef")), true);
+  });
+
+  it("caps the warm cache: past the budget, the oldest idle checkouts go anyway", async () => {
+    // The grace window bounds AGE, not COUNT — a week of PR previews mints a
+    // multi-GB checkout per ref long before the first is old enough to reclaim.
+    rmSync(paths.worktreesDir(), { recursive: true, force: true }); // only this test's checkouts count
+    const now = Date.now();
+    for (let i = 0; i < 5; i++) {
+      const dir = paths.worktree(`my-app-ref${i}-deadbee${i}`);
+      mkdirSync(dir, { recursive: true });
+      const at = new Date(now - i * 10 * 60_000); // ref0 newest; all past the in-use window but inside the grace
+      utimesSync(dir, at, at);
+    }
+    const mgr = new WorktreeManager({ tokenResolver: async () => "tok", git: async () => ({ stdout: "", stderr: "", code: 0 }) });
+    // All five are well inside the grace window; only the budget overflow goes.
+    const removed = await mgr.pruneWorktrees(new Set(), 60 * 60_000, 2);
+    assert.deepEqual(removed.sort(), ["dh-my-app-ref2-deadbee2", "dh-my-app-ref3-deadbee3", "dh-my-app-ref4-deadbee4"]);
+    assert.equal(existsSync(paths.worktree("my-app-ref0-deadbee0")), true, "the two most recent stay warm");
+    assert.equal(existsSync(paths.worktree("my-app-ref1-deadbee1")), true);
+  });
+
+  it("teardown leaves the checkout in place (it is the next build's warm cache)", async () => {
+    const key = worktreeKey(app.id, parseRefSpec({ ref: "main" }));
+    mkdirSync(paths.worktree(key), { recursive: true });
+    const mgr = new WorktreeManager({ tokenResolver: async () => "tok", git: async () => ({ stdout: "", stderr: "", code: 0 }) });
+    await mgr.removeWorktree(app, "preview-one");
+    assert.equal(existsSync(paths.worktree(key)), true);
   });
 });

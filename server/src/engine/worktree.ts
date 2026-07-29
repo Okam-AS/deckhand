@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, utimesSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { App } from "../config.ts";
 import { parseRepo } from "../config.ts";
@@ -59,10 +61,14 @@ export function isCommitSha(ref: string): boolean {
   return /^[0-9a-f]{7,40}$/i.test(ref);
 }
 
-/** HTTPS clone URL for an app's repo (token supplied out-of-band via GIT_ASKPASS). */
+/**
+ * HTTPS clone URL for an app's repo (token supplied out-of-band via GIT_ASKPASS).
+ * The host is lowercased so it matches the host the askpass script is pinned to
+ * verbatim — DNS is case-insensitive, git's prompt text is not.
+ */
 export function cloneUrl(app: App): string {
   const { host, owner, name } = parseRepo(requireRepo(app));
-  return `https://${host}/${owner}/${name}.git`;
+  return `https://${host.toLowerCase()}/${owner}/${name}.git`;
 }
 
 /** The app's repo string, or a RefError for local-only apps (no git operations apply). */
@@ -94,8 +100,8 @@ const defaultRunner: GitRunner = (args, opts) =>
   });
 
 export interface WorktreeManagerOptions {
-  /** `(owner) => Promise<installation token>`; only called for network fetches. */
-  tokenResolver: (owner: string) => Promise<string>;
+  /** `(owner, repoName) => Promise<installation token>`; only called for network fetches. */
+  tokenResolver: (owner: string, repoName?: string, extraRepos?: string[]) => Promise<string>;
   /**
    * When no credential is configured at all, retry network ops unauthenticated
    * (public repos). Wired from config `allowPublicRepos` so operators who bound
@@ -104,6 +110,51 @@ export interface WorktreeManagerOptions {
   allowAnonymous?: boolean;
   git?: GitRunner;
 }
+
+/**
+ * The directory key for an app at a ref: `<appId>-<ref slug>-<hash>`.
+ *
+ * Keyed by app+ref rather than by preview so the SAME code reuses one warm
+ * checkout — node_modules, Pods and (because Xcode keys DerivedData on the
+ * project path) the compiled objects. A per-preview path made every start a
+ * cold ~15-minute build and stacked up a 3.6 GB DerivedData tree per attempt.
+ * The hash keeps refs that slugify alike ("feat/a-b" vs "feat/a/b") apart, and
+ * the leading app id keeps the directory readable in `ls`.
+ */
+export function worktreeKey(appId: string, spec: RefSpec): string {
+  const ref = spec.kind === "pr" ? `pr-${spec.number}` : spec.branch;
+  const slug = `${appId}-${ref}`.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+  const hash = createHash("sha256").update(`${appId}\n${ref}`).digest("hex").slice(0, 8);
+  return `${slug.slice(0, 48)}-${hash}`;
+}
+
+/**
+ * How long a checkout no live preview is using survives a prune.
+ *
+ * The point of keying checkouts by app+ref is that the NEXT preview of that ref
+ * reuses the warm node_modules/Pods/DerivedData — so "delete everything not
+ * live" would throw that away the moment any prune ran after a stop (at boot,
+ * where the live set is empty by definition, it deleted every checkout on the
+ * machine). Idle time is the real signal: keep what was used recently, reclaim
+ * what wasn't. It doubles as the race guard — a checkout created seconds ago by
+ * a start_preview the pruner hasn't seen yet is far inside the window.
+ */
+export const WORKTREE_IDLE_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * How many idle checkouts the warm cache is allowed to hold. The grace window
+ * bounds AGE but not COUNT, and a busy week of PR previews mints a checkout per
+ * ref — each one a node_modules + Pods + platforms tree — so without a budget
+ * the cache grows to tens of GB before anything is old enough to reclaim.
+ */
+export const MAX_IDLE_WORKTREES = 6;
+
+/**
+ * A checkout touched this recently is being used right now, whatever the prune
+ * decided a moment ago. Only consulted inside the per-key lock, to catch a
+ * checkout that a queued-ahead create finished with while we waited.
+ */
+const CHECKOUT_IN_USE_MS = 5 * 60 * 1000;
 
 export interface PreparedWorktree {
   path: string;
@@ -121,16 +172,84 @@ export interface RepoInspection {
   hasEntry: (path: string) => Promise<boolean>;
 }
 
+/**
+ * Mark a checkout as used *now*, so the idle prune keeps it.
+ *
+ * Directory mtime, not a marker file: these are real git worktrees, and an
+ * untracked file dropped inside one is exactly what a `git add -A` in an agent
+ * session would sweep up. Best-effort — a failure here only means the checkout
+ * looks older than it is, and the worst case is one cold rebuild.
+ */
+function touchWorktree(wtPath: string): void {
+  try {
+    const now = new Date();
+    utimesSync(wtPath, now, now);
+  } catch {
+    // mtime is a hint, never a correctness requirement
+  }
+}
+
+/**
+ * How long ago a checkout was last created/reset, or Infinity if it can't be
+ * read (unreadable = not warm, so it may be reclaimed). Clamped at zero: mtime
+ * carries sub-millisecond precision, so a directory made moments ago can read
+ * as marginally "in the future" and turn a zero grace into an infinite one.
+ */
+function worktreeIdleMs(wtPath: string, now: number): number {
+  try {
+    return Math.max(0, now - statSync(wtPath).mtimeMs);
+  } catch {
+    return Infinity;
+  }
+}
+
+/** readdir that yields [] for a missing dir (the repos dir may not exist yet). */
+function safeReaddir(dir: string): string[] {
+  try {
+    return readdirSync(dir);
+  } catch {
+    return [];
+  }
+}
+
 export class WorktreeManager {
   private readonly git: GitRunner;
+  /** One in-flight checkout operation per directory key (see createWorktree). */
+  private readonly locks = new Map<string, Promise<unknown>>();
   constructor(private readonly opts: WorktreeManagerOptions) {
     this.git = opts.git ?? defaultRunner;
   }
 
-  private async runNetwork(app: App, args: string[], cwd: string): Promise<GitResult> {
+  private serialize<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const run = (this.locks.get(key) ?? Promise.resolve()).then(fn, fn);
+    const settled = run.catch(() => {});
+    this.locks.set(key, settled);
+    // Drop the entry once nothing is queued behind it — this server is meant to
+    // run for weeks, and a PR-per-checkout workload would otherwise leave one
+    // resolved promise per app+ref ever seen for the life of the process.
+    void settled.then(() => {
+      if (this.locks.get(key) === settled) this.locks.delete(key);
+    });
+    return run;
+  }
+
+  private async runNetwork(app: App, args: string[], cwd: string, extraRepos?: string[]): Promise<GitResult> {
+    const repo = parseRepo(requireRepo(app));
     let token: string;
     try {
-      token = await this.opts.tokenResolver(parseRepo(requireRepo(app)).owner);
+      try {
+        token = await this.opts.tokenResolver(repo.owner, repo.name, extraRepos);
+      } catch (e) {
+        // A widened token names sibling submodule repos, and GitHub rejects the
+        // WHOLE request (422) if even one of them is outside the installation —
+        // a public same-org submodule is enough. That must not take down a
+        // checkout that worked before submodule widening existed: fall back to
+        // the repo-only token. Public submodules need no token at all, and a
+        // genuinely private one still fails later with the actionable
+        // `submodule checkout failed …` message instead of a raw auth error.
+        if (!extraRepos?.length || e instanceof CredentialsMissingError) throw e;
+        token = await this.opts.tokenResolver(repo.owner, repo.name);
+      }
     } catch (e) {
       if (this.opts.allowAnonymous && e instanceof CredentialsMissingError) {
         // No credential anywhere — let git try unauthenticated. Any inherited
@@ -142,11 +261,75 @@ export class WorktreeManager {
       }
       throw e;
     }
-    const askpass = createAskpass(token);
+    // Pinned to the app's own repo host: `submodule update --init --recursive`
+    // below runs under this env against URLs the previewed repo chooses, and an
+    // unpinned askpass handed the credential to whatever host they named.
+    const askpass = createAskpass(token, repo.host.toLowerCase());
     try {
       return await this.git(args, { cwd, env: { ...process.env, ...askpass.env } });
     } finally {
       askpass.cleanup();
+    }
+  }
+
+  /**
+   * Sibling repos the worktree's `.gitmodules` points at, so the (repo-scoped)
+   * installation token can be widened to cover them. Only same-host, same-owner
+   * https URLs count: the token is an installation token for that org, and a
+   * submodule anywhere else would either be public (no token needed) or outside
+   * what deckhand may ask for. Relative URLs (`../shared.git`) are the same org
+   * by definition.
+   */
+  /**
+   * ACCEPTED RISK (audit 2026-07-29): this widens a repo-scoped token using
+   * file content the previewed branch controls. Anyone who can push a branch or
+   * open a PR can add a `.gitmodules` naming `../another-private-repo`, and the
+   * minted token then covers it — the build script (RCE by design, PLAN §11
+   * item 7) can read it. It is still strictly narrower than what it replaced (an
+   * org-wide installation token, where the same build had everything), and it is
+   * bounded to the same owner. Narrowing it properly means resolving submodules
+   * from the app's DEFAULT branch rather than the previewed ref; not done, since
+   * legitimate submodule changes then can't be previewed until they merge.
+   */
+  private submoduleRepoNames(wtPath: string, host: string, owner: string): string[] {
+    let text: string;
+    try {
+      text = readFileSync(join(wtPath, ".gitmodules"), "utf8");
+    } catch {
+      return [];
+    }
+    const names = new Set<string>();
+    for (const m of text.matchAll(/^\s*url\s*=\s*(\S+)\s*$/gm)) {
+      const url = m[1]!;
+      const rel = /^\.{1,2}\/([A-Za-z0-9._-]+?)(?:\.git)?$/.exec(url);
+      if (rel) {
+        names.add(rel[1]!);
+        continue;
+      }
+      const abs = /^https?:\/\/(?:[^/@]*@)?([^/:]+)(?::\d+)?\/([^/]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?$/.exec(url);
+      if (abs && abs[1]!.toLowerCase() === host.toLowerCase() && abs[2]!.toLowerCase() === owner.toLowerCase()) {
+        names.add(abs[3]!);
+      }
+    }
+    return [...names];
+  }
+
+  /**
+   * `submodule update --init --recursive` under a token widened to the declared
+   * submodule repos. Failures are surfaced: an unreadable private submodule used
+   * to fail here silently and reappear as an incomprehensible build error.
+   */
+  private async initSubmodules(app: App, wtPath: string): Promise<void> {
+    if (!existsSync(join(wtPath, ".gitmodules"))) return;
+    const repo = parseRepo(requireRepo(app));
+    const extra = this.submoduleRepoNames(wtPath, repo.host, repo.owner);
+    const res = await this.runNetwork(app, ["submodule", "update", "--init", "--recursive"], wtPath, extra);
+    if (res.code !== 0) {
+      throw new RefError(
+        `submodule checkout failed for ${app.repo}: ${res.stderr.trim().slice(0, 300)} — ` +
+          `if a submodule is private, grant deckhand's GitHub credential access to it too ` +
+          `(nested submodules and submodules outside ${repo.owner} are not covered automatically)`,
+      );
     }
   }
 
@@ -189,9 +372,30 @@ export class WorktreeManager {
 
   /** Create a detached worktree for a preview at the resolved ref; init submodules. */
   async createWorktree(app: App, previewId: string, spec: RefSpec): Promise<PreparedWorktree> {
+    // Serialized per directory: the checkout is SHARED by app+ref now, so two
+    // previews of the same ref starting together would otherwise run `worktree
+    // add` and `reset --hard` over each other's files mid-build.
+    return this.serialize(worktreeKey(app.id, spec), () => this.createWorktreeLocked(app, spec));
+  }
+
+  private async createWorktreeLocked(app: App, spec: RefSpec): Promise<PreparedWorktree> {
     const base = await this.ensureBaseClone(app);
     const { localRef, usedToken } = await this.prepareRef(app, spec);
-    const wtPath = paths.worktree(previewId);
+    const wtPath = paths.worktree(worktreeKey(app.id, spec));
+    // Already checked out for this app+ref: reuse it (warm node_modules, Pods and
+    // DerivedData) by resetting in place instead of throwing it away.
+    if (existsSync(join(wtPath, ".git"))) {
+      const reset = await this.git(["reset", "--hard", localRef], { cwd: wtPath });
+      if (reset.code === 0) {
+        touchWorktree(wtPath);
+        await this.initSubmodules(app, wtPath);
+        return { path: wtPath, ref: localRef, description: refDescription(spec), usedToken };
+      }
+      // A wedged checkout is not worth diagnosing — fall through and rebuild it.
+      // Async: these trees are 100k+ inodes, and a sync delete here would stall
+      // every live stream on the server for its duration.
+      await rm(wtPath, { recursive: true, force: true });
+    }
     mkdirSync(paths.worktreesDir(), { recursive: true });
     // Remove any stale worktree registration for this path before re-adding.
     await this.git(["worktree", "remove", "--force", wtPath], { cwd: base });
@@ -199,10 +403,8 @@ export class WorktreeManager {
     if (add.code !== 0) {
       throw new RefError(`worktree add failed: ${add.stderr.trim().slice(0, 300)}`);
     }
-    if (existsSync(join(wtPath, ".gitmodules"))) {
-      // Submodules may be private too — fetch them with the token.
-      await this.runNetwork(app, ["submodule", "update", "--init", "--recursive"], wtPath);
-    }
+    touchWorktree(wtPath);
+    await this.initSubmodules(app, wtPath);
     return { path: wtPath, ref: localRef, description: refDescription(spec), usedToken };
   }
 
@@ -212,16 +414,19 @@ export class WorktreeManager {
    * artifacts (node_modules, platforms/, Pods) survive, so the rebuild is warm.
    */
   async updateWorktree(app: App, previewId: string, spec: RefSpec): Promise<PreparedWorktree> {
+    return this.serialize(worktreeKey(app.id, spec), () => this.updateWorktreeLocked(app, spec));
+  }
+
+  private async updateWorktreeLocked(app: App, spec: RefSpec): Promise<PreparedWorktree> {
     const { localRef, usedToken } = await this.prepareRef(app, spec);
-    const wtPath = paths.worktree(previewId);
-    if (!existsSync(wtPath)) throw new RefError(`worktree for preview ${previewId} no longer exists`);
+    const wtPath = paths.worktree(worktreeKey(app.id, spec));
+    if (!existsSync(wtPath)) throw new RefError(`the checkout for ${app.id} at ${refDescription(spec)} no longer exists`);
     const reset = await this.git(["reset", "--hard", localRef], { cwd: wtPath });
     if (reset.code !== 0) {
       throw new RefError(`worktree update failed: ${reset.stderr.trim().slice(0, 300)}`);
     }
-    if (existsSync(join(wtPath, ".gitmodules"))) {
-      await this.runNetwork(app, ["submodule", "update", "--init", "--recursive"], wtPath);
-    }
+    touchWorktree(wtPath);
+    await this.initSubmodules(app, wtPath);
     return { path: wtPath, ref: localRef, description: refDescription(spec), usedToken };
   }
 
@@ -258,13 +463,81 @@ export class WorktreeManager {
     };
   }
 
-  /** Remove a preview's worktree and its directory. Best-effort; safe to call twice. */
-  async removeWorktree(app: App, previewId: string): Promise<void> {
-    const base = paths.repo(app.id);
-    const wtPath = paths.worktree(previewId);
-    if (existsSync(join(base, ".git"))) {
-      await this.git(["worktree", "remove", "--force", wtPath], { cwd: base });
+  /**
+   * Teardown no longer deletes the checkout: it is keyed by app+ref and shared,
+   * so deleting it when ONE preview stops would throw away the warm node_modules
+   * / Pods / DerivedData the next start of that same ref depends on — and could
+   * pull the directory out from under a second preview still building in it.
+   * Directories are reclaimed by `pruneWorktrees` instead, which knows which
+   * keys are live.
+   */
+  async removeWorktree(_app: App, _previewId: string): Promise<void> {
+    // intentionally empty — see pruneWorktrees
+  }
+
+  /**
+   * Delete checkouts that no live preview is using and that are not worth
+   * keeping warm: idle past `idleGraceMs` (see WORKTREE_IDLE_GRACE_MS), or —
+   * once more than `maxIdle` of them have piled up — the oldest of the rest.
+   * `keep` holds the keys of live previews (see worktreeKey). Returns what it
+   * removed.
+   *
+   * Safe to call on a timer as well as at boot — that is the point. Teardown
+   * deliberately keeps checkouts (removeWorktree is a no-op), so without a
+   * recurring prune a long-lived server never reclaims the disk of a stopped
+   * preview; and a boot-only prune both leaks between restarts and, because the
+   * live set is empty at boot, deleted every warm checkout it was meant to keep.
+   */
+  async pruneWorktrees(
+    keep: ReadonlySet<string>,
+    idleGraceMs = WORKTREE_IDLE_GRACE_MS,
+    maxIdle = MAX_IDLE_WORKTREES,
+  ): Promise<string[]> {
+    let entries: string[];
+    try {
+      entries = readdirSync(paths.worktreesDir());
+    } catch {
+      return [];
     }
-    rmSync(wtPath, { recursive: true, force: true });
+    const now = Date.now();
+    const idle = entries
+      .filter((name) => name.startsWith("dh-") && !keep.has(name.slice(3)))
+      .map((name) => ({ name, idleMs: worktreeIdleMs(join(paths.worktreesDir(), name), now) }))
+      .sort((a, b) => b.idleMs - a.idleMs); // oldest first
+    // The grace window alone is not a bound: a week of PR review can leave a
+    // dozen checkouts of one RN app (node_modules + Pods + platforms, GBs each)
+    // before the first is even eligible. So anything past the LRU budget goes
+    // too, oldest first, regardless of how recent it is.
+    const doomed = idle.filter((e, i) => e.idleMs >= idleGraceMs || i < idle.length - maxIdle);
+    // Never longer than the caller's own grace: a zero grace means "reclaim
+    // everything now" and must not be silently overridden by the in-use guard.
+    const inUseMs = Math.min(CHECKOUT_IN_USE_MS, idleGraceMs);
+    const removed: string[] = [];
+    for (const { name } of doomed) {
+      const wtPath = join(paths.worktreesDir(), name);
+      // Under the same per-key lock as create/update, so a start_preview that
+      // began after `keep` was computed can't have the directory pulled out from
+      // under it mid-checkout.
+      const gone = await this.serialize(name.slice(3), async () => {
+        // Re-read inside the lock: a create that queued ahead of us has just
+        // touched it, and a freshly touched checkout is by definition in use.
+        if (worktreeIdleMs(wtPath, Date.now()) < inUseMs) return false;
+        // `git worktree remove` needs the base clone it was registered against;
+        // we don't know which app that was, so prune registrations repo-side after
+        // deleting the directory (git prune drops registrations for missing dirs).
+        // Async: these trees are 100k+ inodes, and this runs on the janitor tick
+        // — a synchronous delete would stall every live stream for its duration.
+        await rm(wtPath, { recursive: true, force: true });
+        return true;
+      });
+      if (gone) removed.push(name);
+    }
+    if (removed.length) {
+      for (const repo of safeReaddir(paths.reposDir())) {
+        const base = join(paths.reposDir(), repo);
+        if (existsSync(join(base, ".git"))) await this.git(["worktree", "prune"], { cwd: base });
+      }
+    }
+    return removed;
   }
 }

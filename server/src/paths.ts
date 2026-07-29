@@ -41,8 +41,14 @@ export const paths = {
   worktreesDir: () => join(deckhandHome(), "worktrees"),
   // The worktree dir name becomes the build's project name. NativeScript's
   // Android build rejects a project name that begins with a digit ("Project name
-  // must not begin with a number"), and previewIds are random hex that can start
-  // with 0-9 — so prefix with a letter. (Xcode doesn't care; Gradle does.)
-  worktree: (previewId: string) => join(deckhandHome(), "worktrees", `dh-${previewId}`),
+  // must not begin with a number"), so prefix with a letter. (Xcode doesn't
+  // care; Gradle does.)
+  //
+  // `key` is app+ref, NOT the previewId (see worktreeKey). Xcode keys DerivedData
+  // on the project PATH, so a per-preview directory made every build a cold one:
+  // full `npm ci`, `pod install` and ~600 pod source files, ~15 min, and a fresh
+  // 3.6 GB DerivedData tree left behind each time. Same code at the same ref
+  // builds identically, so it can share one warm directory.
+  worktree: (key: string) => join(deckhandHome(), "worktrees", `dh-${key}`),
   logsDir: () => join(deckhandHome(), "logs"),
 } as const;
