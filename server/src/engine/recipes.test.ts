@@ -109,19 +109,20 @@ describe("buildPlan — nativescript iOS", () => {
 describe("buildPlan — android", () => {
   const androidInput = { ...baseInput, platform: "android" as const, udid: "emulator-5554" };
 
-  it("expo android runs install then expo run:android with the serial", () => {
+  it("expo android resolves the AVD name from the serial before run:android", () => {
     const plan = buildPlan({ ...androidInput, type: "expo" });
     assert.deepEqual(
       plan.map((s) => s.name),
       ["install-deps", "build"],
     );
-    assert.deepEqual((plan[1]!.run as { args: string[] }).args, [
-      "expo",
-      "run:android",
-      "--device",
-      "emulator-5554",
-      "--no-bundler",
-    ]);
+    const script = (plan[1]!.run as { kind: string; script: string }).script;
+    assert.equal((plan[1]!.run as { kind: string }).kind, "shell");
+    // Looks the AVD name up rather than handing expo the serial, which it
+    // cannot match against a device name.
+    assert.match(script, /adb -s 'emulator-5554' emu avd name/);
+    // Physical devices (no AVD name) still fall back to the serial.
+    assert.match(script, /_avd='emulator-5554'/);
+    assert.match(script, /npx expo run:android --device "\$_avd" --no-bundler/);
   });
 
   it("bare react-native android uses run-android --deviceId", () => {
@@ -151,12 +152,17 @@ describe("buildPlan — android", () => {
 describe("buildPlan — local dev mode", () => {
   const base = { platform: "ios" as const, udid: "UDID", worktreePath: "/Users/dev/app", appEnv: {}, local: true };
 
-  it("never wipes the developer's node_modules (install only when missing)", () => {
+  it("never wipes the developer's node_modules (install only when missing or stale)", () => {
     const plan = buildPlan({ ...base, type: "react-native" });
     const deps = plan[0]!;
     assert.equal(deps.name, "install-deps");
     const script = deps.run.kind === "shell" ? deps.run.script : "";
-    assert.match(script, /\[ -d node_modules \] \|\|/, "an existing node_modules must be left alone");
+    assert.match(script, /\[ -d node_modules \]/, "an existing node_modules must be left alone");
+    // ...unless the manifest moved under it: present-but-incomplete surfaces far
+    // downstream as a Metro "Unable to resolve module", which reads as the app's
+    // bug rather than a checkout that never got the new dependency.
+    assert.match(script, /! \[ package\.json -nt node_modules \]/, "a manifest newer than node_modules must install");
+    assert.match(script, /! \[ bun\.lock -nt node_modules \]/, "a lockfile newer than node_modules must install");
   });
 
   it("leaves the borrowed checkout's tracked git state clean (npm ci, or --no-package-lock)", () => {
@@ -193,7 +199,11 @@ describe("buildPlan — local dev mode", () => {
   it("prefers bun when the project has a bun lockfile, in both modes", () => {
     for (const local of [true, false]) {
       const plan = buildPlan({ ...base, local, type: "expo" });
-      const script = plan[0]!.run.kind === "shell" ? (plan[0]!.run as { script: string }).script : "";
+      const full = plan[0]!.run.kind === "shell" ? (plan[0]!.run as { script: string }).script : "";
+      // Only the install clause decides the package manager; local mode prefixes
+      // a staleness guard that names every lockfile, so match on the whole
+      // script would compare positions in the guard, not in the install.
+      const script = full.slice(full.indexOf("if [ -f bun.lock ]"));
       // bun is tested BEFORE npm: a bun project keeps its private-registry
       // scopes in bunfig.toml, which npm can't read — npm resolves them against
       // the public registry and 404s.
@@ -212,7 +222,7 @@ describe("buildPlan — web", () => {
     assert.equal(plan.length, 1);
     assert.equal(plan[0]!.name, "install-deps");
     const script = plan[0]!.run.kind === "shell" ? plan[0]!.run.script : "";
-    assert.match(script, /\[ -d node_modules \] \|\|/, "a web dev's node_modules must be left alone");
+    assert.match(script, /\[ -d node_modules \]/, "a web dev's node_modules must be left alone");
   });
 });
 

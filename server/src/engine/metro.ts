@@ -52,6 +52,7 @@ interface RunningMetro {
 }
 
 export interface MetroHandle {
+  port: number;
   manifestUrl: string;
 }
 
@@ -204,6 +205,15 @@ export class MetroManager {
     return run;
   }
 
+  /**
+   * The port of a Metro already running for this app, or null. Read-only — it
+   * never starts one, so a periodic caller can ask cheaply.
+   */
+  portForApp(appId: string): number | null {
+    for (const cur of this.running.values()) if (cur.appId === appId) return cur.port;
+    return null;
+  }
+
   /** Ensure a Metro is running for this app+env; reuse if the signature matches and it's healthy. */
   ensure(appId: string, worktreePath: string, appEnv: Record<string, string>): Promise<MetroHandle> {
     return this.lock(() => this.ensureLocked(appId, worktreePath, appEnv));
@@ -219,7 +229,7 @@ export class MetroManager {
     const cur = this.running.get(key);
     if (cur && (await this.healthyImpl(cur.port))) {
       // Ours when it started; re-verify, since a crash frees the port for anyone.
-      if (await this.ownsPort(cur.port, cur.child.pid, true)) return { manifestUrl: cur.manifestUrl };
+      if (await this.ownsPort(cur.port, cur.child.pid, true)) return { port: cur.port, manifestUrl: cur.manifestUrl };
     }
     if (cur) await this.stopLocked(key);
     // Same app + same checkout, different env: that server can never be reused
@@ -257,7 +267,7 @@ export class MetroManager {
         // Healthy is not enough: any Metro answers /status the same way. If the
         // listener isn't in our process group, someone else grabbed the port in
         // the gap — serving it would load THEIR bundle into this app's shell.
-        if (await this.ownsPort(port, child.pid)) return { manifestUrl };
+        if (await this.ownsPort(port, child.pid)) return { port, manifestUrl };
         await this.stopLocked(key);
         throw new Error(
           `port ${port} is serving a Metro that deckhand did not start — another Expo/React Native ` +

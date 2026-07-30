@@ -906,11 +906,21 @@ figcaption {
 @media (max-width: 700px) {
   /* The sim fills the viewport between the notch and the dock, centered, at the
      largest size that fits both dimensions — no top strip, minimal margins. */
+  /* `--trun-h` is the open test-run popover's measured height (0 when closed, set by
+     TestRunControl). Reserving it here is what makes the popover push the sim up instead of
+     covering it: the stage is flex:1 inside this padding, and `.device-screen` sizes off the
+     stage as a size container — so the device re-fits the smaller box on its own, at the same
+     aspect ratio. Transitioning the padding is therefore enough to animate the whole thing,
+     and `prefers-reduced-motion` already zeroes every transition globally. */
   .app {
     height: 100dvh;
     display: flex;
     padding: calc(env(safe-area-inset-top, 0px) + 0.35rem) 0.35rem
-      calc(env(safe-area-inset-bottom, 0px) + 0.5rem + 42px + 0.4rem);
+      calc(env(safe-area-inset-bottom, 0px) + 0.5rem + 42px + 0.4rem + var(--trun-h, 0px));
+    transition: padding-bottom 0.22s cubic-bezier(0.16, 0.84, 0.34, 1);
+  }
+  .device-screen {
+    transition: height 0.22s cubic-bezier(0.16, 0.84, 0.34, 1);
   }
   .stage {
     flex: 1;
@@ -1392,6 +1402,17 @@ figcaption {
   min-height: 0;
   max-width: none;
   margin: 0;
+  /* The pane is the only thing allowed to give: a reference pane taller than
+     its row (more than one device in the stage) must clip here rather than
+     push the chrome around. */
+  overflow: hidden;
+}
+/* Chrome above the pane is fixed-size. Without this the flex default
+   (shrink: 1) collapses the switch to zero height the moment the visible pane
+   overflows — switching to Reference made the selector itself disappear. */
+.app--mig-mobile > .mig-switch,
+.app--mig-mobile > .mig-ledger {
+  flex: none;
 }
 /* The visible pane wrapper: React omits the attribute entirely for hidden={false}
    (it never emits hidden="false"), so :not([hidden]) is what matches it. */

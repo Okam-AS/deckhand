@@ -244,6 +244,38 @@ export class AndroidManager {
     return out.startsWith("package:") ? out.slice("package:".length) : null;
   }
 
+  /**
+   * Point the device's `localhost:devicePort` at `hostPort` on this machine.
+   * A React Native / Expo debug build reaches its bundler at localhost:8081 —
+   * so whatever holds host 8081 serves the app. `expo start` in ANY unrelated
+   * project installs `tcp:8081 → tcp:8081` on every attached device, which
+   * silently feeds a preview the wrong project's bundle inside the right native
+   * shell. Deckhand owns the mapping for its own devices instead.
+   */
+  async reversePort(serial: string, devicePort: number, hostPort: number): Promise<void> {
+    const res = await this.adb(serial, ["reverse", `tcp:${devicePort}`, `tcp:${hostPort}`]);
+    if (res.code !== 0) throw new AndroidError(`adb reverse failed: ${res.stderr.trim().slice(0, 200)}`);
+  }
+
+  /** Stop the app if it is running. Best-effort: a package that isn't up is not an error. */
+  async forceStop(serial: string, pkg: string): Promise<void> {
+    await this.adb(serial, ["shell", "am", "force-stop", pkg]).catch(() => {});
+  }
+
+  /**
+   * Launch via a VIEW intent — the Android counterpart of `simctl openurl`.
+   * An Expo dev client started with a plain `am start` reconnects to whatever
+   * server it opened LAST, which after a session on another project is that
+   * project's Metro: the right app icon, someone else's JS. The deep link names
+   * the server explicitly, so the preview always loads its own bundle.
+   */
+  async openUrl(serial: string, url: string): Promise<void> {
+    const res = await this.adb(serial, ["shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", url]);
+    if (res.code !== 0 || /^error/im.test(`${res.stdout.toString()}\n${res.stderr}`)) {
+      throw new AndroidError(`am start VIEW failed: ${(res.stderr || res.stdout.toString()).trim().slice(0, 200)}`);
+    }
+  }
+
   async launch(serial: string, pkg: string): Promise<void> {
     // Resolve the launchable activity and `am start` it — reliable and idempotent.
     // We deliberately avoid `monkey` as the primary path: on emulators with no

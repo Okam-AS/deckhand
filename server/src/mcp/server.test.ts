@@ -800,6 +800,131 @@ describe("agent-driven testing tools (describe/ui + test runs)", () => {
     await admin.close();
   });
 
+  it("reminds the agent to open a test run while it drives the app untracked", async () => {
+    // The whole point of a test run is that the user can watch what is being verified. An
+    // agent that never opens one leaves the viewer showing a cursor moving over a silent
+    // app — so the reminder has to ride in the outputs, not just in a doc.
+    const admin = await client(ADMIN);
+    const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
+    const previewId = started.previewId as string;
+    const deviceId = "ios-0";
+    assert.match(String(started.nextStep), /start_test_run/, "the contract must ride in start_preview");
+
+    const ready = parse(await admin.callTool({ name: "preview_status", arguments: { previewId } }));
+    if ((ready.status as { ready?: boolean }).ready) {
+      assert.match(String(ready.testingHint), /start_test_run/, "and in preview_status once ready");
+    }
+
+    const tap = { type: "tap", x: 0.5, y: 0.5 };
+    const first = parse(await admin.callTool({ name: "ui", arguments: { previewId, deviceId, action: tap } }));
+    assert.equal(first.ok, true);
+    assert.match(String(first.hint), /start_test_run/, "driving with no run open must nudge");
+
+    // Once is enough per stretch: a hint repeated on every tap is one the model learns to skip.
+    const second = parse(await admin.callTool({ name: "ui", arguments: { previewId, deviceId, action: tap } }));
+    assert.equal(second.hint, undefined, "the nudge must not repeat on every action");
+
+    // With a run open there is nothing to remind about — the viewer already shows the steps.
+    assert.equal(parse(await admin.callTool({ name: "start_test_run", arguments: { previewId, title: "Smoke", steps: ["Tap"] } })).ok, true);
+    const tracked = parse(await admin.callTool({ name: "ui", arguments: { previewId, deviceId, action: tap } }));
+    assert.equal(tracked.hint, undefined, "an open run silences the nudge");
+
+    // ...and it re-arms after the run closes, so the next untracked stretch is caught too.
+    assert.equal(parse(await admin.callTool({ name: "finish_test_run", arguments: { previewId, status: "passed" } })).ok, true);
+    const afterFinish = parse(await admin.callTool({ name: "ui", arguments: { previewId, deviceId, action: tap } }));
+    assert.match(String(afterFinish.hint), /start_test_run/, "the nudge must re-arm once the run is closed");
+
+    // A read-only verifier is not what the user is missing — it must stay quiet.
+    assert.equal(parse(await admin.callTool({ name: "start_test_run", arguments: { previewId, title: "Second", steps: ["Tap"] } })).ok, true);
+    assert.equal(parse(await admin.callTool({ name: "finish_test_run", arguments: { previewId, status: "passed" } })).ok, true);
+    const asserted = parse(await admin.callTool({ name: "ui", arguments: { previewId, deviceId, action: { type: "assert", selector: { text: "x" } } } }));
+    assert.equal(asserted.hint, undefined, "verifiers must not nudge");
+    await admin.close();
+  });
+
+  it("tells the agent to close every message with the viewer link", async () => {
+    // Relaying the link once, at the top of a long session, buries it: the user ends up
+    // scrolling back through everything written since to find the sim again.
+    const admin = await client(ADMIN);
+    const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
+    const previewId = started.previewId as string;
+    const url = started.url as string;
+    const carriesFooter = (s: unknown): boolean => String(s).includes("End EVERY message") && String(s).includes(url);
+
+    assert.ok(carriesFooter(started.nextStep), "start_preview must carry the link footer");
+
+    // The already-running branch is where a resumed session lands — it needs it most.
+    const again = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
+    assert.equal(again.alreadyRunning, true);
+    assert.ok(carriesFooter(again.nextStep), "the alreadyRunning branch must carry it too");
+
+    await waitReadyByApp(admin, "app-local");
+    const st = parse(await admin.callTool({ name: "preview_status", arguments: { previewId } }));
+    assert.ok(carriesFooter(st.testingHint), "preview_status must carry it once ready");
+
+    // finish_test_run is the one moment the agent is certain to be writing a long message.
+    await admin.callTool({ name: "start_test_run", arguments: { previewId, title: "Smoke", steps: ["Tap"] } });
+    const fin = parse(await admin.callTool({ name: "finish_test_run", arguments: { previewId, status: "passed" } }));
+    assert.ok(carriesFooter(fin.nextStep), "finish_test_run must carry it");
+
+    const restarted = parse(await admin.callTool({ name: "restart_preview", arguments: { previewId } }));
+    assert.ok(carriesFooter(restarted.nextStep), "restart_preview must carry it");
+    await admin.close();
+  });
+
+  it("will not let a run with a failed step be recorded as passed", async () => {
+    // Otherwise the dock button settles to a green ✓ while the popover lists a red ✗ — the
+    // viewer faithfully rendering a contradiction, and the user reading a pass that wasn't one.
+    const admin = await client(ADMIN);
+    const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
+    const previewId = started.previewId as string;
+    await admin.callTool({ name: "start_test_run", arguments: { previewId, title: "Tab bar", steps: ["Home", "Wash", "Stations"] } });
+
+    // Mid-run, the update tells the agent what it still has outstanding.
+    await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 1, status: "passed" } } });
+    const mid = parse(await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 2, status: "failed" } } }));
+    assert.deepEqual(mid.steps, { total: 3, passed: 1, failed: 1, pending: 1, running: 0 });
+    assert.match(String(mid.nextStep), /still unmarked/);
+    assert.match(String(mid.nextStep), /must finish as "failed"/);
+
+    const fin = parse(await admin.callTool({ name: "finish_test_run", arguments: { previewId, status: "passed", summary: "looks fine" } }));
+    assert.equal(fin.ok, true);
+    assert.equal(fin.status, "failed", "the verdict must follow the steps, not the agent's optimism");
+    assert.match(String(fin.nextStep), /Recorded as FAILED/);
+    assert.match(String(fin.nextStep), /never marked/, "and unmarked steps must be called out");
+
+    // An honest pass is left exactly as the agent reported it.
+    await admin.callTool({ name: "start_test_run", arguments: { previewId, title: "Clean", steps: ["Only"] } });
+    await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 1, status: "passed" } } });
+    const clean = parse(await admin.callTool({ name: "finish_test_run", arguments: { previewId, status: "passed" } }));
+    assert.equal(clean.status, "passed");
+    assert.doesNotMatch(String(clean.nextStep), /Recorded as FAILED|never marked/);
+    await admin.close();
+  });
+
+  it("clears a run so a stale or wrongly-recorded verdict can be taken off screen", async () => {
+    const admin = await client(ADMIN);
+    const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
+    const previewId = started.previewId as string;
+    await admin.callTool({ name: "start_test_run", arguments: { previewId, title: "Stale", steps: ["One"] } });
+    await admin.callTool({ name: "finish_test_run", arguments: { previewId, status: "passed" } });
+
+    const cleared = parse(await admin.callTool({ name: "clear_test_run", arguments: { previewId } }));
+    assert.equal(cleared.ok, true);
+    assert.equal(cleared.cleared, true);
+    assert.match(String(cleared.nextStep), /start_test_run/, "and it points at reopening one before driving again");
+
+    // Gone from the share state, which is what the viewer renders.
+    const st = parse(await admin.callTool({ name: "preview_status", arguments: { previewId } }));
+    assert.equal((st.status as { testRun?: unknown }).testRun, undefined);
+
+    // Clearing nothing is a calm no-op, not an error.
+    const again = parse(await admin.callTool({ name: "clear_test_run", arguments: { previewId } }));
+    assert.equal(again.ok, true);
+    assert.equal(again.cleared, false);
+    await admin.close();
+  });
+
   it("rejects ui/test-run tools for a member without access to the preview's app", async () => {
     const admin = await client(ADMIN);
     const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-b", ref: "main", devices: [{ platform: "ios" }], share: { access: "public" } } }));

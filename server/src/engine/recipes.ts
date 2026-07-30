@@ -81,13 +81,22 @@ export function installDepsStep(worktreePath: string, env: Record<string, string
  * developer's checkout. bun gets `--frozen-lockfile` for the same reason — it
  * resolves from bun.lock without ever writing it back. node_modules itself is
  * gitignored, so this leaves the tracked tree untouched.
+ *
+ * "Leave it alone" cannot mean "never look at it", though: a manifest edited
+ * since the last install (a dependency added on the branch, a merge that pulled
+ * one in) leaves node_modules present but incomplete, and the build then fails
+ * far downstream as a Metro "Unable to resolve module" — read as the app's bug,
+ * not a stale checkout. So install when node_modules is missing OR older than
+ * the manifest/lockfile. Still read-only, still the dev's directory.
  */
+const STALE_DEPS = "[ -d node_modules ]" + ["package.json", "package-lock.json", "bun.lock", "bun.lockb", "yarn.lock", "pnpm-lock.yaml"].map((f) => ` && ! [ ${f} -nt node_modules ]`).join("");
+
 export function installDepsIfMissingStep(worktreePath: string, env: Record<string, string>): CommandStep {
   return {
     name: "install-deps",
     run: {
       kind: "shell",
-      script: `[ -d node_modules ] || { ${bunOr("--frozen-lockfile", "[ -f package-lock.json ] && npm ci || npm install --no-package-lock")}; }`,
+      script: `${STALE_DEPS} || { ${bunOr("--frozen-lockfile", "[ -f package-lock.json ] && npm ci || npm install --no-package-lock")}; }`,
     },
     cwd: worktreePath,
     env,
@@ -190,6 +199,21 @@ function nativescriptIosPlan(i: BuildPlanInput): CommandStep[] {
   ];
 }
 
+/**
+ * `expo run:android --device` matches on the *device name*, and for an emulator
+ * that name is its AVD name — not the adb serial (see @expo/cli
+ * AndroidDeviceManager.resolveFromNameAsync). Passing `emulator-5554` fails with
+ * "Could not find device with name". Resolve the AVD name over adb and pass
+ * that; fall back to the serial for physical devices, where `emu avd name` has
+ * nothing to answer. `--no-bundler`: same reason as iOS — deckhand owns Metro.
+ */
+const expoAndroidRun = (serial: string): string =>
+  [
+    `_avd=$(adb -s '${serial}' emu avd name 2>/dev/null | tr -d '\\r' | head -1)`,
+    `case "$_avd" in ""|OK|*error*) _avd='${serial}';; esac`,
+    `npx expo run:android --device "$_avd" --no-bundler`,
+  ].join("\n");
+
 function androidPlan(i: BuildPlanInput): CommandStep[] {
   // `i.udid` carries the adb serial for Android.
   const serial = i.udid;
@@ -197,7 +221,7 @@ function androidPlan(i: BuildPlanInput): CommandStep[] {
     if (i.type === "expo") {
       return {
         name: "build",
-        run: { kind: "argv", command: "npx", args: ["expo", "run:android", "--device", serial, "--no-bundler"] },
+        run: { kind: "shell", script: expoAndroidRun(serial) },
         cwd: i.worktreePath,
         env: i.appEnv,
         idleTimeoutMs: GENERAL_IDLE_MS,

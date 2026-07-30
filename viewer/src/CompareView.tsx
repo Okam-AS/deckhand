@@ -1,5 +1,6 @@
-import { useState } from "react";
-import { DeviceFrame } from "./DeviceFrame.tsx";
+import { useCallback, useRef, useState } from "react";
+import { DeviceFrame, type DeviceControls } from "./DeviceFrame.tsx";
+import { MobileChrome } from "./MobileChrome.tsx";
 import { repoName, type ShareLedgerScreen, type ShareState } from "./api.ts";
 import { useIsMobile } from "./useIsMobile.ts";
 
@@ -25,6 +26,50 @@ export function CompareView({ shareId, state }: { shareId: string; state: ShareS
   const screens = state.ledger?.screens ?? [];
   const refShown = !!paired && showRef;
 
+  // Home/rotate/keyboard for the mobile dock. The two panes are DIFFERENT shares, so both can
+  // hand out the same deviceId ("ios-0" on each) — hence a map per side rather than one keyed
+  // by deviceId, which would let the reference pane's controls answer for the working pane.
+  const controls = useRef({ reference: new Map<string, DeviceControls>(), working: new Map<string, DeviceControls>() });
+  const [rotations, setRotations] = useState<Record<string, number>>({});
+  const [mobileDevice, setMobileDevice] = useState<string | null>(null);
+  const registerRef = useCallback((id: string, api: DeviceControls | null) => {
+    if (api) controls.current.reference.set(id, api);
+    else controls.current.reference.delete(id);
+  }, []);
+  const registerWork = useCallback((id: string, api: DeviceControls | null) => {
+    if (api) controls.current.working.set(id, api);
+    else controls.current.working.delete(id);
+  }, []);
+  const rotatedRef = useCallback(
+    (id: string, deg: number) => setRotations((r) => (r[`reference:${id}`] === deg ? r : { ...r, [`reference:${id}`]: deg })),
+    [],
+  );
+  const rotatedWork = useCallback(
+    (id: string, deg: number) => setRotations((r) => (r[`working:${id}`] === deg ? r : { ...r, [`working:${id}`]: deg })),
+    [],
+  );
+
+  // The dock drives whichever pane is actually on screen.
+  const dockSide = paired && isMobile ? mobileSide : "working";
+  const dockDevices = dockSide === "reference" && paired ? paired.devices : state.devices;
+  const dockFocus = dockDevices.some((d) => d.deviceId === mobileDevice) ? mobileDevice! : (dockDevices[0]?.deviceId ?? "");
+  const dock = (
+    <MobileChrome
+      devices={dockDevices}
+      focusId={dockFocus}
+      onFocus={setMobileDevice}
+      onHome={() => controls.current[dockSide].get(dockFocus)?.home()}
+      onRotate={() => controls.current[dockSide].get(dockFocus)?.rotate()}
+      onText={(text) => controls.current[dockSide].get(dockFocus)?.typeText(text) ?? [...text]}
+      onKey={(name) => controls.current[dockSide].get(dockFocus)?.key(name)}
+      rotation={rotations[`${dockSide}:${dockFocus}`] ?? 0}
+      repo={dockSide === "reference" && paired ? paired.repo : state.repo}
+      refName={dockSide === "reference" && paired ? paired.ref : state.ref}
+      source={state.source}
+      testRun={state.testRun}
+    />
+  );
+
   const refPane = paired && (
     <section className="mig-col">
       <header className="mig-col-head">
@@ -35,7 +80,16 @@ export function CompareView({ shareId, state }: { shareId: string; state: ShareS
       </header>
       <div className="mig-col-stage">
         {paired.devices.map((d) => (
-          <DeviceFrame key={`s-${d.deviceId}`} shareId={paired.shareId} device={d} repo={paired.repo} branch={paired.ref} variant="grid" />
+          <DeviceFrame
+            key={`s-${d.deviceId}`}
+            shareId={paired.shareId}
+            device={d}
+            repo={paired.repo}
+            branch={paired.ref}
+            variant="grid"
+            registerControls={registerRef}
+            onRotationChange={rotatedRef}
+          />
         ))}
       </div>
     </section>
@@ -56,7 +110,17 @@ export function CompareView({ shareId, state }: { shareId: string; state: ShareS
       </header>
       <div className="mig-col-stage">
         {state.devices.map((d) => (
-          <DeviceFrame key={`t-${d.deviceId}`} shareId={shareId} device={d} repo={state.repo} branch={state.ref} variant="grid" testRun={state.testRun} />
+          <DeviceFrame
+            key={`t-${d.deviceId}`}
+            shareId={shareId}
+            device={d}
+            repo={state.repo}
+            branch={state.ref}
+            variant="grid"
+            registerControls={registerWork}
+            onRotationChange={rotatedWork}
+            testRun={state.testRun}
+          />
         ))}
       </div>
     </section>
@@ -95,9 +159,7 @@ export function CompareView({ shareId, state }: { shareId: string; state: ShareS
             <div hidden={mobileSide !== "working"}>{workPane}</div>
           </div>
         </main>
-        <aside className="brand" aria-label="Deckhand">
-          <span className="brand-name">Deckhand</span>
-        </aside>
+        {dock}
       </>
     );
   }
@@ -111,9 +173,15 @@ export function CompareView({ shareId, state }: { shareId: string; state: ShareS
           {workPane}
         </div>
       </main>
-      <aside className="brand" aria-label="Deckhand">
-        <span className="brand-name">Deckhand</span>
-      </aside>
+      {/* A compare with no reference pane is still one device on a phone, and it needs the same
+          controls — the wordmark is desktop-only chrome, not a substitute for them. */}
+      {isMobile ? (
+        dock
+      ) : (
+        <aside className="brand" aria-label="Deckhand">
+          <span className="brand-name">Deckhand</span>
+        </aside>
+      )}
     </>
   );
 }

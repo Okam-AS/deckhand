@@ -17,9 +17,10 @@ import { WorktreeManager, worktreeKey, type RefSpec, refDescription } from "./wo
 import { pruneDerivedData } from "./derivedData.ts";
 import { Simctl, selectRuntime, selectDeviceType, deviceLabel, type SimDevice } from "../devices/ios.ts";
 import { AndroidManager, selectSystemImage, portForSerial, serialForPort } from "../devices/android.ts";
+import { resolveAndroidEnv } from "../devices/toolEnv.ts";
 import { Reaper, POOL_SIM_PREFIX, POOL_AVD_PREFIX } from "./reaper.ts";
 import { MetroManager } from "./metro.ts";
-import { buildPlan, usesMetroDeepLink, nativescriptDevRun, webDevRun, webRootDevRun, GENERAL_IDLE_MS } from "./recipes.ts";
+import { buildPlan, usesMetroDeepLink, nativescriptDevRun, webDevRun, webRootDevRun, GENERAL_IDLE_MS, METRO_PORT } from "./recipes.ts";
 import { runStep as defaultRunStep, type RunResult } from "./procs.ts";
 import type { CommandStep } from "./recipes.ts";
 import {
@@ -131,6 +132,8 @@ interface LivePreview {
   attached: Map<string, AttachedStream>;
   /** Ephemeral: the agent's current end-to-end test run, surfaced to the viewer. */
   testRun?: TestRun;
+  /** Set once the agent has been reminded to open a test run; cleared when it opens one. */
+  testRunNudged?: boolean;
   /** Ephemeral: pairing + parity checklist for a compare session, surfaced to the viewer. */
   compare?: CompareSession;
   /** Epoch ms of the last viewer/agent touch — the idle sweep's clock. */
@@ -333,6 +336,23 @@ export function redactForShare(text: string): string {
 /** One dev process per app+platform. */
 function devKey(appId: string, platform: Platform): string {
   return `${appId}:${platform}`;
+}
+
+/**
+ * The app env plus the resolved Android toolchain. Gradle locates the SDK from
+ * ANDROID_HOME/ANDROID_SDK_ROOT (or a local.properties deckhand refuses to write
+ * into a borrowed checkout) — having platform-tools on PATH is not enough, and a
+ * LaunchAgent starts with neither. The app's own env still wins on conflict.
+ */
+export function androidBuildEnv(appEnv: Record<string, string>): Record<string, string> {
+  const a = resolveAndroidEnv();
+  return {
+    ANDROID_HOME: a.ANDROID_HOME,
+    ANDROID_SDK_ROOT: a.ANDROID_HOME,
+    ...(a.JAVA_HOME ? { JAVA_HOME: a.JAVA_HOME } : {}),
+    PATH: a.PATH,
+    ...appEnv,
+  };
 }
 
 export class PreviewEngine {
@@ -1545,7 +1565,9 @@ export class PreviewEngine {
       command,
       args,
       cwd,
-      env: appEnv,
+      // `ns run android` shells out to Gradle, which needs ANDROID_HOME just as
+      // much as the plan-driven builds do.
+      env: platform === "android" ? androidBuildEnv(appEnv) : appEnv,
       onLog: (line) => {
         this.appendLog(dev, "build", `[livesync] ${line}`);
         this.noteProgress(p);
@@ -1675,7 +1697,12 @@ export class PreviewEngine {
     appEnv: Record<string, string>,
     local = false,
   ): Promise<void> {
-    const plan = buildPlan({ type: p.app.type, platform, udid, worktreePath, appEnv, local });
+    // Gradle finds the SDK through ANDROID_HOME (or sdk.dir in a local.properties
+    // deckhand must not write into the developer's checkout) — never through PATH.
+    // A LaunchAgent inherits no shell env, so without this every Android build dies
+    // at "SDK location not found" even with platform-tools on PATH.
+    const env = platform === "android" ? androidBuildEnv(appEnv) : appEnv;
+    const plan = buildPlan({ type: p.app.type, platform, udid, worktreePath, appEnv: env, local });
     for (const step of plan) {
       const res = await this.d.runStep!(step, {
         signal: dev.abort.signal,
@@ -1760,6 +1787,21 @@ export class PreviewEngine {
     appEnv: Record<string, string>,
   ): Promise<void> {
     if (dev.record.platform === "android") {
+      if (usesMetroDeepLink(p.app.type)) {
+        const slug = expoSlug(safeReadJson(join(worktreePath, "app.json")));
+        if (!slug) throw new PreviewError("could not read the Expo slug from app.json");
+        const metro = await this.d.metro.ensure(p.app.id, worktreePath, appEnv);
+        await this.reverseMetroPorts(handle, metro.port);
+        // Cold start, then name the server explicitly. Both halves are needed:
+        // `expo run:android` already launched the app at the end of the build,
+        // pointed at whatever answered 8081 then — and a dev client that is
+        // ALREADY showing another project ignores the deep link rather than
+        // switching to it, so the preview would keep serving someone else's JS
+        // under the right app icon.
+        await this.android().forceStop(handle, bundleId);
+        await this.android().openUrl(handle, expoDevClientUrl(slug, `http://localhost:${metro.port}`));
+        return;
+      }
       // The build already launched the builder; (re)launch is idempotent and
       // covers install-many devices.
       await this.android().launch(handle, bundleId);
@@ -2053,6 +2095,59 @@ export class PreviewEngine {
 
   // --- agent-driven test runs (ephemeral; rendered live in the viewer) --------
 
+  /**
+   * Should this preview's next driving action remind the agent to open a run?
+   *
+   * A run is not only for formal testing — it is the label on whatever the agent is doing to
+   * the app right now. Any driving with no run open shows the user a cursor moving over a
+   * silent app: they can see something is happening but not what, or why, or whether it
+   * worked. So the reminder fires from the first action, whether the agent is verifying a
+   * change, reproducing a bug or just having a look — the title is what tells them which.
+   *
+   * Fires once per stretch (a hint repeated on every tap is one the model learns to skip),
+   * stays quiet while a run is live, and re-arms when one opens so the next untracked stretch
+   * is caught too.
+   *
+   * The bookkeeping lives here rather than in the MCP layer because that layer is stateless:
+   * `createMcpRouter` builds a fresh `McpServer` and re-runs `registerTools` on every POST, so
+   * a closure-local flag there would reset between calls and nudge on every single action.
+   */
+  shouldNudgeTestRun(previewId: string): boolean {
+    const p = this.previews.get(previewId);
+    if (!p || p.testRun?.status === "running") return false;
+    if (p.testRunNudged) return false;
+    p.testRunNudged = true;
+    return true;
+  }
+
+  /**
+   * Step tallies for the current run, or null if there is none. The MCP layer reports these
+   * back on every update so the agent can see what it has left unmarked, and uses them to
+   * catch a closing verdict that contradicts the steps.
+   */
+  testRunCounts(previewId: string): { total: number; passed: number; failed: number; pending: number; running: number } | null {
+    const run = this.previews.get(previewId)?.testRun;
+    if (!run) return null;
+    const by = (s: TestStepStatus): number => run.steps.filter((x) => x.status === s).length;
+    return { total: run.steps.length, passed: by("passed"), failed: by("failed"), pending: by("pending"), running: by("running") };
+  }
+
+  /**
+   * Drop the current run so the viewer goes back to showing no run at all.
+   *
+   * A finished run otherwise lingers for the life of the preview — which is right while it is
+   * the record of what just happened, and wrong once it is stale or was recorded badly. There
+   * was no way to take it back: `startTestRun` only replaces one run with another, so the only
+   * escape was to leave a misleading verdict on screen.
+   */
+  clearTestRun(previewId: string): boolean {
+    const p = this.previews.get(previewId);
+    if (!p?.testRun) return false;
+    p.testRun = undefined;
+    p.testRunNudged = false;
+    return true;
+  }
+
   /** Begin a test run on a preview (replacing any prior one). Steps start pending. */
   startTestRun(previewId: string, title: string, steps: string[] = []): { runId: string } {
     const p = this.active(previewId);
@@ -2065,6 +2160,10 @@ export class PreviewEngine {
       steps: steps.map((label, i) => ({ n: i + 1, label, status: "pending" as const })),
       startedAt: this.iso(),
     };
+    // Re-arm the reminder: the agent did the right thing here, so the NEXT stretch of driving
+    // with no run open is a fresh lapse and deserves to be caught. Without this the nudge fires
+    // at most once per preview, and everything after the first run goes unreported in silence.
+    p.testRunNudged = false;
     return { runId: id };
   }
 
@@ -2271,11 +2370,45 @@ export class PreviewEngine {
       this.d.audit.record({ actor: "engine", tool: "auto_stop", args: { preview: id, reason }, result: "ok" });
       await this.stopPreview(id).catch(() => {});
     }
+    await this.reassertAndroidReverse();
     // Teardown keeps the checkout (it is the next build's warm cache), so this
     // sweep is the only thing that ever gives that disk back on a server that
     // isn't restarted. It only touches checkouts idle past the grace window.
     await this.pruneDisk();
     return doomed.map((d) => d.id);
+  }
+
+  /**
+   * Re-take `tcp:8081` on every live Android device. Setting it once at launch
+   * is not enough: `expo start` in any unrelated project on this machine
+   * re-points 8081 on EVERY attached device, so a dev server started after a
+   * preview is up silently takes over its bundle — the app keeps running, it
+   * just becomes someone else's app. Cheap (one adb call per device) and
+   * idempotent, so the janitor can simply re-assert every pass.
+   */
+  private async reassertAndroidReverse(): Promise<void> {
+    for (const p of this.previews.values()) {
+      if (p.record.phase !== "ready" || !usesMetroDeepLink(p.app.type)) continue;
+      const port = this.d.metro.portForApp(p.app.id);
+      if (!port) continue;
+      for (const dev of p.devices.values()) {
+        if (dev.record.platform !== "android" || !dev.androidPort) continue;
+        await this.reverseMetroPorts(serialForPort(dev.androidPort), port).catch(() => {});
+      }
+    }
+  }
+
+  /**
+   * Both ports a dev client can ask for. The app's own port is the one the
+   * served manifest advertises, so the client dials `127.0.0.1:<port>` on the
+   * DEVICE and finds nothing unless it is forwarded — the symptom is a dev
+   * client stuck on "Unable to load script" while Metro is demonstrably healthy
+   * on the host. 8081 is the debug build's compiled-in fallback, and pointing it
+   * here too is what stops another project's `expo start` from owning it.
+   */
+  private async reverseMetroPorts(serial: string, metroPort: number): Promise<void> {
+    if (metroPort !== METRO_PORT) await this.android().reversePort(serial, metroPort, metroPort);
+    await this.android().reversePort(serial, METRO_PORT, metroPort);
   }
 
   /**

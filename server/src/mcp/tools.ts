@@ -267,11 +267,55 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     () => audited("list_devices", {}, async () => ok(await engine.listDevices())),
   );
 
+  /**
+   * The one sentence that makes the agent's work visible in the viewer. It rides in every
+   * output that precedes driving the app, because an agent that only meets it once — buried
+   * in a `preview_status` poll it may never repeat — drives the whole session invisibly: the
+   * user watches a cursor move with no idea what is being done or whether it worked.
+   *
+   * Deliberately not limited to testing. A run is the label on whatever the agent is doing to
+   * the app, so exploring and bug-reproduction get one too; the title is what tells the user
+   * which it is.
+   */
+  const TEST_RUN_CONTRACT =
+    "ALWAYS open a run before you drive the app — not just for tests: start_test_run with a title saying what you are about to do (\"Verify the new tab bar\", \"Reproduce the crash\", \"Look at the wash flow\") and the steps you plan, mark each one running→passed/failed with update_test_run as you go, and close it with finish_test_run. That is what puts a live spinner and step list in the viewer; without it the user sees a cursor moving over a silent app and cannot tell what you are doing.";
+
+  /**
+   * Keep the link within reach. Relaying it once, at the top of a long session, means the user
+   * scrolls back through everything the agent has written since to find the sim again — so the
+   * contract is not "relay it early" but "never let it leave the bottom of the conversation".
+   */
+  const linkFooter = (url: string): string =>
+    `End EVERY message you write the user with this link on its own line — ${url} — so they never have to scroll back to find the sim.`;
+
   /** The daily-loop guidance attached to start/restart results (agent-led contract, PLAN §6). */
   const loopNextStep = (source: "git" | "local", url: string, ref?: string): string =>
     source === "local"
-      ? `Give the user this link NOW: ${url} — it's already live (it shows build progress while the sim boots) and is stable for this app across restarts; relay it before any other work, don't wait for ready. Then poll preview_status for readiness. While the preview runs, file saves livesync to the simulator automatically, so after editing code there is nothing to call — just tell the user the change is on the sim. Only call restart_preview after native-level changes (new plugins, Podfile/gradle edits) or if the app looks stuck.`
-      : `Give the user this link NOW: ${url} — it's already live (it shows build progress) and is stable for this app; relay it before any other work, don't wait for ready. Then poll preview_status for readiness. After pushing new commits to ${ref ?? "the branch"}, call restart_preview to rebuild the same simulators at the new tip — the link stays the same.`;
+      ? `Give the user this link NOW: ${url} — it's already live (it shows build progress while the sim boots) and is stable for this app across restarts; relay it before any other work, don't wait for ready. Then poll preview_status for readiness. While the preview runs, file saves livesync to the simulator automatically, so after editing code there is nothing to call — just tell the user the change is on the sim. Only call restart_preview after native-level changes (new plugins, Podfile/gradle edits) or if the app looks stuck. ${TEST_RUN_CONTRACT} ${linkFooter(url)}`
+      : `Give the user this link NOW: ${url} — it's already live (it shows build progress) and is stable for this app; relay it before any other work, don't wait for ready. Then poll preview_status for readiness. After pushing new commits to ${ref ?? "the branch"}, call restart_preview to rebuild the same simulators at the new tip — the link stays the same. ${TEST_RUN_CONTRACT} ${linkFooter(url)}`;
+
+  /**
+   * UI actions that change what the user sees, as opposed to the read-only verifiers
+   * (waitFor/assert/query). A bare `assert` moves nothing on screen, so it is not the thing
+   * the user is left guessing about.
+   */
+  const DRIVING_UI_ACTIONS = new Set(["tap", "tapElement", "type", "key", "button", "home", "swipe", "gesture", "openUrl"]);
+
+  /**
+   * The reminder attached to a driving `ui` action when nothing is being reported to the viewer.
+   * The once-per-stretch bookkeeping lives on the engine — this layer is rebuilt per request and
+   * cannot remember anything (see `shouldNudgeTestRun`).
+   */
+  const testRunNudge = (previewId: string, actionType: string): { hint?: string } => {
+    if (!DRIVING_UI_ACTIONS.has(actionType)) return {};
+    if (!engine.shouldNudgeTestRun(previewId)) return {};
+    // Deliberately does NOT append TEST_RUN_CONTRACT: this fires in the middle of a flow, where
+    // the agent has already met the full contract at start_preview. Restating it here says the
+    // same thing twice in one payload — the reminder just needs to be unmissable, not long.
+    return {
+      hint: "You are driving the app with no run open, so the user is watching a cursor move over a silent app with no idea what you are doing. Open one NOW, even mid-flow: start_test_run titled with what you are doing, then report each step with update_test_run and close with finish_test_run.",
+    };
+  };
 
   /** Resolve a preview id from previewId or app args (status/restart accept either). */
   const resolvePreviewId = (args: { previewId?: string; app?: string }): string | CallToolResult => {
@@ -433,12 +477,13 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             (result.alreadyRunning
             ? `An equivalent preview is already running — same viewer link: ${result.url}. ` +
               (isWeb
-                ? "Saving files hot-reloads the page automatically; call restart_preview only after dependency/config changes."
-                : source === "local"
-                  ? "File saves livesync to it automatically; call restart_preview only after native-level changes."
-                  : "After pushing new commits, call restart_preview to rebuild it at the new tip.")
+                ? `Saving files hot-reloads the page automatically; call restart_preview only after dependency/config changes. ${linkFooter(result.url)}`
+                : (source === "local"
+                    ? "File saves livesync to it automatically; call restart_preview only after native-level changes. "
+                    : "After pushing new commits, call restart_preview to rebuild it at the new tip. ") +
+                  `${TEST_RUN_CONTRACT} ${linkFooter(result.url)}`)
             : isWeb
-              ? `Give the user this link NOW: ${result.url} (stable for this app) — relay it before any other work; then poll preview_status for readiness. It's a live web dev server — saving files hot-reloads the page automatically, so after editing there is nothing to call. Use restart_preview only after dependency/config changes (new packages, vite.config edits) or if the server looks stuck. Deckhand runs this working copy in place and only reads/runs it — never commit or push any local changes deckhand caused (dev-server caches, a stray lockfile); its git state is not yours to write.${webHostWarning}`
+              ? `Give the user this link NOW: ${result.url} (stable for this app) — relay it before any other work; then poll preview_status for readiness. It's a live web dev server — saving files hot-reloads the page automatically, so after editing there is nothing to call. Use restart_preview only after dependency/config changes (new packages, vite.config edits) or if the server looks stuck. Deckhand runs this working copy in place and only reads/runs it — never commit or push any local changes deckhand caused (dev-server caches, a stray lockfile); its git state is not yours to write. ${linkFooter(result.url)}${webHostWarning}`
               : loopNextStep(source, result.url, args.ref ?? resolved.defaultBranch)) + protectionNote,
         });
       }),
@@ -646,7 +691,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           counts,
           nextStep:
             `The viewer is already live at ${result.url} (it shows build progress while both panes boot) — give the user this link NOW, before any other work; do not wait for ready. ` +
-            `It shows the working app and the reference side by side. Drive either pane with describe/ui/screenshot, compare each item yourself, and record the verdict with compare_set (matches / adjusted / regression). The checklist is local to this session — keep the project plan in your task tracker.` +
+            `It shows the working app and the reference side by side. Drive either pane with describe/ui/screenshot, compare each item yourself, and record the verdict with compare_set (matches / adjusted / regression). The checklist is local to this session — keep the project plan in your task tracker. ` +
+            `${linkFooter(result.url)}` +
             protectionNote,
         });
       }),
@@ -720,7 +766,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         const result = engine.restartPreview(id);
         return ok({
           ...result,
-          nextStep: `Rebuilding on the same simulators. Poll preview_status until ready — the viewer link is unchanged: ${result.url}`,
+          nextStep: `Rebuilding on the same simulators. Poll preview_status until ready — the viewer link is unchanged: ${result.url}. ${linkFooter(result.url)}`,
         });
       }),
   );
@@ -749,7 +795,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           ...(status.ready
             ? {
                 testingHint:
-                  "To test local changes: read the diff to pick flows, drive the app with `describe`+`ui`, and report progress with start_test_run/update_test_run/finish_test_run (shown live in the viewer). Then write the report in chat.",
+                  `The preview is ready to drive: read the diff to pick the flows, then use \`describe\`+\`ui\`, and write the full report in chat when you are done. ${TEST_RUN_CONTRACT}${status.url ? ` ${linkFooter(status.url)}` : ""}`,
               }
             : {}),
         });
@@ -836,7 +882,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         const denied = previewOwnedByPrincipal(args.previewId);
         if (denied) return denied;
         const result = await engine.ui(args.previewId, args.deviceId, args.action as UiAction);
-        return ok({ result });
+        return ok({ result, ...testRunNudge(args.previewId, (args.action as UiAction).type) });
       }),
   );
 
@@ -951,7 +997,9 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         return ok({
           runId,
           nextStep:
-            "Drive the app with `describe`/`ui`. Mark each step running→passed/failed with update_test_run, then finish_test_run + report in chat.",
+            "Drive the app with `describe`/`ui`. Mark each step running→passed/failed with update_test_run as you get to it, then finish_test_run + report in chat. " +
+            "Two rules the viewer holds you to: every step you actually check must end as passed or failed — one left pending renders as never-run, so if you skipped it, say why in the summary rather than leaving it ambiguous. " +
+            "And the closing verdict has to follow the steps: one failed step means the run failed, however minor it looked.",
         });
       }),
   );
@@ -983,7 +1031,51 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         const denied = previewOwnedByPrincipal(id);
         if (denied) return denied;
         engine.updateTestRun(id, { step: args.step, runStatus: args.runStatus });
-        return ok({ updated: true });
+        // `{updated: true}` told the agent nothing. This tool is called throughout the run, so
+        // it is the natural place to show what is still unmarked — the state that later turns
+        // into a step rendered as never-run next to a verdict that ignored it.
+        const c = engine.testRunCounts(id);
+        const left = c ? c.pending + c.running : 0;
+        return ok({
+          updated: true,
+          ...(c ? { steps: c } : {}),
+          ...(left > 0
+            ? {
+                nextStep:
+                  `${left} of ${c!.total} steps are still unmarked. Mark each one passed or failed as you check it — a step left pending renders in the viewer as never-run.` +
+                  (c!.failed > 0 ? ` ${c!.failed} step(s) have failed, so this run must finish as "failed".` : ""),
+              }
+            : c && c.failed > 0
+              ? { nextStep: `All steps are marked and ${c.failed} failed, so finish this run as "failed".` }
+              : {}),
+        });
+      }),
+  );
+
+  server.registerTool(
+    "clear_test_run",
+    {
+      title: "Clear the test run",
+      description:
+        "Remove the preview's test run so the viewer shows none at all — the dock's run button disappears. Use it when a finished run is stale (the user has moved on) or was recorded wrongly and you are about to redo it; a finished run otherwise stays on screen for the life of the preview. This is not how you end a run: finish_test_run records the verdict, and clearing instead of finishing throws away what you just proved. Pass previewId or app id.",
+      inputSchema: {
+        previewId: z.string().optional().describe("from start_preview; or pass app instead"),
+        app: z.string().optional().describe("app id — targets its running preview"),
+      },
+    },
+    (args) =>
+      audited("clear_test_run", args, () => {
+        const id = resolvePreviewId(args);
+        if (typeof id !== "string") return id;
+        const denied = previewOwnedByPrincipal(id);
+        if (denied) return denied;
+        const cleared = engine.clearTestRun(id);
+        return ok({
+          cleared,
+          nextStep: cleared
+            ? "The viewer shows no run now. If you are about to test again, open a fresh one with start_test_run before you drive."
+            : "There was no run on this preview — nothing to clear.",
+        });
       }),
   );
 
@@ -1006,8 +1098,37 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         if (typeof id !== "string") return id;
         const denied = previewOwnedByPrincipal(id);
         if (denied) return denied;
-        engine.finishTestRun(id, args.status, args.summary);
-        return ok({ finished: true, nextStep: "Now post the full test report in chat for the user." });
+        // Read the tallies BEFORE finishing — finishing settles any running step, which would
+        // hide the very mismatch we are checking for.
+        const counts = engine.testRunCounts(id);
+        // A run holding a failed step cannot be a pass. Left alone this renders as a green ✓ on
+        // the dock button with a red ✗ inside it — the viewer faithfully showing a contradiction
+        // the agent introduced. Record the honest verdict and say why, rather than refusing the
+        // call and leaving the run open.
+        const contradicted = args.status === "passed" && !!counts && counts.failed > 0;
+        const effective = contradicted ? "failed" : args.status;
+        engine.finishTestRun(id, effective, args.summary);
+
+        const notes: string[] = [];
+        if (contradicted) {
+          notes.push(
+            `Recorded as FAILED, not passed: ${counts!.failed} of ${counts!.total} steps failed. A run's verdict follows its steps — if those failures are acceptable, say so in the summary and in your report, but do not call the run green.`,
+          );
+        }
+        if (counts && counts.pending > 0) {
+          notes.push(
+            `${counts.pending} step(s) were never marked and now render as never-run. Tell the user plainly which checks you did not perform — an unmarked step is not a passed one.`,
+          );
+        }
+        // The one moment the agent is certain to be writing a long message — so the single most
+        // valuable place to say where the link goes.
+        const url = engine.getStatus(id, { touch: false })?.url;
+        return ok({
+          finished: true,
+          status: effective,
+          ...(counts ? { steps: counts } : {}),
+          nextStep: `${notes.join(" ")}${notes.length ? " " : ""}Now post the full test report in chat for the user — it must match the verdict recorded here.${url ? ` ${linkFooter(url)}` : ""}`,
+        });
       }),
   );
 
