@@ -613,6 +613,28 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           .optional()
           .describe("what to compare the working app against; omit to use its registered migratesFrom"),
         items: z.array(z.string()).optional().describe("checklist item names to seed (flows/screens); update with compare_set"),
+        labels: z
+          .preprocess(
+            // MCP clients cache tool schemas across server restarts; a client with
+            // the pre-`labels` schema serializes this object as a JSON string.
+            (v) => {
+              if (typeof v !== "string") return v;
+              try {
+                return JSON.parse(v);
+              } catch {
+                return v;
+              }
+            },
+            z
+              .object({
+                working: z.string().max(60).optional().describe("pane name for the working app"),
+                reference: z.string().max(60).optional().describe("pane name for the reference"),
+              })
+              .optional(),
+          )
+          .describe(
+            'display names for the two panes in the viewer, e.g. { working: "Expo-port", reference: "Gammel app v3.4.8" } — name what each app IS; omitted panes fall back to Working/Reference',
+          ),
         devices: z
           .array(
             z.object({
@@ -679,7 +701,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           if (refBoot.booted) void engine.stopPreview(refBoot.previewId).catch(() => {});
           throw e;
         }
-        const counts = engine.startCompare(result.previewId, refBoot.reference, args.items ?? [], refBoot.previewId);
+        const counts = engine.startCompare(result.previewId, refBoot.reference, args.items ?? [], refBoot.previewId, args.labels);
 
         const protectionNote =
           access === "pin"

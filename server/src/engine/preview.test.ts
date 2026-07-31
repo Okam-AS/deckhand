@@ -49,6 +49,8 @@ interface Harness {
   devProcCalls: string[];
   detached: string[];
   audit: { tool: string; args: unknown }[];
+  firstFrameResults: boolean[];
+  attachCalls: string[];
 }
 
 function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (step: CommandStep) => RunResult = () => ({ code: 0, timedOut: false, aborted: false })): Harness {
@@ -107,17 +109,24 @@ function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (
     },
   } as unknown as PreviewEngineDeps["simctl"];
 
+  // Queue of probe outcomes; empty = healthy. Lets a test declare "the kept
+  // helper is dead" for exactly one probe (attachAndReady's liveness check).
+  const firstFrameResults: boolean[] = [];
+  const attachCalls: string[] = [];
   const fakeStream: AttachedStream = {
     origin: "http://127.0.0.1:3100",
     helperBasePath: "/helper/x",
-    waitForFirstFrame: async () => true,
+    waitForFirstFrame: async () => (firstFrameResults.length ? firstFrameResults.shift()! : true),
     describe: async () => "tree",
     detach: async () => {
       detached.push("x");
     },
   };
   const streaming = {
-    attach: async (_d: StreamDeviceRef) => fakeStream,
+    attach: async (d: StreamDeviceRef) => {
+      attachCalls.push(d.udid);
+      return fakeStream;
+    },
     reapOrphans: async () => {},
   };
 
@@ -174,7 +183,7 @@ function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (
     genShareId: () => "share-abc",
     ...overrides,
   };
-  return { engine: new PreviewEngine(deps), simctlCalls, buildEnvSeen, removedWorktrees, worktreeCalls, devProcCalls, detached, audit };
+  return { engine: new PreviewEngine(deps), simctlCalls, buildEnvSeen, removedWorktrees, worktreeCalls, devProcCalls, detached, audit, firstFrameResults, attachCalls };
 }
 
 async function waitForPhase(engine: PreviewEngine, previewId: string, phases: string[], timeoutMs = 2000): Promise<string> {
@@ -537,6 +546,20 @@ describe("local (dev-mode) previews", () => {
     assert.equal(phase, "ready");
     assert.equal(h.devProcCalls.filter((c) => c.startsWith("start local-app:ios")).length, 2);
     assert.equal(h.simctlCalls.filter((c) => c.startsWith("create ")).length, 1, "restart must not boot new sims");
+  });
+
+  it("restart re-attaches when the kept helper no longer answers", async () => {
+    const h = makeEngine();
+    startLocal(h);
+    await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
+    const before = h.attachCalls.length;
+    // Kept-helper liveness probe fails once (dead process); the fresh attach's probe succeeds.
+    h.firstFrameResults.push(false);
+    h.engine.restartPreview("pv1");
+    const phase = await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
+    assert.equal(phase, "ready");
+    assert.ok(h.detached.includes("x"), "the dead helper must be detached");
+    assert.equal(h.attachCalls.length, before + 1, "a fresh helper must be attached in its place");
   });
 
   it("restart while a build is in flight fails with an actionable error", () => {

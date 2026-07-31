@@ -208,3 +208,27 @@ describe("compactUiAutomatorXml", () => {
     assert.doesNotMatch(out, /\bView\b/);
   });
 });
+
+describe("AndroidManager.bootEmulator", () => {
+  // Deckhand streams the device over adb, so the emulator's own window is pure
+  // overhead — and an expensive one: an idle pixel_7/API36 emulator measured
+  // 227% CPU windowed against 34% with these flags. Both capture paths keep
+  // working headless, so there is no reason to ever draw that window.
+  it("boots headless on the host GPU", async () => {
+    const launched: string[][] = [];
+    const exec = async (cmd: string, args: string[]): Promise<ExecResult> => {
+      if (cmd === "emulator") launched.push(args);
+      // Report booted immediately so the wait loop resolves.
+      return { code: 0, stdout: Buffer.from("1\n"), stderr: "" };
+    };
+    const mgr = new AndroidManager(exec);
+    await mgr.bootEmulator("pixel_7", 5554);
+
+    const args = launched[0];
+    assert.ok(args, "emulator must be launched");
+    assert.ok(args.includes("-no-window"), "must not draw the emulator window");
+    // -gpu host renders via Metal; without it a headless emulator falls back to
+    // a software rasteriser, which is what burned the CPU in the first place.
+    assert.equal(args[args.indexOf("-gpu") + 1], "host");
+  });
+});

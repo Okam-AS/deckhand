@@ -26,6 +26,15 @@ const MAX_RECOVERY = 8;
 // Longest quiet gap seen on a live stream with a blinking caret is ~430 ms —
 // 600 ms only fires when the screen has truly gone still with frames owed.
 const STALL_MS = 600;
+// Feeds separated by more than this are organic activity, not the helper's
+// connection-opening GOP replay (written as one contiguous burst). A pure
+// replay always ends with one frame held in Safari's decoder, so stall-healing
+// on it would reconnect → replay → hold again, forever, on an idle screen.
+const ORGANIC_GAP_MS = 500;
+// Queue depth over MAX_DECODE_QUEUE must persist this long before it counts as
+// latency drift. The replay burst spikes the queue legitimately; tripping on
+// instantaneous depth caused a reconnect→replay→reconnect loop (3–4 Hz, phones).
+const BACKLOG_MS = 1500;
 // Enough to capture a whole failed connect + its retries; small enough that a
 // misbehaving stream can't turn the diagnostic channel into traffic of its own.
 const MAX_REPORTS = 40;
@@ -56,6 +65,10 @@ export class DevicePlayer {
   private fed = 0;
   private delivered = 0;
   private stallTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private backlogSince: number | null = null;
+  private lastFeedAt = 0;
+  private organicFeed = false; // a feed arrived after an ORGANIC_GAP_MS quiet gap
   private reports = 0;
 
   constructor(
@@ -119,6 +132,13 @@ export class DevicePlayer {
     this.firstFrameTimer = null;
     if (this.stallTimer) clearTimeout(this.stallTimer);
     this.stallTimer = null;
+    // A live reconnect timer surviving teardown opened a second concurrent
+    // stream for the same device once anything else restarted in the meantime.
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.backlogSince = null;
+    this.fed = 0;
+    this.delivered = 0;
     try {
       this.decoder?.close();
     } catch {
@@ -143,8 +163,11 @@ export class DevicePlayer {
 
   private startAvcc(): void {
     this.mode = "avcc";
+    this.abort?.abort(); // never leave a previous connection streaming beside the new one
     const ac = new AbortController();
     this.abort = ac;
+    this.lastFeedAt = 0;
+    this.organicFeed = false;
     const demux = new AvccDemuxer();
     let gotFrame = false;
 
@@ -211,6 +234,7 @@ export class DevicePlayer {
     this.sawKeyframe = false;
     this.fed = 0;
     this.delivered = 0;
+    this.backlogSince = null;
     this.decoder = new VideoDecoder({
       output: (frame) => this.onFrame(frame),
       error: () => this.onDecodeError(),
@@ -231,15 +255,28 @@ export class DevicePlayer {
     if (isKey) this.sawKeyframe = true;
     // Backlog reset: catch up instead of drifting into latency. Must be a
     // reconnect — a bare decoder reset would gate on a mid-stream keyframe
-    // that serve-sim never sends, freezing the stream for good.
+    // that serve-sim never sends, freezing the stream for good. Sustained-only
+    // (BACKLOG_MS): a transient spike is just the GOP replay draining, and
+    // reconnecting on it re-triggers the very replay that caused the spike.
     if (dec.decodeQueueSize > MAX_DECODE_QUEUE) {
-      this.reconnectAvcc();
-      return;
+      const now = performance.now();
+      if (this.backlogSince === null) {
+        this.backlogSince = now;
+      } else if (now - this.backlogSince > BACKLOG_MS) {
+        this.report("decode backlog", `queue ${dec.decodeQueueSize} for ${Math.round(now - this.backlogSince)}ms — reconnecting`);
+        this.reconnectAvcc();
+        return;
+      }
+    } else {
+      this.backlogSince = null;
     }
     this.ts += 1; // monotonic
     try {
       dec.decode(new EncodedVideoChunk({ type: isKey ? "key" : "delta", timestamp: this.ts, data: payload }));
       this.fed += 1;
+      const now = performance.now();
+      if (this.lastFeedAt !== 0 && now - this.lastFeedAt > ORGANIC_GAP_MS) this.organicFeed = true;
+      this.lastFeedAt = now;
       this.armStallCheck();
     } catch {
       this.onDecodeError();
@@ -251,14 +288,18 @@ export class DevicePlayer {
    * arrives (Safari) = the last frame of a burst — the typed character, the
    * pressed key — stays invisible until the next screen change. If the stream
    * goes quiet while the decoder still owes frames, reconnect: the fresh
-   * seed + keyframe repaint the current framebuffer within ~250 ms.
+   * seed + keyframe repaint the current framebuffer within ~250 ms. Gated on
+   * organicFeed — see ORGANIC_GAP_MS.
    */
   private armStallCheck(): void {
     if (this.stallTimer) clearTimeout(this.stallTimer);
     this.stallTimer = setTimeout(() => {
       this.stallTimer = null;
       if (this.disposed || !this.active || this.mode !== "avcc") return;
-      if (this.delivered < this.fed) this.reconnectAvcc();
+      if (this.delivered < this.fed && this.organicFeed) {
+        this.report("stall heal", `decoder owes ${this.fed - this.delivered} frame(s) — reconnecting`);
+        this.reconnectAvcc();
+      }
     }, STALL_MS);
   }
 
@@ -307,7 +348,8 @@ export class DevicePlayer {
       return;
     }
     this.recovery += 1;
-    setTimeout(() => {
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
       if (!this.disposed && this.active) this.mode === "avcc" ? this.startAvcc() : this.startMjpeg();
     }, 500);
   }
@@ -324,6 +366,7 @@ export class DevicePlayer {
 
   private startMjpeg(): void {
     this.mode = "mjpeg";
+    this.abort?.abort();
     const ac = new AbortController();
     this.abort = ac;
     const parser = createMjpegFrameParser((jpeg) => this.paintImage(jpeg));

@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import type { ShareDevice, ShareTestRun } from "./api.ts";
+import type { ShareDevice } from "./api.ts";
 import type { SpecialKey } from "./stream/input.ts";
 import { CheckIcon, HomeIcon, InfoIcon, KeyboardIcon, RotateIcon, SwitchDeviceIcon, XIcon } from "./icons.tsx";
-import { TestRunControl } from "./TestRunPopover.tsx";
 
 interface Props {
   devices: ShareDevice[];
@@ -19,8 +18,6 @@ interface Props {
   repo: string;
   refName: string;
   source?: "git" | "local";
-  /** The agent's live test run — shown as a dock button (spinning border while running). */
-  testRun?: ShareTestRun;
 }
 
 /**
@@ -31,7 +28,7 @@ interface Props {
  */
 export function MobileChrome(props: Props) {
   const { devices, focusId, onFocus, onHome, onRotate, onText, onKey, rotation } = props;
-  const { repo, refName, source, testRun } = props;
+  const { repo, refName, source } = props;
   const [pickerOpen, setPickerOpen] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
   const [typing, setTyping] = useState(false);
@@ -140,7 +137,6 @@ export function MobileChrome(props: Props) {
               </div>
             </div>
           </div>
-          {testRun && <TestRunControl testRun={testRun} placement="dock" />}
         </div>
       )}
 

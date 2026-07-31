@@ -156,6 +156,30 @@ body::before {
   left: 50%;
   transform: translateX(-50%);
 }
+/* Inline variant: a compare pane owns its own picker and sits it in that device's
+   control row, not fixed at the top of the window — two fixed pickers would land
+   on top of each other. The menu is absolute to .picker either way, so only the
+   anchor changes. */
+.picker--inline {
+  position: relative;
+  z-index: 20;
+  top: auto;
+  left: auto;
+  transform: none;
+  display: inline-flex;
+}
+/* Compact: the trigger is a .ctrl-btn, so the menu can't stay centred on a 34px
+   anchor — a 250px popover would hang off the column. Hang it from the right
+   edge instead, opening back over the sim. */
+.picker--compact .picker-menu {
+  left: auto;
+  right: 0;
+  transform: translateY(-8px) scale(0.96);
+  transform-origin: top right;
+}
+.picker--compact .picker-menu.open {
+  transform: translateY(0) scale(1);
+}
 .picker-btn {
   display: inline-flex;
   align-items: center;
@@ -329,6 +353,12 @@ body::before {
   margin: 0;
   animation: rise 0.6s cubic-bezier(0.2, 0.7, 0.2, 1) both;
   will-change: transform; /* FLIP moves the figure between layouts */
+}
+/* Any author `display` on .device (the mobile compare stage sets flex) beats the
+   UA's [hidden]{display:none} — without this a non-shown device renders frozen
+   beside the live one. */
+.device[hidden] {
+  display: none !important;
 }
 
 /* Side by side: each device at a comfortable natural size, wrapping + centered. */
@@ -906,17 +936,15 @@ figcaption {
 @media (max-width: 700px) {
   /* The sim fills the viewport between the notch and the dock, centered, at the
      largest size that fits both dimensions — no top strip, minimal margins. */
-  /* `--trun-h` is the open test-run popover's measured height (0 when closed, set by
-     TestRunControl). Reserving it here is what makes the popover push the sim up instead of
-     covering it: the stage is flex:1 inside this padding, and `.device-screen` sizes off the
-     stage as a size container — so the device re-fits the smaller box on its own, at the same
-     aspect ratio. Transitioning the padding is therefore enough to animate the whole thing,
-     and `prefers-reduced-motion` already zeroes every transition globally. */
   .app {
     height: 100dvh;
     display: flex;
+    /* Column, not the flex default: the stage is no longer the only child —
+       ProgressBar sits above it, and in a row the two would stand side by side
+       with the bar squeezing the sim into half the width. */
+    flex-direction: column;
     padding: calc(env(safe-area-inset-top, 0px) + 0.35rem) 0.35rem
-      calc(env(safe-area-inset-bottom, 0px) + 0.5rem + 42px + 0.4rem + var(--trun-h, 0px));
+      calc(env(safe-area-inset-bottom, 0px) + 0.5rem + 42px + 0.4rem);
     transition: padding-bottom 0.22s cubic-bezier(0.16, 0.84, 0.34, 1);
   }
   .device-screen {
@@ -1097,50 +1125,173 @@ figcaption {
   transition: transform 0.45s cubic-bezier(0.16, 0.84, 0.34, 1);
 }
 
-/* ---- Agent test run: a control-row button (spinning border while running,
-        ✓/✗ when done) + a step popover. Sits among the other device controls —
-        the bottom dock on mobile, the top control row on desktop. ---- */
-.trun {
+/* ---- Progress bar: one collapsible bar at the top of every view, carrying the
+        test run and (in a compare) the parity checklist. Same position and
+        behaviour in single and compare, phone and desktop. ---- */
+.pbar {
   --tr-pass: var(--sage);
   --tr-fail: var(--coral);
   --tr-run: var(--amber);
+  position: relative; /* anchors the running sweep */
+  align-self: center;
+  width: min(46rem, 100%);
+  margin: 0 auto clamp(1rem, 2.5vw, 1.8rem);
+  background: var(--card-grad);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
 }
-/* Desktop: a positioned box so the popover anchors under the button (opens down).
-   Mobile: display:contents so the button joins the dock row directly and the
-   popover anchors to the (fixed) dock and stays on screen (opens up). */
-.trun--topbar {
-  position: relative;
+/* The head stays rounded against the bar; only an open body squares it off. */
+.pbar-head {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  width: 100%;
+  padding: 0.8rem 1.1rem;
+  font: inherit;
+  color: var(--ink);
+  background: transparent;
+  border: 0;
+  border-radius: 16px;
+  cursor: pointer;
+  text-align: left;
+}
+.pbar-title {
+  font-family: var(--serif);
+  font-weight: 650;
+  font-size: 1rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pbar-count {
+  flex: none;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+.pbar-verdict {
+  flex: none;
   display: inline-flex;
 }
-.trun--dock {
-  display: contents;
+.pbar-verdict--passed {
+  color: var(--tr-pass);
 }
-.trun-btn {
-  position: relative;
-  overflow: visible;
+.pbar-verdict--failed {
+  color: var(--tr-fail);
 }
-.trun-count {
-  font-family: var(--mono);
-  font-size: 0.74rem;
+/* The secondary count: present, but never competing with the head's own number. */
+.pbar-aside {
+  flex: none;
+  font-size: 0.8rem;
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+.pbar-aside::before {
+  content: "·";
+  margin-right: 0.5rem;
+}
+.pbar-dots {
+  display: flex;
+  gap: 0.35rem;
+}
+/* Push the chevron to the far edge and let whatever precedes it sit left. */
+.pbar-chev {
+  margin-left: auto;
+  flex: none;
+  display: inline-flex;
+  color: var(--ink-faint);
+  transition: transform 0.25s var(--ease-settle, ease);
+}
+.pbar-chev.flip {
+  transform: rotate(180deg);
+}
+/* Worst signal wins: a failed run or a regression tints the whole bar, so the
+   "something is wrong" read costs no interaction. */
+.pbar--alarm {
+  border-color: color-mix(in srgb, var(--coral) 45%, transparent);
+}
+.pbar.open .pbar-head {
+  border-radius: 16px 16px 0 0;
+}
+/* The compare layouts are flex columns with their own gap — the bar's bottom
+   margin would double the spacing there. */
+.app--mig .pbar,
+.app--mig-mobile .pbar {
+  margin-bottom: 0;
+}
+.pbar-body {
+  border-top: 1px solid var(--line);
+  padding: 0.2rem 0.6rem 0.5rem;
+  /* The old ledger clipped its list with overflow:hidden; the bar can't — that
+     would cut off the running sweep, which sits at inset:-1px. Round the body
+     itself instead (16px shell minus the 1px border). */
+  border-radius: 0 0 15px 15px;
+}
+.pbar-sect + .pbar-sect {
+  margin-top: 0.5rem;
+  border-top: 1px solid var(--line);
+}
+.pbar-sect-head {
+  margin: 0;
+  padding: 0.6rem 0.55rem 0.3rem;
+  font-size: 0.68rem;
   font-weight: 600;
-  color: var(--tr-run);
-  letter-spacing: -0.02em;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--ink-faint);
 }
-/* Running: a comet sweeps along the border. The ring itself never moves — the
-   mask keeps it glued to the button's rounded shape; what animates is the
-   conic-gradient's *angle* (a registered @property, so it interpolates). Never
-   transform-rotate this pseudo-element: rotating a rounded rect swings the arc
-   out of the button's outline. */
+.pbar-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0.2rem 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+/* A section inside the bar owns its own padding, so the ledger list must drop
+   the border it carried as a standalone panel. */
+.pbar .mig-ledger-list {
+  border-top: 0;
+  padding: 0.2rem 0 0.2rem;
+}
+/* Phone: the bar is chrome above a sim that wants every pixel — keep it compact
+   and never let it grow tall enough to squeeze the device. */
+@media (max-width: 700px) {
+  .pbar {
+    margin-bottom: 0.5rem;
+    flex: none;
+  }
+  .pbar-head {
+    padding: 0.55rem 0.8rem;
+    gap: 0.55rem;
+  }
+  .pbar-title {
+    font-size: 0.9rem;
+  }
+  .pbar-body {
+    max-height: 45dvh;
+    overflow-y: auto;
+  }
+}
+
+/* ---- Agent test run: step styling, shared by the progress bar. The run used to
+        be a button in the device control row; it now lives in ProgressBar at the
+        top of every view, so only the step rows and the running sweep remain. ---- */
 @property --trun-sweep {
   syntax: "<angle>";
   inherits: false;
   initial-value: 0deg;
 }
-.trun-btn--running {
+/* Running: a comet sweeps along the bar's border. The ring itself never moves —
+   the mask keeps it glued to the rounded shape; what animates is the
+   conic-gradient's *angle* (a registered @property, so it interpolates). Never
+   transform-rotate this pseudo-element: rotating a rounded rect swings the arc
+   out of the outline. Carried over verbatim from the old test-run button. */
+.pbar--running {
   border-color: transparent;
-  color: var(--tr-run);
 }
-.trun-btn--running::before {
+.pbar--running::before {
   content: "";
   position: absolute;
   inset: -1px;
@@ -1165,76 +1316,12 @@ figcaption {
     --trun-sweep: 360deg;
   }
 }
-.trun-btn--passed {
-  color: var(--tr-pass);
-  border-color: color-mix(in srgb, var(--tr-pass) 55%, transparent);
-}
-.trun-btn--failed {
-  color: var(--tr-fail);
-  border-color: color-mix(in srgb, var(--tr-fail) 60%, transparent);
-}
 .spinner--tr {
   width: 14px;
   height: 14px;
   border-width: 2px;
 }
 
-/* The step popover. */
-.trun-pop {
-  position: absolute;
-  width: min(19rem, 78vw);
-  max-height: min(60vh, 30rem);
-  overflow-y: auto;
-  padding: 0.5rem;
-  border: 1px solid var(--line-strong);
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--panel) 94%, transparent);
-  box-shadow: var(--shadow-lg);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  opacity: 0;
-  pointer-events: none;
-  transition:
-    opacity 0.16s ease,
-    transform 0.2s cubic-bezier(0.16, 0.84, 0.34, 1);
-  z-index: 50;
-}
-.trun--topbar .trun-pop {
-  top: calc(100% + 0.5rem);
-  right: 0;
-  transform-origin: top right;
-  transform: translateY(-6px) scale(0.97);
-}
-.trun--dock .trun-pop {
-  bottom: calc(100% + 0.6rem);
-  left: 50%;
-  transform-origin: bottom center;
-  transform: translate(-50%, 8px) scale(0.96);
-}
-.trun-pop.open {
-  opacity: 1;
-  pointer-events: auto;
-}
-.trun--topbar .trun-pop.open {
-  transform: translateY(0) scale(1);
-}
-.trun--dock .trun-pop.open {
-  transform: translate(-50%, 0) scale(1);
-}
-.trun-head {
-  padding: 0.3rem 0.45rem 0.5rem;
-  font-weight: 600;
-  font-size: 0.9rem;
-  color: var(--ink);
-}
-.trun-steps {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.1rem;
-}
 .trun-step {
   display: flex;
   align-items: flex-start;
@@ -1244,7 +1331,7 @@ figcaption {
   font-size: 0.82rem;
   color: var(--ink-soft);
 }
-.trun-pop.open .trun-step {
+.pbar.open .trun-step {
   animation: rise 0.3s cubic-bezier(0.2, 0.7, 0.2, 1) both;
   animation-delay: calc(var(--i, 0) * 32ms);
 }
@@ -1411,7 +1498,7 @@ figcaption {
    (shrink: 1) collapses the switch to zero height the moment the visible pane
    overflows — switching to Reference made the selector itself disappear. */
 .app--mig-mobile > .mig-switch,
-.app--mig-mobile > .mig-ledger {
+.app--mig-mobile > .pbar {
   flex: none;
 }
 /* The visible pane wrapper: React omits the attribute entirely for hidden={false}
@@ -1479,43 +1566,6 @@ figcaption {
   background: var(--accent);
 }
 
-/* Parity ledger: a calm, collapsible checklist above the two panes. */
-.mig-ledger {
-  align-self: center;
-  width: min(46rem, 100%);
-  background: var(--card-grad);
-  border: 1px solid var(--line);
-  border-radius: 16px;
-  box-shadow: var(--shadow);
-  overflow: hidden;
-}
-.mig-ledger-head {
-  display: flex;
-  align-items: center;
-  gap: 0.8rem;
-  width: 100%;
-  padding: 0.8rem 1.1rem;
-  font: inherit;
-  color: var(--ink);
-  background: transparent;
-  border: 0;
-  cursor: pointer;
-  text-align: left;
-}
-.mig-ledger-title {
-  font-family: var(--serif);
-  font-weight: 650;
-  font-size: 1rem;
-}
-.mig-ledger-count {
-  font-size: 0.85rem;
-  color: var(--ink-soft);
-}
-.mig-ledger-dots {
-  margin-left: auto;
-  display: flex;
-  gap: 0.35rem;
-}
 .mig-dot {
   min-width: 1.35rem;
   text-align: center;

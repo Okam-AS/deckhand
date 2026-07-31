@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { CheckIcon, SwitchDeviceIcon } from "./icons.tsx";
 import type { ShareDevice } from "./api.ts";
 
 export type ViewMode = "grid" | "focus";
@@ -7,16 +8,47 @@ interface Props {
   devices: ShareDevice[];
   visible: Set<string>;
   shownCount: number;
-  mode: ViewMode;
-  onMode: (mode: ViewMode) => void;
+  /** Layout section — omit both to hide it (a compare pane shows one device, so it has no layout choice). */
+  mode?: ViewMode;
+  onMode?: (mode: ViewMode) => void;
   onToggle: (id: string) => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /**
+   * "multi" (default): checkboxes, any subset visible — the single-preview stage.
+   * "single": radios, exactly one — a compare pane, where two devices side by side
+   * in one column would each be a sliver.
+   */
+  select?: "multi" | "single";
+  /** Position in flow instead of fixed top-center (for a compare pane header). */
+  inline?: boolean;
+  /**
+   * Render the trigger as an icon-only button matching the device control row
+   * (Home/Rotate/Fullscreen), so a compare pane's device picker sits beside them
+   * as a peer instead of floating above the sim as a second, larger affordance.
+   */
+  compact?: boolean;
 }
 
-/** Top-center control: choose the layout mode and which devices are shown. */
-export function DevicePicker({ devices, visible, shownCount, mode, onMode, onToggle, open, onOpenChange }: Props) {
+/** Choose the layout mode and which devices are shown. */
+export function DevicePicker({
+  devices,
+  visible,
+  shownCount,
+  mode,
+  onMode,
+  onToggle,
+  open,
+  onOpenChange,
+  select = "multi",
+  inline = false,
+  compact = false,
+}: Props) {
   const ref = useRef<HTMLDivElement>(null);
+  const single = select === "single";
+  // In single mode the count is always "1/2" — useless. Name the device instead,
+  // dropping the runtime ("iPhone 17 Pro · iOS 26.5" → "iPhone 17 Pro") to fit.
+  const current = devices.find((d) => visible.has(d.deviceId)) ?? devices[0];
 
   useEffect(() => {
     if (!open) return;
@@ -35,62 +67,90 @@ export function DevicePicker({ devices, visible, shownCount, mode, onMode, onTog
   }, [open, onOpenChange]);
 
   return (
-    <div className="picker" ref={ref}>
+    <div className={`picker ${inline ? "picker--inline" : ""} ${compact ? "picker--compact" : ""}`} ref={ref}>
       <button
         type="button"
-        className="picker-btn"
+        className={compact ? "ctrl-btn" : "picker-btn"}
         onClick={() => onOpenChange(!open)}
         aria-expanded={open}
         aria-haspopup="menu"
+        aria-label={single ? `Device: ${current?.label ?? "none"}` : undefined}
+        title={compact ? (current?.label ?? "Choose device") : undefined}
       >
-        <GridIcon />
-        <span className="picker-count">
-          {shownCount}/{devices.length}
-        </span>
-        <ChevronIcon className={open ? "chev flip" : "chev"} />
+        {compact ? (
+          <SwitchDeviceIcon size={18} />
+        ) : (
+          <>
+            <GridIcon />
+            <span className="picker-count">
+              {single ? (current?.label.split(" · ")[0] ?? "—") : `${shownCount}/${devices.length}`}
+            </span>
+            <ChevronIcon className={open ? "chev flip" : "chev"} />
+          </>
+        )}
       </button>
 
       <div className={`picker-menu ${open ? "open" : ""}`} role="menu">
-        <div className="picker-section">Layout</div>
-        <div className="seg" role="tablist" aria-label="View mode">
-          <button
-            type="button"
-            className={`seg-btn ${mode === "grid" ? "on" : ""}`}
-            role="tab"
-            aria-selected={mode === "grid"}
-            onClick={() => onMode("grid")}
-          >
-            Side by side
-          </button>
-          <button
-            type="button"
-            className={`seg-btn ${mode === "focus" ? "on" : ""}`}
-            role="tab"
-            aria-selected={mode === "focus"}
-            onClick={() => onMode("focus")}
-          >
-            Focus
-          </button>
-        </div>
+        {mode && onMode && (
+          <>
+            <div className="picker-section">Layout</div>
+            <div className="seg" role="tablist" aria-label="View mode">
+              <button
+                type="button"
+                className={`seg-btn ${mode === "grid" ? "on" : ""}`}
+                role="tab"
+                aria-selected={mode === "grid"}
+                onClick={() => onMode("grid")}
+              >
+                Side by side
+              </button>
+              <button
+                type="button"
+                className={`seg-btn ${mode === "focus" ? "on" : ""}`}
+                role="tab"
+                aria-selected={mode === "focus"}
+                onClick={() => onMode("focus")}
+              >
+                Focus
+              </button>
+            </div>
+          </>
+        )}
 
         <div className="picker-section">Devices</div>
         {devices.map((d) => {
           const on = visible.has(d.deviceId);
-          const isLast = on && shownCount <= 1; // never hide the last one
+          // Multi: never hide the last one. Single: the chosen row is already the
+          // answer, so clicking it again is a no-op rather than a disabled button.
+          const isLast = on && shownCount <= 1;
           return (
             <button
               key={d.deviceId}
               type="button"
               className="picker-row"
-              role="menuitemcheckbox"
+              role={single ? "menuitemradio" : "menuitemcheckbox"}
               aria-checked={on}
-              disabled={isLast}
-              onClick={() => onToggle(d.deviceId)}
+              disabled={!single && isLast}
+              onClick={() => {
+                if (single && on) return void onOpenChange(false);
+                onToggle(d.deviceId);
+                if (single) onOpenChange(false);
+              }}
             >
               <span className="picker-label">{d.label}</span>
-              <span className={`switch ${on ? "on" : ""}`} aria-hidden>
-                <span className="knob" />
-              </span>
+              {single ? (
+                // Same tick as MobileChrome's device menu — one shape for
+                // "this is the device you're looking at", wherever you pick it.
+                on && (
+                  <span className="mrow-check" aria-hidden>
+                    <CheckIcon size={15} />
+                  </span>
+                )
+              ) : (
+                <span className={`switch ${on ? "on" : ""}`} aria-hidden>
+                  <span className="knob" />
+                </span>
+              )}
             </button>
           );
         })}

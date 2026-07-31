@@ -214,6 +214,17 @@ export class AndroidManager {
       "-no-audio",
       "-no-boot-anim",
       "-no-snapshot",
+      // Nobody looks at the emulator's own window — deckhand streams the device
+      // over adb — but drawing it is not free: an idle pixel_7/API36 emulator
+      // measured 227% CPU windowed vs 34% with these two flags. `-gpu host`
+      // renders through Metal instead of falling back to a software rasteriser,
+      // which is what made a headless emulator expensive in the first place.
+      // Both capture paths keep working headless: screenrecord (the H.264
+      // primary) and screencap (the MJPEG fallback) read from SurfaceFlinger,
+      // not from the host window.
+      "-no-window",
+      "-gpu",
+      "host",
       ...(opts.wipeData ? ["-wipe-data"] : []),
     ]);
     // The waits below take minutes. Without a signal, a preview collected by

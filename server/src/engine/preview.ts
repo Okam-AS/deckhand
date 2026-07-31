@@ -93,6 +93,39 @@ const BUILD_VERBS =
  */
 const DETAIL_MAX = 40;
 
+/**
+ * Lift the actionable cause of a failed build out of the log we already captured.
+ *
+ * `build step "build" failed` is a dead end: the agent has to go read 500 lines of Gradle or
+ * Xcode chatter to learn anything, and the viewer shows the user one line they cannot act on.
+ * The cause is always in the tail, in a shape each toolchain repeats — so name it.
+ *
+ * Gradle prints `* What went wrong:` followed by the task and, when it has one, `Caused by:`.
+ * Xcode/clang mark real failures with `error:`. Anything else falls back to the last non-noise
+ * lines, which beats saying nothing.
+ */
+export function buildFailureCause(lines: readonly string[], max = 400): string | null {
+  const strip = (l: string): string => l.replace(/\x1b\[[0-9;]*m/g, "").replace(/^\[[a-z-]+\]\s?/, "").trimEnd();
+  const tail = lines.slice(-300).map(strip);
+
+  const gradleAt = tail.findLastIndex((l) => l.startsWith("* What went wrong:"));
+  if (gradleAt >= 0) {
+    const stop = tail.findIndex((l, i) => i > gradleAt && l.startsWith("* Try:"));
+    const block = tail.slice(gradleAt + 1, stop > 0 ? stop : gradleAt + 6).filter((l) => l.trim());
+    const caused = tail.filter((l) => l.trim().startsWith("Caused by:")).slice(-2);
+    const out = [...block, ...caused].join(" ").replace(/\s+/g, " ").trim();
+    if (out) return clip(out, max);
+  }
+
+  const errors = tail.filter((l) => /(^|\s)error:/i.test(l) || /^FAILURE:|^fatal error:/i.test(l)).slice(-3);
+  if (errors.length) return clip(errors.join(" ").replace(/\s+/g, " ").trim(), max);
+
+  const last = tail.filter((l) => l.trim()).slice(-3).join(" ").replace(/\s+/g, " ").trim();
+  return last ? clip(last, max) : null;
+}
+
+const clip = (s: string, max: number): string => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
+
 export function buildStepDetail(line: string): string | null {
   const clean = line
     .replace(/\x1b\[[0-9;]*m/g, "") // ANSI colour
@@ -192,6 +225,8 @@ export interface CompareSession {
   /** Engine-internal: the booted reference preview, torn down with the working one. */
   referencePreviewId?: string;
   items: CompareItem[];
+  /** Agent-set pane names shown in the viewer instead of Working/Reference. */
+  labels?: { working?: string; reference?: string };
 }
 export interface CompareCounts {
   pending: number;
@@ -549,8 +584,12 @@ export class PreviewEngine {
       shareId: string;
       repo: string;
       ref: string;
+      /** Agent-set pane name (viewer falls back to "Reference"). */
+      label?: string;
       devices: { deviceId: string; platform: Platform; label: string; phase: string; detail?: string; step?: string }[];
     };
+    /** Agent-set name for THIS app's pane in a compare (viewer falls back to "Working"). */
+    paneLabel?: string;
     /** Migration target only: the agent-maintained parity ledger, if the file exists. */
     ledger?: { screens: { name: string; status: string; note?: string }[] };
   } | null {
@@ -583,6 +622,7 @@ export class PreviewEngine {
               shareId: p.compare.reference.shareId,
               repo: p.compare.reference.repo,
               ref: p.compare.reference.ref,
+              ...(p.compare.labels?.reference ? { label: p.compare.labels.reference } : {}),
               devices: sanitizeDevices(ref),
             };
           }
@@ -628,6 +668,7 @@ export class PreviewEngine {
               }
             : {}),
           ...(pairedWith ? { pairedWith } : {}),
+          ...(p.compare?.labels?.working ? { paneLabel: p.compare.labels.working } : {}),
           ...(ledger ? { ledger } : {}),
         };
       }
@@ -1717,8 +1758,13 @@ export class PreviewEngine {
         },
       });
       if (res.code !== 0 && !step.optional) {
+        // `build step "build" failed` is true and useless: the agent gets a dead end and the
+        // viewer shows one line with no way to act on it. The cause is always in the log we
+        // just captured, so lift it into the error itself.
+        const cause = buildFailureCause(dev.logs.build);
         throw new PreviewError(
-          `build step "${step.name}" failed${res.timedOut ? " (idle timeout)" : ""}${res.aborted ? " (aborted)" : ""}`,
+          `build step "${step.name}" failed${res.timedOut ? " (idle timeout)" : ""}${res.aborted ? " (aborted)" : ""}` +
+            (cause ? ` — ${cause}` : ""),
         );
       }
     }
@@ -1726,10 +1772,21 @@ export class PreviewEngine {
 
   private async attachAndReady(p: LivePreview, dev: LiveDevice, platform: Platform, handle: string): Promise<void> {
     // A restarted preview keeps its stream: it captures the device's screen,
-    // which survives app reinstalls — no reason to detach and reattach.
-    if (p.attached.has(dev.record.deviceId)) {
-      this.setPhase(p, dev, "ready", undefined);
-      return;
+    // which survives app reinstalls — no reason to detach and reattach. But
+    // only after verifying the helper still answers: a kept record can point at
+    // a dead process (helper crash, external kill, adoption across a server
+    // restart), and trusting it blindly declared "ready" panes whose bridge
+    // then failed silently forever.
+    const kept = p.attached.get(dev.record.deviceId);
+    if (kept) {
+      const alive = await kept.waitForFirstFrame(4000).catch(() => false);
+      if (alive) {
+        this.setPhase(p, dev, "ready", undefined);
+        return;
+      }
+      this.streamLog(dev, `kept helper at ${kept.origin}${kept.helperBasePath} is not answering — re-attaching`);
+      p.attached.delete(dev.record.deviceId);
+      await kept.detach().catch(() => {});
     }
     const ref = platform === "android" ? { platform, udid: handle, serial: handle } : { platform, udid: handle };
     const t0 = this.d.now!();
@@ -2216,12 +2273,27 @@ export class PreviewEngine {
   }
 
   /** Link a working preview to a reference preview + seed the item checklist (replacing any prior). */
-  startCompare(previewId: string, reference: CompareReference, items: string[] = [], referencePreviewId?: string): CompareCounts {
+  startCompare(
+    previewId: string,
+    reference: CompareReference,
+    items: string[] = [],
+    referencePreviewId?: string,
+    labels?: { working?: string; reference?: string },
+  ): CompareCounts {
     const p = this.active(previewId);
     if (!p) throw new PreviewError(`no active preview "${previewId}"`);
     const seen = new Set<string>();
     const uniq = items.map((s) => s.trim()).filter((s) => s.length > 0 && !seen.has(s) && (seen.add(s), true));
-    p.compare = { reference, referencePreviewId, items: uniq.map((name) => ({ name, verdict: "pending" as const })) };
+    // Shown verbatim on a (possibly public) share page — single line, bounded.
+    const clean = (s?: string) => s?.replace(/\s+/g, " ").trim().slice(0, 60) || undefined;
+    const working = clean(labels?.working);
+    const ref = clean(labels?.reference);
+    p.compare = {
+      reference,
+      referencePreviewId,
+      items: uniq.map((name) => ({ name, verdict: "pending" as const })),
+      ...(working || ref ? { labels: { working, reference: ref } } : {}),
+    };
     return PreviewEngine.countCompare(p.compare.items);
   }
 
@@ -2240,10 +2312,12 @@ export class PreviewEngine {
   }
 
   /** The current compare session (reference + items + counts), or null. */
-  compareStatus(previewId: string): { reference: CompareReference; items: CompareItem[]; counts: CompareCounts } | null {
+  compareStatus(
+    previewId: string,
+  ): { reference: CompareReference; items: CompareItem[]; counts: CompareCounts; labels?: { working?: string; reference?: string } } | null {
     const c = this.active(previewId)?.compare;
     if (!c) return null;
-    return { reference: c.reference, items: c.items, counts: PreviewEngine.countCompare(c.items) };
+    return { reference: c.reference, items: c.items, counts: PreviewEngine.countCompare(c.items), ...(c.labels ? { labels: c.labels } : {}) };
   }
 
   // --- reaping / idle sweep --------------------------------------------------

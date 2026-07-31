@@ -29,6 +29,8 @@ export interface SharePaired {
   shareId: string;
   repo: string;
   ref: string;
+  /** Agent-set pane name; falls back to "Reference". */
+  label?: string;
   devices: ShareDevice[];
 }
 
@@ -57,6 +59,8 @@ export interface ShareState {
   testRun?: ShareTestRun;
   /** Migration target only: the live source preview to render side by side. */
   pairedWith?: SharePaired;
+  /** Agent-set name for this app's pane in a compare; falls back to "Working". */
+  paneLabel?: string;
   /** Migration target only: the parity checklist, when the ledger file exists. */
   ledger?: { screens: ShareLedgerScreen[] };
 }

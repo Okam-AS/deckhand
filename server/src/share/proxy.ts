@@ -701,6 +701,7 @@ function bridgeSockets(
   head: Buffer,
   target: string,
   protocols?: string[],
+  onUpstreamError?: (message: string) => void,
 ): void {
   wss.handleUpgrade(req, socket, head, (client) => {
     const upstream = protocols && protocols.length ? new WebSocket(target, protocols) : new WebSocket(target);
@@ -740,7 +741,12 @@ function bridgeSockets(
     client.on("close", (code) => closeBoth(code));
     upstream.on("close", (code) => closeBoth(code));
     client.on("error", () => closeBoth());
-    upstream.on("error", () => closeBoth());
+    upstream.on("error", (e) => {
+      // Without this the client saw only a silent close and retried forever —
+      // a dead helper produced an "upgrade accepted" flood with no cause line.
+      onUpstreamError?.(e instanceof Error ? e.message : String(e));
+      closeBoth();
+    });
   });
 }
 
@@ -785,7 +791,9 @@ export function handleShareUpgrade(
     }
     trace(engine, shareId, deviceId, "ws upgrade accepted → bridging to helper");
     const targetOrigin = dev.stream.origin.replace(/^http/, "ws");
-    bridgeSockets(wss, req, socket, head, `${targetOrigin}${dev.stream.helperBasePath}/ws`);
+    bridgeSockets(wss, req, socket, head, `${targetOrigin}${dev.stream.helperBasePath}/ws`, undefined, (msg) =>
+      trace(engine, shareId, deviceId, `ws bridge → helper FAILED: ${msg}`),
+    );
     return true;
   }
 

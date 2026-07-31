@@ -5,6 +5,7 @@ import { MobileChrome } from "./MobileChrome.tsx";
 import { WebFrame } from "./WebFrame.tsx";
 import { PinGate } from "./PinGate.tsx";
 import { CompareView } from "./CompareView.tsx";
+import { ProgressBar } from "./ProgressBar.tsx";
 import { fetchShareState, shareIdFromPath, type ShareState } from "./api.ts";
 import { useIsMobile } from "./useIsMobile.ts";
 
@@ -174,6 +175,7 @@ export function App() {
     return (
       <>
         <main className="app app--web">
+          <ProgressBar testRun={state.testRun} />
           <section className="stage stage--web" ref={stageRef}>
             <WebFrame shareId={shareId} device={dev} repo={state.repo} branch={state.ref} />
           </section>
@@ -188,6 +190,7 @@ export function App() {
   return (
     <>
       <main className={`app ${multi && !isMobile ? "has-picker" : ""} ${isMobile ? "app--mobile" : ""}`}>
+        <ProgressBar testRun={state.testRun} />
         <section className={`stage stage--${effectiveMode}`} ref={stageRef}>
           {shown.map((d) => {
             const variant = effectiveMode === "grid" ? "grid" : d.deviceId === focus ? "focus" : "thumb";
@@ -202,7 +205,6 @@ export function App() {
                 onSelect={variant === "thumb" ? () => setFocusId(d.deviceId) : undefined}
                 registerControls={registerControls}
                 onRotationChange={handleRotation}
-                testRun={state.testRun}
               />
             );
           })}
@@ -224,7 +226,6 @@ export function App() {
           repo={state.repo}
           refName={state.ref}
           source={state.source}
-          testRun={state.testRun}
         />
       ) : (
         <>

@@ -42,6 +42,10 @@ export interface ServeSimOptions {
   detachImpl?: (bin: string, args: string[]) => Promise<string>;
   /** Injected for tests: run `serve-sim -k <udid>`. */
   killImpl?: (bin: string, args: string[]) => Promise<void>;
+  /** Injected for tests: PIDs listening on a TCP port (the survivor check `serve-sim -k` needs). */
+  listenersImpl?: (port: number) => Promise<number[]>;
+  /** Injected for tests: send a signal to a pid. */
+  killPidImpl?: (pid: number) => void;
   fetchImpl?: typeof fetch;
 }
 
@@ -68,6 +72,19 @@ function defaultDetach(bin: string, args: string[]): Promise<string> {
 function defaultKill(bin: string, args: string[]): Promise<void> {
   return new Promise((resolve) => execFile(bin, args, () => resolve()));
 }
+function defaultListeners(port: number): Promise<number[]> {
+  return new Promise((resolve) =>
+    execFile("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"], { timeout: 5_000 }, (_e, stdout) =>
+      resolve(
+        stdout
+          .toString()
+          .split("\n")
+          .map((l) => Number(l.trim()))
+          .filter((n) => Number.isInteger(n) && n > 0),
+      ),
+    ),
+  );
+}
 
 /** Derive the helper base path from serve-sim's reported streamUrl (e.g. ".../helper/<udid>/stream.mjpeg" → "/helper/<udid>"). */
 export function basePathFromStreamUrl(streamUrl: string): string {
@@ -84,6 +101,8 @@ export class ServeSimBackend implements StreamingBackend {
   private readonly range: [number, number];
   private readonly detachImpl: NonNullable<ServeSimOptions["detachImpl"]>;
   private readonly killImpl: NonNullable<ServeSimOptions["killImpl"]>;
+  private readonly listenersImpl: NonNullable<ServeSimOptions["listenersImpl"]>;
+  private readonly killPidImpl: NonNullable<ServeSimOptions["killPidImpl"]>;
   private readonly fetchImpl: typeof fetch;
   private readonly helpers = new Map<string, Helper>();
 
@@ -92,11 +111,27 @@ export class ServeSimBackend implements StreamingBackend {
     this.range = opts.portRange;
     this.detachImpl = opts.detachImpl ?? defaultDetach;
     this.killImpl = opts.killImpl ?? defaultKill;
+    this.listenersImpl = opts.listenersImpl ?? defaultListeners;
+    this.killPidImpl = opts.killPidImpl ?? ((pid) => process.kill(pid));
     this.fetchImpl = opts.fetchImpl ?? fetch;
   }
 
-  private usedPorts(): Set<number> {
-    return new Set([...this.helpers.values()].map((h) => h.port));
+  /**
+   * Ports held by a helper we know about, PLUS any port in the range something else is
+   * already listening on.
+   *
+   * The in-memory map alone is not enough: it is empty in a fresh process, while detached
+   * helpers from the previous one are still alive on their ports. Allocating over one of those
+   * hands the new device a daemon bound to a simulator that no longer exists — it answers, and
+   * serves that dead simulator's last framebuffer forever.
+   */
+  private async usedPorts(): Promise<Set<number>> {
+    const used = new Set([...this.helpers.values()].map((h) => h.port));
+    for (let port = this.range[0]; port <= this.range[1]; port++) {
+      if (used.has(port)) continue;
+      if ((await this.listenersImpl(port)).length) used.add(port);
+    }
+    return used;
   }
 
   async attach(device: StreamDeviceRef): Promise<AttachedStream> {
@@ -104,7 +139,7 @@ export class ServeSimBackend implements StreamingBackend {
 
     let helper = this.helpers.get(device.udid);
     if (!helper) {
-      const port = allocatePort(this.range[0], this.range[1], this.usedPorts());
+      const port = allocatePort(this.range[0], this.range[1], await this.usedPorts());
       // Spawn the streaming helper (daemon) and read the URLs it reports.
       const stdout = await this.detachImpl(this.bin, ["--detach", "-p", String(port), device.udid]);
       const parsed = this.parseDetach(stdout);
@@ -204,7 +239,31 @@ export class ServeSimBackend implements StreamingBackend {
     await this.killImpl(this.bin, ["-k", udid]);
   }
 
+  /**
+   * Kill every helper, then CHECK — `serve-sim -k` is a request, not a guarantee.
+   *
+   * A detached daemon has no child handle, so this is the only lever we have on it, and a
+   * helper that ignores it outlives the server: still listening, still holding a port, still
+   * bound to a simulator that was torn down hours ago. The next process starts with an empty
+   * helper map, allocates that same port, adopts the survivor, and every viewer on that share
+   * then watches the dead simulator's final frame — served intact, forever, under the new
+   * app's name. Observed in the wild: a helper 2h48m old, on a UDID with no booted device,
+   * feeding one 275,440-byte still to reconnect after reconnect.
+   *
+   * So sweep the range afterwards and SIGKILL whatever is still listening. Nothing else may
+   * use this range (it is deckhand's, from config), which is what makes the sweep safe.
+   */
   async reapOrphans(): Promise<void> {
     await this.killImpl(this.bin, ["-k"]);
+    this.helpers.clear();
+    for (let port = this.range[0]; port <= this.range[1]; port++) {
+      for (const pid of await this.listenersImpl(port)) {
+        try {
+          this.killPidImpl(pid);
+        } catch {
+          // Already gone between the scan and the signal — the outcome we wanted anyway.
+        }
+      }
+    }
   }
 }

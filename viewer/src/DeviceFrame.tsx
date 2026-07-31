@@ -1,9 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { DevicePlayer, type PlayerStatus } from "./stream/player.ts";
 import { DeviceInput, ORIENTATION_CYCLE, type SpecialKey } from "./stream/input.ts";
-import { deviceBase, deviceWsUrl, phaseBadge, phaseLabel, repoName, type ShareDevice, type ShareTestRun } from "./api.ts";
+import { deviceBase, deviceWsUrl, phaseBadge, phaseLabel, repoName, type ShareDevice } from "./api.ts";
 import { CollapseIcon, ExpandIcon, HomeIcon, KeyboardIcon, RotateIcon } from "./icons.tsx";
-import { TestRunControl } from "./TestRunPopover.tsx";
 
 export type DeviceVariant = "grid" | "focus" | "thumb";
 
@@ -28,8 +27,19 @@ interface Props {
   registerControls?: (id: string, api: DeviceControls | null) => void;
   /** Report the cumulative rotation (deg) so app-level chrome can spin its icons to match. */
   onRotationChange?: (deviceId: string, deg: number) => void;
-  /** The agent's live test run — shown as a control-row button (spinning border while running). */
-  testRun?: ShareTestRun;
+  /**
+   * Render but keep off screen. Used by the compare panes to show one device at a
+   * time without unmounting the others, so switching back doesn't rebuild the
+   * canvas, the input socket or the control registration — only the video stream
+   * is dropped while hidden and restarted on the way back.
+   */
+  hidden?: boolean;
+  /**
+   * Extra control-row buttons, placed before Home. A compare pane puts its device
+   * picker here so it sits with Home/Rotate/Fullscreen rather than floating above
+   * the sim as a separate, larger control.
+   */
+  topbarLead?: React.ReactNode;
 }
 
 // iPhone Safari has no element fullscreen; there we hide the button (the mobile
@@ -37,10 +47,29 @@ interface Props {
 const fullscreenSupported = typeof document !== "undefined" && Boolean(document.fullscreenEnabled);
 
 /** One live device: canvas + player + touch input, with a calm building overlay. */
-export function DeviceFrame({ shareId, device, repo, branch, variant = "grid", onSelect, registerControls, onRotationChange, testRun }: Props) {
+export function DeviceFrame({ shareId, device, repo, branch, variant = "grid", onSelect, registerControls, onRotationChange, hidden, topbarLead }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const frameRef = useRef<HTMLElement>(null); // the whole card is the fullscreen target
   const inputRef = useRef<DeviceInput | null>(null); // control buttons ride the same HID ws as touch
+  // Streaming is gated on three independent signals, so they can't clobber each
+  // other: `hidden` (a compare pane showing a different device), on-screen (the
+  // IntersectionObserver), and tab visibility. setActive tears the stream DOWN,
+  // so a single source getting this wrong leaves a permanently blank canvas.
+  //
+  // Deliberately NOT gated on layout (offsetParent / getBoundingClientRect):
+  // that read is layout-engine dependent, and under the `container-type: size`
+  // the mobile stage uses it withheld activation on phones while desktop — which
+  // has no containment there — worked fine. `hidden` is the complete truth about
+  // whether a frame should stream, because every ancestor that can hide one
+  // folds its own visibility into that prop (see CompareView's refPaneOff).
+  const playerRef = useRef<DevicePlayer | null>(null);
+  const onScreenRef = useRef(true);
+  // Seeded from the first render, so the stream effect below sees the right value
+  // on mount — effects run in declaration order, before the `hidden` effect.
+  const hiddenRef = useRef(!!hidden);
+  const syncActive = useCallback(() => {
+    playerRef.current?.setActive(onScreenRef.current && !hiddenRef.current && !document.hidden);
+  }, []);
   const orientationRef = useRef(0); // index into ORIENTATION_CYCLE
   const orientedRef = useRef(false); // seed orientation from the first frame's aspect (once)
   const [rotationDeg, setRotationDeg] = useState(0); // cumulative — rotates the control icons with the device
@@ -135,7 +164,14 @@ export function DeviceFrame({ shareId, device, repo, branch, variant = "grid", o
     });
     const input = new DeviceInput(canvas, deviceWsUrl(shareId, device.deviceId));
     inputRef.current = input;
-    player.start();
+    playerRef.current = player;
+    // DevicePlayer is born with active=true, and setActive no-ops on equal
+    // state — so a gated mount must be told setActive(false), not merely left
+    // unstarted, or the later un-hide's setActive(true) is a no-op and the
+    // frame stays blank forever. hiddenRef deliberately not in the dep list:
+    // re-running this effect on a switch would rebuild both streams.
+    if (onScreenRef.current && !hiddenRef.current && !document.hidden) player.start();
+    else player.setActive(false);
     input.start();
     registerControls?.(device.deviceId, {
       home: pressHome,
@@ -144,10 +180,39 @@ export function DeviceFrame({ shareId, device, repo, branch, variant = "grid", o
       key: (name) => void inputRef.current?.sendKey(name),
     });
 
-    // Pause decoding when off-screen or the tab is hidden (learnings §2).
-    const io = new IntersectionObserver((entries) => player.setActive(entries[0]!.isIntersecting), { threshold: 0.05 });
+    // Drop the stream when off-screen or the tab is hidden (learnings §2). Both
+    // feed syncActive rather than calling setActive directly — a hidden frame has
+    // no box, so the observer reports "off screen" and would otherwise fight the
+    // `hidden` gate below.
+    const io = new IntersectionObserver(
+      (entries) => {
+        const e = entries[entries.length - 1]!;
+        const box = e.boundingClientRect;
+        // A zero-area box means this frame has no layout YET — it just came back
+        // from display:none — not that it scrolled away. The observer's first
+        // report after unhiding can still describe the hidden state, and honouring
+        // it tore down the stream the `hidden` effect had just started: video
+        // froze on one frame while input (a separate socket) kept working.
+        if (box.width === 0 && box.height === 0) return;
+        onScreenRef.current = e.isIntersecting;
+        syncActive();
+      },
+      // threshold 0 (any pixel) rather than learnings §2's 0.05: the mobile panes
+      // clip with overflow:hidden, so a sim that is mostly-but-not-entirely on
+      // screen must keep streaming. Fully off screen still reads 0 and pauses.
+      { threshold: 0 },
+    );
     io.observe(canvas);
-    const onVis = () => player.setActive(!document.hidden);
+    // On return to the foreground, don't fabricate on-screen state (that revived
+    // streams for frames genuinely scrolled away, and no threshold crossing ever
+    // corrects it) — re-observe, which always delivers a fresh report.
+    const onVis = () => {
+      if (!document.hidden) {
+        io.unobserve(canvas);
+        io.observe(canvas);
+      }
+      syncActive();
+    };
     document.addEventListener("visibilitychange", onVis);
 
     return () => {
@@ -155,15 +220,26 @@ export function DeviceFrame({ shareId, device, repo, branch, variant = "grid", o
       document.removeEventListener("visibilitychange", onVis);
       registerControls?.(device.deviceId, null);
       inputRef.current = null;
+      playerRef.current = null;
       input.dispose();
       player.dispose();
     };
-  }, [ready, shareId, device.deviceId]);
+  }, [ready, shareId, device.deviceId, syncActive]);
+
+  // Showing/hiding a frame (compare pane device switch) starts or drops its
+  // stream directly — the observer can't, since it ignores zero-area reports.
+  // onScreenRef needs no forcing here: the zero-area guard means hiding never
+  // set it false, so a false value predates the hide and is still correct.
+  useEffect(() => {
+    hiddenRef.current = !!hidden;
+    syncActive();
+  }, [hidden, syncActive]);
 
   return (
     <figure
       className={`device device--${variant}`}
       ref={frameRef}
+      hidden={hidden}
       data-device-id={device.deviceId}
       {...(isThumb
         ? { onClick: onSelect, role: "button", tabIndex: 0, title: `Focus ${device.label}`, "aria-label": `Focus ${device.label}` }
@@ -178,6 +254,7 @@ export function DeviceFrame({ shareId, device, repo, branch, variant = "grid", o
               <KeyboardIcon size={15} />
             </span>
           )}
+          {topbarLead}
           {ready && (
             <>
               <button
@@ -211,7 +288,6 @@ export function DeviceFrame({ shareId, device, repo, branch, variant = "grid", o
               )}
             </>
           )}
-          {testRun && <TestRunControl testRun={testRun} placement="topbar" />}
         </div>
       )}
       <div
