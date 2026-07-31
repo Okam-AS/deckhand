@@ -2373,10 +2373,18 @@ export class PreviewEngine {
     // duplicate would otherwise be torn down twice and unlocked twice.
     const byShare = new Set<string>();
     const refs = references.filter((r) => !byShare.has(r.shareId) && (byShare.add(r.shareId), true));
-    p.compare = {
-      references: refs,
-      items: uniq.map((name) => ({ name, verdict: "pending" as const })),
-    };
+    // Preserve the verdicts already recorded. `start_preview` is idempotent and
+    // is the documented way for an agent to re-answer "what's the link?" — so
+    // re-calling it mid-session used to reset every item to `pending` and throw
+    // away an afternoon of judgements, silently. Seeding the same name twice is
+    // not a request to forget what you decided about it.
+    const prior = new Map((p.compare?.items ?? []).map((i) => [i.name, i]));
+    const merged = uniq.map((name) => prior.get(name) ?? { name, verdict: "pending" as const });
+    // Anything recorded earlier but not named again stays: the list is additive
+    // by design (setCompareItem appends unknown names) and there is no removal
+    // API, so dropping them could only ever lose work.
+    for (const item of prior.values()) if (!uniq.includes(item.name)) merged.push(item);
+    p.compare = { references: refs, items: merged };
     return PreviewEngine.countCompare(p.compare.items);
   }
 

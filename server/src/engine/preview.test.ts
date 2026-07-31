@@ -934,6 +934,28 @@ describe("PreviewEngine compare session", () => {
     assert.deepEqual(h.engine.pairedShareIds("no-such-share"), []);
   });
 
+  it("keeps recorded verdicts when the checklist is seeded again", () => {
+    // start_preview is idempotent and is the documented way to re-answer
+    // "what's the link?", so an agent asking for it again mid-port used to reset
+    // every verdict to pending and lose the whole session's judgements.
+    const h = makeEngine(uniqIds());
+    const work = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    h.engine.startCompare(work.previewId, [], ["Login", "Home"]);
+    h.engine.setCompareItem(work.previewId, { item: "Login", verdict: "done", note: "checked" });
+
+    // The same call again, as an idempotent re-invocation makes it.
+    h.engine.startCompare(work.previewId, [], ["Login", "Home"]);
+    const st = h.engine.compareStatus(work.previewId)!;
+    assert.equal(st.items.find((i) => i.name === "Login")!.verdict, "done");
+    assert.equal(st.items.find((i) => i.name === "Login")!.note, "checked");
+    assert.equal(st.items.find((i) => i.name === "Home")!.verdict, "pending");
+
+    // An item recorded but not re-seeded is kept — the list only ever grows.
+    h.engine.setCompareItem(work.previewId, { item: "Profile", verdict: "regression" });
+    h.engine.startCompare(work.previewId, [], ["Login"]);
+    assert.equal(h.engine.compareStatus(work.previewId)!.items.length, 3);
+  });
+
   it("surfaces every live source as a pane, own share last", () => {
     // The page is a set of panes, and the order is old → new: references first,
     // this share's own last, so a migration reads left-to-right as before→after.

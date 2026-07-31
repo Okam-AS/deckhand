@@ -168,7 +168,11 @@ export function App() {
   // render at the normal size, never the enlarged focus size. Grouped columns are
   // sized by the column, so the modes don't apply there at all.
   const effectiveMode: ViewMode = !multiSource && shownCount > 1 ? mode : "grid";
-  const focused = [...visible][0] ?? "";
+  // The enlarged pane in focus mode: the one the user clicked, when it is still
+  // on screen. Taking the first visible pane instead meant clicking a thumbnail
+  // set focusKey and changed nothing — focusKey only reached computeStage on
+  // mobile, so focus mode was inert on the desktop it exists for.
+  const focused = focusKey && visible.has(focusKey) ? focusKey : ([...visible][0] ?? "");
   const mobileFocus = isMobile ? focused : "";
 
   // The dock drives whichever pane is on screen; on desktop it isn't rendered.
