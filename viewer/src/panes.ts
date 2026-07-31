@@ -76,14 +76,6 @@ export interface StageOptions {
    * A stale entry (the device went away) is ignored rather than blanking the group.
    */
   choices?: Record<string, string>;
-  /**
-   * The platform the user last picked. Groups without an explicit choice follow
-   * it, so switching one column to Android switches the others too — comparing
-   * old-iOS against new-Android is almost never what you meant, and doing it by
-   * hand is two clicks for what feels like one. An explicit `choices` entry
-   * still wins, which is how you break the link deliberately.
-   */
-  preferredPlatform?: string;
   /** Mobile shows exactly one device; this is the one. */
   focusKey?: string;
   /**
@@ -138,7 +130,7 @@ export function computeStage(sharePanes: SharePane[], opts: StageOptions): Stage
         meta: p.ref,
         self: p.self === true,
         panes,
-        activeKey: pickActive(panes, opts.choices?.[p.shareId], opts.preferredPlatform),
+        activeKey: pickActive(panes, opts.choices?.[p.shareId]),
       };
     });
 
@@ -170,23 +162,23 @@ export function computeStage(sharePanes: SharePane[], opts: StageOptions): Stage
 }
 
 /**
- * Which device a group shows: the explicit pick, else a healthy device matching
- * the platform the user last chose elsewhere, else any healthy one, else the
+ * Which device a group shows: the explicit pick, else a healthy one, else the
  * first.
+ *
+ * Each column chooses INDEPENDENTLY. An earlier version had the other columns
+ * follow whichever platform you last picked, on the theory that comparing
+ * old-iOS against new-Android is rarely what you meant — but that spends a click
+ * every time it guesses wrong, and guessing on the user's behalf about which two
+ * things they want to hold up against each other is not the stage's business.
  *
  * Health matters because a group shows ONE device: picking positionally put a
  * "This device didn't start" frame on screen while a perfectly good one sat
  * hidden behind the picker, with nothing saying so. An explicit pick still wins
- * — asking to see the broken device is a reasonable thing to want, and it is how
- * you read the error.
+ * — asking to see the broken device is reasonable, and it is how you read the
+ * error.
  */
-function pickActive(panes: StagePane[], choice: string | undefined, preferredPlatform: string | undefined): string {
+function pickActive(panes: StagePane[], choice: string | undefined): string {
   if (choice && panes.some((p) => p.key === choice)) return choice;
   const healthy = panes.filter((p) => p.device.phase !== "failed");
-  const pool = healthy.length ? healthy : panes;
-  if (preferredPlatform) {
-    const match = pool.find((p) => p.device.platform === preferredPlatform);
-    if (match) return match.key;
-  }
-  return pool[0]?.key ?? "";
+  return (healthy.length ? healthy : panes)[0]?.key ?? "";
 }

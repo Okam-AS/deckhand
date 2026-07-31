@@ -1396,6 +1396,30 @@ describe("PreviewEngine idle sweep", () => {
     assert.equal(wipes[wipes.length - 1], true, "a boot that failed cannot count as the wipe having run");
   });
 
+  it("recovers a device whose first helper never produced a frame", async () => {
+    // A helper that comes up and then stays silent is usually the helper, not
+    // the device — a cold sim under load, or a daemon adopted from a previous
+    // process. It used to be fatal on the first try: the pane read "This device
+    // didn't start" for the life of the preview and only restart_preview cleared
+    // it. The viewer already retried on its side; the server did not.
+    const h = makeEngine();
+    h.firstFrameResults.push(false, false); // two silent helpers, then a good one
+    h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+    assert.equal(h.attachCalls.length, 3, "each attempt asks for a fresh helper");
+    assert.ok(h.detached.length >= 2, "and discards the silent one first — attach is idempotent per device");
+  });
+
+  it("gives up after a bounded number of silent helpers", async () => {
+    const h = makeEngine();
+    h.firstFrameResults.push(false, false, false, false);
+    h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "failed");
+    assert.match(h.engine.getStatus("pv1")!.devices[0]!.error ?? "", /no first frame \(3 attempts\)/);
+  });
+
   it("never allocates a console port an emulator already holds", async () => {
     // The worst-behaved bug in the audit. `emulator -port <busy>` fails to bind
     // and exits, but `adb -s emulator-<port> wait-for-device` resolves INSTANTLY

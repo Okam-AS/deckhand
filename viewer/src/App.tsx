@@ -19,7 +19,6 @@ export function App() {
   // layout (see computeStage) — no branch here decides what the page "is".
   const [mode, setMode] = useState<ViewMode>("grid");
   const [choices, setChoices] = useState<Record<string, string>>({});
-  const [preferredPlatform, setPreferredPlatform] = useState<string | undefined>(undefined);
   const [hiddenKeys, setHiddenKeys] = useState<string[]>([]);
   const [focusKey, setFocusKey] = useState<string | null>(null);
   // Width decides how many sources fit side by side (see MIN_PANE_WIDTH). Read
@@ -81,11 +80,10 @@ export function App() {
         isMobile,
         viewportWidth,
         choices,
-        preferredPlatform,
         hiddenKeys,
         focusKey: focusKey ?? undefined,
       }),
-    [state?.panes, isMobile, viewportWidth, choices, preferredPlatform, hiddenKeys, focusKey],
+    [state?.panes, isMobile, viewportWidth, choices, hiddenKeys, focusKey],
   );
 
   // FLIP: after each layout change, slide/zoom every device figure from its old
@@ -204,13 +202,10 @@ export function App() {
   const toggleHidden = (key: string) =>
     setHiddenKeys((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
 
-  const chooseInGroup = (group: StageGroup, key: string) => {
+  // Each column chooses on its own. Making the others follow spent a click every
+  // time the guess was wrong, and which two things to compare is the user's call.
+  const chooseInGroup = (group: StageGroup, key: string) =>
     setChoices((prev) => ({ ...prev, [group.shareId]: key }));
-    // Remember the platform so the other sources follow — comparing old-iOS
-    // against new-Android is almost never what you meant.
-    const picked = group.panes.find((p) => p.key === key);
-    if (picked?.device.platform) setPreferredPlatform(picked.device.platform);
-  };
 
   return (
     <>

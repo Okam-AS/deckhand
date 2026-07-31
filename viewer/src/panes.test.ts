@@ -111,32 +111,16 @@ describe("computeStage — which device each source shows", () => {
     assert.equal(s.groups[0]!.activeKey, paneKey("old", "ios-0"));
   });
 
-  it("follows the platform picked elsewhere, so both columns switch together", () => {
-    const s = computeStage(twoSources, { isMobile: false, preferredPlatform: "android" });
+  it("lets each source choose its device independently", () => {
+    // An earlier version made the other columns follow whichever platform you
+    // last picked. It spent a click every time the guess was wrong, and which
+    // two things to hold up against each other is the user's call, not the
+    // stage's.
+    const s = computeStage(twoSources, { isMobile: false, choices: { old: paneKey("old", "android-1") } });
     assert.deepEqual(
       s.groups.map((g) => g.activeKey),
-      [paneKey("old", "android-1"), paneKey("new", "android-1")],
-    );
-  });
-
-  it("lets an explicit pick beat the shared platform, to compare across platforms on purpose", () => {
-    const s = computeStage(twoSources, {
-      isMobile: false,
-      preferredPlatform: "android",
-      choices: { old: paneKey("old", "ios-0") },
-    });
-    assert.deepEqual(
-      s.groups.map((g) => g.activeKey),
-      [paneKey("old", "ios-0"), paneKey("new", "android-1")],
-    );
-  });
-
-  it("falls back to the first device when a source lacks the preferred platform", () => {
-    const mixed = [pane("a", "r/a", "main", [dev("ios-0", "ios")]), pane("b", "r/b", "main", [dev("android-0", "android")])];
-    const s = computeStage(mixed, { isMobile: false, preferredPlatform: "android" });
-    assert.deepEqual(
-      s.groups.map((g) => g.activeKey),
-      [paneKey("a", "ios-0"), paneKey("b", "android-0")],
+      [paneKey("old", "android-1"), paneKey("new", "ios-0")],
+      "picking Android on one source leaves the other where it was",
     );
   });
 
@@ -169,14 +153,13 @@ describe("computeStage — which device each source shows", () => {
     assert.equal(s.groups[0]!.activeKey, paneKey("a", "ios-0"));
   });
 
-  it("prefers a healthy device over the shared platform when that platform is broken", () => {
+  it("prefers a healthy device over the first one", () => {
     const broken = [
       pane("a", "r/a", "main", [dev("ios-0", "ios"), { ...dev("android-1", "android"), phase: "failed" }]),
       pane("b", "r/b", "main", [dev("ios-0", "ios"), dev("android-1", "android")], { self: true }),
     ];
-    const s = computeStage(broken, { isMobile: false, preferredPlatform: "android" });
-    assert.equal(s.groups[0]!.activeKey, paneKey("a", "ios-0"), "a broken pane is worse than the wrong platform");
-    assert.equal(s.groups[1]!.activeKey, paneKey("b", "android-1"), "…and the healthy source still follows the platform");
+    const s = computeStage(broken, { isMobile: false });
+    assert.equal(s.groups[0]!.activeKey, paneKey("a", "ios-0"), "the healthy device wins over position");
   });
 
   it("ignores a stale choice instead of blanking the source", () => {

@@ -62,6 +62,14 @@ const DEV_INSTALL_TIMEOUT_MS = GENERAL_IDLE_MS;
 /** How long to wait for a web dev server to start answering before failing.
  *  Generous: a cold Nuxt/webpack build can take a couple of minutes. */
 const WEB_READY_TIMEOUT_MS = 180_000;
+/**
+ * How many times to throw the streaming helper away and re-attach before
+ * declaring a device dead. A helper that comes up but never produces a frame is
+ * usually the HELPER — a cold sim under load, a recorder that lost its grip, a
+ * daemon adopted from a previous process — and a fresh one normally works. One
+ * attempt made a transient failure permanent for the life of the preview.
+ */
+const FIRST_FRAME_ATTEMPTS = 3;
 /** Loopback port range for web dev servers (Vite defaults to 5173). */
 const WEB_PORT_RANGE: [number, number] = [5170, 5199];
 
@@ -1896,26 +1904,44 @@ export class PreviewEngine {
       await kept.detach().catch(() => {});
     }
     const ref = platform === "android" ? { platform, udid: handle, serial: handle } : { platform, udid: handle };
-    const t0 = this.d.now!();
-    let stream: AttachedStream;
-    try {
-      stream = await this.d.streaming.attach(ref);
-    } catch (e) {
-      this.streamLog(dev, `attach FAILED after ${this.d.now!() - t0}ms: ${e instanceof Error ? e.message : String(e)}`);
-      throw e;
-    }
-    this.streamLog(dev, `attached in ${this.d.now!() - t0}ms → ${stream.origin}${stream.helperBasePath}`);
-    p.attached.set(dev.record.deviceId, stream);
-    const t1 = this.d.now!();
-    const framed = await stream.waitForFirstFrame();
-    this.streamLog(dev, `first frame ${framed ? "ok" : "NOT SEEN"} after ${this.d.now!() - t1}ms`);
-    if (!framed) {
-      throw new PreviewError(
-        "stream attached but produced no first frame",
-        "read the device's `stream` log (logs tool, source=stream) — it records the helper URL and every probe",
+    // Retry a SILENT first frame with a fresh helper. A helper that comes up and
+    // then produces nothing is recoverable by discarding it and asking again —
+    // which is what the viewer already does on its side, and what the server did
+    // not do at all. One bad attempt used to leave the pane reading "This device
+    // didn't start" for the life of the preview, curable only by restart_preview.
+    for (let attempt = 1; attempt <= FIRST_FRAME_ATTEMPTS; attempt++) {
+      const t0 = this.d.now!();
+      let stream: AttachedStream;
+      try {
+        stream = await this.d.streaming.attach(ref);
+      } catch (e) {
+        // An attach that THROWS is a different failure (no helper binary, no
+        // adb) and retrying only reproduces it — surface it now.
+        this.streamLog(dev, `attach FAILED after ${this.d.now!() - t0}ms: ${e instanceof Error ? e.message : String(e)}`);
+        throw e;
+      }
+      this.streamLog(dev, `attached in ${this.d.now!() - t0}ms → ${stream.origin}${stream.helperBasePath}`);
+      p.attached.set(dev.record.deviceId, stream);
+      const t1 = this.d.now!();
+      const framed = await stream.waitForFirstFrame();
+      this.streamLog(
+        dev,
+        `first frame ${framed ? "ok" : "NOT SEEN"} after ${this.d.now!() - t1}ms (attempt ${attempt}/${FIRST_FRAME_ATTEMPTS})`,
       );
+      if (framed) {
+        this.setPhase(p, dev, "ready", undefined);
+        return;
+      }
+      // Discard the helper before retrying: `attach` is idempotent per device,
+      // so without this the next attempt is handed the same silent one back.
+      p.attached.delete(dev.record.deviceId);
+      await stream.detach().catch(() => {});
+      if (dev.abort.signal.aborted) return;
     }
-    this.setPhase(p, dev, "ready", undefined);
+    throw new PreviewError(
+      `stream attached but produced no first frame (${FIRST_FRAME_ATTEMPTS} attempts)`,
+      "read the device's `stream` log (logs tool, source=stream) — it records the helper URL and every probe",
+    );
   }
 
   private async verifyInstalled(
