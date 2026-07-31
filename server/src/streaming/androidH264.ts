@@ -74,6 +74,15 @@ const IDLE_FLUSH_MS = 120;
  * dropped the viewer. Lingering makes a reconnect reuse the live recorder.
  */
 const LINGER_MS = 3_000;
+/**
+ * How long a failed H.264 probe is trusted before re-asking. Not forever: the
+ * host encoder is effectively SINGLE-INSTANCE across emulators — whichever one
+ * holds `screenrecord` wins, and every other device silently produces zero bytes
+ * — so "this device cannot encode" and "another device is using the encoder"
+ * look identical from here. Caching the first permanently pinned a perfectly
+ * capable device to the ~4 MB/s MJPEG path for the life of the server.
+ */
+const RETRY_AFTER_MS = 20_000;
 
 export interface AvccSubscriber {
   /** Return false to signal the consumer is backed up; the source will drop it. */
@@ -118,12 +127,16 @@ export class AvccSource {
 
   /** Cached outcome of "can this device encode H.264 at all". */
   private readyPromise: Promise<boolean> | null = null;
+  /** When the last probe failed, so the next one waits rather than spinning. */
+  private failedAt = 0;
   private settleReady: ((ok: boolean) => void) | null = null;
   private readyTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly serial: string,
     private readonly spawnRecorder: SpawnRecorder = defaultSpawnRecorder,
+    /** Backoff after a failed probe. Injected by tests; 0 re-probes immediately. */
+    private readonly retryAfterMs: number = RETRY_AFTER_MS,
   ) {}
 
   /**
@@ -143,6 +156,10 @@ export class AvccSource {
    */
   ready(): Promise<boolean> {
     if (this.readyPromise) return this.readyPromise;
+    // A recent failure is reused briefly so a viewer retrying in a loop does not
+    // respawn a recorder every time — but it expires, because the cause is often
+    // another device holding the encoder, and that clears on its own.
+    if (this.failedAt && Date.now() - this.failedAt < this.retryAfterMs) return Promise.resolve(false);
     // Held locally as well as on the instance: `start()` can settle
     // SYNCHRONOUSLY (a spawn that throws), and a non-sticky settle clears the
     // instance field — so returning the field would hand the caller `null`.
@@ -226,16 +243,23 @@ export class AvccSource {
    * Resolve the readiness probe. `sticky` marks a verdict about the DEVICE
    * rather than about this attempt — only such a false is remembered.
    */
-  private settle(ok: boolean, sticky = false): void {
+  private settle(ok: boolean): void {
     if (this.readyTimer) clearTimeout(this.readyTimer);
     this.readyTimer = null;
     const resolve = this.settleReady;
     this.settleReady = null;
-    // Drop the cache so the next caller re-probes. The promise already handed
-    // out still resolves false — this attempt did fail — but it stops being the
-    // permanent answer for the device.
-    if (!ok && !sticky) this.readyPromise = null;
+    if (!ok) {
+      // Never permanent. The promise already handed out still resolves false —
+      // this attempt did fail — but the device gets asked again later.
+      this.readyPromise = null;
+      this.failedAt = Date.now();
+    }
     resolve?.(ok);
+    // A probe starts a recorder with nobody subscribed, and only `unsubscribe`
+    // ever scheduled the stop — so a probe that no viewer followed up on held
+    // the host's single H.264 encoder indefinitely, which is what pushed the
+    // OTHER emulator onto the slow MJPEG path. Release it if nobody arrived.
+    this.scheduleStop();
   }
 
   private start(): void {
@@ -313,9 +337,10 @@ export class AvccSource {
     // back. A device that has streamed before gets restarted instead: a short
     // segment there means rotation, a killed recorder or a lost adb link.
     if (!this.everProduced && this.description === null && lived < MIN_HEALTHY_SEGMENT_MS) {
-      // The one false worth remembering: it started, produced nothing decodable,
-      // and died immediately. Respawning would just spin.
-      this.settle(false, true);
+      // Looks like a dead encoder, but is exactly what contention looks like
+      // too — another emulator holding `screenrecord` makes this one produce
+      // zero bytes with no error at all. So it is a timed backoff, not a verdict.
+      this.settle(false);
       for (const sub of this.subscribers) sub.close();
       this.subscribers.clear();
       return;
