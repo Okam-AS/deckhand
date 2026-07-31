@@ -212,7 +212,7 @@ async function cmdAppAdd(id: string | undefined, repo: string | undefined, flags
   if (type === "web" && !path) {
     fail("a web app is a local dev server — pass --path /abs/dir");
   }
-  const existing = loadAppsSafe();
+  const existing = loadAppsForWrite();
   const migratesFrom = str(flags["migrates-from"]);
   if (migratesFrom) {
     if (migratesFrom === id) fail("--migrates-from can't point at the app itself");
@@ -257,11 +257,38 @@ function loadTokensSafe() {
     return [];
   }
 }
+/** Read-only paths (`app list`): an unreadable file honestly shows nothing. */
 function loadAppsSafe() {
   try {
     return loadApps();
   } catch {
     return [];
+  }
+}
+
+/**
+ * Read for a path that will WRITE the file back.
+ *
+ * Treating an unreadable apps.yaml as empty is fine when listing and
+ * catastrophic when adding: `addAppEntry([], newApp)` then writes a file
+ * containing ONLY the new app, silently deregistering every other one — and the
+ * command prints "registered app" as if nothing happened. A YAML typo, a
+ * half-written file or a permissions blip is enough to trigger it, and the
+ * original is gone.
+ *
+ * A MISSING file is still fine: that is the first-run case, and `init` writes an
+ * empty list for exactly that reason.
+ */
+function loadAppsForWrite() {
+  if (!existsSync(paths.apps())) return [];
+  try {
+    return loadApps();
+  } catch (e) {
+    fail(
+      `apps.yaml could not be read (${e instanceof Error ? e.message : String(e)}).\n` +
+        `Refusing to rewrite it — doing so would deregister every app already in it.\n` +
+        `Fix ${paths.apps()} first, then run this again.`,
+    );
   }
 }
 function tryHostname(): string | null {
