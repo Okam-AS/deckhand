@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DevicePlayer, type PlayerStatus } from "./stream/player.ts";
 import { DeviceInput, ORIENTATION_CYCLE, type SpecialKey } from "./stream/input.ts";
 import { deviceBase, deviceWsUrl, phaseBadge, phaseLabel, repoName, type ShareDevice } from "./api.ts";
-import { CollapseIcon, ExpandIcon, HomeIcon, KeyboardIcon, RotateIcon } from "./icons.tsx";
+import { CollapseIcon, ExpandIcon, HomeIcon, InfoIcon, KeyboardIcon, RotateIcon } from "./icons.tsx";
 
 export type DeviceVariant = "grid" | "focus" | "thumb";
 
@@ -87,6 +87,7 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
   // Click-to-type: while the canvas has keyboard focus, keystrokes go to the sim.
   const [kbLive, setKbLive] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [infoOpen, setInfoOpen] = useState(false);
   // The frame auto-fits each device: default shape from the model name, then the
   // exact aspect from the first real frame (so an iPad never sits in a phone frame).
   const isTablet = /ipad|tablet/i.test(device.label);
@@ -102,6 +103,24 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
   // Keep the corner subtle: a big radius clips real screen content (the status-bar
   // clock sits in the very corner). Small enough to soften, not eat content.
   const radius = aw && ah && aw / ah > 0.62 ? "14px" : "18px";
+
+  // Close the info popover on an outside click or Escape — the same contract the
+  // pickers use, so no popover behaves differently from its neighbours.
+  useEffect(() => {
+    if (!infoOpen) return;
+    const onDoc = (e: PointerEvent) => {
+      if (!(e.target instanceof Node) || !frameRef.current?.contains(e.target)) setInfoOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setInfoOpen(false);
+    };
+    document.addEventListener("pointerdown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [infoOpen]);
 
   // Track fullscreen for this device (Escape/native exit included).
   useEffect(() => {
@@ -296,6 +315,38 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
                   {isFullscreen ? <CollapseIcon /> : <ExpandIcon />}
                 </button>
               )}
+              {/* What this pane IS lives here rather than in a caption under the
+                  sim: the caption repeated the same three facts beneath every
+                  device and pushed the frames apart, and on a page with several
+                  sources it read as three near-identical labels. Same control the
+                  phone dock already has, so there is one place to look. */}
+              <div className="frame-info">
+                <button
+                  type="button"
+                  className="ctrl-btn"
+                  onClick={() => setInfoOpen((o) => !o)}
+                  aria-expanded={infoOpen}
+                  aria-haspopup="dialog"
+                  title="What this pane shows"
+                  aria-label="What this pane shows"
+                >
+                  <InfoIcon />
+                </button>
+                <div className={`mmenu frame-info-menu ${infoOpen ? "open" : ""}`} role="dialog" aria-label="Pane info">
+                  <div className="info-row">
+                    <span className="info-key">Repo</span>
+                    <span className="info-val">{repoName(repo) || "—"}</span>
+                  </div>
+                  <div className="info-row">
+                    <span className="info-key">Branch</span>
+                    <span className="info-val">{branch || "—"}</span>
+                  </div>
+                  <div className="info-row">
+                    <span className="info-key">Device</span>
+                    <span className="info-val">{device.label}</span>
+                  </div>
+                </div>
+              </div>
             </>
           )}
         </div>
@@ -346,13 +397,10 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
       {isThumb ? (
         <figcaption className="thumb-cap">{device.label.split(" · ")[0]}</figcaption>
       ) : (
-        <figcaption>
-          <span className="cap-model">{device.label}</span>
-          <span className="cap-repo">
-            {repoName(repo)}
-            {branch ? <span className="cap-branch"> · {branch}</span> : null}
-          </span>
-        </figcaption>
+        // The caption is gone: its three facts now live behind the (i) button in
+        // the control row, where they are one click away instead of permanently
+        // occupying space under every device.
+        null
       )}
     </figure>
   );

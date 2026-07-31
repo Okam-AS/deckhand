@@ -1406,6 +1406,19 @@ figcaption {
      missing" — the one thing a comparison must not do. */
   flex-wrap: nowrap;
 }
+/* Anchors the (i) popover to the button rather than the page. */
+.frame-info {
+  position: relative;
+  display: inline-flex;
+}
+.frame-info-menu {
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  right: 0;
+  min-width: 15rem;
+  z-index: 30;
+}
+
 .stage--grouped .pane-group {
   /* Equal columns that shrink together, rather than each demanding its natural
      width and pushing the next one onto a new row. */

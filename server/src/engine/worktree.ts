@@ -435,6 +435,24 @@ export class WorktreeManager {
    * Null if it can't be determined. Ensures the base clone first (so it can hit
    * the same credential path as add_app and surface a missing-credential error).
    */
+  /**
+   * The branch a LOCAL (dev-mode) checkout is currently on, or null when it is
+   * detached, not a repo, or unreadable.
+   *
+   * Read-only, and deliberately so: deckhand borrows a developer's working copy
+   * and never writes to it (PLAN §11.4). This exists because "local" is a true
+   * but useless thing to show a viewer — it names the SOURCE MODE, not what is
+   * on screen. Two panes both reading "local" tell you nothing about which
+   * branch each one is.
+   */
+  async localBranch(dir: string): Promise<string | null> {
+    const r = await this.git(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir });
+    if (r.code !== 0) return null;
+    const name = r.stdout.trim();
+    // "HEAD" is git's answer for a detached checkout — not a branch name.
+    return name && name !== "HEAD" ? name : null;
+  }
+
   async defaultBranch(app: App): Promise<string | null> {
     const base = await this.ensureBaseClone(app);
     const r = await this.git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], { cwd: base });

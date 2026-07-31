@@ -1065,6 +1065,25 @@ export class PreviewEngine {
       result: "ok",
     });
 
+    // A local preview's ref starts as the literal "local" because start_preview
+    // is synchronous and reading the branch is not. Fill in the real branch as
+    // soon as git answers: "local" names the SOURCE MODE, not what is on screen,
+    // and two panes both reading "local" say nothing about which branch each one
+    // is. The viewer polls, so it picks this up within a poll. Read-only —
+    // deckhand never writes to a borrowed checkout (PLAN §11.4).
+    if (req.source === "local" && req.app.path) {
+      void this.d.worktrees
+        .localBranch(req.app.path)
+        .then((branch) => {
+          if (!branch || record.ref !== "local") return;
+          record.ref = branch;
+          this.persist();
+        })
+        .catch(() => {
+          /* a detached or non-git checkout keeps "local", which is still true */
+        });
+    }
+
     // Kick off orchestration; do not await (start_preview returns immediately).
     record.phase = "running";
     void this.orchestratePreview(preview).catch(() => {

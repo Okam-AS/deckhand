@@ -224,14 +224,9 @@ export function App() {
               className={`pane-group ${g.self ? "pane-group--self" : ""} ${g.panes.some((p) => visible.has(p.key)) ? "" : "pane-group--off"}`}
               key={g.key}
             >
-              {/* A heading only earns its line when there is something to tell
-                  apart; one source is already named in the frame's caption. */}
-              {multiSource && !isMobile && (
-                <header className="pane-head">
-                  <span className="pane-name">{g.label}</span>
-                  <span className="pane-meta">{g.meta}</span>
-                </header>
-              )}
+              {/* No column heading: the repo and branch live behind each frame's
+                  (i) button now, so a heading would state them twice — once above
+                  the sim and once inside it. */}
               <div className="pane-stage">
                 {g.panes.map((p) => (
                   <DeviceFrame
