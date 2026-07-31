@@ -209,7 +209,7 @@ export interface TestRun {
 // per session) — Deckhand owns only the visual verdict; the plan lives in the
 // team's tracker (e.g. Linear). `adjusted` = deliberately different-and-fine, so
 // an intentional redesign isn't flagged as a `regression`.
-export type CompareVerdict = "pending" | "doing" | "matches" | "adjusted" | "regression";
+export type CompareVerdict = "pending" | "doing" | "done" | "adjusted" | "regression";
 export interface CompareItem {
   name: string;
   verdict: CompareVerdict;
@@ -235,7 +235,7 @@ export interface CompareSession {
 export interface CompareCounts {
   pending: number;
   doing: number;
-  matches: number;
+  done: number;
   adjusted: number;
   regression: number;
 }
@@ -2295,7 +2295,7 @@ export class PreviewEngine {
   // --- compare sessions (ephemeral; pairing + parity checklist for the viewer) -
 
   private static countCompare(items: CompareItem[]): CompareCounts {
-    const c: CompareCounts = { pending: 0, doing: 0, matches: 0, adjusted: 0, regression: 0 };
+    const c: CompareCounts = { pending: 0, doing: 0, done: 0, adjusted: 0, regression: 0 };
     for (const i of items) c[i.verdict]++;
     return c;
   }

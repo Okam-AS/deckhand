@@ -888,7 +888,7 @@ describe("PreviewEngine compare session", () => {
     assert.notEqual(ref.shareId, work.shareId);
 
     const counts = h.engine.startCompare(work.previewId, [{ shareId: ref.shareId, repo: "acme/app", ref: "main" }], ["Login", "Home"]);
-    assert.deepEqual(counts, { pending: 2, doing: 0, matches: 0, adjusted: 0, regression: 0 });
+    assert.deepEqual(counts, { pending: 2, doing: 0, done: 0, adjusted: 0, regression: 0 });
 
     const s = h.engine.shareState(work.shareId)!;
     assert.deepEqual(
@@ -1057,12 +1057,12 @@ describe("PreviewEngine compare session", () => {
     const h = makeEngine(uniqIds());
     const work = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
     h.engine.startCompare(work.previewId, [{ shareId: "ref-x", repo: "r", ref: "main" }], ["A", "B"]);
-    assert.equal(h.engine.setCompareItem(work.previewId, { item: "A", verdict: "matches" }).matches, 1);
+    assert.equal(h.engine.setCompareItem(work.previewId, { item: "A", verdict: "done" }).done, 1);
     assert.equal(h.engine.setCompareItem(work.previewId, { item: "C", verdict: "adjusted", note: "redesigned" }).adjusted, 1);
     const st = h.engine.compareStatus(work.previewId)!;
     assert.equal(st.items.length, 3);
     assert.equal(st.items.find((i) => i.name === "C")?.note, "redesigned");
-    assert.deepEqual(st.counts, { pending: 1, doing: 0, matches: 1, adjusted: 1, regression: 0 });
+    assert.deepEqual(st.counts, { pending: 1, doing: 0, done: 1, adjusted: 1, regression: 0 });
   });
 
   it("surfaces the ledger even when the reference isn't live (no second pane)", () => {

@@ -535,7 +535,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
               ? `Give the user this link NOW: ${result.url} (stable for this app) — relay it before any other work; then poll preview_status for readiness. It's a live web dev server — saving files hot-reloads the page automatically, so after editing there is nothing to call. Use restart_preview only after dependency/config changes (new packages, vite.config edits) or if the server looks stuck. Deckhand runs this working copy in place and only reads/runs it — never commit or push any local changes deckhand caused (dev-server caches, a stray lockfile); its git state is not yours to write. ${linkFooter(result.url)}${webHostWarning}`
               : loopNextStep(source, result.url, args.ref ?? resolved.defaultBranch)) +
             (refs.length
-              ? ` It shows ${refs.length + 1} sources side by side under this one link. Drive any pane with describe/ui/screenshot, judge each item yourself, and record the verdict with parity_set (matches / adjusted / regression). The checklist is local to this session — keep the project plan in your task tracker.`
+              ? ` It shows ${refs.length + 1} sources side by side under this one link. Drive any pane with describe/ui/screenshot, judge each item yourself, and record the verdict with parity_set (done / adjusted / regression). The checklist is local to this session — keep the project plan in your task tracker.`
               : "") +
             protectionNote,
         });
@@ -675,12 +675,12 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Set a compare verdict",
       description:
-        "Record the parity verdict for one checklist item after you've judged it in the viewer. verdict: matches (identical to the reference) · adjusted (deliberately different and fine — a redesign, not a bug) · regression (unwanted divergence to fix) · doing (in progress) · pending. An unknown item name is appended. Returns the updated counts. Call this as you finish each item. Pass previewId or the working app id.",
+        "Record your verdict on one checklist item after you've judged it in the viewer. YOU maintain this list — it is what the person watching reads to see how far along you are, so keep it current as you go rather than in a batch at the end. verdict: done (verified fine — use this when there is nothing to compare against, and when the port matches the reference) · adjusted (deliberately different from the reference and fine — a redesign, not a bug) · regression (unwanted divergence, still to fix) · doing (in progress) · pending (not looked at). An unknown item name is appended. Returns the updated counts. Pass previewId or the app id.",
       inputSchema: {
         previewId: z.string().optional().describe("from start_preview; or pass app instead"),
         app: z.string().optional().describe("the app id — targets its running preview"),
         item: z.string().describe("the item name (flow/screen)"),
-        verdict: z.enum(["pending", "doing", "matches", "adjusted", "regression"]),
+        verdict: z.enum(["pending", "doing", "done", "adjusted", "regression"]),
         note: z.string().optional().describe("optional short note, e.g. why it's adjusted"),
       },
     },

@@ -9,13 +9,15 @@ import type { ShareLedgerScreen, ShareTestRun } from "./api.ts";
  *
  *   - the TEST RUN — one agent run happening now; steps go pending → running →
  *     passed/failed and it ends with a verdict. Ephemeral.
- *   - PARITY — the compare session's checklist. Durable, compare-only.
+ *   - the CHECKLIST — one row per screen/flow with a durable verdict
+ *     (done / adjusted / regression). Survives many runs; only meaningful
+ *     when the page has something to compare against.
  *
  * The head is a sentence about the current state, not a label on a component:
- * a run in flight owns it (it's the thing actually changing) and parity rides
- * along as a secondary count; with no run, parity takes the head and gets its
- * full dot row. They stay separate sections when expanded, because the statuses
- * don't mean the same thing — "passed" is a step that ran, "matches" is a screen
+ * a run in flight owns it (it's the thing actually changing) and the checklist
+ * rides along as a secondary count; with no run, the checklist takes the head
+ * and gets its full dot row. They stay separate sections when expanded, because the statuses
+ * don't mean the same thing — "passed" is a step that ran, "done" is a screen
  * that agrees with the reference — so one merged list would read as rows lying
  * about what they are.
  *
@@ -32,7 +34,7 @@ export function ProgressBar({ testRun, screens }: { testRun?: ShareTestRun; scre
   const running = testRun?.status === "running";
   const runTotal = testRun?.steps.length ?? 0;
   const runDone = testRun?.steps.filter((s) => s.status === "passed" || s.status === "failed").length ?? 0;
-  const parityDone = rows.filter((s) => DONE.has(s.status)).length;
+  const checklistDone = rows.filter((s) => DONE.has(s.status)).length;
 
   // Worst signal wins the bar's accent, so "something is wrong" reads without
   // opening anything. A live run outranks it visually — the sweep already says
@@ -54,20 +56,20 @@ export function ProgressBar({ testRun, screens }: { testRun?: ShareTestRun; scre
             )}
             <span className="pbar-title">{testRun.title}</span>
             <span className="pbar-count">{running ? `${runDone}/${runTotal}` : testRun.status}</span>
-            {/* Parity rides along as a secondary count — present, not competing. */}
+            {/* The checklist rides along as a secondary count — present, not competing. */}
             {hasLedger && (
               <span className="pbar-aside">
-                Parity {parityDone}/{rows.length}
+                Checklist {checklistDone}/{rows.length}
               </span>
             )}
           </>
         ) : (
           <>
-            <span className="pbar-title">Parity</span>
+            <span className="pbar-title">Checklist</span>
             <span className="pbar-count">
-              {parityDone}/{rows.length} done
+              {checklistDone}/{rows.length} done
             </span>
-            {/* The full breakdown only when parity IS the story; alongside a run
+            {/* The full breakdown only when the checklist IS the story; alongside a run
                 it would double the numbers competing for the same glance. */}
             <span className="pbar-dots" aria-hidden>
               {STATUS_ORDER.filter((st) => counts[st]).map((st) => (
@@ -119,7 +121,7 @@ export function ProgressBar({ testRun, screens }: { testRun?: ShareTestRun; scre
 
           {hasLedger && (
             <section className="pbar-sect">
-              {testRun && <h2 className="pbar-sect-head">Parity</h2>}
+              {testRun && <h2 className="pbar-sect-head">Checklist</h2>}
               <ol className="mig-ledger-list">
                 {rows.map((s, i) => (
                   <li key={i} className={`mig-screen mig-screen--${s.status}`}>
@@ -148,9 +150,11 @@ function ChevronIcon() {
   );
 }
 
-// Verdicts, worst-signal-first for the dot row. `matches`/`adjusted` are both
+// Verdicts, worst-signal-first for the dot row. `done`/`adjusted` are both
 // "done" (adjusted = a deliberate, accepted difference); `regression` is the only
 // one that flags a problem. Legacy migration-ledger statuses still render.
-const STATUS_ORDER = ["regression", "doing", "matches", "adjusted", "pending", "differs", "in-progress", "not-started"] as const;
-const DONE = new Set(["matches", "adjusted"]);
+// "matches"/"differs"/"in-progress"/"not-started" come from deckhand.migration.yaml,
+// whose vocabulary lives in the user's own repo and is deliberately left alone.
+const STATUS_ORDER = ["regression", "doing", "done", "adjusted", "pending", "matches", "differs", "in-progress", "not-started"] as const;
+const DONE = new Set(["done", "adjusted", "matches"]);
 const ALARM = new Set(["regression", "differs"]);

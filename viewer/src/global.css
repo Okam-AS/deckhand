@@ -1214,8 +1214,15 @@ figcaption {
 .pbar.open .pbar-head {
   border-radius: 16px 16px 0 0;
 }
-/* The grouped stage is a flex column with its own gap — the bar's bottom
-   margin would double the spacing there. */
+/* The grouped stage is a flex column with its own gap, so the bar's own bottom
+   margin would double the spacing. The gap has to actually exist, though —
+   zeroing the margin without it left the first device sitting right under the
+   bar with nothing between them. */
+.app--grouped {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(1rem, 2.5vw, 1.8rem);
+}
 .app--grouped .pbar {
   margin-bottom: 0;
 }
@@ -1486,6 +1493,7 @@ figcaption {
   border-radius: 999px;
   color: var(--bg);
 }
+.mig-dot--done,
 .mig-dot--matches {
   background: var(--sage);
 }
@@ -1499,6 +1507,7 @@ figcaption {
   background: var(--ink-faint);
 }
 /* compare verdicts */
+.mig-dot--done,
 .mig-dot--matches,
 .mig-dot--adjusted {
   background: var(--sage);
