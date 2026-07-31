@@ -1406,17 +1406,49 @@ figcaption {
      missing" — the one thing a comparison must not do. */
   flex-wrap: nowrap;
 }
-/* Anchors the (i) popover to the button rather than the page. */
+/* The pane-info popover. Deliberately NOT `.mmenu`: that is the phone dock's
+   menu — `position: fixed`, `left: 50%`, with a `top` computed from the dock's
+   height — so borrowing it anchored this to the middle of the VIEWPORT and let
+   it run off the right edge. A popover hanging off a button belongs to the
+   button. */
 .frame-info {
   position: relative;
   display: inline-flex;
 }
 .frame-info-menu {
   position: absolute;
-  top: calc(100% + 0.4rem);
+  top: calc(100% + 0.45rem);
   right: 0;
+  left: auto;
   min-width: 15rem;
-  z-index: 30;
+  /* Never wider than the column it hangs in, so a long branch name wraps
+     instead of pushing the panel off screen. */
+  max-width: min(22rem, 80vw);
+  padding: 0.45rem;
+  z-index: 40;
+  background: var(--card-grad);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-6px) scale(0.97);
+  transform-origin: top right;
+  transition:
+    opacity 0.18s var(--ease-settle, ease),
+    transform 0.2s var(--ease-settle, ease);
+}
+.frame-info-menu.open {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0) scale(1);
+}
+/* Long values (a branch like feature/some-long-name) wrap rather than widen. */
+.frame-info-menu .info-val {
+  overflow-wrap: anywhere;
+  text-align: right;
 }
 
 .stage--grouped .pane-group {

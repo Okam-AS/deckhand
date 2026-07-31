@@ -332,7 +332,7 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
                 >
                   <InfoIcon />
                 </button>
-                <div className={`mmenu frame-info-menu ${infoOpen ? "open" : ""}`} role="dialog" aria-label="Pane info">
+                <div className={`frame-info-menu ${infoOpen ? "open" : ""}`} role="dialog" aria-label="Pane info">
                   <div className="info-row">
                     <span className="info-key">Repo</span>
                     <span className="info-val">{repoName(repo) || "—"}</span>
