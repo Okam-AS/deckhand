@@ -989,6 +989,33 @@ describe("PreviewEngine compare session", () => {
     );
   });
 
+  it("keeps every pane's idle clock alive while the page is being watched", async () => {
+    // The viewer polls ONE shareId — the page's own. The extra panes have nobody
+    // polling them directly, so a single markActive let them age out on their own
+    // idle timer and get torn down underneath a page someone was actively
+    // watching: the reference column simply vanished mid-session.
+    const clock = { t: Date.now() };
+    const h = makeEngine({
+      ...uniqIds(),
+      now: () => clock.t,
+      config: { ...config, limits: { ...config.limits, maxTotalDevices: 8, idleMinutes: 1 } },
+    });
+    const mk = (branch: string) =>
+      h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch }, devices: [{ platform: "ios" }], access: "public" });
+    const ref = mk("main");
+    const work = mk("feature");
+    for (const p of [ref, work]) await waitForPhase(h.engine, p.previewId, ["ready", "failed"]);
+    h.engine.startCompare(work.previewId, [{ shareId: ref.shareId, repo: "acme/app", ref: "main", previewId: ref.previewId }], []);
+
+    // Age everything past the idle window, then poll the page exactly as a viewer does.
+    clock.t += 5 * 60_000;
+    assert.ok(h.engine.shareState(work.shareId), "the page still answers");
+
+    assert.deepEqual(await h.engine.sweepIdle(), [], "polling the page must reprieve every pane on it, not just its own");
+    assert.ok(h.engine.getStatus(ref.previewId), "the reference pane survives");
+    assert.ok(h.engine.getStatus(work.previewId));
+  });
+
   it("unlocks every pane of a three-source compare, from any pane", () => {
     // The whole point of the pane model: old app + main + this branch is three
     // sources on one page, and one PIN has to reach all of them. Each extra pane

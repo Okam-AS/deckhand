@@ -199,7 +199,9 @@ export class DevicePlayer {
         const reader = res.body.getReader();
         for (;;) {
           const { value, done } = await reader.read();
-          if (done || this.disposed || !this.active) break;
+          // Our own teardown: stop silently, the new connection owns recovery.
+          if (this.disposed || !this.active) return;
+          if (done) return this.upstreamEnded(ac, "avcc stream");
           if (!value) continue;
           for (const chunk of demux.push(value)) {
             if (chunk.type === "description") {
@@ -222,6 +224,20 @@ export class DevicePlayer {
           this.scheduleReconnect();
         }
       });
+  }
+
+  /**
+   * The upstream body ended on its own — not an error, and not our teardown.
+   * A helper restart, a re-attach, or a sim that stops producing all close the
+   * response cleanly, and the read loop simply ran out. Before this, only the
+   * `.catch()` path reconnected, so a clean end left the canvas holding its last
+   * frame with the status still reporting "streaming": a frozen device that
+   * looked alive, where taps were delivered and nothing ever moved.
+   */
+  private upstreamEnded(ac: AbortController, what: string): void {
+    if (this.disposed || !this.active || this.abort !== ac) return;
+    this.report(`${what} ended by the helper`, "reconnecting");
+    this.scheduleReconnect();
   }
 
   private configureDecoder(description: Uint8Array): void {
@@ -309,7 +325,7 @@ export class DevicePlayer {
       frame.close();
       return;
     }
-    this.recovery = 0;
+    this.streamIsHealthy();
     const w = frame.displayWidth || frame.codedWidth;
     const h = frame.displayHeight || frame.codedHeight;
     if (this.canvas.width !== w || this.canvas.height !== h) {
@@ -381,7 +397,8 @@ export class DevicePlayer {
         const reader = res.body.getReader();
         for (;;) {
           const { value, done } = await reader.read();
-          if (done || this.disposed || !this.active) break;
+          if (this.disposed || !this.active) return;
+          if (done) return this.upstreamEnded(ac, "mjpeg stream");
           if (value) parser.push(value);
         }
       })
@@ -391,6 +408,21 @@ export class DevicePlayer {
           this.scheduleReconnect();
         }
       });
+  }
+
+  /**
+   * A frame reached the screen, so whatever went wrong before is over — clear
+   * the reconnect budget.
+   *
+   * This used to live only in the WebCodecs path, which meant MJPEG never
+   * cleared it: the budget was a LIFETIME allowance rather than a
+   * consecutive-failure one, so a device that recovered fine seven times over an
+   * afternoon gave up permanently on the eighth — reported as "gave up", with a
+   * reload as the only cure. Android is MJPEG by default, and iOS falls back to
+   * it, so this was the common path, not the rare one.
+   */
+  private streamIsHealthy(): void {
+    this.recovery = 0;
   }
 
   private paintImage(bytes: Uint8Array): void {
@@ -409,6 +441,8 @@ export class DevicePlayer {
       const w = img.naturalWidth;
       const h = img.naturalHeight;
       if (w === 0 || h === 0) return;
+      // A painted MJPEG/PNG frame is proof of health, exactly like a decoded one.
+      this.streamIsHealthy();
       if (this.canvas.width !== w || this.canvas.height !== h) {
         this.canvas.width = w;
         this.canvas.height = h;

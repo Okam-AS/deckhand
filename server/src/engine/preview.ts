@@ -616,7 +616,22 @@ export class PreviewEngine {
       }));
     for (const p of this.previews.values()) {
       if (p.record.shareId === shareId) {
-        this.markActive(p); // the viewer polls this — it is the idle clock's heartbeat
+        // The viewer polls this — it is the idle clock's heartbeat. It has to beat
+        // for EVERY pane the page will render, not just this share's own preview:
+        // the extra panes have no viewer polling them directly, so with a single
+        // markActive they aged out on their own idle timer and were torn down
+        // underneath a page someone was actively watching. Marked before the
+        // panes are built so a pane that is about to be advertised cannot be
+        // reaped in the same tick.
+        this.markActive(p);
+        for (const r of p.compare?.references ?? []) {
+          const live = this.liveByShareId(r.shareId);
+          if (live) this.markActive(live);
+        }
+        if (p.app.migratesFrom) {
+          const src = this.livePreviewForApp(p.app.migratesFrom);
+          if (src) this.markActive(src);
+        }
         // Pair the working preview with its reference and surface the checklist.
         // A live compare session (explicit reference + in-memory items) wins; else
         // fall back to the legacy migration path (migratesFrom + repo-file ledger).
