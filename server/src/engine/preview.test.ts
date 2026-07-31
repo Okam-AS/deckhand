@@ -53,6 +53,38 @@ interface Harness {
   attachCalls: string[];
 }
 
+/**
+ * The default fake AndroidManager. Extracted so a test can override ONE method
+ * (`...androidFake(calls), attachedSerials: …`) instead of restating a whole
+ * device manager to change a single answer.
+ */
+function androidFake(calls: string[] = []) {
+  return {
+    // No emulator is attached in the fake world, so every console port is free.
+    // Tests about port collisions override this.
+    attachedSerials: async () => [] as string[],
+    listSystemImages: async () => [{ pkg: "system-images;android-34;google_apis;arm64-v8a", api: 34 }],
+    listAvds: async () => [] as string[],
+    createAvd: async () => {
+      calls.push("avd create");
+    },
+    bootEmulator: async () => {
+      calls.push("emu boot");
+      return "emulator-5554";
+    },
+    packagePath: async () => "/data/app/base.apk",
+    installApk: async (serial: string) => {
+      calls.push(`apk install ${serial}`);
+    },
+    launch: async () => {},
+    screenshotPng: async () => Buffer.from([0x89, 0x50]),
+    findApk: async () => "/wt/app-debug.apk",
+    shutdown: async () => {},
+    deleteAvd: async () => {},
+    describe: async () => "tree",
+  } as unknown as PreviewEngineDeps["android"];
+}
+
 function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (step: CommandStep) => RunResult = () => ({ code: 0, timedOut: false, aborted: false })): Harness {
   const simctlCalls: string[] = [];
   const buildEnvSeen: (Record<string, string> | undefined)[] = [];
@@ -130,26 +162,7 @@ function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (
     reapOrphans: async () => {},
   };
 
-  const android = {
-    listSystemImages: async () => [{ pkg: "system-images;android-34;google_apis;arm64-v8a", api: 34 }],
-    createAvd: async () => {
-      simctlCalls.push("avd create");
-    },
-    bootEmulator: async () => {
-      simctlCalls.push("emu boot");
-      return "emulator-5554";
-    },
-    packagePath: async () => "/data/app/base.apk",
-    installApk: async (serial: string) => {
-      simctlCalls.push(`apk install ${serial}`);
-    },
-    launch: async () => {},
-    screenshotPng: async () => Buffer.from([0x89, 0x50]),
-    findApk: async () => "/wt/app-debug.apk",
-    shutdown: async () => {},
-    deleteAvd: async () => {},
-    describe: async () => "tree",
-  } as unknown as PreviewEngineDeps["android"];
+  const android = androidFake(simctlCalls);
 
   const deps: PreviewEngineDeps = {
     config: overrides.config ?? config,
@@ -1318,6 +1331,59 @@ describe("PreviewEngine idle sweep", () => {
     assert.ok(h.simctlCalls.some((c) => c.startsWith("delete ")));
   });
 
+  it("never allocates a console port an emulator already holds", async () => {
+    // The worst-behaved bug in the audit. `emulator -port <busy>` fails to bind
+    // and exits, but `adb -s emulator-<port> wait-for-device` resolves INSTANTLY
+    // against the device already there and sys.boot_completed is already 1 — so
+    // the boot looks perfect while every step after it (installApk -r -g,
+    // forceStop, adb reverse, screenrecord on a public share, `adb emu kill` on
+    // teardown) is aimed at a machine deckhand does not own. Typically the
+    // developer's own Android Studio AVD, which the reaper deliberately spares.
+    const booted: string[] = [];
+    const h = makeEngine({
+      android: {
+        ...(androidFake() as object),
+        attachedSerials: async () => ["emulator-5554", "emulator-5556"], // not ours
+        bootEmulator: async (_avd: string, port: number) => {
+          booted.push(`emulator-${port}`);
+          return `emulator-${port}`;
+        },
+      } as unknown as PreviewEngineDeps["android"],
+    });
+    h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "android", runtime: "34" }],
+      access: "public",
+    });
+    await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
+    assert.deepEqual(booted, ["emulator-5558"], "the first two ports are occupied by devices we did not start");
+  });
+
+  it("refuses to boot Android rather than guess when adb cannot be listed", async () => {
+    // An unreadable device list is indistinguishable from an empty one, and
+    // guessing "empty" is precisely the permissive direction that hijacks a
+    // stranger's emulator. Fail loudly instead.
+    const h = makeEngine({
+      android: {
+        ...(androidFake() as object),
+        attachedSerials: async () => {
+          throw new Error("adb: not found");
+        },
+      } as unknown as PreviewEngineDeps["android"],
+    });
+    h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "android", runtime: "34" }],
+      access: "public",
+    });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "failed");
+    assert.match(h.engine.getStatus("pv1")!.devices[0]!.error ?? "", /list attached Android devices/);
+  });
+
   it("counts a failed preview's still-booted devices against capacity", async () => {
     const h = makeSwept((step) => ({ code: step.name === "build" ? 1 : 0, timedOut: false, aborted: false }));
     h.engine.startPreview({
@@ -1403,6 +1469,7 @@ describe("PreviewEngine idle sweep", () => {
       android: {
         listSystemImages: async () => [{ pkg: "system-images;android-34;google_apis;arm64-v8a", api: 34 }],
         listAvds: async () => [],
+        attachedSerials: async () => [],
         createAvd: async () => void androidCalls.push("createAvd"),
         bootEmulator: async () => {
           androidCalls.push("bootEmulator");
@@ -1571,6 +1638,7 @@ describe("device pool", () => {
     const android = {
       listSystemImages: async () => [{ pkg: "system-images;android-34;google_apis;arm64-v8a", api: 34 }],
       listAvds: async () => avds,
+      attachedSerials: async () => [],
       createAvd: async (name: string) => {
         calls.push(`avd create ${name}`);
         avds.push(name);

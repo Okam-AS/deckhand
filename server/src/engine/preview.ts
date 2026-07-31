@@ -441,12 +441,39 @@ export class PreviewEngine {
     return this.d.devProcs;
   }
 
-  private allocAndroidPort(): number {
+  /**
+   * Claim a free emulator console port.
+   *
+   * The in-process set is not enough on its own: it knows only about emulators
+   * THIS process started, and the reaper deliberately never touches a device the
+   * developer created (PLAN §12 "Devices the developer created themselves are
+   * never touched"). Allocating over an existing `emulator-<port>` was silently
+   * catastrophic rather than merely wrong — the freshly launched emulator fails
+   * to bind and exits, but `adb -s emulator-<port> wait-for-device` resolves
+   * INSTANTLY against the stranger's device and `sys.boot_completed` is already
+   * 1, so the boot looks successful. Everything after that is aimed at the wrong
+   * machine: `installApk -r -g`, `forceStop`, `adb reverse` over its Metro port,
+   * screenrecord published on a share link, and finally `adb emu kill` on
+   * teardown. The developer's own emulator gets hijacked and then destroyed,
+   * with no error anywhere.
+   *
+   * It also closes the in-process race: `shutdown` gives up waiting after 20s
+   * without failing, while teardown returns the port to the pool unconditionally,
+   * so a QEMU still exiting under load could hand its live port to the next boot.
+   */
+  private async allocAndroidPort(): Promise<number> {
+    // A listing failure must not silently reopen the hazard, so treat "adb did
+    // not answer" as "every port might be taken" only for ports we don't own —
+    // an empty list is indistinguishable from a broken adb, and guessing wrong
+    // in the permissive direction is what this exists to prevent.
+    const attached = await this.android().attachedSerials().catch(() => null);
+    if (attached === null) throw new PreviewError("could not list attached Android devices", "check that `adb devices` works, then retry");
+    const taken = new Set(attached);
     for (let p = 5554; p <= 5680; p += 2) {
-      if (!this.androidPorts.has(p)) {
-        this.androidPorts.add(p);
-        return p;
-      }
+      if (this.androidPorts.has(p)) continue;
+      if (taken.has(`emulator-${p}`)) continue;
+      this.androidPorts.add(p);
+      return p;
     }
     throw new PreviewError("no free Android emulator console port");
   }
@@ -1369,7 +1396,7 @@ export class PreviewEngine {
     // Remember the port on the device, not just via its serial: bootEmulator can
     // time out (240 s) or throw, and a port only released when a serial came back
     // is a port lost for the life of the process.
-    const port = this.allocAndroidPort();
+    const port = await this.allocAndroidPort();
     dev.androidPort = port;
     // createAvd can't be cancelled, so check before paying for a 240 s boot.
     await this.abandonIfAborted(dev, async () => {

@@ -38,6 +38,7 @@ function makeReaper(overrides: Partial<ReaperDeps> = {}) {
     } as unknown as ReaperDeps["simctl"],
     android: {
       listAvds: async () => avds,
+      attachedSerials: async () => [],
       deleteAvd: async (n: string) => void calls.push(`avd delete ${n}`),
     } as unknown as ReaperDeps["android"],
     kill: async (pattern: string) => void calls.push(`kill ${pattern}`),
@@ -88,6 +89,7 @@ describe("Reaper.reap", () => {
       } as unknown as ReaperDeps["simctl"],
       android: {
         listAvds: async () => ["deckhand_pool_pixel_7_api34"],
+        attachedSerials: async () => [],
         deleteAvd: async (n: string) => void seen.push(`avd delete ${n}`),
       } as unknown as ReaperDeps["android"],
     });
@@ -110,6 +112,7 @@ describe("Reaper.reap", () => {
         listAvds: async () => {
           throw new Error("avdmanager: not found");
         },
+        attachedSerials: async () => [],
       } as unknown as ReaperDeps["android"],
     });
     const report = await reaper.reap();
