@@ -471,7 +471,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         // share takes the chosen access — same order the old compare tool used.
         const refs: { reference: CompareReference; previewId: string; booted: boolean }[] = [];
         for (const target of extra) {
-          const booted = bootReference(resolved, target, paneDevices);
+          const booted = bootReference(resolved, target, paneDevices, args.share);
           if ("content" in booted) {
             // Undo the ones this call already started; a reused running pane is
             // left alone (another page may be showing it).
@@ -554,13 +554,20 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
 
   const shortHash = (s: string): string => "cmp-" + createHash("sha1").update(s).digest("hex").slice(0, 12);
 
-  // Resolve a compare `against` into a booted, PUBLIC reference preview (so the paired
-  // pane needs no cross-share unlock). Four kinds: another registered app, the working
-  // app at another git ref, an arbitrary local worktree, or an arbitrary repo@ref.
+  // Resolve an `alongside` entry into a booted extra pane. Four kinds: another
+  // registered app, this app at another git ref, an arbitrary local worktree, or
+  // an arbitrary repo@ref.
+  //
+  // The pane takes the PAGE's access, not a forced public one. It used to boot
+  // public unconditionally, because there was no cross-share unlock and a
+  // protected pane would have hung on "Connecting…" forever. There is one now
+  // (pairedShareIds), so a PIN-protected page no longer has to publish half of
+  // itself on a second URL to show it.
   const bootReference = (
     workingApp: App,
     against: { app?: string; ref?: string; worktree?: string; repo?: string } | undefined,
     devices: { platform: "ios" | "android"; runtime?: string; model?: string }[],
+    share: { access: "public" | "pin"; pin?: string },
   ): { reference: CompareReference; previewId: string; booted: boolean } | CallToolResult => {
     // An entry with nothing named means "my migratesFrom" — that is the whole
     // point of declaring it, and it saves the agent repeating the source app id.
@@ -633,15 +640,27 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       spec = parseRefSpec({ ref: a.ref! });
       key = `ref:${workingApp.id}@${a.ref!}`;
     }
-    if (base.type === "web") return fail("web_not_supported", "compare pairing is for mobile apps (iOS/Android), not web previews");
+    if (base.type === "web") return fail("web_not_supported", "extra panes are for mobile apps (iOS/Android), not web previews");
     // The reference ALWAYS boots under a synthetic, distinct app id. Sharing the
     // working app's id (a same-app against.ref, or against.app pointing at itself)
     // would collide on the per-app stable shareId (self-pairing) and per-app PIN,
     // and a public reference boot would wipe a registered app's persisted PIN. A
     // fresh id keyed by `key` stays stable across restarts (so compare is idempotent).
     const refApp: App = { ...base, id: shortHash(key), migratesFrom: undefined };
-    const result = engine.startPreview({ app: refApp, source, spec, devices, access: "public", reference: true });
-    engine.setAppPin(refApp.id, null);
+    // PIN before boot, same reasoning as the page's own share: the pane's share
+    // id is stable per (synthetic) app, so applying it afterwards leaves a window
+    // where the pane is open. The synthetic id is what makes this safe to write —
+    // it can never be a registered app's persisted PIN.
+    const paneProtected = share.access === "pin";
+    engine.setAppPin(refApp.id, paneProtected ? share.pin! : null);
+    const result = engine.startPreview({
+      app: refApp,
+      source,
+      spec,
+      devices,
+      access: paneProtected ? "password" : "public",
+      reference: true,
+    });
     const ref = source === "local" ? "local" : refDescription(spec!);
     return {
       reference: { shareId: result.shareId, repo: base.repo ?? refApp.id, ref },

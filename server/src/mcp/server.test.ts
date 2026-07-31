@@ -230,6 +230,41 @@ describe("MCP server (end-to-end over HTTP)", () => {
     await admin.close();
   });
 
+  it("gives an extra pane the page's PIN instead of publishing it", async () => {
+    // Panes used to boot public unconditionally: a PIN-protected page published
+    // half of itself on a second URL, because there was no cross-share unlock and
+    // a protected pane would have hung on "Connecting…". There is one now, so the
+    // pane must be gated too — otherwise the padlock on the page is a lie.
+    const admin = await client(ADMIN);
+    const res = parse(
+      await admin.callTool({
+        name: "start_preview",
+        arguments: { app: "app-a", alongside: [{ app: "app-a" }], share: { access: "pin", pin: "1234" } },
+      }),
+    );
+    assert.equal(res.ok, true);
+    const extra = (res.alongside as { shareId: string }[])[0]!;
+    assert.equal(engine.pinInfoForShare(res.shareId as string).required, true, "the page is gated");
+    assert.equal(engine.pinInfoForShare(extra.shareId).required, true, "and so is its extra pane");
+    // …and one PIN reaches both, or the pane is gated into uselessness.
+    assert.deepEqual(engine.pairedShareIds(res.shareId as string), [extra.shareId]);
+
+    await admin.callTool({ name: "stop_preview", arguments: { previewId: res.previewId as string } });
+    await admin.close();
+  });
+
+  it("leaves an extra pane public when the page itself is public", async () => {
+    const admin = await client(ADMIN);
+    const res = parse(
+      await admin.callTool({ name: "start_preview", arguments: { app: "app-a", alongside: [{ app: "app-a" }], share: { access: "public" } } }),
+    );
+    assert.equal(res.ok, true);
+    const extra = (res.alongside as { shareId: string }[])[0]!;
+    assert.equal(engine.pinInfoForShare(extra.shareId).required, false, "a public page must not gate a pane behind a PIN nobody has");
+    await admin.callTool({ name: "stop_preview", arguments: { previewId: res.previewId as string } });
+    await admin.close();
+  });
+
   it("tears the extra panes back down when the main boot fails (no orphaned devices)", async () => {
     // The extra panes boot first and take devices. If the main boot then throws —
     // most likely BECAUSE of device capacity — leaving them up permanently holds
