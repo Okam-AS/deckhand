@@ -219,14 +219,22 @@ export interface CompareReference {
   shareId: string;
   repo: string;
   ref: string;
+  /** Engine-internal: the booted reference preview, torn down with the working one. */
+  previewId?: string;
+  /** Agent-set pane name shown in the viewer instead of "Reference". */
+  label?: string;
 }
 export interface CompareSession {
-  reference: CompareReference;
-  /** Engine-internal: the booted reference preview, torn down with the working one. */
-  referencePreviewId?: string;
+  /**
+   * The panes shown alongside the working one, in display order. A list rather
+   * than a single reference because the page is a set of panes, not a pair:
+   * old app + `main` + this branch is three sources, and every layer below
+   * (shareState, unlock minting, teardown refcount) fans out over the same list.
+   */
+  references: CompareReference[];
   items: CompareItem[];
-  /** Agent-set pane names shown in the viewer instead of Working/Reference. */
-  labels?: { working?: string; reference?: string };
+  /** Agent-set name for the working pane (viewer falls back to "Working"). */
+  workingLabel?: string;
 }
 export interface CompareCounts {
   pending: number;
@@ -616,13 +624,17 @@ export class PreviewEngine {
         let pairedWith;
         let ledger;
         if (p.compare) {
-          const ref = this.liveByShareId(p.compare.reference.shareId);
-          if (ref) {
+          // Slice 1 keeps the single-pane wire shape: the viewer still reads one
+          // `pairedWith`, so surface the first LIVE reference. Nothing creates a
+          // second one yet; `panes[]` replaces this once the viewer can render it.
+          const first = p.compare.references.find((r) => this.liveByShareId(r.shareId));
+          const ref = first ? this.liveByShareId(first.shareId) : undefined;
+          if (first && ref) {
             pairedWith = {
-              shareId: p.compare.reference.shareId,
-              repo: p.compare.reference.repo,
-              ref: p.compare.reference.ref,
-              ...(p.compare.labels?.reference ? { label: p.compare.labels.reference } : {}),
+              shareId: first.shareId,
+              repo: first.repo,
+              ref: first.ref,
+              ...(first.label ? { label: first.label } : {}),
               devices: sanitizeDevices(ref),
             };
           }
@@ -668,7 +680,7 @@ export class PreviewEngine {
               }
             : {}),
           ...(pairedWith ? { pairedWith } : {}),
-          ...(p.compare?.labels?.working ? { paneLabel: p.compare.labels.working } : {}),
+          ...(p.compare?.workingLabel ? { paneLabel: p.compare.workingLabel } : {}),
           ...(ledger ? { ledger } : {}),
         };
       }
@@ -677,48 +689,54 @@ export class PreviewEngine {
   }
 
   /**
-   * The shareId this share is paired with in a compare session, or null.
+   * Every shareId this share shares a page with, so one PIN unlocks all of them.
    *
-   * The compare viewer is ONE page showing two shares: it renders the reference
-   * pane from the working share's `pairedWith`, but streams it from the
-   * reference's own shareId, whose unlock cookie is scoped to its own path. So
-   * a PIN on the working share left the reference pane stuck on "Connecting…"
-   * forever (the WS was refused once a second, silently). The unlock route uses
-   * this to mint the partner's cookie too — one PIN unlocks the pair.
+   * The viewer is ONE page showing several shares: it renders each extra pane
+   * from this share's compare session, but streams it from that pane's OWN
+   * shareId, whose unlock cookie is scoped to its own path. So a PIN on the
+   * working share left every other pane stuck on "Connecting…" forever (the WS
+   * refused once a second, silently). The unlock route uses this to mint each
+   * partner's cookie too.
    *
-   * Symmetric on purpose: whichever side of the pair the viewer is opened from
-   * has to unlock the other.
+   * Symmetric on purpose: whichever pane the viewer is opened from has to
+   * unlock the others.
    */
-  pairedShareId(shareId: string): string | null {
+  pairedShareIds(shareId: string): string[] {
+    const out = new Set<string>();
     for (const p of this.previews.values()) {
       // Mirror shareState's two pairing sources: a live compare session wins,
-      // else the legacy migratesFrom link. Anything shareState will render as a
-      // second pane must be unlockable, or that pane hangs.
-      const compareRef = p.compare?.reference.shareId ?? null;
-      const migrationSrc = p.compare
-        ? null
-        : p.app.migratesFrom
-          ? (this.livePreviewForApp(p.app.migratesFrom)?.record.shareId ?? null)
-          : null;
-      const refShareId = compareRef ?? migrationSrc;
-      if (!refShareId) continue;
-      // Only a LIVE reference counts — the viewer never mounts a dead pane.
-      if (p.record.shareId === shareId) {
-        if (!this.liveByShareId(refShareId)) return null;
-        // A migration source pane is only advertised when it is reachable from
-        // here (see shareState) — don't mint a cookie for a pane we hid.
-        return migrationSrc && !this.partnerIsReachable(shareId, refShareId) ? null : refShareId;
+      // else the legacy migratesFrom link. Anything shareState will render as
+      // another pane must be unlockable, or that pane hangs.
+      if (p.compare) {
+        if (p.record.shareId === shareId) {
+          // Forward: this page's own panes. Only a LIVE one counts — the viewer
+          // never mounts a dead pane, so don't mint a cookie for it either.
+          for (const r of p.compare.references) {
+            if (this.liveByShareId(r.shareId)) out.add(r.shareId);
+          }
+        } else if (p.compare.references.some((r) => r.shareId === shareId)) {
+          // The reverse direction is a compare-session-only affair. A compare
+          // reference is a synthetic app the operator just booted as one pane of
+          // one page, so unlocking any pane unlocks the page. `migratesFrom`
+          // instead names another REGISTERED app with its own PIN and its own
+          // repo — and only the target's page renders a source pane, never the
+          // other way round, so minting the target's cookie for whoever holds
+          // the source's PIN unlocks an app they were never given access to, for
+          // nothing.
+          out.add(p.record.shareId);
+        }
+        continue;
       }
-      // The reverse direction is a compare-session-only affair. A compare
-      // reference is a synthetic app the operator just booted as one half of
-      // one page, so unlocking either half unlocks the pair. `migratesFrom`
-      // instead names another REGISTERED app with its own PIN and its own repo
-      // — and only the target's page renders a source pane, never the other way
-      // round, so minting the target's cookie for whoever holds the source's
-      // PIN unlocks an app they were never given access to, for nothing.
-      if (compareRef === shareId) return p.record.shareId;
+      if (!p.app.migratesFrom || p.record.shareId !== shareId) continue;
+      const src = this.livePreviewForApp(p.app.migratesFrom);
+      // A migration source pane is only advertised when it is reachable from
+      // here (see shareState) — don't mint a cookie for a pane we hid.
+      if (src && this.partnerIsReachable(shareId, src.record.shareId)) out.add(src.record.shareId);
     }
-    return null;
+    // Never hand a share its own cookie: harmless, but it would let a caller
+    // read "I am paired" off a page that is alone.
+    out.delete(shareId);
+    return [...out];
   }
 
   /**
@@ -2272,13 +2290,12 @@ export class PreviewEngine {
     return c;
   }
 
-  /** Link a working preview to a reference preview + seed the item checklist (replacing any prior). */
+  /** Link a working preview to its reference panes + seed the item checklist (replacing any prior). */
   startCompare(
     previewId: string,
-    reference: CompareReference,
+    references: CompareReference[],
     items: string[] = [],
-    referencePreviewId?: string,
-    labels?: { working?: string; reference?: string },
+    workingLabel?: string,
   ): CompareCounts {
     const p = this.active(previewId);
     if (!p) throw new PreviewError(`no active preview "${previewId}"`);
@@ -2286,13 +2303,14 @@ export class PreviewEngine {
     const uniq = items.map((s) => s.trim()).filter((s) => s.length > 0 && !seen.has(s) && (seen.add(s), true));
     // Shown verbatim on a (possibly public) share page — single line, bounded.
     const clean = (s?: string) => s?.replace(/\s+/g, " ").trim().slice(0, 60) || undefined;
-    const working = clean(labels?.working);
-    const ref = clean(labels?.reference);
+    // De-dupe by shareId: the same reference named twice is one pane, and a
+    // duplicate would otherwise be torn down twice and unlocked twice.
+    const byShare = new Set<string>();
+    const refs = references.filter((r) => !byShare.has(r.shareId) && (byShare.add(r.shareId), true));
     p.compare = {
-      reference,
-      referencePreviewId,
+      references: refs.map((r) => ({ ...r, label: clean(r.label) })),
       items: uniq.map((name) => ({ name, verdict: "pending" as const })),
-      ...(working || ref ? { labels: { working, reference: ref } } : {}),
+      ...(clean(workingLabel) ? { workingLabel: clean(workingLabel) } : {}),
     };
     return PreviewEngine.countCompare(p.compare.items);
   }
@@ -2311,13 +2329,18 @@ export class PreviewEngine {
     return PreviewEngine.countCompare(c.items);
   }
 
-  /** The current compare session (reference + items + counts), or null. */
+  /** The current compare session (reference panes + items + counts), or null. */
   compareStatus(
     previewId: string,
-  ): { reference: CompareReference; items: CompareItem[]; counts: CompareCounts; labels?: { working?: string; reference?: string } } | null {
+  ): { references: CompareReference[]; items: CompareItem[]; counts: CompareCounts; workingLabel?: string } | null {
     const c = this.active(previewId)?.compare;
     if (!c) return null;
-    return { reference: c.reference, items: c.items, counts: PreviewEngine.countCompare(c.items), ...(c.labels ? { labels: c.labels } : {}) };
+    return {
+      references: c.references,
+      items: c.items,
+      counts: PreviewEngine.countCompare(c.items),
+      ...(c.workingLabel ? { workingLabel: c.workingLabel } : {}),
+    };
   }
 
   // --- reaping / idle sweep --------------------------------------------------
@@ -2660,9 +2683,9 @@ export class PreviewEngine {
   async stopPreview(previewId: string): Promise<boolean> {
     const p = this.previews.get(previewId);
     if (!p) return false;
-    // A compare session owns a dedicated reference preview — tear it down too,
-    // unless another live compare session is still pairing against it.
-    const refPreviewId = p.compare?.referencePreviewId;
+    // A compare session owns its reference previews — tear them down too,
+    // unless another live compare session is still pairing against one.
+    const refPreviewIds = (p.compare?.references ?? []).map((r) => r.previewId).filter((id): id is string => !!id);
     p.record.phase = "stopping";
     this.persist();
     for (const dev of p.devices) dev.abort.abort();
@@ -2687,9 +2710,14 @@ export class PreviewEngine {
     this.stopMetroIfUnused(p.app.id);
     this.d.audit.record({ actor: "engine", tool: "stop_preview", args: { preview: previewId }, result: "ok" });
 
-    // Cascade: stop the paired reference preview once no other live compare needs it.
-    if (refPreviewId && this.previews.has(refPreviewId)) {
-      const stillUsed = [...this.previews.values()].some((o) => o.compare?.referencePreviewId === refPreviewId);
+    // Cascade: stop each reference preview once no other live compare needs it.
+    // Re-checked per id inside the loop because an earlier iteration may itself
+    // have cascaded into a later one.
+    for (const refPreviewId of refPreviewIds) {
+      if (!this.previews.has(refPreviewId)) continue;
+      const stillUsed = [...this.previews.values()].some((o) =>
+        (o.compare?.references ?? []).some((r) => r.previewId === refPreviewId),
+      );
       if (!stillUsed) await this.stopPreview(refPreviewId).catch(() => {});
     }
     return true;

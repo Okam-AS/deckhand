@@ -449,12 +449,12 @@ export function createShareRouter(deps: ShareDeps): express.Router {
     // (bootReference), so `GET /s/<publicReferenceId>/state` would have handed
     // out an unlock cookie for the protected working share.
     if (info.required) {
-      const partner = deps.engine.pairedShareId(shareId);
-      // The `allowed` term is belt-and-braces, not an optimisation: the
+      // The `allowed` term is belt-and-braces, not an optimisation: each
       // partner's cookie is path-scoped to `/s/<partner>`, so the browser never
-      // sends it here and this is in practice always true — the partner's cookie
-      // is re-minted on every poll, identical each time.
-      if (partner && deps.pinGate.info(partner).required && !deps.pinGate.allowed(req.headers.cookie, partner)) {
+      // sends it here and this is in practice always true — every partner's
+      // cookie is re-minted on each poll, identical each time.
+      for (const partner of deps.engine.pairedShareIds(shareId)) {
+        if (!deps.pinGate.info(partner).required || deps.pinGate.allowed(req.headers.cookie, partner)) continue;
         const cookie = deps.pinGate.issue(partner);
         if (cookie) setUnlockCookie(res, req, partner, cookie);
       }
@@ -476,17 +476,18 @@ export function createShareRouter(deps: ShareDeps): express.Router {
     if (r.ok) {
       const setUnlock = (id: string, cookie: string) => setUnlockCookie(res, req, id, cookie);
       setUnlock(shareId, r.cookie);
-      // A compare session is one page showing two shares side by side. The
-      // reference pane streams from its OWN shareId, so its own path-scoped
-      // cookie: without this, a PIN on either share left the other pane stuck
-      // on "Connecting…" while its WS was refused once a second. Unlocking one
-      // side of a live pair unlocks the other — the operator asked for one PIN,
-      // and the pair is only ever shown together.
-      const paired = deps.engine.pairedShareId(shareId);
-      // Mint the partner's cookie through ITS OWN gate, so a partner with a
+      // A compare session is one page showing several shares side by side. Each
+      // extra pane streams from its OWN shareId, so its own path-scoped cookie:
+      // without this, a PIN on any pane left the others stuck on "Connecting…"
+      // while their WS was refused once a second. Unlocking one pane of a live
+      // page unlocks the rest — the operator asked for one PIN, and the panes
+      // are only ever shown together.
+      //
+      // Mint each partner's cookie through ITS OWN gate, so a partner with a
       // different PIN length/secret still gets a correctly-bound cookie, and a
       // partner with no PIN at all is simply skipped.
-      if (paired && deps.pinGate.info(paired).required) {
+      for (const paired of deps.engine.pairedShareIds(shareId)) {
+        if (!deps.pinGate.info(paired).required) continue;
         const p = deps.pinGate.issue(paired);
         if (p) setUnlock(paired, p);
       }

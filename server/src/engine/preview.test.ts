@@ -850,17 +850,17 @@ describe("PreviewEngine migration pairing", () => {
 
     h.engine.setAppPin("old-app", "1234"); // source protected, target public
     assert.equal(h.engine.shareState(tgt.shareId)!.pairedWith, undefined, "an unreachable source pane must not be advertised");
-    assert.equal(h.engine.pairedShareId(tgt.shareId), null, "and must not be handed an unlock cookie");
+    assert.deepEqual(h.engine.pairedShareIds(tgt.shareId), [], "and must not be handed an unlock cookie");
 
     // Protect the target too and the pane comes back: the unlock now rides on a
     // PIN this page actually proves, instead of being granted from nothing.
     h.engine.setAppPin("new-app", "4321");
     assert.equal(h.engine.shareState(tgt.shareId)!.pairedWith?.shareId, src.shareId);
-    assert.equal(h.engine.pairedShareId(tgt.shareId), src.shareId);
+    assert.deepEqual(h.engine.pairedShareIds(tgt.shareId), [src.shareId]);
 
     // The source's own page never renders a target pane, so it must never mint
     // the target's cookie — that would be pure gratuitous widening.
-    assert.equal(h.engine.pairedShareId(src.shareId), null);
+    assert.deepEqual(h.engine.pairedShareIds(src.shareId), []);
   });
 
   it("omits pairedWith and ledger for an ordinary (non-migration) app", async () => {
@@ -886,7 +886,7 @@ describe("PreviewEngine compare session", () => {
     const work = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "feature" }, devices: [{ platform: "ios" }], access: "public" });
     assert.notEqual(ref.shareId, work.shareId);
 
-    const counts = h.engine.startCompare(work.previewId, { shareId: ref.shareId, repo: "acme/app", ref: "main" }, ["Login", "Home"]);
+    const counts = h.engine.startCompare(work.previewId, [{ shareId: ref.shareId, repo: "acme/app", ref: "main" }], ["Login", "Home"]);
     assert.deepEqual(counts, { pending: 2, doing: 0, matches: 0, adjusted: 0, regression: 0 });
 
     const s = h.engine.shareState(work.shareId)!;
@@ -910,24 +910,81 @@ describe("PreviewEngine compare session", () => {
     const h = makeEngine(uniqIds());
     const ref = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
     const work = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "feature" }, devices: [{ platform: "ios" }], access: "public" });
-    h.engine.startCompare(work.previewId, { shareId: ref.shareId, repo: "acme/app", ref: "main" }, []);
+    h.engine.startCompare(work.previewId, [{ shareId: ref.shareId, repo: "acme/app", ref: "main" }], []);
 
-    assert.equal(h.engine.pairedShareId(work.shareId), ref.shareId);
-    assert.equal(h.engine.pairedShareId(ref.shareId), work.shareId);
-    assert.equal(h.engine.pairedShareId("no-such-share"), null);
+    assert.deepEqual(h.engine.pairedShareIds(work.shareId), [ref.shareId]);
+    assert.deepEqual(h.engine.pairedShareIds(ref.shareId), [work.shareId]);
+    assert.deepEqual(h.engine.pairedShareIds("no-such-share"), []);
+  });
+
+  it("unlocks every pane of a three-source compare, from any pane", () => {
+    // The whole point of the pane model: old app + main + this branch is three
+    // sources on one page, and one PIN has to reach all of them. Each extra pane
+    // streams from its own shareId, so each needs its own path-scoped cookie.
+    const h = makeEngine({ ...uniqIds(), config: { ...config, limits: { ...config.limits, maxTotalDevices: 8 } } });
+    const mk = (branch: string) =>
+      h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch }, devices: [{ platform: "ios" }], access: "public" });
+    const a = mk("main");
+    const b = mk("old");
+    const work = mk("feature");
+    h.engine.startCompare(
+      work.previewId,
+      [
+        { shareId: a.shareId, repo: "acme/app", ref: "main" },
+        { shareId: b.shareId, repo: "acme/old", ref: "old" },
+      ],
+      [],
+    );
+
+    assert.deepEqual(h.engine.pairedShareIds(work.shareId).sort(), [a.shareId, b.shareId].sort());
+    // …and from either reference back to the working pane, so opening the page
+    // on any pane unlocks the rest.
+    assert.deepEqual(h.engine.pairedShareIds(a.shareId), [work.shareId]);
+    assert.deepEqual(h.engine.pairedShareIds(b.shareId), [work.shareId]);
+  });
+
+  it("skips a dead pane when minting cookies but keeps the live ones", () => {
+    const h = makeEngine(uniqIds());
+    const live = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    const work = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "feature" }, devices: [{ platform: "ios" }], access: "public" });
+    h.engine.startCompare(
+      work.previewId,
+      [
+        { shareId: "not-live", repo: "r", ref: "gone" },
+        { shareId: live.shareId, repo: "acme/app", ref: "main" },
+      ],
+      [],
+    );
+    assert.deepEqual(h.engine.pairedShareIds(work.shareId), [live.shareId]);
+  });
+
+  it("de-dupes references naming the same share twice", () => {
+    const h = makeEngine(uniqIds());
+    const ref = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    const work = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "feature" }, devices: [{ platform: "ios" }], access: "public" });
+    h.engine.startCompare(
+      work.previewId,
+      [
+        { shareId: ref.shareId, repo: "acme/app", ref: "main" },
+        { shareId: ref.shareId, repo: "acme/app", ref: "main" },
+      ],
+      [],
+    );
+    assert.equal(h.engine.compareStatus(work.previewId)!.references.length, 1);
+    assert.deepEqual(h.engine.pairedShareIds(work.shareId), [ref.shareId]);
   });
 
   it("reports no pairing when the reference isn't live (nothing to unlock)", () => {
     const h = makeEngine(uniqIds());
     const work = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
-    h.engine.startCompare(work.previewId, { shareId: "not-live", repo: "r", ref: "main" }, ["A"]);
-    assert.equal(h.engine.pairedShareId(work.shareId), null);
+    h.engine.startCompare(work.previewId, [{ shareId: "not-live", repo: "r", ref: "main" }], ["A"]);
+    assert.deepEqual(h.engine.pairedShareIds(work.shareId), []);
   });
 
   it("sets a verdict, appends an unknown item, and recounts", () => {
     const h = makeEngine(uniqIds());
     const work = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
-    h.engine.startCompare(work.previewId, { shareId: "ref-x", repo: "r", ref: "main" }, ["A", "B"]);
+    h.engine.startCompare(work.previewId, [{ shareId: "ref-x", repo: "r", ref: "main" }], ["A", "B"]);
     assert.equal(h.engine.setCompareItem(work.previewId, { item: "A", verdict: "matches" }).matches, 1);
     assert.equal(h.engine.setCompareItem(work.previewId, { item: "C", verdict: "adjusted", note: "redesigned" }).adjusted, 1);
     const st = h.engine.compareStatus(work.previewId)!;
@@ -939,7 +996,7 @@ describe("PreviewEngine compare session", () => {
   it("surfaces the ledger even when the reference isn't live (no pairedWith)", () => {
     const h = makeEngine();
     const work = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
-    h.engine.startCompare(work.previewId, { shareId: "not-live", repo: "r", ref: "main" }, ["A"]);
+    h.engine.startCompare(work.previewId, [{ shareId: "not-live", repo: "r", ref: "main" }], ["A"]);
     const s = h.engine.shareState("share-abc")!;
     assert.equal(s.pairedWith, undefined);
     assert.equal(s.ledger?.screens.length, 1);
@@ -951,7 +1008,7 @@ describe("PreviewEngine compare session", () => {
     const work = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "feature" }, devices: [{ platform: "ios" }], access: "public" });
     await waitForPhase(h.engine, ref.previewId, ["ready", "failed"]);
     await waitForPhase(h.engine, work.previewId, ["ready", "failed"]);
-    h.engine.startCompare(work.previewId, { shareId: ref.shareId, repo: "acme/app", ref: "main" }, [], ref.previewId);
+    h.engine.startCompare(work.previewId, [{ shareId: ref.shareId, repo: "acme/app", ref: "main", previewId: ref.previewId }], []);
 
     assert.equal(await h.engine.stopPreview(work.previewId), true);
     assert.equal(h.engine.getStatus(work.previewId), null);
@@ -964,8 +1021,8 @@ describe("PreviewEngine compare session", () => {
     const w1 = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "f1" }, devices: [{ platform: "ios" }], access: "public" });
     const w2 = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "f2" }, devices: [{ platform: "ios" }], access: "public" });
     for (const p of [ref, w1, w2]) await waitForPhase(h.engine, p.previewId, ["ready", "failed"]);
-    h.engine.startCompare(w1.previewId, { shareId: ref.shareId, repo: "r", ref: "main" }, [], ref.previewId);
-    h.engine.startCompare(w2.previewId, { shareId: ref.shareId, repo: "r", ref: "main" }, [], ref.previewId);
+    h.engine.startCompare(w1.previewId, [{ shareId: ref.shareId, repo: "r", ref: "main", previewId: ref.previewId }], []);
+    h.engine.startCompare(w2.previewId, [{ shareId: ref.shareId, repo: "r", ref: "main", previewId: ref.previewId }], []);
 
     await h.engine.stopPreview(w1.previewId);
     assert.equal(h.engine.getStatus(w1.previewId), null);

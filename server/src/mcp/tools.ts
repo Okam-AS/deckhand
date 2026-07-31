@@ -701,7 +701,12 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           if (refBoot.booted) void engine.stopPreview(refBoot.previewId).catch(() => {});
           throw e;
         }
-        const counts = engine.startCompare(result.previewId, refBoot.reference, args.items ?? [], refBoot.previewId, args.labels);
+        const counts = engine.startCompare(
+          result.previewId,
+          [{ ...refBoot.reference, previewId: refBoot.previewId, label: args.labels?.reference }],
+          args.items ?? [],
+          args.labels?.working,
+        );
 
         const protectionNote =
           access === "pin"
@@ -750,7 +755,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Get the compare checklist",
       description:
-        "Return the current compare session — the reference, every item with its verdict/note, and the counts. Call this at the START of a compare session to pull the full checklist into context and see what's left. Pass previewId or the working app id.",
+        "Return the current compare session — the reference pane(s), every item with its verdict/note, and the counts. Call this at the START of a compare session to pull the full checklist into context and see what's left. Pass previewId or the working app id.",
       inputSchema: {
         previewId: z.string().optional().describe("from compare_start; or pass app instead"),
         app: z.string().optional().describe("the working app id — targets its running compare"),
