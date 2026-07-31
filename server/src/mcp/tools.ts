@@ -673,13 +673,31 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     // would collide on the per-app stable shareId (self-pairing) and per-app PIN,
     // and a public reference boot would wipe a registered app's persisted PIN. A
     // fresh id keyed by `key` stays stable across restarts (so compare is idempotent).
-    const refApp: App = { ...base, id: shortHash(key), migratesFrom: undefined };
+    // The access class is part of the pane's identity: a public page and a
+    // PIN-protected page must never land on the same pane, or one of them is
+    // wrong about whether that content is exposed.
+    const refApp: App = { ...base, id: shortHash(`${key}|${share.access}`), migratesFrom: undefined };
     // PIN before boot, same reasoning as the page's own share: the pane's share
     // id is stable per (synthetic) app, so applying it afterwards leaves a window
     // where the pane is open. The synthetic id is what makes this safe to write —
     // it can never be a registered app's persisted PIN.
     const paneProtected = share.access === "pin";
-    engine.setAppPin(refApp.id, paneProtected ? share.pin! : null);
+    // Do NOT re-key a pane that is already live. Its synthetic app id is derived
+    // from CONTENT (repo+ref), not from the page asking for it, so two pages
+    // comparing against the same source share one pane and one PIN — and this
+    // call would silently rewrite the other page's protection underneath it.
+    // With a different PIN that revokes their viewers' cookies mid-session
+    // (the cookie binds the PIN in force); worse, a public page reusing a
+    // protected pane would strip the protection off someone else's.
+    //
+    // Leaving it alone is safe because a viewer never proves the PANE's PIN:
+    // cross-share minting issues its cookie off the PIN they proved on their own
+    // page (see pairedShareIds). The key below keeps public and PIN-protected
+    // pages on separate panes, so this only ever applies between two pages of
+    // the same access class — the residual already documented in PLAN §11.
+    if (!engine.hasLivePreviewForApp(refApp.id)) {
+      engine.setAppPin(refApp.id, paneProtected ? share.pin! : null);
+    }
     const result = engine.startPreview({
       app: refApp,
       source,

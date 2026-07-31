@@ -2095,6 +2095,11 @@ export class PreviewEngine {
   }
 
   /** The live (non-terminal) preview for an app, if any — newest first. */
+  /** Whether some preview of this app is live right now (a reference pane about to be reused). */
+  hasLivePreviewForApp(appId: string): boolean {
+    return this.livePreviewForApp(appId) !== null;
+  }
+
   private livePreviewForApp(appId: string): LivePreview | null {
     let best: LivePreview | null = null;
     for (const p of this.previews.values()) {

@@ -275,6 +275,40 @@ describe("MCP server (end-to-end over HTTP)", () => {
     await admin.close();
   });
 
+  it("never lets a public page reuse (and strip) a protected page's pane", async () => {
+    // A pane's synthetic app id comes from its CONTENT, so two pages comparing
+    // against the same source used to share one pane and one PIN. A public page
+    // reusing a protected one called setAppPin(null) and quietly published
+    // someone else's protected content; with two different PINs it revoked their
+    // viewers' cookies mid-session instead. Access class is now part of the
+    // pane's identity, so the two can never meet.
+    const admin = await client(ADMIN);
+    const locked = parse(
+      await admin.callTool({
+        name: "start_preview",
+        arguments: { app: "app-a", alongside: [{ app: "app-a" }], share: { access: "pin", pin: "1234" } },
+      }),
+    );
+    assert.equal(locked.ok, true);
+    const lockedPane = (locked.alongside as { shareId: string }[])[0]!;
+    assert.equal(engine.pinInfoForShare(lockedPane.shareId).required, true);
+
+    const open = parse(
+      await admin.callTool({
+        name: "start_preview",
+        arguments: { app: "app-b", alongside: [{ app: "app-a" }], share: { access: "public" } },
+      }),
+    );
+    assert.equal(open.ok, true);
+    const openPane = (open.alongside as { shareId: string }[])[0]!;
+
+    assert.notEqual(openPane.shareId, lockedPane.shareId, "the public page gets its own pane");
+    assert.equal(engine.pinInfoForShare(lockedPane.shareId).required, true, "and the protected pane stays protected");
+
+    for (const r of [locked, open]) await admin.callTool({ name: "stop_preview", arguments: { previewId: r.previewId as string } });
+    await admin.close();
+  });
+
   it("leaves an extra pane public when the page itself is public", async () => {
     const admin = await client(ADMIN);
     const res = parse(
