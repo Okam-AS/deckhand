@@ -584,19 +584,38 @@ export class PreviewEngine {
       summary?: string;
     };
     /**
-     * Migration target only: the live SOURCE preview to show alongside, so the
-     * viewer can render old vs new side by side. Present only when this app has a
-     * `migratesFrom` whose source preview is currently live.
+     * Every pane on this page, in display order — always at least one (this
+     * share's own). Extra panes come from a live compare session or a live
+     * `migratesFrom` source.
+     *
+     * Order is old-to-new: reference panes first, this share's own LAST, so a
+     * migration reads left-to-right as before → after. Each pane streams from
+     * its OWN shareId (see `pairedShareIds`, which is what makes one PIN reach
+     * all of them) — the page is a set of panes, not a preview with an
+     * attachment bolted on.
+     */
+    panes: {
+      shareId: string;
+      repo: string;
+      ref: string;
+      /** Agent-set pane name; the viewer falls back to the repo + ref. */
+      label?: string;
+      /** True for this page's own share — the one `devices`/`canRestart` describe. */
+      self?: true;
+      devices: { deviceId: string; platform: Platform; label: string; phase: string; detail?: string; step?: string }[];
+    }[];
+    /**
+     * Deprecated alias for the last extra pane, kept until the viewer renders
+     * `panes`. Removed in the same change that deletes CompareView.
      */
     pairedWith?: {
       shareId: string;
       repo: string;
       ref: string;
-      /** Agent-set pane name (viewer falls back to "Reference"). */
       label?: string;
       devices: { deviceId: string; platform: Platform; label: string; phase: string; detail?: string; step?: string }[];
     };
-    /** Agent-set name for THIS app's pane in a compare (viewer falls back to "Working"). */
+    /** Deprecated alias for this share's own pane label. */
     paneLabel?: string;
     /** Migration target only: the agent-maintained parity ledger, if the file exists. */
     ledger?: { screens: { name: string; status: string; note?: string }[] };
@@ -621,22 +640,24 @@ export class PreviewEngine {
         // A live compare session (explicit reference + in-memory items) wins; else
         // fall back to the legacy migration path (migratesFrom + repo-file ledger).
         // Both are gated so an ordinary preview does zero extra work.
-        let pairedWith;
+        type Pane = NonNullable<ReturnType<PreviewEngine["shareState"]>>["panes"][number];
+        // Reference panes first, this share's own appended last (below), so the
+        // page reads before → after.
+        const refPanes: Pane[] = [];
         let ledger;
         if (p.compare) {
-          // Slice 1 keeps the single-pane wire shape: the viewer still reads one
-          // `pairedWith`, so surface the first LIVE reference. Nothing creates a
-          // second one yet; `panes[]` replaces this once the viewer can render it.
-          const first = p.compare.references.find((r) => this.liveByShareId(r.shareId));
-          const ref = first ? this.liveByShareId(first.shareId) : undefined;
-          if (first && ref) {
-            pairedWith = {
-              shareId: first.shareId,
-              repo: first.repo,
-              ref: first.ref,
-              ...(first.label ? { label: first.label } : {}),
-              devices: sanitizeDevices(ref),
-            };
+          for (const r of p.compare.references) {
+            // Only LIVE panes are advertised — the viewer never mounts a dead
+            // one, and pairedShareIds won't mint a cookie for it either.
+            const live = this.liveByShareId(r.shareId);
+            if (!live) continue;
+            refPanes.push({
+              shareId: r.shareId,
+              repo: r.repo,
+              ref: r.ref,
+              ...(r.label ? { label: r.label } : {}),
+              devices: sanitizeDevices(live),
+            });
           }
           if (p.compare.items.length) {
             ledger = { screens: p.compare.items.map((i) => ({ name: i.name, status: i.verdict, note: i.note })) };
@@ -652,16 +673,31 @@ export class PreviewEngine {
           // its socket refused once a second, forever, with nothing on screen
           // and no way to authenticate — so don't advertise it.
           if (src && this.partnerIsReachable(p.record.shareId, src.record.shareId)) {
-            pairedWith = {
+            refPanes.push({
               shareId: src.record.shareId,
               repo: src.app.repo ?? src.app.id,
               ref: src.record.ref,
               devices: sanitizeDevices(src),
-            };
+            });
           }
           const led = readMigrationLedger(p.sourceDir ?? p.app.path);
           if (led) ledger = led;
         }
+        const panes: Pane[] = [
+          ...refPanes,
+          {
+            shareId: p.record.shareId,
+            repo: p.app.repo ?? p.app.id,
+            ref: p.record.ref,
+            ...(p.compare?.workingLabel ? { label: p.compare.workingLabel } : {}),
+            self: true,
+            devices: sanitizeDevices(p),
+          },
+        ];
+        // The deprecated aliases the viewer still reads. `pairedWith` was only
+        // ever one pane, so it names the LAST reference — with a single one
+        // (everything that exists today) that is the same pane as before.
+        const pairedWith = refPanes.length ? refPanes[refPanes.length - 1] : undefined;
         return {
           ready: p.record.phase === "ready",
           ref: p.record.ref,
@@ -669,6 +705,7 @@ export class PreviewEngine {
           source: p.record.source,
           canRestart: p.record.source === "local" && (p.record.phase === "ready" || p.record.phase === "failed"),
           devices: sanitizeDevices(p),
+          panes,
           ...(p.testRun
             ? {
                 testRun: {

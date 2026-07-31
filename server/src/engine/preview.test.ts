@@ -917,6 +917,68 @@ describe("PreviewEngine compare session", () => {
     assert.deepEqual(h.engine.pairedShareIds("no-such-share"), []);
   });
 
+  it("surfaces every live source as a pane, own share last", () => {
+    // The page is a set of panes, and the order is old → new: references first,
+    // this share's own last, so a migration reads left-to-right as before→after.
+    const h = makeEngine({ ...uniqIds(), config: { ...config, limits: { ...config.limits, maxTotalDevices: 8 } } });
+    const mk = (branch: string) =>
+      h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch }, devices: [{ platform: "ios" }], access: "public" });
+    const old = mk("old");
+    const main = mk("main");
+    const work = mk("feature");
+    h.engine.startCompare(
+      work.previewId,
+      [
+        { shareId: old.shareId, repo: "acme/old", ref: "old", label: "Old app" },
+        { shareId: main.shareId, repo: "acme/app", ref: "main" },
+      ],
+      [],
+      "My branch",
+    );
+
+    const panes = h.engine.shareState(work.shareId)!.panes;
+    assert.deepEqual(
+      panes.map((x) => x.shareId),
+      [old.shareId, main.shareId, work.shareId],
+    );
+    assert.equal(panes[0]!.label, "Old app");
+    assert.equal(panes[1]!.label, undefined, "an unlabelled pane carries no label — the viewer falls back to repo + ref");
+    assert.equal(panes[2]!.label, "My branch");
+    assert.deepEqual(
+      panes.map((x) => x.self),
+      [undefined, undefined, true],
+      "exactly one pane is the page's own",
+    );
+    assert.equal(panes[0]!.devices.length, 1);
+  });
+
+  it("gives an ordinary preview a single self pane", () => {
+    const h = makeEngine(uniqIds());
+    const solo = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    const panes = h.engine.shareState(solo.shareId)!.panes;
+    assert.equal(panes.length, 1);
+    assert.equal(panes[0]!.self, true);
+    assert.equal(panes[0]!.shareId, solo.shareId);
+  });
+
+  it("drops a dead reference from panes but keeps the live ones", () => {
+    const h = makeEngine(uniqIds());
+    const live = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    const work = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "feature" }, devices: [{ platform: "ios" }], access: "public" });
+    h.engine.startCompare(
+      work.previewId,
+      [
+        { shareId: "not-live", repo: "r", ref: "gone" },
+        { shareId: live.shareId, repo: "acme/app", ref: "main" },
+      ],
+      [],
+    );
+    assert.deepEqual(
+      h.engine.shareState(work.shareId)!.panes.map((x) => x.shareId),
+      [live.shareId, work.shareId],
+    );
+  });
+
   it("unlocks every pane of a three-source compare, from any pane", () => {
     // The whole point of the pane model: old app + main + this branch is three
     // sources on one page, and one PIN has to reach all of them. Each extra pane
