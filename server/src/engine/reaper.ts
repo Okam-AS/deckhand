@@ -100,21 +100,23 @@ export class Reaper {
   }
 
   /**
-   * Kill Metro dev servers left behind by a previous deckhand.
+   * Kill processes left behind by a previous deckhand, identified by an env
+   * marker it stamps on its own.
    *
-   * Metro is spawned `detached`, so it survives the server that started it, and
-   * nothing collected it: each restart leaked one, and after enough of them the
-   * whole 8081-8099 range was held and every preview failed with "no free Metro
-   * port". They are identified by an env marker deckhand stamps on its own
-   * (METRO_MARKER_ENV), never by argv or port — the developer's own `expo start`
-   * looks exactly the same from the outside, and killing that would be the
-   * device-hijack mistake in another costume.
+   * Used for two things that are spawned `detached` and so outlive the server:
+   * Metro (leaked one per restart until the 8081-8099 range was full) and the
+   * NativeScript livesync runners (36 orphans at 418% CPU, measured — which
+   * starved the CPU-bound Android emulators while native iOS stayed fine).
+   *
+   * Identified by the ENV marker, never by argv: the developer's own
+   * `expo start` or `ns run` looks identical from the outside, and killing that
+   * would be the emulator-hijack mistake in another costume.
    *
    * Called at boot only, before anything is owned, so every marked process
    * found is by definition an orphan. `keepPids` exists for callers that run it
    * later.
    */
-  async reapOrphanMetro(marker: string, keepPids: Iterable<number> = []): Promise<number[]> {
+  async reapOrphansByMarker(marker: string, keepPids: Iterable<number> = []): Promise<number[]> {
     const keep = new Set(keepPids);
     const pids = await this.markedPids(marker).catch(() => [] as number[]);
     const killed: number[] = [];

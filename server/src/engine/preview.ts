@@ -20,6 +20,7 @@ import { AndroidManager, selectSystemImage, portForSerial, serialForPort } from 
 import { resolveAndroidEnv } from "../devices/toolEnv.ts";
 import { Reaper, POOL_SIM_PREFIX, POOL_AVD_PREFIX } from "./reaper.ts";
 import { METRO_MARKER_ENV } from "./metro.ts";
+import { DEV_MARKER_ENV } from "./devProcess.ts";
 import { MetroManager } from "./metro.ts";
 import { buildPlan, usesMetroDeepLink, nativescriptDevRun, webDevRun, webRootDevRun, GENERAL_IDLE_MS, METRO_PORT } from "./recipes.ts";
 import { runStep as defaultRunStep, type RunResult } from "./procs.ts";
@@ -2495,8 +2496,18 @@ export class PreviewEngine {
         // Metro outlives the server too (spawned detached), and leaked one per
         // restart until the whole port range was held. Nothing is owned at boot,
         // so every marked process is an orphan.
-        const metro = await reaper.reapOrphanMetro(METRO_MARKER_ENV).catch(() => [] as number[]);
-        if (metro.length) this.d.audit.record({ actor: "engine", tool: "reap_metro", args: { killed: metro.length }, result: "ok" });
+        // Metro AND the livesync runners: both are spawned detached and tracked
+        // only in memory, so both were reparented to launchd on every restart.
+        // The livesync leak was the worse of the two by far — 36 orphans at 418%
+        // CPU, which starved the Android emulators (CPU-bound QEMU) while iOS
+        // (native) stayed fine.
+        for (const [tool, marker] of [
+          ["reap_metro", METRO_MARKER_ENV],
+          ["reap_dev_run", DEV_MARKER_ENV],
+        ] as const) {
+          const killed = await reaper.reapOrphansByMarker(marker).catch(() => [] as number[]);
+          if (killed.length) this.d.audit.record({ actor: "engine", tool, args: { killed: killed.length }, result: "ok" });
+        }
         return devices;
       } catch {
         return { sims: [], avds: [], keptPooled: [] };

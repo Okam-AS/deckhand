@@ -151,10 +151,11 @@ describe("the serve-sim kill pattern", () => {
   });
 });
 
-describe("Reaper.reapOrphanMetro", () => {
-  // Metro is spawned detached, so it outlives the server that started it, and
-  // nothing collected it: each restart leaked one until the whole 8081-8099
-  // range was held and every preview failed with "no free Metro port".
+describe("Reaper.reapOrphansByMarker", () => {
+  // Two things are spawned detached and outlive the server: Metro (leaked one
+  // per restart until the 8081-8099 range was full) and the livesync runners
+  // (36 orphans at 418% CPU, measured — which starved the CPU-bound Android
+  // emulators while native iOS stayed fine).
   const make = (pids: number[]) => {
     const killed: number[] = [];
     const reaper = new Reaper({
@@ -168,19 +169,25 @@ describe("Reaper.reapOrphanMetro", () => {
 
   it("kills every process carrying deckhand's marker", async () => {
     const { reaper, killed } = make([111, 222]);
-    assert.deepEqual(await reaper.reapOrphanMetro("DECKHAND_METRO"), [111, 222]);
+    assert.deepEqual(await reaper.reapOrphansByMarker("DECKHAND_METRO"), [111, 222]);
     assert.deepEqual(killed, [111, 222]);
   });
 
   it("spares pids the caller still owns, and never signals itself", async () => {
     const { reaper, killed } = make([111, 222, process.pid]);
-    assert.deepEqual(await reaper.reapOrphanMetro("DECKHAND_METRO", [222]), [111]);
+    assert.deepEqual(await reaper.reapOrphansByMarker("DECKHAND_METRO", [222]), [111]);
     assert.deepEqual(killed, [111]);
+  });
+
+  it("works for any marker, not just Metro's", async () => {
+    const { reaper, killed } = make([777]);
+    assert.deepEqual(await reaper.reapOrphansByMarker("DECKHAND_DEV_RUN"), [777]);
+    assert.deepEqual(killed, [777]);
   });
 
   it("kills nothing when the marker matches nothing — the developer's own `expo start` looks identical from the outside", async () => {
     const { reaper, killed } = make([]);
-    assert.deepEqual(await reaper.reapOrphanMetro("DECKHAND_METRO"), []);
+    assert.deepEqual(await reaper.reapOrphansByMarker("DECKHAND_METRO"), []);
     assert.deepEqual(killed, []);
   });
 });
