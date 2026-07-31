@@ -41,9 +41,12 @@ const apps: App[] = [
 
 const ADMIN = "a".repeat(64);
 const MEMBER = "b".repeat(64);
+/** A member with no `owners` — the common shape, and the one the repo gate used to wave through. */
+const UNSCOPED = "c".repeat(64);
 const tokens: TokenEntry[] = [
   { name: "admin", role: "admin", token: ADMIN },
   { name: "kari", role: "member", owners: ["ainfrastructure"], token: MEMBER },
+  { name: "ola", role: "member", token: UNSCOPED },
 ];
 
 function fakeEngine(): PreviewEngine {
@@ -216,6 +219,25 @@ describe("MCP server (end-to-end over HTTP)", () => {
     assert.equal(repo.ok, false, "acme is outside this token's owners");
     assert.equal((repo.error as { code: string }).code, "forbidden");
 
+    await member.close();
+  });
+
+  it("an UNSCOPED member cannot build an arbitrary repo either", async () => {
+    // canAccessApp returns true for a principal with no `owners` — right for
+    // registered apps, wrong here, where the whole point is reaching past the
+    // registered set. Cloning an arbitrary repo runs its install and build
+    // scripts as the deckhand user, which is the capability requireAdmin()
+    // guards on the worktree branch. Leaving `owners` unset must not buy it.
+    const member = await client(UNSCOPED);
+    const res = parse(
+      await member.callTool({
+        name: "start_preview",
+        arguments: { app: "app-a", alongside: [{ repo: "acme/proj", ref: "main" }], share: { access: "public" } },
+      }),
+    );
+    assert.equal(res.ok, false);
+    assert.equal((res.error as { code: string }).code, "forbidden");
+    assert.deepEqual(engine.list().map((p) => p.previewId), [], "and nothing was booted");
     await member.close();
   });
 

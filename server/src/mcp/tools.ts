@@ -468,12 +468,26 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         // Extra sources first, so their (public) panes exist before this app's
         // share takes the chosen access — same order the old compare tool used.
         const refs: { reference: CompareReference; previewId: string; booted: boolean }[] = [];
+        // Undo the panes THIS call started; a reused running pane is left alone,
+        // because another page may be showing it right now.
+        const rollbackPanes = () => {
+          for (const r of refs) if (r.booted) void engine.stopPreview(r.previewId).catch(() => {});
+        };
         for (const target of extra) {
-          const booted = bootReference(resolved, target, paneDevices, args.share);
+          let booted;
+          try {
+            booted = bootReference(resolved, target, paneDevices, args.share);
+          } catch (e) {
+            // A THROW here (device capacity, a git failure) used to escape with
+            // the earlier panes still up and no previewId in the response — so
+            // they held their devices with no MCP handle to reach them, and the
+            // capacity that caused the failure stayed spent. Only the returned
+            // failure was rolled back.
+            rollbackPanes();
+            throw e;
+          }
           if ("content" in booted) {
-            // Undo the ones this call already started; a reused running pane is
-            // left alone (another page may be showing it).
-            for (const r of refs) if (r.booted) void engine.stopPreview(r.previewId).catch(() => {});
+            rollbackPanes();
             return booted;
           }
           refs.push(booted);
@@ -498,7 +512,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           // orphans. Only the ones THIS call booted: a reused pane may be live on
           // someone else's page.
           // best-effort: the original failure is what the caller needs to see
-          for (const r of refs) if (r.booted) void engine.stopPreview(r.previewId).catch(() => {});
+          rollbackPanes();
           throw e;
         }
         if (refs.length || args.items?.length) {
@@ -611,7 +625,23 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       // Owner scoping applies to an arbitrary repo too: check the synthetic app
       // the reference would boot, or a token scoped to one org could clone and
       // build any repo deckhand's credential can read.
+      //
+      // But `canAccessApp` returns TRUE for a principal with no `owners` — that
+      // is correct for registered apps (an unscoped member may use them all) and
+      // completely wrong here, where the point is reaching PAST the registered
+      // set. Cloning an arbitrary repo runs its install and build scripts as the
+      // deckhand user; that is the same capability `requireAdmin()` guards on the
+      // worktree branch two cases up, so an unscoped member must not get it for
+      // free just by leaving `owners` unset.
       const probe: App = { ...workingApp, repo: a.repo, path: undefined };
+      const scoped = (principal.owners?.length ?? 0) > 0;
+      if (!isAdmin(principal) && !scoped) {
+        return fail(
+          "forbidden",
+          "building an arbitrary repo needs an owner-scoped or admin token",
+          "use alongside: [{ app }] for a registered app, or ask an admin to scope this token to the repo's owner.",
+        );
+      }
       if (!canAccessApp(principal, probe)) {
         return fail(
           "forbidden",
