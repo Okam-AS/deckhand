@@ -2336,7 +2336,7 @@ export class PreviewEngine {
   /** Set one item's verdict (by exact name; appends if new). Returns the new counts. */
   setCompareItem(previewId: string, patch: { item: string; verdict: CompareVerdict; note?: string }): CompareCounts {
     const c = this.active(previewId)?.compare;
-    if (!c) throw new PreviewError(`no compare session for preview "${previewId}"`, "call compare_start first");
+    if (!c) throw new PreviewError(`no parity checklist for preview "${previewId}"`, "seed one with start_preview's `items`");
     let item = c.items.find((x) => x.name === patch.item);
     if (!item) {
       item = { name: patch.item, verdict: patch.verdict };

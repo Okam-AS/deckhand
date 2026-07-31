@@ -141,7 +141,7 @@ export class MetroManager {
    * A single slot meant the second Expo preview that needed Metro killed the
    * first one's dev server: two live previews of one app at different refs is a
    * supported flow (`findReusable` never reuses across refs), so is a second app,
-   * and `compare_start` boots its reference under a synthetic app id and then
+   * and an extra pane boots under a synthetic app id and then
    * boots the working app. The victim stayed `ready` in the viewer with a dead
    * bundle URL — nothing failed, the app just could not reload. Ports are
    * allocated per instance out of the same range.
