@@ -362,14 +362,12 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
               ref: z.string().optional().describe("a branch/PR/SHA of THIS app (or, with repo, of that repo)"),
               worktree: z.string().optional().describe("absolute path to another local checkout"),
               repo: z.string().optional().describe("an arbitrary repo (owner/name or url); pair with ref"),
-              label: z.string().max(60).optional().describe('what this source IS, e.g. "Old app v3.4.8"'),
             }),
           )
           .optional()
           .describe(
             "extra sources to show on the same page, in old → new order. An empty object {} means this app's registered migratesFrom. Each gets the same `devices`.",
           ),
-        label: z.string().max(60).optional().describe("what THIS app's pane is, shown when there are several sources"),
         items: z.array(z.string()).optional().describe("parity checklist items to seed (flows/screens); update with parity_set"),
         share: z
           .object({
@@ -478,7 +476,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             for (const r of refs) if (r.booted) void engine.stopPreview(r.previewId).catch(() => {});
             return booted;
           }
-          refs.push({ ...booted, reference: { ...booted.reference, label: target.label } });
+          refs.push(booted);
         }
 
         const priorPin = engine.pinRecordForApp(resolved.id);
@@ -503,12 +501,11 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           for (const r of refs) if (r.booted) void engine.stopPreview(r.previewId).catch(() => {});
           throw e;
         }
-        if (refs.length || args.items?.length || args.label) {
+        if (refs.length || args.items?.length) {
           engine.startCompare(
             result.previewId,
             refs.map((r) => ({ ...r.reference, previewId: r.previewId })),
             args.items ?? [],
-            args.label,
           );
         }
         const protectionNote =
@@ -537,10 +534,10 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             : isWeb
               ? `Give the user this link NOW: ${result.url} (stable for this app) — relay it before any other work; then poll preview_status for readiness. It's a live web dev server — saving files hot-reloads the page automatically, so after editing there is nothing to call. Use restart_preview only after dependency/config changes (new packages, vite.config edits) or if the server looks stuck. Deckhand runs this working copy in place and only reads/runs it — never commit or push any local changes deckhand caused (dev-server caches, a stray lockfile); its git state is not yours to write. ${linkFooter(result.url)}${webHostWarning}`
               : loopNextStep(source, result.url, args.ref ?? resolved.defaultBranch)) +
-            protectionNote +
             (refs.length
               ? ` It shows ${refs.length + 1} sources side by side under this one link. Drive any pane with describe/ui/screenshot, judge each item yourself, and record the verdict with parity_set (matches / adjusted / regression). The checklist is local to this session — keep the project plan in your task tracker.`
-              : ""),
+              : "") +
+            protectionNote,
         });
       }),
   );

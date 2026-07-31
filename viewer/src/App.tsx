@@ -198,7 +198,10 @@ export function App() {
         <ProgressBar testRun={state.testRun} screens={state.ledger?.screens} />
         <section className={`stage stage--${effectiveMode} ${multiSource ? "stage--grouped" : ""}`} ref={stageRef}>
           {groups.map((g) => (
-            <section className={`pane-group ${g.self ? "pane-group--self" : ""}`} key={g.key}>
+            <section
+              className={`pane-group ${g.self ? "pane-group--self" : ""} ${g.panes.some((p) => visible.has(p.key)) ? "" : "pane-group--off"}`}
+              key={g.key}
+            >
               {/* A heading only earns its line when there is something to tell
                   apart; one source is already named in the frame's caption. */}
               {multiSource && !isMobile && (

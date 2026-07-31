@@ -86,6 +86,23 @@ function defaultListeners(port: number): Promise<number[]> {
   );
 }
 
+/**
+ * The port serve-sim actually served on: its reported `port`, else the one in
+ * the stream URL, else the port we asked for. Both sources are the daemon's own
+ * answer — `-p` is only a request, and it is ignored outright when a helper for
+ * that device already exists.
+ */
+export function portFromDetach(parsed: { port?: number; streamUrl?: string }, requested: number): number {
+  if (Number.isInteger(parsed.port) && parsed.port! > 0) return parsed.port!;
+  try {
+    const p = Number(new URL(parsed.streamUrl ?? "").port);
+    if (Number.isInteger(p) && p > 0) return p;
+  } catch {
+    /* fall through to the requested port */
+  }
+  return requested;
+}
+
 /** Derive the helper base path from serve-sim's reported streamUrl (e.g. ".../helper/<udid>/stream.mjpeg" → "/helper/<udid>"). */
 export function basePathFromStreamUrl(streamUrl: string): string {
   try {
@@ -138,12 +155,30 @@ export class ServeSimBackend implements StreamingBackend {
     if (device.platform !== "ios") throw new Error(`serve-sim backend only supports iOS (got ${device.platform})`);
 
     let helper = this.helpers.get(device.udid);
+    // A remembered helper is a claim about another process, and processes die:
+    // a crash, an external kill, or a `serve-sim -k` we didn't make. Reusing the
+    // record blindly made attach() "succeed" against a port with nothing on it,
+    // and the only symptom was a 20s "no first frame" twenty seconds later, with
+    // no helper in `ps` to explain it. Verify before trusting, and respawn if
+    // the claim is stale — the preview layer already does this one level up.
+    if (helper && !(await this.listenersImpl(helper.port)).length) {
+      this.helpers.delete(device.udid);
+      helper = undefined;
+    }
     if (!helper) {
-      const port = allocatePort(this.range[0], this.range[1], await this.usedPorts());
+      const want = allocatePort(this.range[0], this.range[1], await this.usedPorts());
       // Spawn the streaming helper (daemon) and read the URLs it reports.
-      const stdout = await this.detachImpl(this.bin, ["--detach", "-p", String(port), device.udid]);
+      const stdout = await this.detachImpl(this.bin, ["--detach", "-p", String(want), device.udid]);
       const parsed = this.parseDetach(stdout);
-      helper = { udid: device.udid, port, base: basePathFromStreamUrl(parsed.streamUrl) };
+      // Believe the port serve-sim REPORTS, never the one we asked for. When a
+      // helper for this udid is already running — a detached daemon outlives the
+      // server that spawned it, so this is the normal case after any restart —
+      // serve-sim ignores `-p` and hands back the existing one. Recording our
+      // requested port instead pointed every probe at a port nothing served, and
+      // no amount of cleanup fixes that because the race reopens the moment a
+      // helper survives. Trusting the answer makes an orphan harmless: `--detach`
+      // is already an adopt-or-spawn, so this is the whole reconciliation.
+      helper = { udid: device.udid, port: portFromDetach(parsed, want), base: basePathFromStreamUrl(parsed.streamUrl) };
       this.helpers.set(device.udid, helper);
     }
 

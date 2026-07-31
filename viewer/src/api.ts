@@ -34,8 +34,6 @@ export interface SharePane {
   shareId: string;
   repo: string;
   ref: string;
-  /** Agent-set pane name; falls back to the repo name. */
-  label?: string;
   /** True for the page's own share — the one `devices`/`canRestart` describe. */
   self?: true;
   devices: ShareDevice[];

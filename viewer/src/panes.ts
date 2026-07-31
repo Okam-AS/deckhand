@@ -36,7 +36,7 @@ export interface StageGroup {
   ref: string;
   /** What to show as the column heading. */
   label: string;
-  /** The secondary line under it: repo · ref. */
+  /** The secondary line under it: the branch, or "local" for a working copy. */
   meta: string;
   self: boolean;
   /** Every device of this source. All stay mounted; only `visible` ones decode. */
@@ -115,8 +115,13 @@ export function computeStage(sharePanes: SharePane[], opts: StageOptions): Stage
         shareId: p.shareId,
         repo: p.repo,
         ref: p.ref,
-        label: p.label || repoShortName(p.repo) || p.shareId,
-        meta: [repoName(p.repo), p.ref].filter(Boolean).join(" · "),
+        // Heading is the repo, subheading the branch. No agent-supplied name:
+        // an invented label ("Old app", "the Expo port") says less than the two
+        // facts that actually identify a source, and drifts from them over time.
+        // The branch has to be here, not just the repo — two panes are often the
+        // SAME repo at different refs, and then the repo alone names neither.
+        label: repoShortName(p.repo) || p.shareId,
+        meta: p.ref,
         self: p.self === true,
         panes,
         activeKey: pickActive(panes, opts.choices?.[p.shareId], opts.preferredPlatform),
@@ -148,14 +153,23 @@ export function computeStage(sharePanes: SharePane[], opts: StageOptions): Stage
 }
 
 /**
- * Which device a group shows: the explicit pick, else the one matching the
- * platform the user last chose elsewhere, else the first.
+ * Which device a group shows: the explicit pick, else a healthy device matching
+ * the platform the user last chose elsewhere, else any healthy one, else the
+ * first.
+ *
+ * Health matters because a group shows ONE device: picking positionally put a
+ * "This device didn't start" frame on screen while a perfectly good one sat
+ * hidden behind the picker, with nothing saying so. An explicit pick still wins
+ * — asking to see the broken device is a reasonable thing to want, and it is how
+ * you read the error.
  */
 function pickActive(panes: StagePane[], choice: string | undefined, preferredPlatform: string | undefined): string {
   if (choice && panes.some((p) => p.key === choice)) return choice;
+  const healthy = panes.filter((p) => p.device.phase !== "failed");
+  const pool = healthy.length ? healthy : panes;
   if (preferredPlatform) {
-    const match = panes.find((p) => p.device.platform === preferredPlatform);
+    const match = pool.find((p) => p.device.platform === preferredPlatform);
     if (match) return match.key;
   }
-  return panes[0]?.key ?? "";
+  return pool[0]?.key ?? "";
 }

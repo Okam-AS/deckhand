@@ -221,8 +221,6 @@ export interface CompareReference {
   ref: string;
   /** Engine-internal: the booted reference preview, torn down with the working one. */
   previewId?: string;
-  /** Agent-set pane name shown in the viewer instead of "Reference". */
-  label?: string;
 }
 export interface CompareSession {
   /**
@@ -233,8 +231,6 @@ export interface CompareSession {
    */
   references: CompareReference[];
   items: CompareItem[];
-  /** Agent-set name for the working pane (viewer falls back to "Working"). */
-  workingLabel?: string;
 }
 export interface CompareCounts {
   pending: number;
@@ -598,8 +594,6 @@ export class PreviewEngine {
       shareId: string;
       repo: string;
       ref: string;
-      /** Agent-set pane name; the viewer falls back to the repo + ref. */
-      label?: string;
       /** True for this page's own share — the one `devices`/`canRestart` describe. */
       self?: true;
       devices: { deviceId: string; platform: Platform; label: string; phase: string; detail?: string; step?: string }[];
@@ -642,7 +636,6 @@ export class PreviewEngine {
               shareId: r.shareId,
               repo: r.repo,
               ref: r.ref,
-              ...(r.label ? { label: r.label } : {}),
               devices: sanitizeDevices(live),
             });
           }
@@ -676,7 +669,6 @@ export class PreviewEngine {
             shareId: p.record.shareId,
             repo: p.app.repo ?? p.app.id,
             ref: p.record.ref,
-            ...(p.compare?.workingLabel ? { label: p.compare.workingLabel } : {}),
             self: true,
             devices: sanitizeDevices(p),
           },
@@ -2313,22 +2305,18 @@ export class PreviewEngine {
     previewId: string,
     references: CompareReference[],
     items: string[] = [],
-    workingLabel?: string,
   ): CompareCounts {
     const p = this.active(previewId);
     if (!p) throw new PreviewError(`no active preview "${previewId}"`);
     const seen = new Set<string>();
     const uniq = items.map((s) => s.trim()).filter((s) => s.length > 0 && !seen.has(s) && (seen.add(s), true));
-    // Shown verbatim on a (possibly public) share page — single line, bounded.
-    const clean = (s?: string) => s?.replace(/\s+/g, " ").trim().slice(0, 60) || undefined;
     // De-dupe by shareId: the same reference named twice is one pane, and a
     // duplicate would otherwise be torn down twice and unlocked twice.
     const byShare = new Set<string>();
     const refs = references.filter((r) => !byShare.has(r.shareId) && (byShare.add(r.shareId), true));
     p.compare = {
-      references: refs.map((r) => ({ ...r, label: clean(r.label) })),
+      references: refs,
       items: uniq.map((name) => ({ name, verdict: "pending" as const })),
-      ...(clean(workingLabel) ? { workingLabel: clean(workingLabel) } : {}),
     };
     return PreviewEngine.countCompare(p.compare.items);
   }
@@ -2350,14 +2338,13 @@ export class PreviewEngine {
   /** The current compare session (reference panes + items + counts), or null. */
   compareStatus(
     previewId: string,
-  ): { references: CompareReference[]; items: CompareItem[]; counts: CompareCounts; workingLabel?: string } | null {
+  ): { references: CompareReference[]; items: CompareItem[]; counts: CompareCounts } | null {
     const c = this.active(previewId)?.compare;
     if (!c) return null;
     return {
       references: c.references,
       items: c.items,
       counts: PreviewEngine.countCompare(c.items),
-      ...(c.workingLabel ? { workingLabel: c.workingLabel } : {}),
     };
   }
 

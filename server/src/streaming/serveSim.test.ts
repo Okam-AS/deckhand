@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { basePathFromStreamUrl, ServeSimBackend } from "./serveSim.ts";
+import { basePathFromStreamUrl, portFromDetach, ServeSimBackend } from "./serveSim.ts";
 
 describe("basePathFromStreamUrl", () => {
   it("derives /helper/<udid> from a detach streamUrl", () => {
@@ -101,5 +101,86 @@ describe("ServeSimBackend — surviving helpers", () => {
       },
     });
     await backend.reapOrphans(); // must not throw — the process is gone, which is the goal
+  });
+});
+
+describe("portFromDetach", () => {
+  it("believes the reported port over the one we asked for", () => {
+    // `-p` is a request. A detached daemon outlives the server that spawned it,
+    // so when one already exists for this device serve-sim ignores `-p` and
+    // returns the running helper — on ITS port.
+    assert.equal(portFromDetach({ port: 3100, streamUrl: "http://127.0.0.1:3100/helper/x/stream.mjpeg" }, 3177), 3100);
+  });
+
+  it("falls back to the stream URL, then to the requested port", () => {
+    assert.equal(portFromDetach({ streamUrl: "http://127.0.0.1:3105/helper/x/stream.mjpeg" }, 3177), 3105);
+    assert.equal(portFromDetach({ streamUrl: "not a url" }, 3177), 3177);
+    assert.equal(portFromDetach({}, 3177), 3177);
+    assert.equal(portFromDetach({ port: 0 }, 3177), 3177, "a nonsense port is not an answer");
+  });
+});
+
+describe("ServeSimBackend.attach — surviving helpers", () => {
+  /** A serve-sim that already has a helper for `busyUdid` on `busyPort`, and ignores -p for it. */
+  const detachAdopting = (busyUdid: string, busyPort: number) => async (_bin: string, args: string[]) => {
+    const udid = args[args.length - 1]!;
+    const asked = Number(args[args.indexOf("-p") + 1]);
+    const port = udid === busyUdid ? busyPort : asked;
+    return JSON.stringify({
+      url: `http://127.0.0.1:${port}`,
+      streamUrl: `http://127.0.0.1:${port}/helper/${udid}/stream.mjpeg`,
+      wsUrl: `ws://127.0.0.1:${port}/helper/${udid}/ws`,
+      port,
+      device: udid,
+    });
+  };
+
+  it("points at the helper serve-sim actually returned, not the port it asked for", async () => {
+    // The real failure: the requested port was free (the orphan held a different
+    // one), so allocation succeeded, attach "succeeded", and every probe went to
+    // a port nothing served — surfacing 20s later as "no first frame", with no
+    // helper in `ps` to explain it.
+    const backend = new ServeSimBackend({
+      portRange: [3100, 3110],
+      detachImpl: detachAdopting("UDID-OLD", 3101),
+      killImpl: async () => {},
+      listenersImpl: async () => [],
+      fetchImpl: (async () => new Response(new Uint8Array(8192))) as unknown as typeof fetch,
+    });
+    const stream = await backend.attach({ platform: "ios", udid: "UDID-OLD" });
+    assert.equal(stream.origin, "http://127.0.0.1:3101");
+  });
+
+  it("respawns when a remembered helper's port has gone quiet", async () => {
+    // A helper can die at any time — crash, external kill, someone's `serve-sim -k`.
+    // Trusting the record made attach() succeed against nothing.
+    const spawns: string[] = [];
+    let alive = true;
+    // The fake has to stay self-consistent: exactly the port the helper landed on
+    // answers. Claiming a listener on every port starves allocation (usedPorts
+    // scans the range); claiming one on a fixed port makes the helper look dead
+    // as soon as it lands somewhere else.
+    let helperPort = 0;
+    const backend = new ServeSimBackend({
+      portRange: [3100, 3110],
+      detachImpl: async (bin, args) => {
+        spawns.push(args[args.length - 1]!);
+        const out = await detachAdopting("none", 0)(bin, args);
+        helperPort = (JSON.parse(out) as { port: number }).port;
+        return out;
+      },
+      killImpl: async () => {},
+      listenersImpl: async (port) => (alive && port === helperPort ? [4242] : []),
+      fetchImpl: (async () => new Response(new Uint8Array(8192))) as unknown as typeof fetch,
+    });
+
+    await backend.attach({ platform: "ios", udid: "UDID-1" });
+    assert.equal(spawns.length, 1);
+    await backend.attach({ platform: "ios", udid: "UDID-1" });
+    assert.equal(spawns.length, 1, "a live helper is reused, not respawned");
+
+    alive = false; // the helper died out from under us
+    await backend.attach({ platform: "ios", udid: "UDID-1" });
+    assert.equal(spawns.length, 2, "a dead helper is replaced instead of trusted");
   });
 });

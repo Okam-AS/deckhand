@@ -933,11 +933,10 @@ describe("PreviewEngine compare session", () => {
     h.engine.startCompare(
       work.previewId,
       [
-        { shareId: old.shareId, repo: "acme/old", ref: "old", label: "Old app" },
+        { shareId: old.shareId, repo: "acme/old", ref: "old" },
         { shareId: main.shareId, repo: "acme/app", ref: "main" },
       ],
       [],
-      "My branch",
     );
 
     const panes = h.engine.shareState(work.shareId)!.panes;
@@ -945,9 +944,16 @@ describe("PreviewEngine compare session", () => {
       panes.map((x) => x.shareId),
       [old.shareId, main.shareId, work.shareId],
     );
-    assert.equal(panes[0]!.label, "Old app");
-    assert.equal(panes[1]!.label, undefined, "an unlabelled pane carries no label — the viewer falls back to repo + ref");
-    assert.equal(panes[2]!.label, "My branch");
+    // repo + ref is what names a pane; there is no separate label to set.
+    assert.deepEqual(
+      panes.slice(0, 2).map((x) => [x.repo, x.ref]),
+      [
+        ["acme/old", "old"],
+        ["acme/app", "main"],
+      ],
+    );
+    assert.equal(panes[2]!.ref, "feature", "the page's own pane is named from its own app + ref");
+    assert.ok(panes[2]!.repo, "…and always has a repo to show");
     assert.deepEqual(
       panes.map((x) => x.self),
       [undefined, undefined, true],

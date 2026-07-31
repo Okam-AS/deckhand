@@ -115,6 +115,45 @@ describe("computeStage — which device each source shows", () => {
     );
   });
 
+  it("skips a failed device so a working one is what you see", () => {
+    // A group shows ONE device. Picking positionally put "This device didn't
+    // start" on screen while a healthy sim sat hidden behind the picker.
+    const broken = [
+      pane("a", "r/a", "main", [{ ...dev("ios-0", "ios"), phase: "failed" }, dev("android-1", "android")]),
+      pane("b", "r/b", "main", [dev("ios-0", "ios")], { self: true }),
+    ];
+    const s = computeStage(broken, { isMobile: false });
+    assert.equal(s.groups[0]!.activeKey, paneKey("a", "android-1"));
+  });
+
+  it("still shows a failed device when it is the only one", () => {
+    const allBroken = [
+      pane("a", "r/a", "main", [{ ...dev("ios-0", "ios"), phase: "failed" }]),
+      pane("b", "r/b", "main", [dev("ios-0", "ios")], { self: true }),
+    ];
+    const s = computeStage(allBroken, { isMobile: false });
+    assert.equal(s.groups[0]!.activeKey, paneKey("a", "ios-0"), "hiding it would leave an empty column and no error");
+  });
+
+  it("lets an explicit pick select a failed device, which is how you read the error", () => {
+    const broken = [
+      pane("a", "r/a", "main", [{ ...dev("ios-0", "ios"), phase: "failed" }, dev("android-1", "android")]),
+      pane("b", "r/b", "main", [dev("ios-0", "ios")], { self: true }),
+    ];
+    const s = computeStage(broken, { isMobile: false, choices: { a: paneKey("a", "ios-0") } });
+    assert.equal(s.groups[0]!.activeKey, paneKey("a", "ios-0"));
+  });
+
+  it("prefers a healthy device over the shared platform when that platform is broken", () => {
+    const broken = [
+      pane("a", "r/a", "main", [dev("ios-0", "ios"), { ...dev("android-1", "android"), phase: "failed" }]),
+      pane("b", "r/b", "main", [dev("ios-0", "ios"), dev("android-1", "android")], { self: true }),
+    ];
+    const s = computeStage(broken, { isMobile: false, preferredPlatform: "android" });
+    assert.equal(s.groups[0]!.activeKey, paneKey("a", "ios-0"), "a broken pane is worse than the wrong platform");
+    assert.equal(s.groups[1]!.activeKey, paneKey("b", "android-1"), "…and the healthy source still follows the platform");
+  });
+
   it("ignores a stale choice instead of blanking the source", () => {
     const s = computeStage(twoSources, { isMobile: false, choices: { old: paneKey("old", "ios-99") } });
     assert.equal(s.groups[0]!.activeKey, paneKey("old", "ios-0"));
@@ -128,14 +167,22 @@ describe("computeStage — which device each source shows", () => {
 });
 
 describe("computeStage — headings", () => {
-  it("uses the agent's label when set, else the repo name", () => {
-    const s = computeStage(
-      [pane("a", "github.com/acme/legacy", "dev", [dev("ios-0", "ios")], { label: "Old app" }), ...twoSources.slice(1)],
-      { isMobile: false },
-    );
-    assert.equal(s.groups[0]!.label, "Old app");
-    assert.equal(s.groups[1]!.label, "app", "unlabelled falls back to the repo's own name, not owner/name");
-    assert.equal(s.groups[0]!.meta, "acme/legacy · dev", "the line under it keeps the owner, so the heading needn't repeat it");
+  it("names a source by its repo, with the branch underneath", () => {
+    const s = computeStage(twoSources, { isMobile: false });
+    assert.deepEqual(s.groups.map((g) => g.label), ["legacy", "app"]);
+    assert.deepEqual(s.groups.map((g) => g.meta), ["dev", "feature/x"]);
+  });
+
+  it("distinguishes two refs of the SAME repo by the branch line", () => {
+    // The case an agent-supplied name used to paper over: same repo twice, where
+    // the repo name alone identifies neither pane.
+    const sameRepo = [
+      pane("a", "github.com/acme/app", "main", [dev("ios-0", "ios")]),
+      pane("b", "github.com/acme/app", "feature/x", [dev("ios-0", "ios")], { self: true }),
+    ];
+    const s = computeStage(sameRepo, { isMobile: false });
+    assert.deepEqual(s.groups.map((g) => g.label), ["app", "app"]);
+    assert.deepEqual(s.groups.map((g) => g.meta), ["main", "feature/x"], "the branch is what tells them apart");
   });
 
   it("marks exactly one source as the page's own", () => {

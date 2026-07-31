@@ -1430,10 +1430,26 @@ figcaption {
   width: min(100%, calc(74vh * var(--dev-w, 9) / var(--dev-h, 19.5)));
 }
 
+/* A source with nothing on screen takes no space. On mobile exactly one device
+   is visible, so without this the other source's empty column still claims its
+   share of the height and the visible phone renders at half size. Hidden rather
+   than unmounted, like the frames inside it: the stream is already dropped by
+   each frame's own `hidden`, and keeping the DOM means switching back does not
+   rebuild the canvas or the input socket. */
+.pane-group--off {
+  display: none;
+}
+
 @media (max-width: 700px) {
   /* One pane, full height, no headings — the dock names what you are looking at. */
   .app--grouped .pane-head {
     display: none;
+  }
+  /* The stage centres its children by default, which leaves the column at its
+     content height — so the size container below has no definite height and the
+     cq units inside it resolve to zero. Stretch, then fill down the chain. */
+  .app--grouped .stage {
+    align-items: stretch;
   }
   .app--grouped .pane-group,
   .app--grouped .pane-stage {
@@ -1441,8 +1457,23 @@ figcaption {
     min-height: 0;
   }
   .app--grouped .pane-stage {
+    display: flex;
     align-items: center;
+    justify-content: center;
     container-type: size;
+  }
+  .app--grouped .pane-stage .device {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .app--grouped .pane-stage .device-screen {
+    height: min(100cqh, calc(100cqw * var(--dev-h) / var(--dev-w)));
+    width: auto;
+    max-width: 100cqw;
+    max-height: 100cqh;
   }
 }
 
