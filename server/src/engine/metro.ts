@@ -150,6 +150,21 @@ export class MetroManager {
    * allocated per instance out of the same range.
    */
   private readonly running = new Map<string, RunningMetro>();
+
+  /**
+   * Pids this manager owns RIGHT NOW, so the boot reap can spare them.
+   *
+   * The orphan sweep runs after the HTTP port is bound (a second `deckhand
+   * serve` has to lose on EADDRINUSE first), so an agent's start_preview can
+   * already have spawned a child by the time it runs — and that child carries
+   * the same env marker the sweep hunts for. Without this the server kills its
+   * own brand-new bundler and leaves the preview `ready` with nothing serving.
+   */
+  livePids(): number[] {
+    return [...this.running.values()]
+      .map((r) => r.child.pid)
+      .filter((pid): pid is number => typeof pid === "number");
+  }
   private readonly range: [number, number];
   private readonly spawnFn: typeof spawn;
   private readonly portFreeImpl: (port: number) => Promise<boolean>;

@@ -920,19 +920,47 @@ describe("PreviewEngine compare session", () => {
     );
   });
 
-  it("reports the pairing from BOTH sides, so one PIN can unlock both panes", () => {
-    // The compare viewer streams the reference pane from the reference's own
-    // shareId, whose unlock cookie is path-scoped to it. The unlock route needs
-    // to find the partner from whichever side the viewer was opened on — else
-    // the second pane sits on "Connecting…" with its WS refused every second.
+  it("mints a page's panes, and never the other way round", () => {
+    // The viewer streams each pane from that pane's own shareId, whose unlock
+    // cookie is path-scoped to it, so unlocking the PAGE has to mint for its
+    // panes — else they sit on "Connecting…" with the WS refused every second.
+    //
+    // The reverse must NOT hold. Panes are keyed by content, so two pages naming
+    // the same source share one pane; a reverse mint would hand whoever holds
+    // one page's PIN a valid cookie for the other page — different app,
+    // different owner, no PIN proven. See the cross-page test below.
     const h = makeEngine(uniqIds());
     const ref = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
     const work = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "feature" }, devices: [{ platform: "ios" }], access: "public" });
     h.engine.startCompare(work.previewId, [{ shareId: ref.shareId, repo: "acme/app", ref: "main" }], []);
 
     assert.deepEqual(h.engine.pairedShareIds(work.shareId), [ref.shareId]);
-    assert.deepEqual(h.engine.pairedShareIds(ref.shareId), [work.shareId]);
+    assert.deepEqual(h.engine.pairedShareIds(ref.shareId), [], "a pane does not unlock the page holding it");
     assert.deepEqual(h.engine.pairedShareIds("no-such-share"), []);
+  });
+
+  it("never lets one page's PIN reach another page that shares a pane", () => {
+    // The escalation this replaced: pages A and B both name the same source, so
+    // they land on ONE pane P (content-keyed, deliberately — it is what makes
+    // reuse possible). A holder of B's link and PIN unlocked P, and the mint
+    // then handed them a cookie for A, with A's shareId disclosed in its Path.
+    const h = makeEngine({ ...uniqIds(), config: { ...config, limits: { ...config.limits, maxTotalDevices: 8 } } });
+    const mk = (branch: string) =>
+      h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch }, devices: [{ platform: "ios" }], access: "public" });
+    const shared = mk("main");
+    const pageA = mk("a");
+    const pageB = mk("b");
+    const ref = { shareId: shared.shareId, repo: "acme/app", ref: "main" };
+    h.engine.startCompare(pageA.previewId, [ref], []);
+    h.engine.startCompare(pageB.previewId, [ref], []);
+
+    assert.deepEqual(h.engine.pairedShareIds(pageA.shareId), [shared.shareId], "each page reaches its own pane");
+    assert.deepEqual(h.engine.pairedShareIds(pageB.shareId), [shared.shareId]);
+    assert.deepEqual(
+      h.engine.pairedShareIds(shared.shareId),
+      [],
+      "and the shared pane reaches NEITHER page — that was the escalation",
+    );
   });
 
   it("keeps recorded verdicts when the checklist is seeded again", () => {
@@ -1052,7 +1080,7 @@ describe("PreviewEngine compare session", () => {
     assert.ok(h.engine.getStatus(work.previewId));
   });
 
-  it("unlocks every pane of a three-source compare, from any pane", () => {
+  it("unlocks every pane of a three-source compare", () => {
     // The whole point of the pane model: old app + main + this branch is three
     // sources on one page, and one PIN has to reach all of them. Each extra pane
     // streams from its own shareId, so each needs its own path-scoped cookie.
@@ -1072,10 +1100,9 @@ describe("PreviewEngine compare session", () => {
     );
 
     assert.deepEqual(h.engine.pairedShareIds(work.shareId).sort(), [a.shareId, b.shareId].sort());
-    // …and from either reference back to the working pane, so opening the page
-    // on any pane unlocks the rest.
-    assert.deepEqual(h.engine.pairedShareIds(a.shareId), [work.shareId]);
-    assert.deepEqual(h.engine.pairedShareIds(b.shareId), [work.shareId]);
+    // …and no pane mints for the page, in either direction.
+    assert.deepEqual(h.engine.pairedShareIds(a.shareId), []);
+    assert.deepEqual(h.engine.pairedShareIds(b.shareId), []);
   });
 
   it("skips a dead pane when minting cookies but keeps the live ones", () => {
@@ -1418,6 +1445,30 @@ describe("PreviewEngine idle sweep", () => {
 
     assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "failed");
     assert.match(h.engine.getStatus("pv1")!.devices[0]!.error ?? "", /no first frame \(3 attempts\)/);
+  });
+
+  it("spares its own live processes when reaping orphans by marker", async () => {
+    // The boot sweep runs AFTER the port is bound, so a start_preview that
+    // landed in the meantime has children carrying the same env marker the sweep
+    // hunts for. Called without keepPids it killed the server's own brand-new
+    // bundler and left the preview `ready` with nothing serving — the device
+    // reap guards this exact window with liveDeviceHandles(); this one did not.
+    const keepSeen: Record<string, number[]> = {};
+    const h = makeEngine({
+      metro: { livePids: () => [4242], stopIfUnused: async () => {}, stopAll: async () => {} } as unknown as PreviewEngineDeps["metro"],
+      devProcs: { livePids: () => [7777], stop: () => {}, stopAll: () => {} } as unknown as PreviewEngineDeps["devProcs"],
+      reaper: {
+        reap: async () => ({ sims: [], avds: [], keptPooled: [] }),
+        reapOrphansByMarker: async (marker: string, keep: Iterable<number> = []) => {
+          keepSeen[marker] = [...keep];
+          return [];
+        },
+      } as unknown as PreviewEngineDeps["reaper"],
+    });
+
+    await h.engine.reapOrphans();
+    assert.deepEqual(keepSeen["DECKHAND_METRO"], [4242], "the running Metro is spared");
+    assert.deepEqual(keepSeen["DECKHAND_DEV_RUN"], [7777], "and the running livesync tree");
   });
 
   it("never allocates a console port an emulator already holds", async () => {

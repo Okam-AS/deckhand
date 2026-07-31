@@ -780,17 +780,20 @@ export class PreviewEngine {
           for (const r of p.compare.references) {
             if (this.liveByShareId(r.shareId)) out.add(r.shareId);
           }
-        } else if (p.compare.references.some((r) => r.shareId === shareId)) {
-          // The reverse direction is a compare-session-only affair. A compare
-          // reference is a synthetic app the operator just booted as one pane of
-          // one page, so unlocking any pane unlocks the page. `migratesFrom`
-          // instead names another REGISTERED app with its own PIN and its own
-          // repo — and only the target's page renders a source pane, never the
-          // other way round, so minting the target's cookie for whoever holds
-          // the source's PIN unlocks an app they were never given access to, for
-          // nothing.
-          out.add(p.record.shareId);
         }
+        // FORWARD ONLY. There used to be a reverse direction here — unlocking a
+        // pane also unlocked the page holding it — justified by "a pane belongs
+        // to one page". That stopped being true when panes were keyed by
+        // CONTENT: two pages naming the same source share one pane, so the
+        // reverse mint handed a holder of page B's PIN a valid cookie for page
+        // A, and disclosed A's shareId in the cookie's Path. Different apps,
+        // different owners, no PIN ever proven for A.
+        //
+        // Nothing is lost by dropping it. A pane's shareId is never given to a
+        // user — it appears only inside the page's own state, which already
+        // requires the page's cookie to read — and anyone who does open a pane
+        // URL directly holds that pane's PIN anyway, so the pad works. The
+        // forward direction alone covers every pane the page actually renders.
         continue;
       }
       if (!p.app.migratesFrom || p.record.shareId !== shareId) continue;
@@ -2501,11 +2504,17 @@ export class PreviewEngine {
         // The livesync leak was the worse of the two by far — 36 orphans at 418%
         // CPU, which starved the Android emulators (CPU-bound QEMU) while iOS
         // (native) stayed fine.
-        for (const [tool, marker] of [
-          ["reap_metro", METRO_MARKER_ENV],
-          ["reap_dev_run", DEV_MARKER_ENV],
+        // Spare what we already own. This sweep runs AFTER the port is bound, so
+        // a start_preview that landed in the meantime has children carrying the
+        // same marker — and killing those leaves the preview `ready` with a dead
+        // bundler. The device reap guards the identical window with
+        // liveDeviceHandles(); this one has to guard it too. Read as late as
+        // possible, for the same reason.
+        for (const [tool, marker, keep] of [
+          ["reap_metro", METRO_MARKER_ENV, () => this.d.metro?.livePids() ?? []],
+          ["reap_dev_run", DEV_MARKER_ENV, () => this.d.devProcs?.livePids() ?? []],
         ] as const) {
-          const killed = await reaper.reapOrphansByMarker(marker).catch(() => [] as number[]);
+          const killed = await reaper.reapOrphansByMarker(marker, keep()).catch(() => [] as number[]);
           if (killed.length) this.d.audit.record({ actor: "engine", tool, args: { killed: killed.length }, result: "ok" });
         }
         return devices;
