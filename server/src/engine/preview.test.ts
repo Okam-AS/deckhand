@@ -818,10 +818,11 @@ describe("PreviewEngine migration pairing", () => {
 
       const s = h.engine.shareState(tgt.shareId)!;
       assert.ok(s, "target shareState resolves");
-      assert.ok(s.pairedWith, "target shareState carries pairedWith");
-      assert.equal(s.pairedWith!.shareId, src.shareId);
-      assert.equal(s.pairedWith!.repo, "github.com/okam/old");
-      assert.equal(s.pairedWith!.devices.length, 1);
+      assert.equal(s.panes.length, 2, "target shareState carries the source as a second pane");
+      assert.equal(s.panes[0]!.shareId, src.shareId, "the source comes first — the page reads old → new");
+      assert.equal(s.panes[0]!.repo, "github.com/okam/old");
+      assert.equal(s.panes[0]!.devices.length, 1);
+      assert.equal(s.panes[1]!.self, true);
       assert.ok(s.ledger, "target shareState carries the ledger");
       assert.equal(s.ledger!.screens.length, 2);
       assert.equal(s.ledger!.screens[0]!.name, "Onboarding");
@@ -849,13 +850,13 @@ describe("PreviewEngine migration pairing", () => {
     const tgt = h.engine.startPreview({ app: targetApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
 
     h.engine.setAppPin("old-app", "1234"); // source protected, target public
-    assert.equal(h.engine.shareState(tgt.shareId)!.pairedWith, undefined, "an unreachable source pane must not be advertised");
+    assert.equal(h.engine.shareState(tgt.shareId)!.panes.length, 1, "an unreachable source pane must not be advertised");
     assert.deepEqual(h.engine.pairedShareIds(tgt.shareId), [], "and must not be handed an unlock cookie");
 
     // Protect the target too and the pane comes back: the unlock now rides on a
     // PIN this page actually proves, instead of being granted from nothing.
     h.engine.setAppPin("new-app", "4321");
-    assert.equal(h.engine.shareState(tgt.shareId)!.pairedWith?.shareId, src.shareId);
+    assert.equal(h.engine.shareState(tgt.shareId)!.panes[0]!.shareId, src.shareId);
     assert.deepEqual(h.engine.pairedShareIds(tgt.shareId), [src.shareId]);
 
     // The source's own page never renders a target pane, so it must never mint
@@ -863,12 +864,12 @@ describe("PreviewEngine migration pairing", () => {
     assert.deepEqual(h.engine.pairedShareIds(src.shareId), []);
   });
 
-  it("omits pairedWith and ledger for an ordinary (non-migration) app", async () => {
+  it("gives an ordinary (non-migration) app one pane and no ledger", async () => {
     const h = makeEngine();
     h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
     await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
     const s = h.engine.shareState("share-abc")!;
-    assert.equal(s.pairedWith, undefined);
+    assert.equal(s.panes.length, 1, "just its own pane — nothing to compare against");
     assert.equal(s.ledger, undefined);
   });
 });
@@ -880,7 +881,7 @@ describe("PreviewEngine compare session", () => {
     return { genPreviewId: () => `pv${++pid}`, genShareId: () => `share-${++sid}` };
   };
 
-  it("links a working preview to a live reference and surfaces pairedWith + ledger", () => {
+  it("links a working preview to a live reference and surfaces both panes + ledger", () => {
     const h = makeEngine(uniqIds());
     const ref = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
     const work = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "feature" }, devices: [{ platform: "ios" }], access: "public" });
@@ -890,9 +891,12 @@ describe("PreviewEngine compare session", () => {
     assert.deepEqual(counts, { pending: 2, doing: 0, matches: 0, adjusted: 0, regression: 0 });
 
     const s = h.engine.shareState(work.shareId)!;
-    assert.equal(s.pairedWith?.shareId, ref.shareId);
-    assert.equal(s.pairedWith?.ref, "main");
-    assert.equal(s.pairedWith?.devices.length, 1);
+    assert.deepEqual(
+      s.panes.map((x) => x.shareId),
+      [ref.shareId, work.shareId],
+    );
+    assert.equal(s.panes[0]!.ref, "main");
+    assert.equal(s.panes[0]!.devices.length, 1);
     assert.deepEqual(
       s.ledger?.screens.map((x) => [x.name, x.status]),
       [
@@ -1055,12 +1059,12 @@ describe("PreviewEngine compare session", () => {
     assert.deepEqual(st.counts, { pending: 1, doing: 0, matches: 1, adjusted: 1, regression: 0 });
   });
 
-  it("surfaces the ledger even when the reference isn't live (no pairedWith)", () => {
+  it("surfaces the ledger even when the reference isn't live (no second pane)", () => {
     const h = makeEngine();
     const work = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
     h.engine.startCompare(work.previewId, [{ shareId: "not-live", repo: "r", ref: "main" }], ["A"]);
     const s = h.engine.shareState("share-abc")!;
-    assert.equal(s.pairedWith, undefined);
+    assert.equal(s.panes.length, 1, "a dead reference is not advertised as a pane");
     assert.equal(s.ledger?.screens.length, 1);
   });
 

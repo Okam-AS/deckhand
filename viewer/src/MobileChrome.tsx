@@ -1,12 +1,22 @@
 import { useEffect, useRef, useState } from "react";
-import type { ShareDevice } from "./api.ts";
 import type { SpecialKey } from "./stream/input.ts";
 import { CheckIcon, HomeIcon, InfoIcon, KeyboardIcon, RotateIcon, SwitchDeviceIcon, XIcon } from "./icons.tsx";
 
+/** One switchable device in the dock's picker. */
+export interface DockEntry {
+  key: string;
+  label: string;
+  /**
+   * Which source it belongs to. Set only when the page shows several, because a
+   * list of four rows all reading "iPhone 16 Pro" is unusable without it.
+   */
+  group?: string;
+}
+
 interface Props {
-  devices: ShareDevice[];
-  focusId: string;
-  onFocus: (id: string) => void;
+  entries: DockEntry[];
+  focusKey: string;
+  onFocus: (key: string) => void;
   onHome: () => void;
   onRotate: () => void;
   /** Type a string on the focused device; returns the characters that couldn't be sent. */
@@ -27,14 +37,14 @@ interface Props {
  * typing bar; switch/info open popovers above.
  */
 export function MobileChrome(props: Props) {
-  const { devices, focusId, onFocus, onHome, onRotate, onText, onKey, rotation } = props;
+  const { entries, focusKey, onFocus, onHome, onRotate, onText, onKey, rotation } = props;
   const { repo, refName, source } = props;
   const [pickerOpen, setPickerOpen] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
   const [typing, setTyping] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
   const infoRef = useRef<HTMLDivElement>(null);
-  const current = devices.find((d) => d.deviceId === focusId);
+  const current = entries.find((e) => e.key === focusKey);
 
   useEffect(() => {
     if (!pickerOpen && !infoOpen) return;
@@ -52,7 +62,7 @@ export function MobileChrome(props: Props) {
     <>
       {!typing && (
         <div className="mdock" style={{ "--icon-rot": `${rotation}deg` } as React.CSSProperties}>
-          {devices.length > 1 && (
+          {entries.length > 1 && (
             <div className="minfo" ref={pickerRef}>
               <button
                 type="button"
@@ -69,25 +79,30 @@ export function MobileChrome(props: Props) {
                 <SwitchDeviceIcon size={19} />
               </button>
               <div className={`mmenu mmenu--up ${pickerOpen ? "open" : ""}`} role="menu">
-                {devices.map((d) => (
-                  <button
-                    key={d.deviceId}
-                    type="button"
-                    className="picker-row mrow"
-                    role="menuitemradio"
-                    aria-checked={d.deviceId === focusId}
-                    onClick={() => {
-                      setPickerOpen(false);
-                      onFocus(d.deviceId);
-                    }}
-                  >
-                    <span className="picker-label">{d.label}</span>
-                    {d.deviceId === focusId && (
-                      <span className="mrow-check" aria-hidden>
-                        <CheckIcon size={15} />
-                      </span>
-                    )}
-                  </button>
+                {entries.map((e, i) => (
+                  <div key={e.key}>
+                    {/* Group heading whenever the source changes, so the rows say
+                        WHICH app's iPhone they are — several sources hand out
+                        identical device labels. */}
+                    {e.group && e.group !== entries[i - 1]?.group && <div className="picker-section">{e.group}</div>}
+                    <button
+                      type="button"
+                      className="picker-row mrow"
+                      role="menuitemradio"
+                      aria-checked={e.key === focusKey}
+                      onClick={() => {
+                        setPickerOpen(false);
+                        onFocus(e.key);
+                      }}
+                    >
+                      <span className="picker-label">{e.label}</span>
+                      {e.key === focusKey && (
+                        <span className="mrow-check" aria-hidden>
+                          <CheckIcon size={15} />
+                        </span>
+                      )}
+                    </button>
+                  </div>
                 ))}
               </div>
             </div>

@@ -604,19 +604,6 @@ export class PreviewEngine {
       self?: true;
       devices: { deviceId: string; platform: Platform; label: string; phase: string; detail?: string; step?: string }[];
     }[];
-    /**
-     * Deprecated alias for the last extra pane, kept until the viewer renders
-     * `panes`. Removed in the same change that deletes CompareView.
-     */
-    pairedWith?: {
-      shareId: string;
-      repo: string;
-      ref: string;
-      label?: string;
-      devices: { deviceId: string; platform: Platform; label: string; phase: string; detail?: string; step?: string }[];
-    };
-    /** Deprecated alias for this share's own pane label. */
-    paneLabel?: string;
     /** Migration target only: the agent-maintained parity ledger, if the file exists. */
     ledger?: { screens: { name: string; status: string; note?: string }[] };
   } | null {
@@ -694,10 +681,6 @@ export class PreviewEngine {
             devices: sanitizeDevices(p),
           },
         ];
-        // The deprecated aliases the viewer still reads. `pairedWith` was only
-        // ever one pane, so it names the LAST reference — with a single one
-        // (everything that exists today) that is the same pane as before.
-        const pairedWith = refPanes.length ? refPanes[refPanes.length - 1] : undefined;
         return {
           ready: p.record.phase === "ready",
           ref: p.record.ref,
@@ -716,8 +699,6 @@ export class PreviewEngine {
                 },
               }
             : {}),
-          ...(pairedWith ? { pairedWith } : {}),
-          ...(p.compare?.workingLabel ? { paneLabel: p.compare.workingLabel } : {}),
           ...(ledger ? { ledger } : {}),
         };
       }

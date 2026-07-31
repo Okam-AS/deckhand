@@ -18,6 +18,14 @@ export interface DeviceControls {
 interface Props {
   shareId: string;
   device: ShareDevice;
+  /**
+   * Identity of this frame on the page, for the control registry and the FLIP
+   * map. Must be unique across SOURCES, not just devices: two apps on one page
+   * both call their first device "ios-0", and keyed on that alone the registry
+   * hands one source's Home button to the other's phone. Defaults to the
+   * deviceId for a page with a single source.
+   */
+  paneKey?: string;
   repo: string;
   branch: string;
   variant?: DeviceVariant;
@@ -26,7 +34,7 @@ interface Props {
   /** Expose home/rotate to app-level chrome while the stream is live (null on teardown). */
   registerControls?: (id: string, api: DeviceControls | null) => void;
   /** Report the cumulative rotation (deg) so app-level chrome can spin its icons to match. */
-  onRotationChange?: (deviceId: string, deg: number) => void;
+  onRotationChange?: (paneKey: string, deg: number) => void;
   /**
    * Render but keep off screen. Used by the compare panes to show one device at a
    * time without unmounting the others, so switching back doesn't rebuild the
@@ -47,7 +55,9 @@ interface Props {
 const fullscreenSupported = typeof document !== "undefined" && Boolean(document.fullscreenEnabled);
 
 /** One live device: canvas + player + touch input, with a calm building overlay. */
-export function DeviceFrame({ shareId, device, repo, branch, variant = "grid", onSelect, registerControls, onRotationChange, hidden, topbarLead }: Props) {
+export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = "grid", onSelect, registerControls, onRotationChange, hidden, topbarLead }: Props) {
+  // Identity for the registry/FLIP map; the stream paths still use the raw deviceId.
+  const key = paneKey ?? device.deviceId;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const frameRef = useRef<HTMLElement>(null); // the whole card is the fullscreen target
   const inputRef = useRef<DeviceInput | null>(null); // control buttons ride the same HID ws as touch
@@ -102,8 +112,8 @@ export function DeviceFrame({ shareId, device, repo, branch, variant = "grid", o
 
   // Report rotation up so app-level chrome (the mobile dock) can spin its icons in sync.
   useEffect(() => {
-    onRotationChange?.(device.deviceId, rotationDeg);
-  }, [rotationDeg, device.deviceId, onRotationChange]);
+    onRotationChange?.(key, rotationDeg);
+  }, [rotationDeg, key, onRotationChange]);
 
   const toggleFullscreen = () => {
     const el = frameRef.current;
@@ -173,7 +183,7 @@ export function DeviceFrame({ shareId, device, repo, branch, variant = "grid", o
     if (onScreenRef.current && !hiddenRef.current && !document.hidden) player.start();
     else player.setActive(false);
     input.start();
-    registerControls?.(device.deviceId, {
+    registerControls?.(key, {
       home: pressHome,
       rotate,
       typeText: (text) => inputRef.current?.sendText(text) ?? [...text],
@@ -218,13 +228,13 @@ export function DeviceFrame({ shareId, device, repo, branch, variant = "grid", o
     return () => {
       io.disconnect();
       document.removeEventListener("visibilitychange", onVis);
-      registerControls?.(device.deviceId, null);
+      registerControls?.(key, null);
       inputRef.current = null;
       playerRef.current = null;
       input.dispose();
       player.dispose();
     };
-  }, [ready, shareId, device.deviceId, syncActive]);
+  }, [ready, shareId, device.deviceId, key, syncActive]);
 
   // Showing/hiding a frame (compare pane device switch) starts or drops its
   // stream directly — the observer can't, since it ignores zero-area reports.
@@ -240,7 +250,7 @@ export function DeviceFrame({ shareId, device, repo, branch, variant = "grid", o
       className={`device device--${variant}`}
       ref={frameRef}
       hidden={hidden}
-      data-device-id={device.deviceId}
+      data-device-id={key}
       {...(isThumb
         ? { onClick: onSelect, role: "button", tabIndex: 0, title: `Focus ${device.label}`, "aria-label": `Focus ${device.label}` }
         : {})}

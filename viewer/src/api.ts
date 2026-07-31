@@ -24,13 +24,20 @@ export interface ShareTestRun {
   summary?: string;
 }
 
-/** A migration source preview shown alongside the target (old vs new). */
-export interface SharePaired {
+/**
+ * One source on the page: an app at a ref, with its devices. A page is a LIST
+ * of these — an ordinary preview has exactly one, a comparison has several.
+ * Order is old → new (references first, this share's own last).
+ */
+export interface SharePane {
+  /** Each pane streams from its OWN share path; one PIN unlocks them all. */
   shareId: string;
   repo: string;
   ref: string;
-  /** Agent-set pane name; falls back to "Reference". */
+  /** Agent-set pane name; falls back to the repo name. */
   label?: string;
+  /** True for the page's own share — the one `devices`/`canRestart` describe. */
+  self?: true;
   devices: ShareDevice[];
 }
 
@@ -54,14 +61,16 @@ export interface ShareState {
   locked?: boolean;
   /** Number of PIN digits (when locked) — drives the pad's dot count + auto-submit. */
   pinLength?: number;
+  /** This share's own devices. Same as the `self` pane's — kept for the web branch. */
   devices: ShareDevice[];
   /** Present while the agent is running (or just finished) an end-to-end test. */
   testRun?: ShareTestRun;
-  /** Migration target only: the live source preview to render side by side. */
-  pairedWith?: SharePaired;
-  /** Agent-set name for this app's pane in a compare; falls back to "Working". */
-  paneLabel?: string;
-  /** Migration target only: the parity checklist, when the ledger file exists. */
+  /**
+   * Every source on this page, in display order. Always at least one, so the
+   * stage renders a list and never asks "is this a comparison?".
+   */
+  panes: SharePane[];
+  /** The parity checklist, when the agent is keeping one. */
   ledger?: { screens: ShareLedgerScreen[] };
 }
 
