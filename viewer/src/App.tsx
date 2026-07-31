@@ -275,15 +275,12 @@ export function App() {
               pick per column instead (topbarLead above). */}
           {!multiSource && panes.length > 1 && (
             <DevicePicker
-              devices={panes.map((p) => p.device)}
-              visible={new Set([...visible].map((k) => k.slice(k.indexOf(":") + 1)))}
+              options={panes.map((p) => ({ key: p.key, label: p.device.label }))}
+              visible={visible}
               shownCount={shownCount}
               mode={mode}
               onMode={setMode}
-              onToggle={(deviceId) => {
-                const p = panes.find((x) => x.deviceId === deviceId);
-                if (p) toggleHidden(p.key);
-              }}
+              onToggle={toggleHidden}
               open={menuOpen}
               onOpenChange={setMenuOpen}
             />
@@ -307,7 +304,7 @@ function GroupDevicePicker({ group, onPick }: { group: StageGroup; onPick: (key:
   if (group.panes.length < 2) return null;
   return (
     <DevicePicker
-      devices={group.panes.map((p) => ({ ...p.device, deviceId: p.key, label: shortDeviceName(p.device.label) }))}
+      options={group.panes.map((p) => ({ key: p.key, label: shortDeviceName(p.device.label) }))}
       visible={new Set([group.activeKey])}
       shownCount={1}
       onToggle={onPick}

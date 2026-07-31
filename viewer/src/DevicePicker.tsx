@@ -1,11 +1,26 @@
 import { useEffect, useRef } from "react";
 import { CheckIcon, SwitchDeviceIcon } from "./icons.tsx";
-import type { ShareDevice } from "./api.ts";
 
 export type ViewMode = "grid" | "focus";
 
+/**
+ * One row in the picker, identified by an OPAQUE key.
+ *
+ * Deliberately not `ShareDevice`: a page can show several sources, and two of
+ * them call their first device `ios-0`. Keying the picker on `deviceId` meant
+ * callers converted pane keys in and out by hand — slicing the prefix off,
+ * looking devices back up by an id that is not unique, and fabricating device
+ * objects to smuggle keys through. The picker never needed to know what a device
+ * is; it needs something to show and something to hand back.
+ */
+export interface PickerOption {
+  key: string;
+  label: string;
+}
+
 interface Props {
-  devices: ShareDevice[];
+  options: PickerOption[];
+  /** Keys currently on screen. */
   visible: Set<string>;
   shownCount: number;
   /** Layout section — omit both to hide it (a compare pane shows one device, so it has no layout choice). */
@@ -32,7 +47,7 @@ interface Props {
 
 /** Choose the layout mode and which devices are shown. */
 export function DevicePicker({
-  devices,
+  options,
   visible,
   shownCount,
   mode,
@@ -48,7 +63,7 @@ export function DevicePicker({
   const single = select === "single";
   // In single mode the count is always "1/2" — useless. Name the device instead,
   // dropping the runtime ("iPhone 17 Pro · iOS 26.5" → "iPhone 17 Pro") to fit.
-  const current = devices.find((d) => visible.has(d.deviceId)) ?? devices[0];
+  const current = options.find((o) => visible.has(o.key)) ?? options[0];
 
   useEffect(() => {
     if (!open) return;
@@ -83,7 +98,7 @@ export function DevicePicker({
           <>
             <GridIcon />
             <span className="picker-count">
-              {single ? (current?.label.split(" · ")[0] ?? "—") : `${shownCount}/${devices.length}`}
+              {single ? (current?.label.split(" · ")[0] ?? "—") : `${shownCount}/${options.length}`}
             </span>
             <ChevronIcon className={open ? "chev flip" : "chev"} />
           </>
@@ -118,14 +133,14 @@ export function DevicePicker({
         )}
 
         <div className="picker-section">Devices</div>
-        {devices.map((d) => {
-          const on = visible.has(d.deviceId);
+        {options.map((d) => {
+          const on = visible.has(d.key);
           // Multi: never hide the last one. Single: the chosen row is already the
           // answer, so clicking it again is a no-op rather than a disabled button.
           const isLast = on && shownCount <= 1;
           return (
             <button
-              key={d.deviceId}
+              key={d.key}
               type="button"
               className="picker-row"
               role={single ? "menuitemradio" : "menuitemcheckbox"}
@@ -133,7 +148,7 @@ export function DevicePicker({
               disabled={!single && isLast}
               onClick={() => {
                 if (single && on) return void onOpenChange(false);
-                onToggle(d.deviceId);
+                onToggle(d.key);
                 if (single) onOpenChange(false);
               }}
             >
