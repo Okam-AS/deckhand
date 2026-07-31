@@ -7,7 +7,7 @@ GitHub App auth + git worktrees, build recipes + detection (Expo/RN/NativeScript
 Android), iOS simctl control, Android device layer (avdmanager/emulator/adb, uiautomator
 describe, toolEnv), the streaming router (serve-sim for iOS, H.264/screencap backend for
 Android), the preview engine (**platform-grouped, build-once-install-many, parallel
-boots/installs**), the MCP server (9 tools, token auth) + scoped share proxy, and the CLI.
+boots/installs**), the MCP server (token auth) + scoped share proxy, and the CLI.
 The viewer is the calm WebCodecs page (reused for Android via multipart-PNG).
 
 Phase 2.5 (PLAN §2 amendment 2026-07-15) added the **daily dev loop**: apps can have a
@@ -48,15 +48,26 @@ AVCC, `streaming/androidH264.ts`); the adb-screencap MJPEG backend is now only t
 for system images with no working AVC encoder (notably the API 29 emulator). Both sit behind
 the same `StreamingBackend` seam (PLAN §8).
 
-**Migration features (2026-07-18):** deckhand can host an app→app migration (e.g.
-NativeScript → React Native) as a *parity harness*. A target app declares `migratesFrom`
-(the source app id); `start_migration_preview` boots both side by side; the viewer renders old vs
-new in two columns (reusing `DeviceFrame` per shareId — no new proxy code) plus a parity
-checklist read from `deckhand.migration.yaml` in the target repo. Deckhand runs/shows both
-and reads the ledger; the agent translates code, judges parity, and writes the ledger.
-See PLAN §6 "Migration features". No mechanical diff tool, no golden snapshots, no persisted
-migration session — those were deliberately not built (agent is the comparator; keeps the
-no-DB / no-repo-writes invariants clean).
+**Migration features (2026-07-18, generalised 2026-07-31):** deckhand can host an app→app
+migration (e.g. NativeScript → React Native) as a *parity harness*. A target app declares
+`migratesFrom` (the source app id), and a parity checklist comes either from `items` on
+`start_preview` or from `deckhand.migration.yaml` in the target repo. Deckhand runs/shows
+the apps and reads the ledger; the agent translates code, judges parity, and writes the
+ledger. No mechanical diff tool, no golden snapshots, no persisted migration session —
+deliberately not built (agent is the comparator; keeps the no-DB / no-repo-writes
+invariants clean).
+
+**A page is a set of panes, not a pair.** There is no compare view and no compare tool.
+`start_preview`'s `alongside` puts extra sources on the same page — another app, this app
+at another ref, a worktree, an arbitrary repo, or `{}` for the registered `migratesFrom` —
+and `shareState` returns `panes[]` (old → new, own share last). One link, one PIN, however
+many sources; `pairedShareIds()` fans the unlock across them, so the old public-by-
+construction reference pane is gone. Panes still stream from their **own** shareIds, which
+is why none of this touched the proxy or the streaming seam. The viewer has ONE stage:
+`computeStage` in `viewer/src/panes.ts` decides grouping and visibility as a pure function
+(one source → all its devices; several → one each; mobile → one), and it is the only
+tested code in `viewer/` — keep new layout rules there, not in `App.tsx`.
+See PLAN §6 "One page, several sources" and the accepted-risk note beside it.
 
 Next phases: 3 (password shares + describe/ui/logs + add_app + **the agent-led
 onboarding contract**, PLAN §6 — empty-state `nextStep`s, relayable errors, PAT auth,
