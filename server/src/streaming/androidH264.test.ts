@@ -306,3 +306,47 @@ test("a joiner facing an oversized replay gets a fresh segment instead of the ba
   assert.equal(spawned.length, 2, "the segment was bounced for a fresh keyframe");
   source.dispose();
 });
+
+test("a spawn failure does not pin the device to MJPEG for the rest of the process", async () => {
+  // ready() cached its promise unconditionally, so ANY false became the
+  // permanent answer for that device — including one caused by a momentary adb
+  // failure or a readiness timer that fired while the emulator was still coming
+  // up. The device then served the ~4 MB/s MJPEG fallback until the server was
+  // restarted, with nothing reporting why.
+  let failNext = true;
+  const spawned: FakeRecorder[] = [];
+  const source = new AvccSource("emulator-5554", () => {
+    if (failNext) throw new Error("adb: device offline");
+    const rec = new FakeRecorder();
+    spawned.push(rec);
+    return rec as unknown as ChildProcessWithoutNullStreams;
+  });
+
+  assert.equal(await source.ready(), false, "the failing attempt reports false");
+
+  // The circumstance passes. The next probe must actually re-probe.
+  failNext = false;
+  const second = source.ready();
+  spawned[spawned.length - 1]!.stdout.write(annexb(SPS, PPS, IDR));
+  assert.equal(await second, true, "a transient failure must not be remembered as a capability");
+});
+
+test("an encoder that dies without producing anything IS remembered", async () => {
+  // The one false worth caching: it started, produced nothing decodable, and
+  // died immediately. Respawning would only spin. (A subscriber has to be
+  // attached — with nobody watching, giving up says nothing about the encoder,
+  // and that verdict is deliberately NOT sticky.)
+  const { source, spawned, latest } = harness();
+  const c = collector();
+  source.subscribe(c.sub);
+  const first = source.ready();
+  await tick();
+  latest().stderr.write("Encoder failed (err=-38)\n");
+  latest().emit("close", 1);
+  assert.equal(await first, false);
+
+  const before = spawned.length;
+  assert.equal(await source.ready(), false, "the verdict stands");
+  assert.equal(spawned.length, before, "and it did not respawn to re-ask");
+  source.dispose();
+});

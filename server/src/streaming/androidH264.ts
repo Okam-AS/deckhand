@@ -128,17 +128,31 @@ export class AvccSource {
 
   /**
    * True once the device has produced decodable H.264, false if its encoder is
-   * unusable. Cached — the probe cost is paid once per device, and the running
-   * recorder it starts is the same one subscribers then attach to.
+   * unusable. The probe cost is paid once per device, and the running recorder
+   * it starts is the same one subscribers then attach to.
+   *
+   * A TRUE is cached forever — a device that has encoded H.264 can encode it.
+   * A FALSE is only cached when it is a real verdict about the encoder (it died
+   * before producing anything usable). Every other route to false is a
+   * circumstance, not a capability: the readiness timer firing while an emulator
+   * is still coming up, a spawn that failed because adb was momentarily
+   * unreachable, or giving up because nobody was subscribed yet. Caching those
+   * pinned a perfectly good device to the ~4 MB/s MJPEG fallback for the rest of
+   * the server's life, with no way back short of a restart — and the first probe
+   * happens exactly when the device is at its busiest.
    */
   ready(): Promise<boolean> {
     if (this.readyPromise) return this.readyPromise;
-    this.readyPromise = new Promise<boolean>((resolve) => {
+    // Held locally as well as on the instance: `start()` can settle
+    // SYNCHRONOUSLY (a spawn that throws), and a non-sticky settle clears the
+    // instance field — so returning the field would hand the caller `null`.
+    const probe = new Promise<boolean>((resolve) => {
       this.settleReady = resolve;
     });
+    this.readyPromise = probe;
     this.readyTimer = setTimeout(() => this.settle(false), READY_TIMEOUT_MS);
     this.start();
-    return this.readyPromise;
+    return probe;
   }
 
   /** Attach a viewer. Returns the unsubscribe function. */
@@ -208,11 +222,19 @@ export class AvccSource {
     this.stop();
   }
 
-  private settle(ok: boolean): void {
+  /**
+   * Resolve the readiness probe. `sticky` marks a verdict about the DEVICE
+   * rather than about this attempt — only such a false is remembered.
+   */
+  private settle(ok: boolean, sticky = false): void {
     if (this.readyTimer) clearTimeout(this.readyTimer);
     this.readyTimer = null;
     const resolve = this.settleReady;
     this.settleReady = null;
+    // Drop the cache so the next caller re-probes. The promise already handed
+    // out still resolves false — this attempt did fail — but it stops being the
+    // permanent answer for the device.
+    if (!ok && !sticky) this.readyPromise = null;
     resolve?.(ok);
   }
 
@@ -291,7 +313,9 @@ export class AvccSource {
     // back. A device that has streamed before gets restarted instead: a short
     // segment there means rotation, a killed recorder or a lost adb link.
     if (!this.everProduced && this.description === null && lived < MIN_HEALTHY_SEGMENT_MS) {
-      this.settle(false);
+      // The one false worth remembering: it started, produced nothing decodable,
+      // and died immediately. Respawning would just spin.
+      this.settle(false, true);
       for (const sub of this.subscribers) sub.close();
       this.subscribers.clear();
       return;
