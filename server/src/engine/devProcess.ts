@@ -28,8 +28,40 @@ interface RunningDev {
 
 export type SpawnFn = typeof nodeSpawn;
 
+/**
+ * Env marker stamped on every livesync tree deckhand spawns, so a LATER
+ * deckhand can recognise and collect its own.
+ *
+ * These are spawned detached and tracked only in an in-memory Map, so every
+ * server restart reparented the whole tree to launchd and forgot it. Measured
+ * on the machine today: 36 orphans burning 418% CPU with the load average at
+ * 17.9 on an 18-core box. That starves the Android emulators specifically —
+ * they are full-system ARM emulation under QEMU and CPU-bound, while iOS
+ * simulators are native and nearly free — which is exactly the "Android lags,
+ * iOS is fine" asymmetry, and it is nowhere near the streaming code.
+ */
+export const DEV_MARKER_ENV = "DECKHAND_DEV_RUN";
+
+/** How long a SIGTERM gets before the group is killed outright. */
+const KILL_ESCALATION_MS = 5_000;
+
 export class DevProcessManager {
   private readonly procs = new Map<string, RunningDev>();
+
+  /**
+   * Pids this manager owns RIGHT NOW, so the boot reap can spare them.
+   *
+   * The orphan sweep runs after the HTTP port is bound (a second `deckhand
+   * serve` has to lose on EADDRINUSE first), so an agent's start_preview can
+   * already have spawned a child by the time it runs — and that child carries
+   * the same env marker the sweep hunts for. Without this the server kills its
+   * own brand-new bundler and leaves the preview `ready` with nothing serving.
+   */
+  livePids(): number[] {
+    return [...this.procs.values()]
+      .map((r) => r.child.pid)
+      .filter((pid): pid is number => typeof pid === "number");
+  }
   constructor(private readonly spawnFn: SpawnFn = nodeSpawn) {}
 
   /** Start (replacing any previous) dev process for a key. */
@@ -37,7 +69,7 @@ export class DevProcessManager {
     this.stop(spec.key);
     const child = this.spawnFn(spec.command, spec.args, {
       cwd: spec.cwd,
-      env: { ...process.env, ...spec.env },
+      env: { ...process.env, ...spec.env, [DEV_MARKER_ENV]: "1" },
       detached: true,
     });
     const rec: RunningDev = { spec, child, exited: false, exitCode: null };
@@ -81,15 +113,27 @@ export class DevProcessManager {
     const rec = this.procs.get(key);
     this.procs.delete(key);
     if (!rec || rec.exited || !rec.child.pid) return;
-    try {
-      process.kill(-rec.child.pid, "SIGTERM");
-    } catch {
+    const pid = rec.child.pid;
+    const signal = (sig: NodeJS.Signals) => {
       try {
-        rec.child.kill("SIGTERM");
+        process.kill(-pid, sig);
       } catch {
-        // already gone
+        try {
+          rec.child.kill(sig);
+        } catch {
+          // already gone
+        }
       }
-    }
+    };
+    signal("SIGTERM");
+    // SIGTERM was sent and never followed up, so a livesync runner that ignores
+    // it — which is how 36 of them survived, the oldest for nearly five hours —
+    // simply stayed. Escalate, and don't hold the process open waiting.
+    const t = setTimeout(() => {
+      if (rec.exited) return;
+      signal("SIGKILL");
+    }, KILL_ESCALATION_MS);
+    t.unref?.();
   }
 
   stopAll(): void {

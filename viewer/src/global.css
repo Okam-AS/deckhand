@@ -1214,10 +1214,16 @@ figcaption {
 .pbar.open .pbar-head {
   border-radius: 16px 16px 0 0;
 }
-/* The compare layouts are flex columns with their own gap — the bar's bottom
-   margin would double the spacing there. */
-.app--mig .pbar,
-.app--mig-mobile .pbar {
+/* The grouped stage is a flex column with its own gap, so the bar's own bottom
+   margin would double the spacing. The gap has to actually exist, though —
+   zeroing the margin without it left the first device sitting right under the
+   bar with nothing between them. */
+.app--grouped {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(1rem, 2.5vw, 1.8rem);
+}
+.app--grouped .pbar {
   margin-bottom: 0;
 }
 .pbar-body {
@@ -1387,183 +1393,127 @@ figcaption {
   font-size: 0.82rem;
 }
 
-/* ---- Migration view: source (old) and target (new) side by side ---------- */
-.app--mig {
-  display: flex;
-  flex-direction: column;
-  gap: clamp(1rem, 2.5vw, 1.8rem);
-}
-.mig-cols {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+/* ---- Grouped stage: one column per source (an app at a ref) -------------
+   Sizing is height-bounded rather than the single-source stage's flat width,
+   because columns have to fit the viewport TOGETHER — a width-first rule wraps
+   the third source below the fold. */
+.stage--grouped {
+  align-items: stretch;
   gap: clamp(1rem, 3vw, 2.4rem);
-  align-items: start;
+  /* Never wrap: the stage decides in JS how many sources fit (MIN_PANE_WIDTH in
+     panes.ts) and shows one when they don't. Wrapping instead put the second
+     source below the fold at full size, which reads as "the other app is
+     missing" — the one thing a comparison must not do. */
+  flex-wrap: nowrap;
 }
-.mig-cols--solo {
-  grid-template-columns: 1fr;
-  max-width: 34rem;
-  margin: 0 auto;
+/* The pane-info popover. Deliberately NOT `.mmenu`: that is the phone dock's
+   menu — `position: fixed`, `left: 50%`, with a `top` computed from the dock's
+   height — so borrowing it anchored this to the middle of the VIEWPORT and let
+   it run off the right edge. A popover hanging off a button belongs to the
+   button. */
+.frame-info {
+  position: relative;
+  display: inline-flex;
 }
-.mig-col {
+.frame-info-menu {
+  position: absolute;
+  top: calc(100% + 0.45rem);
+  right: 0;
+  left: auto;
+  min-width: 15rem;
+  /* Never wider than the column it hangs in, so a long branch name wraps
+     instead of pushing the panel off screen. */
+  max-width: min(22rem, 80vw);
+  padding: 0.45rem;
+  z-index: 40;
+  background: var(--card-grad);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-6px) scale(0.97);
+  transform-origin: top right;
+  transition:
+    opacity 0.18s var(--ease-settle, ease),
+    transform 0.2s var(--ease-settle, ease);
+}
+.frame-info-menu.open {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0) scale(1);
+}
+/* Long values (a branch like feature/some-long-name) wrap rather than widen. */
+.frame-info-menu .info-val {
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.stage--grouped .pane-group {
+  /* Equal columns that shrink together, rather than each demanding its natural
+     width and pushing the next one onto a new row. */
+  flex: 1 1 0;
+}
+.pane-group {
   display: flex;
   flex-direction: column;
   gap: 0.8rem;
   min-width: 0;
 }
-.mig-col-head {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  padding: 0 0.2rem;
-}
-.mig-col-tag {
-  font-family: var(--serif);
-  font-size: 0.9rem;
-  font-weight: 650;
-  letter-spacing: -0.01em;
-  padding: 0.12rem 0.6rem;
-  border-radius: 999px;
-  border: 1px solid var(--line-strong);
-}
-.mig-col-tag--source {
-  color: var(--ink-soft);
-  background: var(--panel-2);
-}
-.mig-col-tag--target {
-  color: var(--bg);
-  background: var(--accent);
-  border-color: transparent;
-}
-.mig-col-meta {
-  font-size: 0.82rem;
-  color: var(--ink-faint);
-  font-family: var(--mono);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.mig-toggle {
-  margin-left: auto;
-  font: inherit;
-  font-size: 0.78rem;
-  color: var(--ink-soft);
-  background: transparent;
-  border: 1px solid var(--line-strong);
-  border-radius: 999px;
-  padding: 0.2rem 0.7rem;
-  cursor: pointer;
-  transition: color 0.2s, border-color 0.2s;
-}
-.mig-toggle:hover {
-  color: var(--ink);
-  border-color: var(--ink-faint);
-}
-.mig-col-stage {
+.pane-stage {
   display: flex;
   flex-wrap: wrap;
   gap: 1rem;
   justify-content: center;
 }
-/* Size the FIGURE by width (exactly like the working .stage--grid view — the
-   screen and canvas then fill it as plain block children, so pointer hit-testing
-   stays correct). The width is the smaller of the column (100%) and the width
-   that makes the device 78vh tall, so it fits both the column and the window
-   height while keeping its true aspect ratio — no stretch, no clipped bottom. */
-.app--mig .mig-col-stage .device {
-  width: min(100%, calc(78vh * var(--dev-w, 9) / var(--dev-h, 19.5)));
+.stage--grouped .pane-stage .device {
+  width: min(100%, calc(74vh * var(--dev-w, 9) / var(--dev-h, 19.5)));
 }
-/* Mobile compare: one device at a time (see CompareView). Reuse the proven
-   single-device mobile sizing — a flex column that fills the screen, with the
-   stage as a size CONTAINER so the device fits its REAL box (cqw/cqh), never
-   the raw viewport. vh-based sizing here blew the frame past the window edge
-   because it couldn't see the space the switch and chrome had already taken. */
-.app--mig-mobile {
-  height: 100dvh;
-  min-height: 100dvh;
-  display: flex;
-  flex-direction: column;
-  gap: 0.8rem;
-}
-.app--mig-mobile .mig-cols {
-  flex: 1;
-  min-height: 0;
-  max-width: none;
-  margin: 0;
-  /* The pane is the only thing allowed to give: a reference pane taller than
-     its row (more than one device in the stage) must clip here rather than
-     push the chrome around. */
-  overflow: hidden;
-}
-/* Chrome above the pane is fixed-size. Without this the flex default
-   (shrink: 1) collapses the switch to zero height the moment the visible pane
-   overflows — switching to Reference made the selector itself disappear. */
-.app--mig-mobile > .mig-switch,
-.app--mig-mobile > .pbar {
-  flex: none;
-}
-/* The visible pane wrapper: React omits the attribute entirely for hidden={false}
-   (it never emits hidden="false"), so :not([hidden]) is what matches it. */
-.app--mig-mobile .mig-col,
-.app--mig-mobile .mig-cols > :not([hidden]) {
-  min-height: 0;
-  height: 100%;
-}
-.app--mig-mobile .mig-col {
-  flex: 1;
-}
-.app--mig-mobile .mig-col-stage {
-  flex: 1;
-  min-height: 0;
-  align-items: center;
-  container-type: size;
-}
-.app--mig-mobile .mig-col-stage .device {
-  width: 100%;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.app--mig-mobile .mig-col-stage .device-screen {
-  height: min(100cqh, calc(100cqw * var(--dev-h, 19.5) / var(--dev-w, 9)));
-  width: auto;
-  max-width: 100cqw;
-  max-height: 100cqh;
-  margin: 0;
-}
-/* Match the proven single-device mobile view: hide the topbar and caption so
-   the figure holds only the screen (a flex row with the topbar visible would
-   sit them side by side and break the layout). The switch names the side. */
-.app--mig-mobile .mig-col-head,
-.app--mig-mobile .mig-col-stage .device-topbar,
-.app--mig-mobile figcaption {
+
+/* A source with nothing on screen takes no space. On mobile exactly one device
+   is visible, so without this the other source's empty column still claims its
+   share of the height and the visible phone renders at half size. Hidden rather
+   than unmounted, like the frames inside it: the stream is already dropped by
+   each frame's own `hidden`, and keeping the DOM means switching back does not
+   rebuild the canvas or the input socket. */
+.pane-group--off {
   display: none;
 }
-/* Reference⇄Working segmented switch, phone only. */
-.mig-switch {
-  display: flex;
-  gap: 0.25rem;
-  align-self: center;
-  padding: 0.25rem;
-  border: 1px solid var(--line-strong);
-  border-radius: 999px;
-  background: var(--panel-2);
-}
-.mig-switch-btn {
-  font: inherit;
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: var(--ink-soft);
-  background: transparent;
-  border: 0;
-  border-radius: 999px;
-  padding: 0.35rem 1.1rem;
-  cursor: pointer;
-  transition: color 0.2s, background 0.2s;
-}
-.mig-switch-btn.is-active {
-  color: var(--bg);
-  background: var(--accent);
+
+@media (max-width: 700px) {
+  /* One pane, full height. The dock names what you are looking at. */
+  /* The stage centres its children by default, which leaves the column at its
+     content height — so the size container below has no definite height and the
+     cq units inside it resolve to zero. Stretch, then fill down the chain. */
+  .app--grouped .stage {
+    align-items: stretch;
+  }
+  .app--grouped .pane-group,
+  .app--grouped .pane-stage {
+    flex: 1;
+    min-height: 0;
+  }
+  .app--grouped .pane-stage {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    container-type: size;
+  }
+  .app--grouped .pane-stage .device {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .app--grouped .pane-stage .device-screen {
+    height: min(100cqh, calc(100cqw * var(--dev-h) / var(--dev-w)));
+    width: auto;
+    max-width: 100cqw;
+    max-height: 100cqh;
+  }
 }
 
 .mig-dot {
@@ -1575,6 +1525,7 @@ figcaption {
   border-radius: 999px;
   color: var(--bg);
 }
+.mig-dot--done,
 .mig-dot--matches {
   background: var(--sage);
 }
@@ -1588,6 +1539,7 @@ figcaption {
   background: var(--ink-faint);
 }
 /* compare verdicts */
+.mig-dot--done,
 .mig-dot--matches,
 .mig-dot--adjusted {
   background: var(--sage);
@@ -1669,8 +1621,3 @@ figcaption {
   font-family: var(--mono);
 }
 
-@media (max-width: 760px) {
-  .mig-cols {
-    grid-template-columns: 1fr;
-  }
-}

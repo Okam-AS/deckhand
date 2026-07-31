@@ -306,3 +306,72 @@ test("a joiner facing an oversized replay gets a fresh segment instead of the ba
   assert.equal(spawned.length, 2, "the segment was bounced for a fresh keyframe");
   source.dispose();
 });
+
+test("a spawn failure does not pin the device to MJPEG for the rest of the process", async () => {
+  // ready() cached its promise unconditionally, so ANY false became the
+  // permanent answer for that device — including one caused by a momentary adb
+  // failure or a readiness timer that fired while the emulator was still coming
+  // up. The device then served the ~4 MB/s MJPEG fallback until the server was
+  // restarted, with nothing reporting why.
+  let failNext = true;
+  const spawned: FakeRecorder[] = [];
+  // retryAfterMs: 0 — this test is about the failure not being PERMANENT, not
+  // about how long the backoff lasts.
+  const source = new AvccSource(
+    "emulator-5554",
+    () => {
+      if (failNext) throw new Error("adb: device offline");
+      const rec = new FakeRecorder();
+      spawned.push(rec);
+      return rec as unknown as ChildProcessWithoutNullStreams;
+    },
+    0,
+  );
+
+  assert.equal(await source.ready(), false, "the failing attempt reports false");
+
+  // The circumstance passes. The next probe must actually re-probe.
+  failNext = false;
+  const second = source.ready();
+  spawned[spawned.length - 1]!.stdout.write(annexb(SPS, PPS, IDR));
+  assert.equal(await second, true, "a transient failure must not be remembered as a capability");
+});
+
+test("a dead-looking encoder is backed off, not written off", async () => {
+  // "Started, produced nothing, died at once" reads as a broken encoder — and is
+  // ALSO exactly what contention looks like. The host's H.264 encoder is
+  // effectively single-instance across emulators: whichever one holds
+  // `screenrecord` wins and every other device silently produces zero bytes,
+  // with no error. Verified on the machine: an emulator yielding 0 bytes
+  // produced 207KB the moment the other recorder stopped. Caching that as a
+  // verdict pinned a capable device to the ~4 MB/s MJPEG path for good.
+  const { source, spawned, latest } = harness();
+  const c = collector();
+  source.subscribe(c.sub);
+  const first = source.ready();
+  await tick();
+  latest().stderr.write("Encoder failed (err=-38)\n");
+  latest().emit("close", 1);
+  assert.equal(await first, false);
+
+  const before = spawned.length;
+  assert.equal(await source.ready(), false, "a retry inside the backoff window reuses the answer");
+  assert.equal(spawned.length, before, "…without respawning, so a polling viewer cannot spin");
+  source.dispose();
+});
+
+test("a probe nobody subscribed to releases the recorder", async () => {
+  // ready() starts a recorder, but only unsubscribe() ever scheduled the stop —
+  // so a readiness probe no viewer followed up on held the host's single H.264
+  // encoder indefinitely, which is what pushed the OTHER emulator onto MJPEG.
+  const { source, spawned, latest } = harness();
+  const ready = source.ready();
+  await tick();
+  latest().stdout.write(annexb(SPS, PPS, IDR));
+  assert.equal(await ready, true);
+
+  assert.equal(spawned[0]!.killed, false, "still recording during the linger window");
+  await new Promise((r) => setTimeout(r, 3_100));
+  assert.equal(spawned[0]!.killed, true, "and released once nobody arrived");
+  source.dispose();
+});

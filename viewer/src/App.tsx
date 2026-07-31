@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { DeviceFrame, type DeviceControls } from "./DeviceFrame.tsx";
 import { DevicePicker, type ViewMode } from "./DevicePicker.tsx";
-import { MobileChrome } from "./MobileChrome.tsx";
+import { MobileChrome, type DockEntry } from "./MobileChrome.tsx";
 import { WebFrame } from "./WebFrame.tsx";
 import { PinGate } from "./PinGate.tsx";
-import { CompareView } from "./CompareView.tsx";
 import { ProgressBar } from "./ProgressBar.tsx";
+import { computeStage, shortDeviceName, type StageGroup } from "./panes.ts";
 import { fetchShareState, shareIdFromPath, type ShareState } from "./api.ts";
 import { useIsMobile } from "./useIsMobile.ts";
 
@@ -13,27 +13,41 @@ export function App() {
   const shareId = shareIdFromPath();
   const [state, setState] = useState<ShareState | null>(null);
   const [gone, setGone] = useState(false);
-  const [visible, setVisible] = useState<Set<string> | null>(null);
-  const [mode, setMode] = useState<ViewMode>("grid");
-  const [focusId, setFocusId] = useState<string | null>(null);
-  const [menuOpen, setMenuOpen] = useState(false);
   const [unlocked, setUnlocked] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  // Stage controls. Each is a small, independent choice the stage folds into a
+  // layout (see computeStage) — no branch here decides what the page "is".
+  const [mode, setMode] = useState<ViewMode>("grid");
+  const [choices, setChoices] = useState<Record<string, string>>({});
+  const [hiddenKeys, setHiddenKeys] = useState<string[]>([]);
+  const [focusKey, setFocusKey] = useState<string | null>(null);
+  // Width decides how many sources fit side by side (see MIN_PANE_WIDTH). Read
+  // from the window rather than a media query: the threshold depends on how many
+  // sources the page has, which no fixed breakpoint can express.
+  const [viewportWidth, setViewportWidth] = useState(() => (typeof window === "undefined" ? Infinity : window.innerWidth));
   const stageRef = useRef<HTMLElement>(null);
   const prevRects = useRef<Map<string, DOMRect>>(new Map());
   const isMobile = useIsMobile();
-  // Live home/rotate handles per device, registered by each mounted DeviceFrame
-  // so the mobile menu can drive whichever device is on screen.
+  // Live home/rotate handles per pane, registered by each mounted DeviceFrame so
+  // the mobile dock can drive whichever pane is on screen. Keyed by PANE key, not
+  // deviceId: two sources both call their first device "ios-0", and one map keyed
+  // on that would let one app's dock buttons drive the other app's phone.
   const controls = useRef(new Map<string, DeviceControls>());
-  const registerControls = useCallback((id: string, api: DeviceControls | null) => {
-    if (api) controls.current.set(id, api);
-    else controls.current.delete(id);
+  const registerControls = useCallback((key: string, api: DeviceControls | null) => {
+    if (api) controls.current.set(key, api);
+    else controls.current.delete(key);
   }, []);
-  // Per-device cumulative rotation (deg), so the mobile dock icons spin with the sim.
   const [rotations, setRotations] = useState<Record<string, number>>({});
   const handleRotation = useCallback(
-    (id: string, deg: number) => setRotations((r) => (r[id] === deg ? r : { ...r, [id]: deg })),
+    (key: string, deg: number) => setRotations((r) => (r[key] === deg ? r : { ...r, [key]: deg })),
     [],
   );
+
+  useEffect(() => {
+    const onResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   useEffect(() => {
     if (!shareId) return;
@@ -58,10 +72,19 @@ export function App() {
     };
   }, [shareId]);
 
-  useEffect(() => {
-    // Only once unlocked — a locked state has no `devices` yet.
-    if (state && !state.locked && visible === null) setVisible(new Set((state.devices ?? []).map((d) => d.deviceId)));
-  }, [state, visible]);
+  // The whole layout, derived. Memoised on the inputs that actually change it, so
+  // the 1.2s status poll doesn't rebuild pane objects and churn React keys.
+  const stage = useMemo(
+    () =>
+      computeStage(state?.panes ?? [], {
+        isMobile,
+        viewportWidth,
+        choices,
+        hiddenKeys,
+        focusKey: focusKey ?? undefined,
+      }),
+    [state?.panes, isMobile, viewportWidth, choices, hiddenKeys, focusKey],
+  );
 
   // FLIP: after each layout change, slide/zoom every device figure from its old
   // box to its new one. Runs every render; the >1px threshold no-ops on the
@@ -77,6 +100,9 @@ export function App() {
       const before = prevRects.current.get(id);
       const after = now.get(id)!;
       if (!before) continue;
+      // A hidden frame reports a zero-area box. Animating from one flings the
+      // frame in from nowhere on the way back, so treat it as "no previous box".
+      if (!before.width || !before.height || !after.width || !after.height) continue;
       const dx = before.left - after.left;
       const dy = before.top - after.top;
       const sx = after.width ? before.width / after.width : 1;
@@ -133,49 +159,14 @@ export function App() {
     );
   }
 
-  // Working preview in a compare session → the side-by-side compare view
-  // (reference vs working + parity checklist). Both panes reuse DeviceFrame via
-  // their own shareIds. Also taken when only the checklist is present (the
-  // reference isn't live yet) so the ledger still shows. (Migration is one
-  // preset — reference = the source app.)
-  // `?solo` forces the plain single-device view even for a paired preview — a
-  // diagnostic escape hatch to test the working device outside the compare DOM.
-  const soloOverride = new URLSearchParams(location.search).has("solo");
-  if (!soloOverride && (state.pairedWith || state.ledger)) return <CompareView shareId={shareId} state={state} />;
-
-  const devices = state.devices ?? [];
-  const isWeb = devices.some((d) => d.platform === "web");
-  const vis = visible ?? new Set(devices.map((d) => d.deviceId));
-  const multi = devices.length > 1;
-  // Mobile shows exactly one device (the focused one) — several sims on a
-  // phone screen help no one. The visibility set only applies on desktop.
-  const mobileFocus =
-    focusId && devices.some((d) => d.deviceId === focusId) ? focusId : (devices[0]?.deviceId ?? "");
-  const shown = isMobile ? devices.filter((d) => d.deviceId === mobileFocus) : devices.filter((d) => vis.has(d.deviceId));
-  // With a single shown device the two modes are identical — render it at the
-  // normal side-by-side size, never the enlarged focus size.
-  const effectiveMode: ViewMode = shown.length > 1 ? mode : "grid";
-  const focus = focusId && vis.has(focusId) ? focusId : (shown[0]?.deviceId ?? null);
-
-  const toggle = (id: string) =>
-    setVisible((prev) => {
-      const next = new Set(prev ?? devices.map((d) => d.deviceId));
-      if (next.has(id)) {
-        if (next.size <= 1) return next; // always keep at least one on screen
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-
   // Web preview: a single iframe of the running dev server, no device chrome.
-  if (isWeb) {
+  const devices = state.devices ?? [];
+  if (devices.some((d) => d.platform === "web")) {
     const dev = devices[0]!;
     return (
       <>
         <main className="app app--web">
-          <ProgressBar testRun={state.testRun} />
+          <ProgressBar testRun={state.testRun} screens={state.ledger?.screens} />
           <section className="stage stage--web" ref={stageRef}>
             <WebFrame shareId={shareId} device={dev} repo={state.repo} branch={state.ref} />
           </section>
@@ -187,27 +178,77 @@ export function App() {
     );
   }
 
+  const { groups, panes, visible, multiSource } = stage;
+  const shownCount = visible.size;
+  // With one source and one device on screen the two layout modes are identical —
+  // render at the normal size, never the enlarged focus size. Grouped columns are
+  // sized by the column, so the modes don't apply there at all.
+  const effectiveMode: ViewMode = !multiSource && shownCount > 1 ? mode : "grid";
+  // The enlarged pane in focus mode: the one the user clicked, when it is still
+  // on screen. Taking the first visible pane instead meant clicking a thumbnail
+  // set focusKey and changed nothing — focusKey only reached computeStage on
+  // mobile, so focus mode was inert on the desktop it exists for.
+  const focused = focusKey && visible.has(focusKey) ? focusKey : ([...visible][0] ?? "");
+  const mobileFocus = isMobile ? focused : "";
+
+  // The dock drives whichever pane is on screen; on desktop it isn't rendered.
+  const dockEntries: DockEntry[] = panes.map((p) => ({
+    key: p.key,
+    label: p.device.label,
+    ...(multiSource ? { group: groups.find((g) => g.shareId === p.shareId)?.label } : {}),
+  }));
+  const focusedGroup = groups.find((g) => g.panes.some((p) => p.key === mobileFocus));
+
+  const toggleHidden = (key: string) =>
+    setHiddenKeys((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
+
+  // Each column chooses on its own. Making the others follow spent a click every
+  // time the guess was wrong, and which two things to compare is the user's call.
+  const chooseInGroup = (group: StageGroup, key: string) =>
+    setChoices((prev) => ({ ...prev, [group.shareId]: key }));
+
   return (
     <>
-      <main className={`app ${multi && !isMobile ? "has-picker" : ""} ${isMobile ? "app--mobile" : ""}`}>
-        <ProgressBar testRun={state.testRun} />
-        <section className={`stage stage--${effectiveMode}`} ref={stageRef}>
-          {shown.map((d) => {
-            const variant = effectiveMode === "grid" ? "grid" : d.deviceId === focus ? "focus" : "thumb";
-            return (
-              <DeviceFrame
-                key={d.deviceId}
-                shareId={shareId}
-                device={d}
-                repo={state.repo}
-                branch={state.ref}
-                variant={variant}
-                onSelect={variant === "thumb" ? () => setFocusId(d.deviceId) : undefined}
-                registerControls={registerControls}
-                onRotationChange={handleRotation}
-              />
-            );
-          })}
+      <main
+        className={`app ${!multiSource && panes.length > 1 && !isMobile ? "has-picker" : ""} ${multiSource ? "app--grouped" : ""} ${isMobile ? "app--mobile" : ""}`}
+      >
+        <ProgressBar testRun={state.testRun} screens={state.ledger?.screens} />
+        <section className={`stage stage--${effectiveMode} ${multiSource ? "stage--grouped" : ""}`} ref={stageRef}>
+          {groups.map((g) => (
+            <section
+              className={`pane-group ${g.self ? "pane-group--self" : ""} ${g.panes.some((p) => visible.has(p.key)) ? "" : "pane-group--off"}`}
+              key={g.key}
+            >
+              {/* No column heading: the repo and branch live behind each frame's
+                  (i) button now, so a heading would state them twice — once above
+                  the sim and once inside it. */}
+              <div className="pane-stage">
+                {g.panes.map((p) => (
+                  <DeviceFrame
+                    key={p.key}
+                    paneKey={p.key}
+                    shareId={p.shareId}
+                    device={p.device}
+                    repo={g.repo}
+                    branch={g.ref}
+                    variant={effectiveMode === "grid" ? "grid" : p.key === focused ? "focus" : "thumb"}
+                    onSelect={effectiveMode === "focus" && p.key !== focused ? () => setFocusKey(p.key) : undefined}
+                    hidden={!visible.has(p.key)}
+                    registerControls={registerControls}
+                    onRotationChange={handleRotation}
+                    // With several sources each column shows one device, so the
+                    // switch belongs in that column's control row — beside
+                    // Home/Rotate rather than floating above the stage.
+                    topbarLead={
+                      multiSource && g.panes.length > 1 ? (
+                        <GroupDevicePicker group={g} onPick={(key) => chooseInGroup(g, key)} />
+                      ) : undefined
+                    }
+                  />
+                ))}
+              </div>
+            </section>
+          ))}
         </section>
       </main>
 
@@ -215,28 +256,31 @@ export function App() {
           become the containing block for these position:fixed elements. */}
       {isMobile ? (
         <MobileChrome
-          devices={devices}
-          focusId={mobileFocus}
-          onFocus={setFocusId}
+          entries={dockEntries}
+          focusKey={mobileFocus}
+          onFocus={setFocusKey}
           onHome={() => controls.current.get(mobileFocus)?.home()}
           onRotate={() => controls.current.get(mobileFocus)?.rotate()}
           onText={(text) => controls.current.get(mobileFocus)?.typeText(text) ?? [...text]}
           onKey={(name) => controls.current.get(mobileFocus)?.key(name)}
           rotation={rotations[mobileFocus] ?? 0}
-          repo={state.repo}
-          refName={state.ref}
+          repo={focusedGroup?.repo ?? state.repo}
+          refName={focusedGroup?.ref ?? state.ref}
           source={state.source}
         />
       ) : (
         <>
-          {multi && (
+          {/* One source with several devices keeps the stage-level picker: which
+              of them are on screen, and the grid/focus layout. Grouped columns
+              pick per column instead (topbarLead above). */}
+          {!multiSource && panes.length > 1 && (
             <DevicePicker
-              devices={devices}
-              visible={vis}
-              shownCount={shown.length}
+              options={panes.map((p) => ({ key: p.key, label: p.device.label }))}
+              visible={visible}
+              shownCount={shownCount}
               mode={mode}
               onMode={setMode}
-              onToggle={toggle}
+              onToggle={toggleHidden}
               open={menuOpen}
               onOpenChange={setMenuOpen}
             />
@@ -247,6 +291,29 @@ export function App() {
         </>
       )}
     </>
+  );
+}
+
+/**
+ * Which device this column shows: DevicePicker in single-select compact mode, so
+ * it's the same switch-device icon button + popover the mobile dock uses, sitting
+ * in the control row beside Home/Rotate/Fullscreen.
+ */
+function GroupDevicePicker({ group, onPick }: { group: StageGroup; onPick: (key: string) => void }) {
+  const [open, setOpen] = useState(false);
+  if (group.panes.length < 2) return null;
+  return (
+    <DevicePicker
+      options={group.panes.map((p) => ({ key: p.key, label: shortDeviceName(p.device.label) }))}
+      visible={new Set([group.activeKey])}
+      shownCount={1}
+      onToggle={onPick}
+      open={open}
+      onOpenChange={setOpen}
+      select="single"
+      inline
+      compact
+    />
   );
 }
 

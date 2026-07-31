@@ -7,6 +7,7 @@ import {
   selectDeviceType,
   deviceLabel,
   SimctlError,
+  Simctl,
   type Runtime,
 } from "./ios.ts";
 
@@ -92,5 +93,28 @@ describe("deviceLabel", () => {
     const rt = selectRuntime(parseRuntimes(runtimesJson), "26");
     const dt = selectDeviceType(parseDeviceTypes(deviceTypesJson), "16 pro");
     assert.equal(deviceLabel(dt, rt), "iPhone 16 Pro · iOS 26.0");
+  });
+});
+
+describe("Simctl.delete", () => {
+  /** A simctl whose every call reports the given exit code. */
+  const simctlExiting = (code: number) =>
+    new Simctl(async (_cmd: string, _args: string[]) => ({
+      stdout: Buffer.alloc(0),
+      stderr: code === 0 ? "" : "Unable to delete device: in use",
+      code,
+    }));
+
+  it("throws when simctl fails, so the caller's guard is not a no-op", async () => {
+    // bootIos deletes a pooled device whose erase failed and only creates a
+    // replacement if the delete SUCCEEDED — two simulators under one pool name
+    // means a later lease can bind the stale one, still holding the previous
+    // tenant's container, while the tenant map calls it clean. A swallowed exit
+    // code made that catch unreachable and the replacement got created anyway.
+    await assert.rejects(() => simctlExiting(1).delete("UDID-1"), (e) => e instanceof SimctlError);
+  });
+
+  it("resolves when simctl succeeds", async () => {
+    await simctlExiting(0).delete("UDID-1");
   });
 });

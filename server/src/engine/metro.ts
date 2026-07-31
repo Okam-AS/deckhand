@@ -134,6 +134,9 @@ function pidAlive(pid: number): boolean {
 }
 
 /** Manages the Metro dev-server (one app at a time, on a port deckhand owns). */
+/** Env var stamped on every Metro deckhand spawns, so a restart can find its own. */
+export const METRO_MARKER_ENV = "DECKHAND_METRO";
+
 export class MetroManager {
   /**
    * One Metro per (app, checkout, env), NOT one in total.
@@ -141,12 +144,27 @@ export class MetroManager {
    * A single slot meant the second Expo preview that needed Metro killed the
    * first one's dev server: two live previews of one app at different refs is a
    * supported flow (`findReusable` never reuses across refs), so is a second app,
-   * and `compare_start` boots its reference under a synthetic app id and then
+   * and an extra pane boots under a synthetic app id and then
    * boots the working app. The victim stayed `ready` in the viewer with a dead
    * bundle URL — nothing failed, the app just could not reload. Ports are
    * allocated per instance out of the same range.
    */
   private readonly running = new Map<string, RunningMetro>();
+
+  /**
+   * Pids this manager owns RIGHT NOW, so the boot reap can spare them.
+   *
+   * The orphan sweep runs after the HTTP port is bound (a second `deckhand
+   * serve` has to lose on EADDRINUSE first), so an agent's start_preview can
+   * already have spawned a child by the time it runs — and that child carries
+   * the same env marker the sweep hunts for. Without this the server kills its
+   * own brand-new bundler and leaves the preview `ready` with nothing serving.
+   */
+  livePids(): number[] {
+    return [...this.running.values()]
+      .map((r) => r.child.pid)
+      .filter((pid): pid is number => typeof pid === "number");
+  }
   private readonly range: [number, number];
   private readonly spawnFn: typeof spawn;
   private readonly portFreeImpl: (port: number) => Promise<boolean>;
@@ -175,6 +193,15 @@ export class MetroManager {
       ...process.env,
       ...appEnv,
       REACT_NATIVE_PACKAGER_HOSTNAME: "127.0.0.1",
+      // A marker so a LATER deckhand can recognise this process as its own.
+      // Metro is spawned detached, so it outlives the server — and nothing could
+      // tell a leaked one from the developer's own `expo start`, because the
+      // argv is identical. Nineteen server restarts left nineteen Metros holding
+      // the whole 8081-8099 range, after which every preview failed with "no
+      // free Metro port". Deliberately in the ENV rather than argv: expo would
+      // reject an unknown flag, and cwd is the developer's own checkout for a
+      // local preview, so neither can carry the mark.
+      [METRO_MARKER_ENV]: "1",
     } as Record<string, string>;
   }
 

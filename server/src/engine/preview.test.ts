@@ -53,6 +53,38 @@ interface Harness {
   attachCalls: string[];
 }
 
+/**
+ * The default fake AndroidManager. Extracted so a test can override ONE method
+ * (`...androidFake(calls), attachedSerials: …`) instead of restating a whole
+ * device manager to change a single answer.
+ */
+function androidFake(calls: string[] = []) {
+  return {
+    // No emulator is attached in the fake world, so every console port is free.
+    // Tests about port collisions override this.
+    attachedSerials: async () => [] as string[],
+    listSystemImages: async () => [{ pkg: "system-images;android-34;google_apis;arm64-v8a", api: 34 }],
+    listAvds: async () => [] as string[],
+    createAvd: async () => {
+      calls.push("avd create");
+    },
+    bootEmulator: async () => {
+      calls.push("emu boot");
+      return "emulator-5554";
+    },
+    packagePath: async () => "/data/app/base.apk",
+    installApk: async (serial: string) => {
+      calls.push(`apk install ${serial}`);
+    },
+    launch: async () => {},
+    screenshotPng: async () => Buffer.from([0x89, 0x50]),
+    findApk: async () => "/wt/app-debug.apk",
+    shutdown: async () => {},
+    deleteAvd: async () => {},
+    describe: async () => "tree",
+  } as unknown as PreviewEngineDeps["android"];
+}
+
 function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (step: CommandStep) => RunResult = () => ({ code: 0, timedOut: false, aborted: false })): Harness {
   const simctlCalls: string[] = [];
   const buildEnvSeen: (Record<string, string> | undefined)[] = [];
@@ -130,31 +162,13 @@ function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (
     reapOrphans: async () => {},
   };
 
-  const android = {
-    listSystemImages: async () => [{ pkg: "system-images;android-34;google_apis;arm64-v8a", api: 34 }],
-    createAvd: async () => {
-      simctlCalls.push("avd create");
-    },
-    bootEmulator: async () => {
-      simctlCalls.push("emu boot");
-      return "emulator-5554";
-    },
-    packagePath: async () => "/data/app/base.apk",
-    installApk: async (serial: string) => {
-      simctlCalls.push(`apk install ${serial}`);
-    },
-    launch: async () => {},
-    screenshotPng: async () => Buffer.from([0x89, 0x50]),
-    findApk: async () => "/wt/app-debug.apk",
-    shutdown: async () => {},
-    deleteAvd: async () => {},
-    describe: async () => "tree",
-  } as unknown as PreviewEngineDeps["android"];
+  const android = androidFake(simctlCalls);
 
   const deps: PreviewEngineDeps = {
     config: overrides.config ?? config,
     android,
     worktrees: {
+      localBranch: async () => "main",
       createWorktree: async (_app: App, previewId: string) => {
         worktreeCalls.push(`create ${previewId}`);
         return { path: `/wt/${previewId}`, ref: "refs/x", description: "main", usedToken: false };
@@ -818,10 +832,11 @@ describe("PreviewEngine migration pairing", () => {
 
       const s = h.engine.shareState(tgt.shareId)!;
       assert.ok(s, "target shareState resolves");
-      assert.ok(s.pairedWith, "target shareState carries pairedWith");
-      assert.equal(s.pairedWith!.shareId, src.shareId);
-      assert.equal(s.pairedWith!.repo, "github.com/okam/old");
-      assert.equal(s.pairedWith!.devices.length, 1);
+      assert.equal(s.panes.length, 2, "target shareState carries the source as a second pane");
+      assert.equal(s.panes[0]!.shareId, src.shareId, "the source comes first — the page reads old → new");
+      assert.equal(s.panes[0]!.repo, "github.com/okam/old");
+      assert.equal(s.panes[0]!.devices.length, 1);
+      assert.equal(s.panes[1]!.self, true);
       assert.ok(s.ledger, "target shareState carries the ledger");
       assert.equal(s.ledger!.screens.length, 2);
       assert.equal(s.ledger!.screens[0]!.name, "Onboarding");
@@ -849,26 +864,26 @@ describe("PreviewEngine migration pairing", () => {
     const tgt = h.engine.startPreview({ app: targetApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
 
     h.engine.setAppPin("old-app", "1234"); // source protected, target public
-    assert.equal(h.engine.shareState(tgt.shareId)!.pairedWith, undefined, "an unreachable source pane must not be advertised");
-    assert.equal(h.engine.pairedShareId(tgt.shareId), null, "and must not be handed an unlock cookie");
+    assert.equal(h.engine.shareState(tgt.shareId)!.panes.length, 1, "an unreachable source pane must not be advertised");
+    assert.deepEqual(h.engine.pairedShareIds(tgt.shareId), [], "and must not be handed an unlock cookie");
 
     // Protect the target too and the pane comes back: the unlock now rides on a
     // PIN this page actually proves, instead of being granted from nothing.
     h.engine.setAppPin("new-app", "4321");
-    assert.equal(h.engine.shareState(tgt.shareId)!.pairedWith?.shareId, src.shareId);
-    assert.equal(h.engine.pairedShareId(tgt.shareId), src.shareId);
+    assert.equal(h.engine.shareState(tgt.shareId)!.panes[0]!.shareId, src.shareId);
+    assert.deepEqual(h.engine.pairedShareIds(tgt.shareId), [src.shareId]);
 
     // The source's own page never renders a target pane, so it must never mint
     // the target's cookie — that would be pure gratuitous widening.
-    assert.equal(h.engine.pairedShareId(src.shareId), null);
+    assert.deepEqual(h.engine.pairedShareIds(src.shareId), []);
   });
 
-  it("omits pairedWith and ledger for an ordinary (non-migration) app", async () => {
+  it("gives an ordinary (non-migration) app one pane and no ledger", async () => {
     const h = makeEngine();
     h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
     await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
     const s = h.engine.shareState("share-abc")!;
-    assert.equal(s.pairedWith, undefined);
+    assert.equal(s.panes.length, 1, "just its own pane — nothing to compare against");
     assert.equal(s.ledger, undefined);
   });
 });
@@ -880,19 +895,22 @@ describe("PreviewEngine compare session", () => {
     return { genPreviewId: () => `pv${++pid}`, genShareId: () => `share-${++sid}` };
   };
 
-  it("links a working preview to a live reference and surfaces pairedWith + ledger", () => {
+  it("links a working preview to a live reference and surfaces both panes + ledger", () => {
     const h = makeEngine(uniqIds());
     const ref = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
     const work = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "feature" }, devices: [{ platform: "ios" }], access: "public" });
     assert.notEqual(ref.shareId, work.shareId);
 
-    const counts = h.engine.startCompare(work.previewId, { shareId: ref.shareId, repo: "acme/app", ref: "main" }, ["Login", "Home"]);
-    assert.deepEqual(counts, { pending: 2, doing: 0, matches: 0, adjusted: 0, regression: 0 });
+    const counts = h.engine.startCompare(work.previewId, [{ shareId: ref.shareId, repo: "acme/app", ref: "main" }], ["Login", "Home"]);
+    assert.deepEqual(counts, { pending: 2, doing: 0, done: 0, adjusted: 0, regression: 0 });
 
     const s = h.engine.shareState(work.shareId)!;
-    assert.equal(s.pairedWith?.shareId, ref.shareId);
-    assert.equal(s.pairedWith?.ref, "main");
-    assert.equal(s.pairedWith?.devices.length, 1);
+    assert.deepEqual(
+      s.panes.map((x) => x.shareId),
+      [ref.shareId, work.shareId],
+    );
+    assert.equal(s.panes[0]!.ref, "main");
+    assert.equal(s.panes[0]!.devices.length, 1);
     assert.deepEqual(
       s.ledger?.screens.map((x) => [x.name, x.status]),
       [
@@ -902,46 +920,307 @@ describe("PreviewEngine compare session", () => {
     );
   });
 
-  it("reports the pairing from BOTH sides, so one PIN can unlock both panes", () => {
-    // The compare viewer streams the reference pane from the reference's own
-    // shareId, whose unlock cookie is path-scoped to it. The unlock route needs
-    // to find the partner from whichever side the viewer was opened on — else
-    // the second pane sits on "Connecting…" with its WS refused every second.
+  it("mints a page's panes, and never the other way round", () => {
+    // The viewer streams each pane from that pane's own shareId, whose unlock
+    // cookie is path-scoped to it, so unlocking the PAGE has to mint for its
+    // panes — else they sit on "Connecting…" with the WS refused every second.
+    //
+    // The reverse must NOT hold. Panes are keyed by content, so two pages naming
+    // the same source share one pane; a reverse mint would hand whoever holds
+    // one page's PIN a valid cookie for the other page — different app,
+    // different owner, no PIN proven. See the cross-page test below.
     const h = makeEngine(uniqIds());
     const ref = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
     const work = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "feature" }, devices: [{ platform: "ios" }], access: "public" });
-    h.engine.startCompare(work.previewId, { shareId: ref.shareId, repo: "acme/app", ref: "main" }, []);
+    h.engine.startCompare(work.previewId, [{ shareId: ref.shareId, repo: "acme/app", ref: "main" }], []);
 
-    assert.equal(h.engine.pairedShareId(work.shareId), ref.shareId);
-    assert.equal(h.engine.pairedShareId(ref.shareId), work.shareId);
-    assert.equal(h.engine.pairedShareId("no-such-share"), null);
+    assert.deepEqual(h.engine.pairedShareIds(work.shareId), [ref.shareId]);
+    assert.deepEqual(h.engine.pairedShareIds(ref.shareId), [], "a pane does not unlock the page holding it");
+    assert.deepEqual(h.engine.pairedShareIds("no-such-share"), []);
+  });
+
+  it("tears down a pane the page stopped referencing, unless another page has it", async () => {
+    // start_preview is idempotent and is the documented way to re-answer "what's
+    // the link?", so re-calling it with a different `alongside` is expected. The
+    // dropped pane used to keep its simulator, Metro port and worktree with no
+    // previewId ever returned to the agent and no way for stop_preview to reach
+    // it — only the idle sweep, an hour later.
+    const h = makeEngine({ ...uniqIds(), config: { ...config, limits: { ...config.limits, maxTotalDevices: 8 } } });
+    const mk = (branch: string) =>
+      h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch }, devices: [{ platform: "ios" }], access: "public" });
+    const old = mk("v1");
+    const next = mk("v2");
+    const page = mk("feature");
+    for (const p of [old, next, page]) await waitForPhase(h.engine, p.previewId, ["ready", "failed"]);
+
+    h.engine.startCompare(page.previewId, [{ shareId: old.shareId, repo: "r", ref: "v1", previewId: old.previewId }], []);
+    h.engine.startCompare(page.previewId, [{ shareId: next.shareId, repo: "r", ref: "v2", previewId: next.previewId }], []);
+    await new Promise((r) => setTimeout(r, 50)); // the teardown is fire-and-forget
+    assert.equal(h.engine.getStatus(old.previewId), null, "the dropped pane is collected");
+    assert.ok(h.engine.getStatus(next.previewId), "and the new one is not");
+  });
+
+  it("keeps a dropped pane alive while another page still shows it", async () => {
+    const h = makeEngine({ ...uniqIds(), config: { ...config, limits: { ...config.limits, maxTotalDevices: 8 } } });
+    const mk = (branch: string) =>
+      h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch }, devices: [{ platform: "ios" }], access: "public" });
+    const shared = mk("v1");
+    const pageA = mk("a");
+    const pageB = mk("b");
+    for (const p of [shared, pageA, pageB]) await waitForPhase(h.engine, p.previewId, ["ready", "failed"]);
+    const ref = { shareId: shared.shareId, repo: "r", ref: "v1", previewId: shared.previewId };
+
+    h.engine.startCompare(pageA.previewId, [ref], []);
+    h.engine.startCompare(pageB.previewId, [ref], []);
+    h.engine.startCompare(pageA.previewId, [], []); // A drops it; B still has it
+    await new Promise((r) => setTimeout(r, 50));
+    assert.ok(h.engine.getStatus(shared.previewId), "content-keyed panes are shared, so dropping one reference is not enough");
+  });
+
+  it("hides a pane the page can no longer unlock, instead of hanging it", () => {
+    // Panes inherit the page's access at boot, so the two normally match — until
+    // `set_pin --remove` makes the page public while the pane keeps its PIN. The
+    // pane was still advertised but no longer minted for, so the viewer mounted
+    // it and had its WS refused once a second forever, with no pad: the pad only
+    // renders for the page's own shareId. The migratesFrom branch had guarded
+    // this from the start; the compare branch never did.
+    const h = makeEngine(uniqIds());
+    const pane = h.engine.startPreview({ app: { ...rnApp, id: "pane-app" }, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "password" });
+    const page = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "feature" }, devices: [{ platform: "ios" }], access: "password" });
+    h.engine.setAppPin("pane-app", "1111");
+    h.engine.setAppPin(rnApp.id, "2222");
+    h.engine.startCompare(page.previewId, [{ shareId: pane.shareId, repo: "acme/app", ref: "main" }], []);
+
+    assert.equal(h.engine.shareState(page.shareId)!.panes.length, 2, "both protected: the pane shows");
+    assert.deepEqual(h.engine.pairedShareIds(page.shareId), [pane.shareId]);
+
+    h.engine.setAppPin(rnApp.id, null); // the page goes public; the pane does not
+    assert.equal(h.engine.shareState(page.shareId)!.panes.length, 1, "an unreachable pane is not advertised");
+    assert.deepEqual(h.engine.pairedShareIds(page.shareId), [], "…and not minted for either");
+  });
+
+  it("never lets one page's PIN reach another page that shares a pane", () => {
+    // The escalation this replaced: pages A and B both name the same source, so
+    // they land on ONE pane P (content-keyed, deliberately — it is what makes
+    // reuse possible). A holder of B's link and PIN unlocked P, and the mint
+    // then handed them a cookie for A, with A's shareId disclosed in its Path.
+    const h = makeEngine({ ...uniqIds(), config: { ...config, limits: { ...config.limits, maxTotalDevices: 8 } } });
+    const mk = (branch: string) =>
+      h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch }, devices: [{ platform: "ios" }], access: "public" });
+    const shared = mk("main");
+    const pageA = mk("a");
+    const pageB = mk("b");
+    const ref = { shareId: shared.shareId, repo: "acme/app", ref: "main" };
+    h.engine.startCompare(pageA.previewId, [ref], []);
+    h.engine.startCompare(pageB.previewId, [ref], []);
+
+    assert.deepEqual(h.engine.pairedShareIds(pageA.shareId), [shared.shareId], "each page reaches its own pane");
+    assert.deepEqual(h.engine.pairedShareIds(pageB.shareId), [shared.shareId]);
+    assert.deepEqual(
+      h.engine.pairedShareIds(shared.shareId),
+      [],
+      "and the shared pane reaches NEITHER page — that was the escalation",
+    );
+  });
+
+  it("keeps recorded verdicts when the checklist is seeded again", () => {
+    // start_preview is idempotent and is the documented way to re-answer
+    // "what's the link?", so an agent asking for it again mid-port used to reset
+    // every verdict to pending and lose the whole session's judgements.
+    const h = makeEngine(uniqIds());
+    const work = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    h.engine.startCompare(work.previewId, [], ["Login", "Home"]);
+    h.engine.setCompareItem(work.previewId, { item: "Login", verdict: "done", note: "checked" });
+
+    // The same call again, as an idempotent re-invocation makes it.
+    h.engine.startCompare(work.previewId, [], ["Login", "Home"]);
+    const st = h.engine.compareStatus(work.previewId)!;
+    assert.equal(st.items.find((i) => i.name === "Login")!.verdict, "done");
+    assert.equal(st.items.find((i) => i.name === "Login")!.note, "checked");
+    assert.equal(st.items.find((i) => i.name === "Home")!.verdict, "pending");
+
+    // An item recorded but not re-seeded is kept — the list only ever grows.
+    h.engine.setCompareItem(work.previewId, { item: "Profile", verdict: "regression" });
+    h.engine.startCompare(work.previewId, [], ["Login"]);
+    assert.equal(h.engine.compareStatus(work.previewId)!.items.length, 3);
+  });
+
+  it("surfaces every live source as a pane, own share last", () => {
+    // The page is a set of panes, and the order is old → new: references first,
+    // this share's own last, so a migration reads left-to-right as before→after.
+    const h = makeEngine({ ...uniqIds(), config: { ...config, limits: { ...config.limits, maxTotalDevices: 8 } } });
+    const mk = (branch: string) =>
+      h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch }, devices: [{ platform: "ios" }], access: "public" });
+    const old = mk("old");
+    const main = mk("main");
+    const work = mk("feature");
+    h.engine.startCompare(
+      work.previewId,
+      [
+        { shareId: old.shareId, repo: "acme/old", ref: "old" },
+        { shareId: main.shareId, repo: "acme/app", ref: "main" },
+      ],
+      [],
+    );
+
+    const panes = h.engine.shareState(work.shareId)!.panes;
+    assert.deepEqual(
+      panes.map((x) => x.shareId),
+      [old.shareId, main.shareId, work.shareId],
+    );
+    // repo + ref is what names a pane; there is no separate label to set.
+    assert.deepEqual(
+      panes.slice(0, 2).map((x) => [x.repo, x.ref]),
+      [
+        ["acme/old", "old"],
+        ["acme/app", "main"],
+      ],
+    );
+    assert.equal(panes[2]!.ref, "feature", "the page's own pane is named from its own app + ref");
+    assert.ok(panes[2]!.repo, "…and always has a repo to show");
+    assert.deepEqual(
+      panes.map((x) => x.self),
+      [undefined, undefined, true],
+      "exactly one pane is the page's own",
+    );
+    assert.equal(panes[0]!.devices.length, 1);
+  });
+
+  it("gives an ordinary preview a single self pane", () => {
+    const h = makeEngine(uniqIds());
+    const solo = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    const panes = h.engine.shareState(solo.shareId)!.panes;
+    assert.equal(panes.length, 1);
+    assert.equal(panes[0]!.self, true);
+    assert.equal(panes[0]!.shareId, solo.shareId);
+  });
+
+  it("drops a dead reference from panes but keeps the live ones", () => {
+    const h = makeEngine(uniqIds());
+    const live = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    const work = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "feature" }, devices: [{ platform: "ios" }], access: "public" });
+    h.engine.startCompare(
+      work.previewId,
+      [
+        { shareId: "not-live", repo: "r", ref: "gone" },
+        { shareId: live.shareId, repo: "acme/app", ref: "main" },
+      ],
+      [],
+    );
+    assert.deepEqual(
+      h.engine.shareState(work.shareId)!.panes.map((x) => x.shareId),
+      [live.shareId, work.shareId],
+    );
+  });
+
+  it("keeps every pane's idle clock alive while the page is being watched", async () => {
+    // The viewer polls ONE shareId — the page's own. The extra panes have nobody
+    // polling them directly, so a single markActive let them age out on their own
+    // idle timer and get torn down underneath a page someone was actively
+    // watching: the reference column simply vanished mid-session.
+    const clock = { t: Date.now() };
+    const h = makeEngine({
+      ...uniqIds(),
+      now: () => clock.t,
+      config: { ...config, limits: { ...config.limits, maxTotalDevices: 8, idleMinutes: 1 } },
+    });
+    const mk = (branch: string) =>
+      h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch }, devices: [{ platform: "ios" }], access: "public" });
+    const ref = mk("main");
+    const work = mk("feature");
+    for (const p of [ref, work]) await waitForPhase(h.engine, p.previewId, ["ready", "failed"]);
+    h.engine.startCompare(work.previewId, [{ shareId: ref.shareId, repo: "acme/app", ref: "main", previewId: ref.previewId }], []);
+
+    // Age everything past the idle window, then poll the page exactly as a viewer does.
+    clock.t += 5 * 60_000;
+    assert.ok(h.engine.shareState(work.shareId), "the page still answers");
+
+    assert.deepEqual(await h.engine.sweepIdle(), [], "polling the page must reprieve every pane on it, not just its own");
+    assert.ok(h.engine.getStatus(ref.previewId), "the reference pane survives");
+    assert.ok(h.engine.getStatus(work.previewId));
+  });
+
+  it("unlocks every pane of a three-source compare", () => {
+    // The whole point of the pane model: old app + main + this branch is three
+    // sources on one page, and one PIN has to reach all of them. Each extra pane
+    // streams from its own shareId, so each needs its own path-scoped cookie.
+    const h = makeEngine({ ...uniqIds(), config: { ...config, limits: { ...config.limits, maxTotalDevices: 8 } } });
+    const mk = (branch: string) =>
+      h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch }, devices: [{ platform: "ios" }], access: "public" });
+    const a = mk("main");
+    const b = mk("old");
+    const work = mk("feature");
+    h.engine.startCompare(
+      work.previewId,
+      [
+        { shareId: a.shareId, repo: "acme/app", ref: "main" },
+        { shareId: b.shareId, repo: "acme/old", ref: "old" },
+      ],
+      [],
+    );
+
+    assert.deepEqual(h.engine.pairedShareIds(work.shareId).sort(), [a.shareId, b.shareId].sort());
+    // …and no pane mints for the page, in either direction.
+    assert.deepEqual(h.engine.pairedShareIds(a.shareId), []);
+    assert.deepEqual(h.engine.pairedShareIds(b.shareId), []);
+  });
+
+  it("skips a dead pane when minting cookies but keeps the live ones", () => {
+    const h = makeEngine(uniqIds());
+    const live = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    const work = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "feature" }, devices: [{ platform: "ios" }], access: "public" });
+    h.engine.startCompare(
+      work.previewId,
+      [
+        { shareId: "not-live", repo: "r", ref: "gone" },
+        { shareId: live.shareId, repo: "acme/app", ref: "main" },
+      ],
+      [],
+    );
+    assert.deepEqual(h.engine.pairedShareIds(work.shareId), [live.shareId]);
+  });
+
+  it("de-dupes references naming the same share twice", () => {
+    const h = makeEngine(uniqIds());
+    const ref = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    const work = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "feature" }, devices: [{ platform: "ios" }], access: "public" });
+    h.engine.startCompare(
+      work.previewId,
+      [
+        { shareId: ref.shareId, repo: "acme/app", ref: "main" },
+        { shareId: ref.shareId, repo: "acme/app", ref: "main" },
+      ],
+      [],
+    );
+    assert.equal(h.engine.compareStatus(work.previewId)!.references.length, 1);
+    assert.deepEqual(h.engine.pairedShareIds(work.shareId), [ref.shareId]);
   });
 
   it("reports no pairing when the reference isn't live (nothing to unlock)", () => {
     const h = makeEngine(uniqIds());
     const work = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
-    h.engine.startCompare(work.previewId, { shareId: "not-live", repo: "r", ref: "main" }, ["A"]);
-    assert.equal(h.engine.pairedShareId(work.shareId), null);
+    h.engine.startCompare(work.previewId, [{ shareId: "not-live", repo: "r", ref: "main" }], ["A"]);
+    assert.deepEqual(h.engine.pairedShareIds(work.shareId), []);
   });
 
   it("sets a verdict, appends an unknown item, and recounts", () => {
     const h = makeEngine(uniqIds());
     const work = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
-    h.engine.startCompare(work.previewId, { shareId: "ref-x", repo: "r", ref: "main" }, ["A", "B"]);
-    assert.equal(h.engine.setCompareItem(work.previewId, { item: "A", verdict: "matches" }).matches, 1);
+    h.engine.startCompare(work.previewId, [{ shareId: "ref-x", repo: "r", ref: "main" }], ["A", "B"]);
+    assert.equal(h.engine.setCompareItem(work.previewId, { item: "A", verdict: "done" }).done, 1);
     assert.equal(h.engine.setCompareItem(work.previewId, { item: "C", verdict: "adjusted", note: "redesigned" }).adjusted, 1);
     const st = h.engine.compareStatus(work.previewId)!;
     assert.equal(st.items.length, 3);
     assert.equal(st.items.find((i) => i.name === "C")?.note, "redesigned");
-    assert.deepEqual(st.counts, { pending: 1, doing: 0, matches: 1, adjusted: 1, regression: 0 });
+    assert.deepEqual(st.counts, { pending: 1, doing: 0, done: 1, adjusted: 1, regression: 0 });
   });
 
-  it("surfaces the ledger even when the reference isn't live (no pairedWith)", () => {
+  it("surfaces the ledger even when the reference isn't live (no second pane)", () => {
     const h = makeEngine();
     const work = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
-    h.engine.startCompare(work.previewId, { shareId: "not-live", repo: "r", ref: "main" }, ["A"]);
+    h.engine.startCompare(work.previewId, [{ shareId: "not-live", repo: "r", ref: "main" }], ["A"]);
     const s = h.engine.shareState("share-abc")!;
-    assert.equal(s.pairedWith, undefined);
+    assert.equal(s.panes.length, 1, "a dead reference is not advertised as a pane");
     assert.equal(s.ledger?.screens.length, 1);
   });
 
@@ -951,7 +1230,7 @@ describe("PreviewEngine compare session", () => {
     const work = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "feature" }, devices: [{ platform: "ios" }], access: "public" });
     await waitForPhase(h.engine, ref.previewId, ["ready", "failed"]);
     await waitForPhase(h.engine, work.previewId, ["ready", "failed"]);
-    h.engine.startCompare(work.previewId, { shareId: ref.shareId, repo: "acme/app", ref: "main" }, [], ref.previewId);
+    h.engine.startCompare(work.previewId, [{ shareId: ref.shareId, repo: "acme/app", ref: "main", previewId: ref.previewId }], []);
 
     assert.equal(await h.engine.stopPreview(work.previewId), true);
     assert.equal(h.engine.getStatus(work.previewId), null);
@@ -964,8 +1243,8 @@ describe("PreviewEngine compare session", () => {
     const w1 = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "f1" }, devices: [{ platform: "ios" }], access: "public" });
     const w2 = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "f2" }, devices: [{ platform: "ios" }], access: "public" });
     for (const p of [ref, w1, w2]) await waitForPhase(h.engine, p.previewId, ["ready", "failed"]);
-    h.engine.startCompare(w1.previewId, { shareId: ref.shareId, repo: "r", ref: "main" }, [], ref.previewId);
-    h.engine.startCompare(w2.previewId, { shareId: ref.shareId, repo: "r", ref: "main" }, [], ref.previewId);
+    h.engine.startCompare(w1.previewId, [{ shareId: ref.shareId, repo: "r", ref: "main", previewId: ref.previewId }], []);
+    h.engine.startCompare(w2.previewId, [{ shareId: ref.shareId, repo: "r", ref: "main", previewId: ref.previewId }], []);
 
     await h.engine.stopPreview(w1.previewId);
     assert.equal(h.engine.getStatus(w1.previewId), null);
@@ -1162,6 +1441,149 @@ describe("PreviewEngine idle sweep", () => {
     assert.ok(h.simctlCalls.some((c) => c.startsWith("delete ")));
   });
 
+  it("re-wipes a pooled AVD when the boot that should have wiped it failed", async () => {
+    // The tenant was recorded BEFORE the wipe ran — the wipe is a `-wipe-data`
+    // flag on a boot that can throw or time out after 240s. A failed boot
+    // therefore left the new app recorded as the owner, so the retry computed
+    // wipeData=false and handed it an AVD still holding the PREVIOUS tenant's
+    // app storage, accounts and cookies, across owner scopes, in silence.
+    const wipes: boolean[] = [];
+    let failNext = true;
+    const cfg = { ...config, limits: { ...config.limits, reuseDevices: true, maxTotalDevices: 8 } };
+    const h = makeEngine({
+      config: cfg,
+      android: {
+        ...(androidFake() as object),
+        bootEmulator: async (_avd: string, port: number, _img: unknown, opts: { wipeData?: boolean } = {}) => {
+          wipes.push(!!opts.wipeData);
+          if (failNext) throw new Error("emulator: timed out waiting for boot");
+          return `emulator-${port}`;
+        },
+      } as unknown as PreviewEngineDeps["android"],
+    });
+
+    const android = () => ({ platform: "android" as const, runtime: "34" });
+    // App A takes the pooled AVD (nothing to wipe — it is fresh).
+    h.engine.startPreview({ app: { ...rnApp, id: "app-a" }, source: "git", spec: { kind: "branch", branch: "main" }, devices: [android()], access: "public" });
+    await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
+    // Release the lease, or app B is handed a SECOND (fresh) pool slot and never
+    // exercises the reuse path at all.
+    await h.engine.stopPreview("pv1");
+
+    // App B takes the same slot next: the wipe is requested, and the boot fails.
+    h.engine.startPreview({ app: { ...rnApp, id: "app-b" }, source: "git", spec: { kind: "branch", branch: "main" }, devices: [android()], access: "public" });
+    await waitForPhase(h.engine, "pv2", ["ready", "failed"]);
+    assert.equal(wipes[wipes.length - 1], true, "app B asked for a wipe");
+    await h.engine.stopPreview("pv2");
+
+    // App B retries. The wipe never actually happened, so it must be asked for again.
+    failNext = false;
+    h.engine.startPreview({ app: { ...rnApp, id: "app-b" }, source: "git", spec: { kind: "branch", branch: "main" }, devices: [android()], access: "public" });
+    await waitForPhase(h.engine, "pv3", ["ready", "failed"]);
+    assert.equal(wipes[wipes.length - 1], true, "a boot that failed cannot count as the wipe having run");
+  });
+
+  it("recovers a device whose first helper never produced a frame", async () => {
+    // A helper that comes up and then stays silent is usually the helper, not
+    // the device — a cold sim under load, or a daemon adopted from a previous
+    // process. It used to be fatal on the first try: the pane read "This device
+    // didn't start" for the life of the preview and only restart_preview cleared
+    // it. The viewer already retried on its side; the server did not.
+    const h = makeEngine();
+    h.firstFrameResults.push(false, false); // two silent helpers, then a good one
+    h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+    assert.equal(h.attachCalls.length, 3, "each attempt asks for a fresh helper");
+    assert.ok(h.detached.length >= 2, "and discards the silent one first — attach is idempotent per device");
+  });
+
+  it("gives up after a bounded number of silent helpers", async () => {
+    const h = makeEngine();
+    h.firstFrameResults.push(false, false, false, false);
+    h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "failed");
+    assert.match(h.engine.getStatus("pv1")!.devices[0]!.error ?? "", /no first frame \(3 attempts\)/);
+  });
+
+  it("spares its own live processes when reaping orphans by marker", async () => {
+    // The boot sweep runs AFTER the port is bound, so a start_preview that
+    // landed in the meantime has children carrying the same env marker the sweep
+    // hunts for. Called without keepPids it killed the server's own brand-new
+    // bundler and left the preview `ready` with nothing serving — the device
+    // reap guards this exact window with liveDeviceHandles(); this one did not.
+    const keepSeen: Record<string, number[]> = {};
+    const h = makeEngine({
+      metro: { livePids: () => [4242], stopIfUnused: async () => {}, stopAll: async () => {} } as unknown as PreviewEngineDeps["metro"],
+      devProcs: { livePids: () => [7777], stop: () => {}, stopAll: () => {} } as unknown as PreviewEngineDeps["devProcs"],
+      reaper: {
+        reap: async () => ({ sims: [], avds: [], keptPooled: [] }),
+        reapOrphansByMarker: async (marker: string, keep: Iterable<number> = []) => {
+          keepSeen[marker] = [...keep];
+          return [];
+        },
+      } as unknown as PreviewEngineDeps["reaper"],
+    });
+
+    await h.engine.reapOrphans();
+    assert.deepEqual(keepSeen["DECKHAND_METRO"], [4242], "the running Metro is spared");
+    assert.deepEqual(keepSeen["DECKHAND_DEV_RUN"], [7777], "and the running livesync tree");
+  });
+
+  it("never allocates a console port an emulator already holds", async () => {
+    // The worst-behaved bug in the audit. `emulator -port <busy>` fails to bind
+    // and exits, but `adb -s emulator-<port> wait-for-device` resolves INSTANTLY
+    // against the device already there and sys.boot_completed is already 1 — so
+    // the boot looks perfect while every step after it (installApk -r -g,
+    // forceStop, adb reverse, screenrecord on a public share, `adb emu kill` on
+    // teardown) is aimed at a machine deckhand does not own. Typically the
+    // developer's own Android Studio AVD, which the reaper deliberately spares.
+    const booted: string[] = [];
+    const h = makeEngine({
+      android: {
+        ...(androidFake() as object),
+        attachedSerials: async () => ["emulator-5554", "emulator-5556"], // not ours
+        bootEmulator: async (_avd: string, port: number) => {
+          booted.push(`emulator-${port}`);
+          return `emulator-${port}`;
+        },
+      } as unknown as PreviewEngineDeps["android"],
+    });
+    h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "android", runtime: "34" }],
+      access: "public",
+    });
+    await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
+    assert.deepEqual(booted, ["emulator-5558"], "the first two ports are occupied by devices we did not start");
+  });
+
+  it("refuses to boot Android rather than guess when adb cannot be listed", async () => {
+    // An unreadable device list is indistinguishable from an empty one, and
+    // guessing "empty" is precisely the permissive direction that hijacks a
+    // stranger's emulator. Fail loudly instead.
+    const h = makeEngine({
+      android: {
+        ...(androidFake() as object),
+        attachedSerials: async () => {
+          throw new Error("adb: not found");
+        },
+      } as unknown as PreviewEngineDeps["android"],
+    });
+    h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "android", runtime: "34" }],
+      access: "public",
+    });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "failed");
+    assert.match(h.engine.getStatus("pv1")!.devices[0]!.error ?? "", /list attached Android devices/);
+  });
+
   it("counts a failed preview's still-booted devices against capacity", async () => {
     const h = makeSwept((step) => ({ code: step.name === "build" ? 1 : 0, timedOut: false, aborted: false }));
     h.engine.startPreview({
@@ -1247,6 +1669,7 @@ describe("PreviewEngine idle sweep", () => {
       android: {
         listSystemImages: async () => [{ pkg: "system-images;android-34;google_apis;arm64-v8a", api: 34 }],
         listAvds: async () => [],
+        attachedSerials: async () => [],
         createAvd: async () => void androidCalls.push("createAvd"),
         bootEmulator: async () => {
           androidCalls.push("bootEmulator");
@@ -1415,6 +1838,7 @@ describe("device pool", () => {
     const android = {
       listSystemImages: async () => [{ pkg: "system-images;android-34;google_apis;arm64-v8a", api: 34 }],
       listAvds: async () => avds,
+      attachedSerials: async () => [],
       createAvd: async (name: string) => {
         calls.push(`avd create ${name}`);
         avds.push(name);

@@ -41,9 +41,12 @@ const apps: App[] = [
 
 const ADMIN = "a".repeat(64);
 const MEMBER = "b".repeat(64);
+/** A member with no `owners` — the common shape, and the one the repo gate used to wave through. */
+const UNSCOPED = "c".repeat(64);
 const tokens: TokenEntry[] = [
   { name: "admin", role: "admin", token: ADMIN },
   { name: "kari", role: "member", owners: ["ainfrastructure"], token: MEMBER },
+  { name: "ola", role: "member", token: UNSCOPED },
 ];
 
 function fakeEngine(): PreviewEngine {
@@ -57,6 +60,7 @@ function fakeEngine(): PreviewEngine {
   const deps: PreviewEngineDeps = {
     config,
     worktrees: {
+      localBranch: async () => "main",
       createWorktree: async (_a: App, id: string) => ({ path: `/wt/${id}`, ref: "r", description: "main", usedToken: false }),
       removeWorktree: async () => {},
     } as unknown as PreviewEngineDeps["worktrees"],
@@ -171,35 +175,37 @@ describe("MCP server (end-to-end over HTTP)", () => {
     await member.close();
   });
 
-  it("compare_start with no against and no migratesFrom asks for a reference (no devices booted)", async () => {
+  it("an extra pane with nothing named and no migratesFrom asks for a source (no devices booted)", async () => {
     const admin = await client(ADMIN);
-    const res = parse(await admin.callTool({ name: "compare_start", arguments: { app: "app-a", share: { access: "public" } } }));
+    const res = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-a", alongside: [{}], share: { access: "public" } } }));
     assert.equal(res.ok, false);
     assert.equal((res.error as { code: string }).code, "needs_reference");
-    assert.match(String((res.error as { hint?: string }).hint), /against|migratesFrom/);
+    assert.match(String((res.error as { hint?: string }).hint), /alongside|migratesFrom/);
     await admin.close();
   });
 
-  it("compare_start against an arbitrary repo requires a ref (no devices booted)", async () => {
+  it("an extra pane from an arbitrary repo requires a ref (no devices booted)", async () => {
     const admin = await client(ADMIN);
-    const res = parse(await admin.callTool({ name: "compare_start", arguments: { app: "app-a", against: { repo: "acme/proj" }, share: { access: "public" } } }));
+    const res = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-a", alongside: [{ repo: "acme/proj" }], share: { access: "public" } } }));
     assert.equal(res.ok, false);
     assert.equal((res.error as { code: string }).code, "needs_ref");
     await admin.close();
   });
 
-  it("compare_start does not let a scoped member escape owner scoping or the admin gate", async () => {
-    // compare_start is a member-role tool, and its worktree/repo branches used
+  it("an extra pane does not let a scoped member escape owner scoping or the admin gate", async () => {
+    // start_preview is a member-role tool, and the worktree/repo branches used
     // to skip resolveApp() entirely — so a token scoped to one org could clone
     // any repo deckhand can read, run its install scripts, and publish a
     // PIN-less share of the live simulator. That is the exact capability
-    // requireAdmin() guards on add_app.
+    // requireAdmin() guards on add_app. Folding compare_start into start_preview
+    // moved these branches onto a tool every member can already call, so the
+    // gates matter more here, not less.
     const member = await client(MEMBER);
 
     const worktree = parse(
       await member.callTool({
-        name: "compare_start",
-        arguments: { app: "app-a", against: { worktree: "/tmp/anything" }, share: { access: "public" } },
+        name: "start_preview",
+        arguments: { app: "app-a", alongside: [{ worktree: "/tmp/anything" }], share: { access: "public" } },
       }),
     );
     assert.equal(worktree.ok, false);
@@ -207,8 +213,8 @@ describe("MCP server (end-to-end over HTTP)", () => {
 
     const repo = parse(
       await member.callTool({
-        name: "compare_start",
-        arguments: { app: "app-a", against: { repo: "acme/proj", ref: "main" }, share: { access: "public" } },
+        name: "start_preview",
+        arguments: { app: "app-a", alongside: [{ repo: "acme/proj", ref: "main" }], share: { access: "public" } },
       }),
     );
     assert.equal(repo.ok, false, "acme is outside this token's owners");
@@ -217,30 +223,119 @@ describe("MCP server (end-to-end over HTTP)", () => {
     await member.close();
   });
 
-  it("compare_start against the same app boots the reference on a distinct shareId (no self-pair)", async () => {
+  it("an UNSCOPED member cannot build an arbitrary repo either", async () => {
+    // canAccessApp returns true for a principal with no `owners` — right for
+    // registered apps, wrong here, where the whole point is reaching past the
+    // registered set. Cloning an arbitrary repo runs its install and build
+    // scripts as the deckhand user, which is the capability requireAdmin()
+    // guards on the worktree branch. Leaving `owners` unset must not buy it.
+    const member = await client(UNSCOPED);
+    const res = parse(
+      await member.callTool({
+        name: "start_preview",
+        arguments: { app: "app-a", alongside: [{ repo: "acme/proj", ref: "main" }], share: { access: "public" } },
+      }),
+    );
+    assert.equal(res.ok, false);
+    assert.equal((res.error as { code: string }).code, "forbidden");
+    assert.deepEqual(engine.list().map((p) => p.previewId), [], "and nothing was booted");
+    await member.close();
+  });
+
+  it("an extra pane of the same app boots on a distinct shareId (no self-pair)", async () => {
     const admin = await client(ADMIN);
-    const res = parse(await admin.callTool({ name: "compare_start", arguments: { app: "app-a", against: { app: "app-a" }, share: { access: "public" } } }));
+    const res = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-a", alongside: [{ app: "app-a" }], share: { access: "public" } } }));
     assert.equal(res.ok, true);
-    const reference = res.reference as { shareId: string };
-    assert.ok(reference.shareId);
-    assert.notEqual(reference.shareId, res.shareId); // reference must not collide with the working app's shareId
+    const extra = (res.alongside as { shareId: string }[])[0]!;
+    assert.ok(extra.shareId);
+    assert.notEqual(extra.shareId, res.shareId); // the pane must not collide with this app's own shareId
     await admin.callTool({ name: "stop_preview", arguments: { previewId: res.previewId as string } }); // cascades to the reference
     await admin.close();
   });
 
-  it("tears the reference back down when the working boot fails (no orphaned devices)", async () => {
-    // The reference boots first and takes devices. If the working boot then
-    // throws — most likely BECAUSE of device capacity — leaving the reference up
-    // permanently holds the slots that caused the failure, with no MCP handle to
-    // reach it.
+  it("gives an extra pane the page's PIN instead of publishing it", async () => {
+    // Panes used to boot public unconditionally: a PIN-protected page published
+    // half of itself on a second URL, because there was no cross-share unlock and
+    // a protected pane would have hung on "Connecting…". There is one now, so the
+    // pane must be gated too — otherwise the padlock on the page is a lie.
+    const admin = await client(ADMIN);
+    const res = parse(
+      await admin.callTool({
+        name: "start_preview",
+        arguments: { app: "app-a", alongside: [{ app: "app-a" }], share: { access: "pin", pin: "1234" } },
+      }),
+    );
+    assert.equal(res.ok, true);
+    const extra = (res.alongside as { shareId: string }[])[0]!;
+    assert.equal(engine.pinInfoForShare(res.shareId as string).required, true, "the page is gated");
+    assert.equal(engine.pinInfoForShare(extra.shareId).required, true, "and so is its extra pane");
+    // …and one PIN reaches both, or the pane is gated into uselessness.
+    assert.deepEqual(engine.pairedShareIds(res.shareId as string), [extra.shareId]);
+
+    await admin.callTool({ name: "stop_preview", arguments: { previewId: res.previewId as string } });
+    await admin.close();
+  });
+
+  it("never lets a public page reuse (and strip) a protected page's pane", async () => {
+    // A pane's synthetic app id comes from its CONTENT, so two pages comparing
+    // against the same source used to share one pane and one PIN. A public page
+    // reusing a protected one called setAppPin(null) and quietly published
+    // someone else's protected content; with two different PINs it revoked their
+    // viewers' cookies mid-session instead. Access class is now part of the
+    // pane's identity, so the two can never meet.
+    const admin = await client(ADMIN);
+    const locked = parse(
+      await admin.callTool({
+        name: "start_preview",
+        arguments: { app: "app-a", alongside: [{ app: "app-a" }], share: { access: "pin", pin: "1234" } },
+      }),
+    );
+    assert.equal(locked.ok, true);
+    const lockedPane = (locked.alongside as { shareId: string }[])[0]!;
+    assert.equal(engine.pinInfoForShare(lockedPane.shareId).required, true);
+
+    const open = parse(
+      await admin.callTool({
+        name: "start_preview",
+        arguments: { app: "app-b", alongside: [{ app: "app-a" }], share: { access: "public" } },
+      }),
+    );
+    assert.equal(open.ok, true);
+    const openPane = (open.alongside as { shareId: string }[])[0]!;
+
+    assert.notEqual(openPane.shareId, lockedPane.shareId, "the public page gets its own pane");
+    assert.equal(engine.pinInfoForShare(lockedPane.shareId).required, true, "and the protected pane stays protected");
+
+    for (const r of [locked, open]) await admin.callTool({ name: "stop_preview", arguments: { previewId: r.previewId as string } });
+    await admin.close();
+  });
+
+  it("leaves an extra pane public when the page itself is public", async () => {
+    const admin = await client(ADMIN);
+    const res = parse(
+      await admin.callTool({ name: "start_preview", arguments: { app: "app-a", alongside: [{ app: "app-a" }], share: { access: "public" } } }),
+    );
+    assert.equal(res.ok, true);
+    const extra = (res.alongside as { shareId: string }[])[0]!;
+    assert.equal(engine.pinInfoForShare(extra.shareId).required, false, "a public page must not gate a pane behind a PIN nobody has");
+    await admin.callTool({ name: "stop_preview", arguments: { previewId: res.previewId as string } });
+    await admin.close();
+  });
+
+  it("tears the extra panes back down when the main boot fails (no orphaned devices)", async () => {
+    // The extra panes boot first and take devices. If the main boot then throws —
+    // most likely BECAUSE of device capacity — leaving them up permanently holds
+    // the slots that caused the failure, with no MCP handle to reach them.
     const admin = await client(ADMIN);
     const devices = Array.from({ length: 4 }, () => ({ platform: "ios" as const })); // 4 + 4 > maxTotalDevices 6
-    const args = { app: "app-a", against: { app: "app-a" }, devices, share: { access: "public" } };
-    const res = await admin.callTool({ name: "compare_start", arguments: args });
-    assert.ok(res.isError || parse(res).ok === false, "the working boot must fail on capacity");
+    const args = { app: "app-a", alongside: [{ app: "app-a" }], devices, share: { access: "public" } };
+    const res = await admin.callTool({ name: "start_preview", arguments: args });
+    // NOT `res.isError ||` — an unknown tool name is also an isError, so that
+    // form would pass vacuously if this tool were ever renamed again.
+    assert.equal(parse(res).ok, false, "the main boot must fail on capacity");
 
     for (let i = 0; i < 100 && engine.list().length > 0; i++) await new Promise((r) => setTimeout(r, 10));
-    assert.deepEqual(engine.list().map((p) => p.previewId), [], "the reference must not survive the failed compare");
+    assert.deepEqual(engine.list().map((p) => p.previewId), [], "no pane may survive the failed call");
 
     // ...and the freed capacity is usable again.
     const after = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-a", ref: "main", devices, share: { access: "public" } } }));
@@ -249,7 +344,7 @@ describe("MCP server (end-to-end over HTTP)", () => {
     await admin.close();
   });
 
-  it("denies a preview whose app is no longer registered, and still allows a compare reference", async () => {
+  it("denies a preview whose app is no longer registered, and still allows an extra pane", async () => {
     // previewOwnedByPrincipal used to SKIP the scope check when apps.find()
     // missed, so any valid token could drive `logs` / `ui` / `stop_preview` on
     // an orphaned preview. It now denies by default — and a compare reference
@@ -258,8 +353,8 @@ describe("MCP server (end-to-end over HTTP)", () => {
     const admin = await client(ADMIN);
     const member = await client(MEMBER);
 
-    // A compare reference: allowed, and marked as such rather than inferred.
-    const cmp = parse(await admin.callTool({ name: "compare_start", arguments: { app: "app-a", against: { app: "app-a" }, share: { access: "public" } } }));
+    // An extra pane: allowed, and marked as such on the record rather than inferred.
+    const cmp = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-a", alongside: [{ app: "app-a" }], share: { access: "public" } } }));
     assert.equal(cmp.ok, true);
     const refId = engine
       .list()
@@ -333,6 +428,7 @@ function onboardingEngine(): PreviewEngine {
           hasEntry: async (p: string) => Object.keys(nsFiles).some((k) => k === p || k.startsWith(`${p}/`)),
         };
       },
+      localBranch: async () => "main",
       createWorktree: async (_a: App, id: string) => ({ path: `/wt/${id}`, ref: "r", description: "main", usedToken: false }),
       removeWorktree: async () => {},
     } as unknown as PreviewEngineDeps["worktrees"],

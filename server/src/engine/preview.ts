@@ -19,6 +19,9 @@ import { Simctl, selectRuntime, selectDeviceType, deviceLabel, type SimDevice } 
 import { AndroidManager, selectSystemImage, portForSerial, serialForPort } from "../devices/android.ts";
 import { resolveAndroidEnv } from "../devices/toolEnv.ts";
 import { Reaper, POOL_SIM_PREFIX, POOL_AVD_PREFIX } from "./reaper.ts";
+import { METRO_MARKER_ENV } from "./metro.ts";
+import { DEV_MARKER_ENV } from "./devProcess.ts";
+import { BUILD_MARKER_ENV } from "./procs.ts";
 import { MetroManager } from "./metro.ts";
 import { buildPlan, usesMetroDeepLink, nativescriptDevRun, webDevRun, webRootDevRun, GENERAL_IDLE_MS, METRO_PORT } from "./recipes.ts";
 import { runStep as defaultRunStep, type RunResult } from "./procs.ts";
@@ -62,6 +65,14 @@ const DEV_INSTALL_TIMEOUT_MS = GENERAL_IDLE_MS;
 /** How long to wait for a web dev server to start answering before failing.
  *  Generous: a cold Nuxt/webpack build can take a couple of minutes. */
 const WEB_READY_TIMEOUT_MS = 180_000;
+/**
+ * How many times to throw the streaming helper away and re-attach before
+ * declaring a device dead. A helper that comes up but never produces a frame is
+ * usually the HELPER — a cold sim under load, a recorder that lost its grip, a
+ * daemon adopted from a previous process — and a fresh one normally works. One
+ * attempt made a transient failure permanent for the life of the preview.
+ */
+const FIRST_FRAME_ATTEMPTS = 3;
 /** Loopback port range for web dev servers (Vite defaults to 5173). */
 const WEB_PORT_RANGE: [number, number] = [5170, 5199];
 
@@ -209,7 +220,7 @@ export interface TestRun {
 // per session) — Deckhand owns only the visual verdict; the plan lives in the
 // team's tracker (e.g. Linear). `adjusted` = deliberately different-and-fine, so
 // an intentional redesign isn't flagged as a `regression`.
-export type CompareVerdict = "pending" | "doing" | "matches" | "adjusted" | "regression";
+export type CompareVerdict = "pending" | "doing" | "done" | "adjusted" | "regression";
 export interface CompareItem {
   name: string;
   verdict: CompareVerdict;
@@ -219,19 +230,23 @@ export interface CompareReference {
   shareId: string;
   repo: string;
   ref: string;
+  /** Engine-internal: the booted reference preview, torn down with the working one. */
+  previewId?: string;
 }
 export interface CompareSession {
-  reference: CompareReference;
-  /** Engine-internal: the booted reference preview, torn down with the working one. */
-  referencePreviewId?: string;
+  /**
+   * The panes shown alongside the working one, in display order. A list rather
+   * than a single reference because the page is a set of panes, not a pair:
+   * old app + `main` + this branch is three sources, and every layer below
+   * (shareState, unlock minting, teardown refcount) fans out over the same list.
+   */
+  references: CompareReference[];
   items: CompareItem[];
-  /** Agent-set pane names shown in the viewer instead of Working/Reference. */
-  labels?: { working?: string; reference?: string };
 }
 export interface CompareCounts {
   pending: number;
   doing: number;
-  matches: number;
+  done: number;
   adjusted: number;
   regression: number;
 }
@@ -437,12 +452,39 @@ export class PreviewEngine {
     return this.d.devProcs;
   }
 
-  private allocAndroidPort(): number {
+  /**
+   * Claim a free emulator console port.
+   *
+   * The in-process set is not enough on its own: it knows only about emulators
+   * THIS process started, and the reaper deliberately never touches a device the
+   * developer created (PLAN §12 "Devices the developer created themselves are
+   * never touched"). Allocating over an existing `emulator-<port>` was silently
+   * catastrophic rather than merely wrong — the freshly launched emulator fails
+   * to bind and exits, but `adb -s emulator-<port> wait-for-device` resolves
+   * INSTANTLY against the stranger's device and `sys.boot_completed` is already
+   * 1, so the boot looks successful. Everything after that is aimed at the wrong
+   * machine: `installApk -r -g`, `forceStop`, `adb reverse` over its Metro port,
+   * screenrecord published on a share link, and finally `adb emu kill` on
+   * teardown. The developer's own emulator gets hijacked and then destroyed,
+   * with no error anywhere.
+   *
+   * It also closes the in-process race: `shutdown` gives up waiting after 20s
+   * without failing, while teardown returns the port to the pool unconditionally,
+   * so a QEMU still exiting under load could hand its live port to the next boot.
+   */
+  private async allocAndroidPort(): Promise<number> {
+    // A listing failure must not silently reopen the hazard, so treat "adb did
+    // not answer" as "every port might be taken" only for ports we don't own —
+    // an empty list is indistinguishable from a broken adb, and guessing wrong
+    // in the permissive direction is what this exists to prevent.
+    const attached = await this.android().attachedSerials().catch(() => null);
+    if (attached === null) throw new PreviewError("could not list attached Android devices", "check that `adb devices` works, then retry");
+    const taken = new Set(attached);
     for (let p = 5554; p <= 5680; p += 2) {
-      if (!this.androidPorts.has(p)) {
-        this.androidPorts.add(p);
-        return p;
-      }
+      if (this.androidPorts.has(p)) continue;
+      if (taken.has(`emulator-${p}`)) continue;
+      this.androidPorts.add(p);
+      return p;
     }
     throw new PreviewError("no free Android emulator console port");
   }
@@ -576,20 +618,24 @@ export class PreviewEngine {
       summary?: string;
     };
     /**
-     * Migration target only: the live SOURCE preview to show alongside, so the
-     * viewer can render old vs new side by side. Present only when this app has a
-     * `migratesFrom` whose source preview is currently live.
+     * Every pane on this page, in display order — always at least one (this
+     * share's own). Extra panes come from a live compare session or a live
+     * `migratesFrom` source.
+     *
+     * Order is old-to-new: reference panes first, this share's own LAST, so a
+     * migration reads left-to-right as before → after. Each pane streams from
+     * its OWN shareId (see `pairedShareIds`, which is what makes one PIN reach
+     * all of them) — the page is a set of panes, not a preview with an
+     * attachment bolted on.
      */
-    pairedWith?: {
+    panes: {
       shareId: string;
       repo: string;
       ref: string;
-      /** Agent-set pane name (viewer falls back to "Reference"). */
-      label?: string;
+      /** True for this page's own share — the one `devices`/`canRestart` describe. */
+      self?: true;
       devices: { deviceId: string; platform: Platform; label: string; phase: string; detail?: string; step?: string }[];
-    };
-    /** Agent-set name for THIS app's pane in a compare (viewer falls back to "Working"). */
-    paneLabel?: string;
+    }[];
     /** Migration target only: the agent-maintained parity ledger, if the file exists. */
     ledger?: { screens: { name: string; status: string; note?: string }[] };
   } | null {
@@ -608,23 +654,55 @@ export class PreviewEngine {
       }));
     for (const p of this.previews.values()) {
       if (p.record.shareId === shareId) {
-        this.markActive(p); // the viewer polls this — it is the idle clock's heartbeat
+        // The viewer polls this — it is the idle clock's heartbeat. It has to beat
+        // for EVERY pane the page will render, not just this share's own preview:
+        // the extra panes have no viewer polling them directly, so with a single
+        // markActive they aged out on their own idle timer and were torn down
+        // underneath a page someone was actively watching. Marked before the
+        // panes are built so a pane that is about to be advertised cannot be
+        // reaped in the same tick.
+        this.markActive(p);
+        for (const r of p.compare?.references ?? []) {
+          const live = this.liveByShareId(r.shareId);
+          if (live) this.markActive(live);
+        }
+        if (p.app.migratesFrom) {
+          const src = this.livePreviewForApp(p.app.migratesFrom);
+          if (src) this.markActive(src);
+        }
         // Pair the working preview with its reference and surface the checklist.
         // A live compare session (explicit reference + in-memory items) wins; else
         // fall back to the legacy migration path (migratesFrom + repo-file ledger).
         // Both are gated so an ordinary preview does zero extra work.
-        let pairedWith;
+        type Pane = NonNullable<ReturnType<PreviewEngine["shareState"]>>["panes"][number];
+        // Reference panes first, this share's own appended last (below), so the
+        // page reads before → after.
+        const refPanes: Pane[] = [];
         let ledger;
         if (p.compare) {
-          const ref = this.liveByShareId(p.compare.reference.shareId);
-          if (ref) {
-            pairedWith = {
-              shareId: p.compare.reference.shareId,
-              repo: p.compare.reference.repo,
-              ref: p.compare.reference.ref,
-              ...(p.compare.labels?.reference ? { label: p.compare.labels.reference } : {}),
-              devices: sanitizeDevices(ref),
-            };
+          for (const r of p.compare.references) {
+            // Only LIVE panes are advertised — the viewer never mounts a dead
+            // one, and pairedShareIds won't mint a cookie for it either.
+            const live = this.liveByShareId(r.shareId);
+            if (!live) continue;
+            // Same rule the migratesFrom branch has always had, and the compare
+            // branch never did: only advertise a pane this page can actually
+            // unlock. Access is inherited at boot, so the two normally match —
+            // until `set_pin --remove` makes the page public while the pane
+            // keeps its PIN. The pane then mounted and had its WS refused once a
+            // second forever, with no pad, because the pad only ever renders for
+            // the page's own shareId.
+            if (!this.partnerIsReachable(p.record.shareId, r.shareId)) continue;
+            refPanes.push({
+              shareId: r.shareId,
+              repo: r.repo,
+              // The LIVE record, not the snapshot taken when the pane was booted.
+              // A local pane's ref starts as "local" and is replaced by its real
+              // branch a moment later, so the snapshot would show "local" forever
+              // — and a restarted pane's ref can move under it too.
+              ref: live.record.ref || r.ref,
+              devices: sanitizeDevices(live),
+            });
           }
           if (p.compare.items.length) {
             ledger = { screens: p.compare.items.map((i) => ({ name: i.name, status: i.verdict, note: i.note })) };
@@ -640,16 +718,26 @@ export class PreviewEngine {
           // its socket refused once a second, forever, with nothing on screen
           // and no way to authenticate — so don't advertise it.
           if (src && this.partnerIsReachable(p.record.shareId, src.record.shareId)) {
-            pairedWith = {
+            refPanes.push({
               shareId: src.record.shareId,
               repo: src.app.repo ?? src.app.id,
               ref: src.record.ref,
               devices: sanitizeDevices(src),
-            };
+            });
           }
           const led = readMigrationLedger(p.sourceDir ?? p.app.path);
           if (led) ledger = led;
         }
+        const panes: Pane[] = [
+          ...refPanes,
+          {
+            shareId: p.record.shareId,
+            repo: p.app.repo ?? p.app.id,
+            ref: p.record.ref,
+            self: true,
+            devices: sanitizeDevices(p),
+          },
+        ];
         return {
           ready: p.record.phase === "ready",
           ref: p.record.ref,
@@ -657,6 +745,7 @@ export class PreviewEngine {
           source: p.record.source,
           canRestart: p.record.source === "local" && (p.record.phase === "ready" || p.record.phase === "failed"),
           devices: sanitizeDevices(p),
+          panes,
           ...(p.testRun
             ? {
                 testRun: {
@@ -667,8 +756,6 @@ export class PreviewEngine {
                 },
               }
             : {}),
-          ...(pairedWith ? { pairedWith } : {}),
-          ...(p.compare?.labels?.working ? { paneLabel: p.compare.labels.working } : {}),
           ...(ledger ? { ledger } : {}),
         };
       }
@@ -677,48 +764,59 @@ export class PreviewEngine {
   }
 
   /**
-   * The shareId this share is paired with in a compare session, or null.
+   * Every shareId this share shares a page with, so one PIN unlocks all of them.
    *
-   * The compare viewer is ONE page showing two shares: it renders the reference
-   * pane from the working share's `pairedWith`, but streams it from the
-   * reference's own shareId, whose unlock cookie is scoped to its own path. So
-   * a PIN on the working share left the reference pane stuck on "Connecting…"
-   * forever (the WS was refused once a second, silently). The unlock route uses
-   * this to mint the partner's cookie too — one PIN unlocks the pair.
+   * The viewer is ONE page showing several shares: it renders each extra pane
+   * from this share's compare session, but streams it from that pane's OWN
+   * shareId, whose unlock cookie is scoped to its own path. So a PIN on the
+   * working share left every other pane stuck on "Connecting…" forever (the WS
+   * refused once a second, silently). The unlock route uses this to mint each
+   * partner's cookie too.
    *
-   * Symmetric on purpose: whichever side of the pair the viewer is opened from
-   * has to unlock the other.
+   * Symmetric on purpose: whichever pane the viewer is opened from has to
+   * unlock the others.
    */
-  pairedShareId(shareId: string): string | null {
+  pairedShareIds(shareId: string): string[] {
+    const out = new Set<string>();
     for (const p of this.previews.values()) {
       // Mirror shareState's two pairing sources: a live compare session wins,
-      // else the legacy migratesFrom link. Anything shareState will render as a
-      // second pane must be unlockable, or that pane hangs.
-      const compareRef = p.compare?.reference.shareId ?? null;
-      const migrationSrc = p.compare
-        ? null
-        : p.app.migratesFrom
-          ? (this.livePreviewForApp(p.app.migratesFrom)?.record.shareId ?? null)
-          : null;
-      const refShareId = compareRef ?? migrationSrc;
-      if (!refShareId) continue;
-      // Only a LIVE reference counts — the viewer never mounts a dead pane.
-      if (p.record.shareId === shareId) {
-        if (!this.liveByShareId(refShareId)) return null;
-        // A migration source pane is only advertised when it is reachable from
-        // here (see shareState) — don't mint a cookie for a pane we hid.
-        return migrationSrc && !this.partnerIsReachable(shareId, refShareId) ? null : refShareId;
+      // else the legacy migratesFrom link. Anything shareState will render as
+      // another pane must be unlockable, or that pane hangs.
+      if (p.compare) {
+        if (p.record.shareId === shareId) {
+          // Forward: this page's own panes. Only a LIVE one counts — the viewer
+          // never mounts a dead pane, so don't mint a cookie for it either.
+          for (const r of p.compare.references) {
+            // Mirrors shareState exactly: never mint for a pane we did not
+            // advertise, and never advertise one we cannot mint for.
+            if (this.liveByShareId(r.shareId) && this.partnerIsReachable(shareId, r.shareId)) out.add(r.shareId);
+          }
+        }
+        // FORWARD ONLY. There used to be a reverse direction here — unlocking a
+        // pane also unlocked the page holding it — justified by "a pane belongs
+        // to one page". That stopped being true when panes were keyed by
+        // CONTENT: two pages naming the same source share one pane, so the
+        // reverse mint handed a holder of page B's PIN a valid cookie for page
+        // A, and disclosed A's shareId in the cookie's Path. Different apps,
+        // different owners, no PIN ever proven for A.
+        //
+        // Nothing is lost by dropping it. A pane's shareId is never given to a
+        // user — it appears only inside the page's own state, which already
+        // requires the page's cookie to read — and anyone who does open a pane
+        // URL directly holds that pane's PIN anyway, so the pad works. The
+        // forward direction alone covers every pane the page actually renders.
+        continue;
       }
-      // The reverse direction is a compare-session-only affair. A compare
-      // reference is a synthetic app the operator just booted as one half of
-      // one page, so unlocking either half unlocks the pair. `migratesFrom`
-      // instead names another REGISTERED app with its own PIN and its own repo
-      // — and only the target's page renders a source pane, never the other way
-      // round, so minting the target's cookie for whoever holds the source's
-      // PIN unlocks an app they were never given access to, for nothing.
-      if (compareRef === shareId) return p.record.shareId;
+      if (!p.app.migratesFrom || p.record.shareId !== shareId) continue;
+      const src = this.livePreviewForApp(p.app.migratesFrom);
+      // A migration source pane is only advertised when it is reachable from
+      // here (see shareState) — don't mint a cookie for a pane we hid.
+      if (src && this.partnerIsReachable(shareId, src.record.shareId)) out.add(src.record.shareId);
     }
-    return null;
+    // Never hand a share its own cookie: harmless, but it would let a caller
+    // read "I am paired" off a page that is alone.
+    out.delete(shareId);
+    return [...out];
   }
 
   /**
@@ -994,6 +1092,27 @@ export class PreviewEngine {
       args: { app: req.app.id, ref: record.ref, source: req.source, devices: req.devices.length },
       result: "ok",
     });
+
+    // A local preview's ref starts as the literal "local" because start_preview
+    // is synchronous and reading the branch is not. Fill in the real branch as
+    // soon as git answers: "local" names the SOURCE MODE, not what is on screen,
+    // and two panes both reading "local" say nothing about which branch each one
+    // is. The viewer polls, so it picks this up within a poll. Read-only —
+    // deckhand never writes to a borrowed checkout (PLAN §11.4).
+    if (req.source === "local" && req.app.path) {
+      // Wrapped: this is a cosmetic lookup, and nothing cosmetic may be able to
+      // fail start_preview. (It did — a WorktreeManager without the method threw
+      // synchronously, past the .catch() that only covers a rejected promise.)
+      void (async () => this.d.worktrees.localBranch?.(req.app.path!))()
+        .then((branch) => {
+          if (!branch || record.ref !== "local") return;
+          record.ref = branch;
+          this.persist();
+        })
+        .catch(() => {
+          /* a detached or non-git checkout keeps "local", which is still true */
+        });
+    }
 
     // Kick off orchestration; do not await (start_preview returns immediately).
     record.phase = "running";
@@ -1313,7 +1432,15 @@ export class PreviewEngine {
       const exists = (await safeList<string>(() => android.listAvds())).includes(avdName);
       wipeData = this.poolTenants.get(avdName) !== p.app.id;
       if (!exists) await android.createAvd(avdName, image, profile);
-      this.poolTenants.set(avdName, p.app.id);
+      // Do NOT claim tenancy yet. The wipe is a `-wipe-data` flag on the boot
+      // below, so at this point it has not happened — and bootEmulator can throw
+      // or time out (240s). Recording the new tenant here meant the retry
+      // computed wipeData=false and handed this app an AVD still holding the
+      // PREVIOUS tenant's data: its app storage, accounts and cookies, across
+      // owner scopes, silently. iOS gets this right by erasing first and
+      // recording after; the comment there even claims Android was already
+      // correct, which is what made this easy to miss. Claimed after the boot
+      // returns instead — see below.
     } else {
       avdName = `deckhand_${p.record.previewId}_${dev.record.deviceId}`.replace(/[^A-Za-z0-9_]/g, "_");
       dev.deviceName = avdName; // see bootIos: spare it by name while createAvd runs
@@ -1326,7 +1453,7 @@ export class PreviewEngine {
     // Remember the port on the device, not just via its serial: bootEmulator can
     // time out (240 s) or throw, and a port only released when a serial came back
     // is a port lost for the life of the process.
-    const port = this.allocAndroidPort();
+    const port = await this.allocAndroidPort();
     dev.androidPort = port;
     // createAvd can't be cancelled, so check before paying for a 240 s boot.
     await this.abandonIfAborted(dev, async () => {
@@ -1336,6 +1463,10 @@ export class PreviewEngine {
     let serial: string;
     try {
       serial = await android.bootEmulator(avdName, port, undefined, { wipeData, signal: dev.abort.signal });
+      // The wipe has now actually run, so the AVD really does belong to this app.
+      // A boot that threw leaves the old tenant recorded, so the next attempt
+      // wipes again — the safe direction to be wrong in.
+      if (avdName.startsWith(POOL_AVD_PREFIX)) this.poolTenants.set(avdName, p.app.id);
     } catch (err) {
       // bootEmulator launches QEMU detached and only *waits* here, so a throw —
       // abort or timeout — leaves an emulator running that nothing can address:
@@ -1789,26 +1920,44 @@ export class PreviewEngine {
       await kept.detach().catch(() => {});
     }
     const ref = platform === "android" ? { platform, udid: handle, serial: handle } : { platform, udid: handle };
-    const t0 = this.d.now!();
-    let stream: AttachedStream;
-    try {
-      stream = await this.d.streaming.attach(ref);
-    } catch (e) {
-      this.streamLog(dev, `attach FAILED after ${this.d.now!() - t0}ms: ${e instanceof Error ? e.message : String(e)}`);
-      throw e;
-    }
-    this.streamLog(dev, `attached in ${this.d.now!() - t0}ms → ${stream.origin}${stream.helperBasePath}`);
-    p.attached.set(dev.record.deviceId, stream);
-    const t1 = this.d.now!();
-    const framed = await stream.waitForFirstFrame();
-    this.streamLog(dev, `first frame ${framed ? "ok" : "NOT SEEN"} after ${this.d.now!() - t1}ms`);
-    if (!framed) {
-      throw new PreviewError(
-        "stream attached but produced no first frame",
-        "read the device's `stream` log (logs tool, source=stream) — it records the helper URL and every probe",
+    // Retry a SILENT first frame with a fresh helper. A helper that comes up and
+    // then produces nothing is recoverable by discarding it and asking again —
+    // which is what the viewer already does on its side, and what the server did
+    // not do at all. One bad attempt used to leave the pane reading "This device
+    // didn't start" for the life of the preview, curable only by restart_preview.
+    for (let attempt = 1; attempt <= FIRST_FRAME_ATTEMPTS; attempt++) {
+      const t0 = this.d.now!();
+      let stream: AttachedStream;
+      try {
+        stream = await this.d.streaming.attach(ref);
+      } catch (e) {
+        // An attach that THROWS is a different failure (no helper binary, no
+        // adb) and retrying only reproduces it — surface it now.
+        this.streamLog(dev, `attach FAILED after ${this.d.now!() - t0}ms: ${e instanceof Error ? e.message : String(e)}`);
+        throw e;
+      }
+      this.streamLog(dev, `attached in ${this.d.now!() - t0}ms → ${stream.origin}${stream.helperBasePath}`);
+      p.attached.set(dev.record.deviceId, stream);
+      const t1 = this.d.now!();
+      const framed = await stream.waitForFirstFrame();
+      this.streamLog(
+        dev,
+        `first frame ${framed ? "ok" : "NOT SEEN"} after ${this.d.now!() - t1}ms (attempt ${attempt}/${FIRST_FRAME_ATTEMPTS})`,
       );
+      if (framed) {
+        this.setPhase(p, dev, "ready", undefined);
+        return;
+      }
+      // Discard the helper before retrying: `attach` is idempotent per device,
+      // so without this the next attempt is handed the same silent one back.
+      p.attached.delete(dev.record.deviceId);
+      await stream.detach().catch(() => {});
+      if (dev.abort.signal.aborted) return;
     }
-    this.setPhase(p, dev, "ready", undefined);
+    throw new PreviewError(
+      `stream attached but produced no first frame (${FIRST_FRAME_ATTEMPTS} attempts)`,
+      "read the device's `stream` log (logs tool, source=stream) — it records the helper URL and every probe",
+    );
   }
 
   private async verifyInstalled(
@@ -2025,6 +2174,11 @@ export class PreviewEngine {
   }
 
   /** The live (non-terminal) preview for an app, if any — newest first. */
+  /** Whether some preview of this app is live right now (a reference pane about to be reused). */
+  hasLivePreviewForApp(appId: string): boolean {
+    return this.livePreviewForApp(appId) !== null;
+  }
+
   private livePreviewForApp(appId: string): LivePreview | null {
     let best: LivePreview | null = null;
     for (const p of this.previews.values()) {
@@ -2267,40 +2421,63 @@ export class PreviewEngine {
   // --- compare sessions (ephemeral; pairing + parity checklist for the viewer) -
 
   private static countCompare(items: CompareItem[]): CompareCounts {
-    const c: CompareCounts = { pending: 0, doing: 0, matches: 0, adjusted: 0, regression: 0 };
+    const c: CompareCounts = { pending: 0, doing: 0, done: 0, adjusted: 0, regression: 0 };
     for (const i of items) c[i.verdict]++;
     return c;
   }
 
-  /** Link a working preview to a reference preview + seed the item checklist (replacing any prior). */
+  /** Link a working preview to its reference panes + seed the item checklist (replacing any prior). */
   startCompare(
     previewId: string,
-    reference: CompareReference,
+    references: CompareReference[],
     items: string[] = [],
-    referencePreviewId?: string,
-    labels?: { working?: string; reference?: string },
   ): CompareCounts {
     const p = this.active(previewId);
     if (!p) throw new PreviewError(`no active preview "${previewId}"`);
     const seen = new Set<string>();
     const uniq = items.map((s) => s.trim()).filter((s) => s.length > 0 && !seen.has(s) && (seen.add(s), true));
-    // Shown verbatim on a (possibly public) share page — single line, bounded.
-    const clean = (s?: string) => s?.replace(/\s+/g, " ").trim().slice(0, 60) || undefined;
-    const working = clean(labels?.working);
-    const ref = clean(labels?.reference);
-    p.compare = {
-      reference,
-      referencePreviewId,
-      items: uniq.map((name) => ({ name, verdict: "pending" as const })),
-      ...(working || ref ? { labels: { working, reference: ref } } : {}),
-    };
+    // De-dupe by shareId: the same reference named twice is one pane, and a
+    // duplicate would otherwise be torn down twice and unlocked twice.
+    const byShare = new Set<string>();
+    const refs = references.filter((r) => !byShare.has(r.shareId) && (byShare.add(r.shareId), true));
+    // Preserve the verdicts already recorded. `start_preview` is idempotent and
+    // is the documented way for an agent to re-answer "what's the link?" — so
+    // re-calling it mid-session used to reset every item to `pending` and throw
+    // away an afternoon of judgements, silently. Seeding the same name twice is
+    // not a request to forget what you decided about it.
+    const prior = new Map((p.compare?.items ?? []).map((i) => [i.name, i]));
+    const merged = uniq.map((name) => prior.get(name) ?? { name, verdict: "pending" as const });
+    // Anything recorded earlier but not named again stays: the list is additive
+    // by design (setCompareItem appends unknown names) and there is no removal
+    // API, so dropping them could only ever lose work.
+    for (const item of prior.values()) if (!uniq.includes(item.name)) merged.push(item);
+    // Panes this page is dropping. `start_preview` is idempotent and documented
+    // as the way to re-answer "what's the link?", so re-calling it with a
+    // different `alongside` is expected — and the old panes then held a
+    // simulator, a Metro port and a worktree with no previewId ever returned to
+    // the agent and no path for `stop_preview` to reach them. Only the idle
+    // sweep would eventually collect them, an hour later.
+    const kept = new Set(refs.map((r) => r.shareId));
+    const dropped = (p.compare?.references ?? []).filter((r) => !kept.has(r.shareId));
+
+    p.compare = { references: refs, items: merged };
+
+    for (const r of dropped) {
+      if (!r.previewId || !this.previews.has(r.previewId)) continue;
+      // Shared panes are the point of content-keying: another page may be
+      // showing this one right now.
+      const stillUsed = [...this.previews.values()].some((o) =>
+        (o.compare?.references ?? []).some((x) => x.previewId === r.previewId),
+      );
+      if (!stillUsed) void this.stopPreview(r.previewId).catch(() => {});
+    }
     return PreviewEngine.countCompare(p.compare.items);
   }
 
   /** Set one item's verdict (by exact name; appends if new). Returns the new counts. */
   setCompareItem(previewId: string, patch: { item: string; verdict: CompareVerdict; note?: string }): CompareCounts {
     const c = this.active(previewId)?.compare;
-    if (!c) throw new PreviewError(`no compare session for preview "${previewId}"`, "call compare_start first");
+    if (!c) throw new PreviewError(`no parity checklist for preview "${previewId}"`, "seed one with start_preview's `items`");
     let item = c.items.find((x) => x.name === patch.item);
     if (!item) {
       item = { name: patch.item, verdict: patch.verdict };
@@ -2311,13 +2488,17 @@ export class PreviewEngine {
     return PreviewEngine.countCompare(c.items);
   }
 
-  /** The current compare session (reference + items + counts), or null. */
+  /** The current compare session (reference panes + items + counts), or null. */
   compareStatus(
     previewId: string,
-  ): { reference: CompareReference; items: CompareItem[]; counts: CompareCounts; labels?: { working?: string; reference?: string } } | null {
+  ): { references: CompareReference[]; items: CompareItem[]; counts: CompareCounts } | null {
     const c = this.active(previewId)?.compare;
     if (!c) return null;
-    return { reference: c.reference, items: c.items, counts: PreviewEngine.countCompare(c.items), ...(c.labels ? { labels: c.labels } : {}) };
+    return {
+      references: c.references,
+      items: c.items,
+      counts: PreviewEngine.countCompare(c.items),
+    };
   }
 
   // --- reaping / idle sweep --------------------------------------------------
@@ -2339,7 +2520,33 @@ export class PreviewEngine {
     const report = await (async () => {
       try {
         const reaper = this.d.reaper ?? new Reaper({ simctl: this.d.simctl, android: this.android() });
-        return await reaper.reap(this.liveDeviceHandles());
+        // Device reap FIRST, and with no await before it: `liveDeviceHandles()`
+        // is what spares a device being created right now, and every await
+        // between reading it and acting on it widens that window. (Putting the
+        // Metro reap ahead of it did exactly that, and the in-flight test caught
+        // it.) Metro and devices are independent, so order costs nothing here.
+        const devices = await reaper.reap(this.liveDeviceHandles());
+        // Metro AND the livesync runners: both are spawned detached and tracked
+        // only in memory, so both were reparented to launchd on every restart.
+        // The livesync leak was the worse of the two by far — 36 orphans at 418%
+        // CPU, which starved the Android emulators (CPU-bound QEMU) while iOS
+        // (native) stayed fine.
+        // Spare what we already own. This sweep runs AFTER the port is bound, so
+        // a start_preview that landed in the meantime has children carrying the
+        // same marker — and killing those leaves the preview `ready` with a dead
+        // bundler. The device reap guards the identical window with
+        // liveDeviceHandles(); this one has to guard it too. Read as late as
+        // possible, for the same reason.
+        for (const [tool, marker, keep] of [
+          ["reap_metro", METRO_MARKER_ENV, () => this.d.metro?.livePids() ?? []],
+          ["reap_dev_run", DEV_MARKER_ENV, () => this.d.devProcs?.livePids() ?? []],
+          // Build steps are awaited, so nothing is owned across a boot.
+          ["reap_build", BUILD_MARKER_ENV, () => []],
+        ] as const) {
+          const killed = await reaper.reapOrphansByMarker(marker, keep()).catch(() => [] as number[]);
+          if (killed.length) this.d.audit.record({ actor: "engine", tool, args: { killed: killed.length }, result: "ok" });
+        }
+        return devices;
       } catch {
         return { sims: [], avds: [], keptPooled: [] };
       }
@@ -2660,9 +2867,9 @@ export class PreviewEngine {
   async stopPreview(previewId: string): Promise<boolean> {
     const p = this.previews.get(previewId);
     if (!p) return false;
-    // A compare session owns a dedicated reference preview — tear it down too,
-    // unless another live compare session is still pairing against it.
-    const refPreviewId = p.compare?.referencePreviewId;
+    // A compare session owns its reference previews — tear them down too,
+    // unless another live compare session is still pairing against one.
+    const refPreviewIds = (p.compare?.references ?? []).map((r) => r.previewId).filter((id): id is string => !!id);
     p.record.phase = "stopping";
     this.persist();
     for (const dev of p.devices) dev.abort.abort();
@@ -2687,9 +2894,14 @@ export class PreviewEngine {
     this.stopMetroIfUnused(p.app.id);
     this.d.audit.record({ actor: "engine", tool: "stop_preview", args: { preview: previewId }, result: "ok" });
 
-    // Cascade: stop the paired reference preview once no other live compare needs it.
-    if (refPreviewId && this.previews.has(refPreviewId)) {
-      const stillUsed = [...this.previews.values()].some((o) => o.compare?.referencePreviewId === refPreviewId);
+    // Cascade: stop each reference preview once no other live compare needs it.
+    // Re-checked per id inside the loop because an earlier iteration may itself
+    // have cascaded into a later one.
+    for (const refPreviewId of refPreviewIds) {
+      if (!this.previews.has(refPreviewId)) continue;
+      const stillUsed = [...this.previews.values()].some((o) =>
+        (o.compare?.references ?? []).some((r) => r.previewId === refPreviewId),
+      );
       if (!stillUsed) await this.stopPreview(refPreviewId).catch(() => {});
     }
     return true;

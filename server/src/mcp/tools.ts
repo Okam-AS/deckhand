@@ -339,7 +339,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Start a preview",
       description:
-        "Returns the live viewer link INSTANTLY — surface it to the user first, before any other work (it's live the moment the preview starts and shows build progress while devices boot); then poll preview_status for readiness. Starts a preview and returns its shareable viewer link — or, if an equivalent preview is already running, returns THAT one (idempotent: each app keeps a stable URL, so this is also the way to answer \"what's the link?\"). With ref/pr it builds that git ref; with neither, an app with a local path previews its local working copy (dev mode — file saves then livesync to the simulator automatically, no pushing needed), and a repo-only app builds its default branch. IMPORTANT: before every call you MUST ask the user whether to protect the link with a PIN or make it public, and pass that as `share` (this call fails until you do). If they choose a PIN, ask for a 4–6 digit code — never repeat that code back in chat.",
+        "Returns the live viewer link INSTANTLY — surface it to the user first, before any other work (it's live the moment the preview starts and shows build progress while devices boot); then poll preview_status for readiness. Starts a preview and returns its shareable viewer link — or, if an equivalent preview is already running, returns THAT one (idempotent: each app keeps a stable URL, so this is also the way to answer \"what's the link?\"). With ref/pr it builds that git ref; with neither, an app with a local path previews its local working copy (dev mode — file saves then livesync to the simulator automatically, no pushing needed), and a repo-only app builds its default branch. Pass `alongside` to put more sources on the SAME page — another app, this app at another ref, a worktree, an arbitrary repo — and the viewer shows them side by side under one link and one PIN. That is how you compare old vs new: there is no separate compare tool or compare view. IMPORTANT: before every call you MUST ask the user whether to protect the link with a PIN or make it public, and pass that as `share` (this call fails until you do). If they choose a PIN, ask for a 4–6 digit code — never repeat that code back in chat.",
       inputSchema: {
         app: z.string().describe("app id from list_apps"),
         ref: z.string().optional().describe("branch name or commit SHA; omit for local dev mode or the default branch"),
@@ -355,6 +355,20 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           .min(1)
           .optional()
           .describe("devices to boot (default: one iOS simulator)"),
+        alongside: z
+          .array(
+            z.object({
+              app: z.string().optional().describe("another registered app id"),
+              ref: z.string().optional().describe("a branch/PR/SHA of THIS app (or, with repo, of that repo)"),
+              worktree: z.string().optional().describe("absolute path to another local checkout"),
+              repo: z.string().optional().describe("an arbitrary repo (owner/name or url); pair with ref"),
+            }),
+          )
+          .optional()
+          .describe(
+            "extra sources to show on the same page, in old → new order. An empty object {} means this app's registered migratesFrom. Each gets the same `devices`.",
+          ),
+        items: z.array(z.string()).optional().describe("parity checklist items to seed (flows/screens); update with parity_set"),
         share: z
           .object({
             access: z.enum(["public", "pin"]).describe("REQUIRED — ask the user first: protect with a PIN, or public?"),
@@ -372,6 +386,10 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
 
         // Web apps are device-less local dev servers: no ref/pr, no simulator.
         const isWeb = resolved.type === "web";
+        const extra = args.alongside ?? [];
+        if (isWeb && extra.length) {
+          return fail("web_not_supported", "extra panes are for mobile apps (iOS/Android), not web previews");
+        }
         if (isWeb && (args.ref || args.pr)) {
           return fail(
             "web_local_only",
@@ -387,13 +405,15 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           );
         }
 
-        const devices = isWeb
-          ? [{ platform: "web" as const }]
-          : (args.devices ?? [{ platform: "ios" as const }]).map((d) => ({
-              platform: d.platform ?? ("ios" as const),
-              runtime: d.runtime,
-              model: d.model,
-            }));
+        // Hoisted so the extra panes boot on the same devices: a web preview's
+        // pseudo-device would not typecheck as a simulator request, and extra
+        // panes are rejected for web above anyway.
+        const paneDevices = (args.devices ?? [{ platform: "ios" as const }]).map((d) => ({
+          platform: d.platform ?? ("ios" as const),
+          runtime: d.runtime,
+          model: d.model,
+        }));
+        const devices = isWeb ? [{ platform: "web" as const }] : paneDevices;
 
         const wantsGit = Boolean(args.ref || args.pr);
         const source = isWeb || (!wantsGit && resolved.path) ? ("local" as const) : ("git" as const);
@@ -445,6 +465,34 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         // ...but roll it back if the boot then throws (device caps, one-device-per-
         // platform): the share id is stable per app, so a failed call must not leave
         // an ALREADY-RUNNING share of this app newly public.
+        // Extra sources first, so their (public) panes exist before this app's
+        // share takes the chosen access — same order the old compare tool used.
+        const refs: { reference: CompareReference; previewId: string; booted: boolean }[] = [];
+        // Undo the panes THIS call started; a reused running pane is left alone,
+        // because another page may be showing it right now.
+        const rollbackPanes = () => {
+          for (const r of refs) if (r.booted) void engine.stopPreview(r.previewId).catch(() => {});
+        };
+        for (const target of extra) {
+          let booted;
+          try {
+            booted = bootReference(resolved, target, paneDevices, args.share);
+          } catch (e) {
+            // A THROW here (device capacity, a git failure) used to escape with
+            // the earlier panes still up and no previewId in the response — so
+            // they held their devices with no MCP handle to reach them, and the
+            // capacity that caused the failure stayed spent. Only the returned
+            // failure was rolled back.
+            rollbackPanes();
+            throw e;
+          }
+          if ("content" in booted) {
+            rollbackPanes();
+            return booted;
+          }
+          refs.push(booted);
+        }
+
         const priorPin = engine.pinRecordForApp(resolved.id);
         engine.setAppPin(resolved.id, access === "pin" ? args.share.pin! : null);
         let result;
@@ -458,7 +506,21 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           });
         } catch (e) {
           engine.restoreAppPin(resolved.id, priorPin);
+          // The extra panes already booted and took devices. The likeliest reason
+          // this boot threw is device capacity — leaving them up would hold the
+          // very slots that caused the failure, with no MCP handle to reach the
+          // orphans. Only the ones THIS call booted: a reused pane may be live on
+          // someone else's page.
+          // best-effort: the original failure is what the caller needs to see
+          rollbackPanes();
           throw e;
+        }
+        if (refs.length || args.items?.length) {
+          engine.startCompare(
+            result.previewId,
+            refs.map((r) => ({ ...r.reference, previewId: r.previewId })),
+            args.items ?? [],
+          );
         }
         const protectionNote =
           access === "pin"
@@ -473,6 +535,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             : "";
         return ok({
           ...result,
+          ...(refs.length ? { alongside: refs.map((r) => r.reference) } : {}),
           nextStep:
             (result.alreadyRunning
             ? `An equivalent preview is already running — same viewer link: ${result.url}. ` +
@@ -484,7 +547,11 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
                   `${TEST_RUN_CONTRACT} ${linkFooter(result.url)}`)
             : isWeb
               ? `Give the user this link NOW: ${result.url} (stable for this app) — relay it before any other work; then poll preview_status for readiness. It's a live web dev server — saving files hot-reloads the page automatically, so after editing there is nothing to call. Use restart_preview only after dependency/config changes (new packages, vite.config edits) or if the server looks stuck. Deckhand runs this working copy in place and only reads/runs it — never commit or push any local changes deckhand caused (dev-server caches, a stray lockfile); its git state is not yours to write. ${linkFooter(result.url)}${webHostWarning}`
-              : loopNextStep(source, result.url, args.ref ?? resolved.defaultBranch)) + protectionNote,
+              : loopNextStep(source, result.url, args.ref ?? resolved.defaultBranch)) +
+            (refs.length
+              ? ` It shows ${refs.length + 1} sources side by side under this one link. Drive any pane with describe/ui/screenshot, judge each item yourself, and record the verdict with parity_set (done / adjusted / regression). The checklist is local to this session — keep the project plan in your task tracker.`
+              : "") +
+            protectionNote,
         });
       }),
   );
@@ -498,20 +565,30 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
 
   const shortHash = (s: string): string => "cmp-" + createHash("sha1").update(s).digest("hex").slice(0, 12);
 
-  // Resolve a compare `against` into a booted, PUBLIC reference preview (so the paired
-  // pane needs no cross-share unlock). Four kinds: another registered app, the working
-  // app at another git ref, an arbitrary local worktree, or an arbitrary repo@ref.
+  // Resolve an `alongside` entry into a booted extra pane. Four kinds: another
+  // registered app, this app at another git ref, an arbitrary local worktree, or
+  // an arbitrary repo@ref.
+  //
+  // The pane takes the PAGE's access, not a forced public one. It used to boot
+  // public unconditionally, because there was no cross-share unlock and a
+  // protected pane would have hung on "Connecting…" forever. There is one now
+  // (pairedShareIds), so a PIN-protected page no longer has to publish half of
+  // itself on a second URL to show it.
   const bootReference = (
     workingApp: App,
     against: { app?: string; ref?: string; worktree?: string; repo?: string } | undefined,
     devices: { platform: "ios" | "android"; runtime?: string; model?: string }[],
+    share: { access: "public" | "pin"; pin?: string },
   ): { reference: CompareReference; previewId: string; booted: boolean } | CallToolResult => {
-    const a = against ?? (workingApp.migratesFrom ? { app: workingApp.migratesFrom } : undefined);
-    if (!a || (!a.app && !a.ref && !a.worktree && !a.repo)) {
+    // An entry with nothing named means "my migratesFrom" — that is the whole
+    // point of declaring it, and it saves the agent repeating the source app id.
+    const named = against && (against.app || against.ref || against.worktree || against.repo);
+    const a = named ? against : workingApp.migratesFrom ? { app: workingApp.migratesFrom } : undefined;
+    if (!a) {
       return fail(
         "needs_reference",
-        "compare needs an `against` reference to build the working app against",
-        "pass against: { app } | { ref } | { worktree } | { repo, ref } — or register the working app with migratesFrom for a default.",
+        "an extra pane needs a source to build",
+        "pass alongside: [{ app } | { ref } | { worktree } | { repo, ref }] — or register this app with migratesFrom and pass alongside: [{}].",
       );
     }
     // The build config the reference boots from, plus a stable key identifying it.
@@ -548,7 +625,23 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       // Owner scoping applies to an arbitrary repo too: check the synthetic app
       // the reference would boot, or a token scoped to one org could clone and
       // build any repo deckhand's credential can read.
+      //
+      // But `canAccessApp` returns TRUE for a principal with no `owners` — that
+      // is correct for registered apps (an unscoped member may use them all) and
+      // completely wrong here, where the point is reaching PAST the registered
+      // set. Cloning an arbitrary repo runs its install and build scripts as the
+      // deckhand user; that is the same capability `requireAdmin()` guards on the
+      // worktree branch two cases up, so an unscoped member must not get it for
+      // free just by leaving `owners` unset.
       const probe: App = { ...workingApp, repo: a.repo, path: undefined };
+      const scoped = (principal.owners?.length ?? 0) > 0;
+      if (!isAdmin(principal) && !scoped) {
+        return fail(
+          "forbidden",
+          "building an arbitrary repo needs an owner-scoped or admin token",
+          "use alongside: [{ app }] for a registered app, or ask an admin to scope this token to the repo's owner.",
+        );
+      }
       if (!canAccessApp(principal, probe)) {
         return fail(
           "forbidden",
@@ -574,15 +667,45 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       spec = parseRefSpec({ ref: a.ref! });
       key = `ref:${workingApp.id}@${a.ref!}`;
     }
-    if (base.type === "web") return fail("web_not_supported", "compare pairing is for mobile apps (iOS/Android), not web previews");
+    if (base.type === "web") return fail("web_not_supported", "extra panes are for mobile apps (iOS/Android), not web previews");
     // The reference ALWAYS boots under a synthetic, distinct app id. Sharing the
     // working app's id (a same-app against.ref, or against.app pointing at itself)
     // would collide on the per-app stable shareId (self-pairing) and per-app PIN,
     // and a public reference boot would wipe a registered app's persisted PIN. A
     // fresh id keyed by `key` stays stable across restarts (so compare is idempotent).
-    const refApp: App = { ...base, id: shortHash(key), migratesFrom: undefined };
-    const result = engine.startPreview({ app: refApp, source, spec, devices, access: "public", reference: true });
-    engine.setAppPin(refApp.id, null);
+    // The access class is part of the pane's identity: a public page and a
+    // PIN-protected page must never land on the same pane, or one of them is
+    // wrong about whether that content is exposed.
+    const refApp: App = { ...base, id: shortHash(`${key}|${share.access}`), migratesFrom: undefined };
+    // PIN before boot, same reasoning as the page's own share: the pane's share
+    // id is stable per (synthetic) app, so applying it afterwards leaves a window
+    // where the pane is open. The synthetic id is what makes this safe to write —
+    // it can never be a registered app's persisted PIN.
+    const paneProtected = share.access === "pin";
+    // Do NOT re-key a pane that is already live. Its synthetic app id is derived
+    // from CONTENT (repo+ref), not from the page asking for it, so two pages
+    // comparing against the same source share one pane and one PIN — and this
+    // call would silently rewrite the other page's protection underneath it.
+    // With a different PIN that revokes their viewers' cookies mid-session
+    // (the cookie binds the PIN in force); worse, a public page reusing a
+    // protected pane would strip the protection off someone else's.
+    //
+    // Leaving it alone is safe because a viewer never proves the PANE's PIN:
+    // cross-share minting issues its cookie off the PIN they proved on their own
+    // page (see pairedShareIds). The key below keeps public and PIN-protected
+    // pages on separate panes, so this only ever applies between two pages of
+    // the same access class — the residual already documented in PLAN §11.
+    if (!engine.hasLivePreviewForApp(refApp.id)) {
+      engine.setAppPin(refApp.id, paneProtected ? share.pin! : null);
+    }
+    const result = engine.startPreview({
+      app: refApp,
+      source,
+      spec,
+      devices,
+      access: paneProtected ? "password" : "public",
+      reference: true,
+    });
     const ref = source === "local" ? "local" : refDescription(spec!);
     return {
       reference: { shareId: result.shareId, repo: base.repo ?? refApp.id, ref },
@@ -596,146 +719,21 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   };
 
   server.registerTool(
-    "compare_start",
+    "parity_set",
     {
-      title: "Start a compare",
+      title: "Record a checklist verdict",
       description:
-        "Returns the live viewer URL instantly — surface it to the user FIRST, then do the work. Pairs the WORKING app against a reference (`against`) and shows them side by side (working vs reference), with an optional per-item parity checklist you maintain. `against` is one of: { app } another registered app · { ref } the same working app at another branch/PR/SHA · { worktree } another local checkout (absolute path) · { repo, ref } an arbitrary repo. Omit `against` to use the working app's registered migratesFrom. `items` seeds the checklist (call compare_set as you compare each; omit for a plain split screen). The checklist is LOCAL to this session (in-memory) — the project plan lives in your task tracker (e.g. Linear), not here. As with start_preview you MUST ask the user PIN-or-public for the working link first; the reference pane is public. Deckhand only runs and observes both apps.",
+        "Record your verdict on one checklist item after you've judged it in the viewer. YOU maintain this list — it is what the person watching reads to see how far along you are, so keep it current as you go rather than in a batch at the end. verdict: done (verified fine — use this when there is nothing to compare against, and when the port matches the reference) · adjusted (deliberately different from the reference and fine — a redesign, not a bug) · regression (unwanted divergence, still to fix) · doing (in progress) · pending (not looked at). An unknown item name is appended. Returns the updated counts. Pass previewId or the app id.",
       inputSchema: {
-        app: z.string().describe("the WORKING app id (the one you're building/comparing)"),
-        against: z
-          .object({
-            app: z.string().optional().describe("another registered app id to compare against"),
-            ref: z.string().optional().describe("a branch/PR/SHA of the WORKING app (or, with repo, of that repo)"),
-            worktree: z.string().optional().describe("absolute path to another local checkout"),
-            repo: z.string().optional().describe("an arbitrary repo (owner/name or url); pair with ref"),
-          })
-          .optional()
-          .describe("what to compare the working app against; omit to use its registered migratesFrom"),
-        items: z.array(z.string()).optional().describe("checklist item names to seed (flows/screens); update with compare_set"),
-        labels: z
-          .preprocess(
-            // MCP clients cache tool schemas across server restarts; a client with
-            // the pre-`labels` schema serializes this object as a JSON string.
-            (v) => {
-              if (typeof v !== "string") return v;
-              try {
-                return JSON.parse(v);
-              } catch {
-                return v;
-              }
-            },
-            z
-              .object({
-                working: z.string().max(60).optional().describe("pane name for the working app"),
-                reference: z.string().max(60).optional().describe("pane name for the reference"),
-              })
-              .optional(),
-          )
-          .describe(
-            'display names for the two panes in the viewer, e.g. { working: "Expo-port", reference: "Gammel app v3.4.8" } — name what each app IS; omitted panes fall back to Working/Reference',
-          ),
-        devices: z
-          .array(
-            z.object({
-              platform: z.enum(["ios", "android"]).default("ios"),
-              runtime: z.string().optional().describe('e.g. "26" or "iOS 26"'),
-              model: z.string().optional().describe('e.g. "iPhone 16 Pro"'),
-            }),
-          )
-          .min(1)
-          .optional()
-          .describe("device types to boot for EACH pane (default: one iOS simulator each)"),
-        share: z
-          .object({
-            access: z.enum(["public", "pin"]).describe("REQUIRED — ask the user first: protect the working link with a PIN, or public?"),
-            pin: z.string().optional().describe("4–6 digit numeric PIN the user chose (required when access is 'pin')"),
-          })
-          .optional()
-          .describe("access control for the working link — ask the user PIN-or-public before calling; omitting this fails the call"),
-      },
-    },
-    (args) =>
-      audited("compare_start", args, () => {
-        const working = resolveApp(args.app);
-        if (isResult(working)) return working;
-        if (working.type === "web") return fail("web_not_supported", "compare pairing is for mobile apps (iOS/Android), not web previews");
-        if (!args.share) {
-          return fail(
-            "needs_access_choice",
-            "Before creating the compare link you must ask the user: protect the working link with a PIN, or make it public?",
-            'Ask the user, then call again with share: { access: "pin", pin: "<4-6 digits>" } or share: { access: "public" }.',
-          );
-        }
-        const access = args.share.access;
-        if (access === "pin" && !isValidPin(args.share.pin ?? "")) {
-          return fail("needs_pin", "A PIN-protected share needs a 4–6 digit numeric PIN.", "Ask the user for a 4–6 digit code, then call again with share.pin set. Don't repeat the PIN in chat.");
-        }
-
-        const devices = (args.devices ?? [{ platform: "ios" as const }]).map((d) => ({
-          platform: d.platform ?? ("ios" as const),
-          runtime: d.runtime,
-          model: d.model,
-        }));
-
-        // Reference first (public oracle), then the working app with the chosen access.
-        const refBoot = bootReference(working, args.against, devices);
-        if ("content" in refBoot) return refBoot;
-        // PIN before boot (same reasoning as start_preview: the working share URL is
-        // stable per app, so applying it afterwards leaves the link open in between),
-        // rolled back if the boot throws.
-        const priorPin = engine.pinRecordForApp(working.id);
-        engine.setAppPin(working.id, access === "pin" ? args.share.pin! : null);
-        let result;
-        try {
-          result = bootWorkingApp(working, devices, access === "pin" ? "password" : "public");
-        } catch (e) {
-          engine.restoreAppPin(working.id, priorPin);
-          // The reference pane already booted and took devices. The likeliest
-          // reason the working boot threw is device capacity — so leaving it up
-          // would permanently hold the slots that caused the failure, with no
-          // MCP handle to reach the orphan. Only if THIS call booted it, though:
-          // `bootReference` reuses a running reference across compare sessions,
-          // and stopping a shared one kills another session's live pane.
-          // best-effort: the original failure is what the caller needs to see
-          if (refBoot.booted) void engine.stopPreview(refBoot.previewId).catch(() => {});
-          throw e;
-        }
-        const counts = engine.startCompare(result.previewId, refBoot.reference, args.items ?? [], refBoot.previewId, args.labels);
-
-        const protectionNote =
-          access === "pin"
-            ? " The working link is PIN-protected (don't repeat the PIN in chat); the reference pane is public."
-            : " The link is public — anyone with the URL can open it.";
-        return ok({
-          ...result,
-          reference: refBoot.reference,
-          counts,
-          nextStep:
-            `The viewer is already live at ${result.url} (it shows build progress while both panes boot) — give the user this link NOW, before any other work; do not wait for ready. ` +
-            `It shows the working app and the reference side by side. Drive either pane with describe/ui/screenshot, compare each item yourself, and record the verdict with compare_set (matches / adjusted / regression). The checklist is local to this session — keep the project plan in your task tracker. ` +
-            `${linkFooter(result.url)}` +
-            protectionNote,
-        });
-      }),
-  );
-
-  server.registerTool(
-    "compare_set",
-    {
-      title: "Set a compare verdict",
-      description:
-        "Record the parity verdict for one compare item after you've compared it in the viewer. verdict: matches (identical to the reference) · adjusted (deliberately different and fine — a redesign, not a bug) · regression (unwanted divergence to fix) · doing (in progress) · pending. An unknown item name is appended. Returns the updated counts. Call this as you finish each item. Pass previewId or the working app id.",
-      inputSchema: {
-        previewId: z.string().optional().describe("from compare_start; or pass app instead"),
-        app: z.string().optional().describe("the working app id — targets its running compare"),
+        previewId: z.string().optional().describe("from start_preview; or pass app instead"),
+        app: z.string().optional().describe("the app id — targets its running preview"),
         item: z.string().describe("the item name (flow/screen)"),
-        verdict: z.enum(["pending", "doing", "matches", "adjusted", "regression"]),
+        verdict: z.enum(["pending", "doing", "done", "adjusted", "regression"]),
         note: z.string().optional().describe("optional short note, e.g. why it's adjusted"),
       },
     },
     (args) =>
-      audited("compare_set", args, () => {
+      audited("parity_set", args, () => {
         const id = resolvePreviewId(args);
         if (typeof id !== "string") return id;
         const denied = previewOwnedByPrincipal(id);
@@ -746,24 +744,24 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   );
 
   server.registerTool(
-    "compare_status",
+    "parity_status",
     {
-      title: "Get the compare checklist",
+      title: "Read the checklist",
       description:
-        "Return the current compare session — the reference, every item with its verdict/note, and the counts. Call this at the START of a compare session to pull the full checklist into context and see what's left. Pass previewId or the working app id.",
+        "Return the parity checklist — the extra pane(s) on the page, every item with its verdict/note, and the counts. Call this at the START of a session to pull the full checklist into context and see what's left. Pass previewId or the working app id.",
       inputSchema: {
-        previewId: z.string().optional().describe("from compare_start; or pass app instead"),
-        app: z.string().optional().describe("the working app id — targets its running compare"),
+        previewId: z.string().optional().describe("from start_preview; or pass app instead"),
+        app: z.string().optional().describe("the app id — targets its running preview"),
       },
     },
     (args) =>
-      audited("compare_status", args, () => {
+      audited("parity_status", args, () => {
         const id = resolvePreviewId(args);
         if (typeof id !== "string") return id;
         const denied = previewOwnedByPrincipal(id);
         if (denied) return denied;
         const status = engine.compareStatus(id);
-        if (!status) return fail("no_compare", "no compare session on this preview", "start one with compare_start");
+        if (!status) return fail("no_checklist", "no parity checklist on this preview", "seed it with start_preview's `items`");
         return ok(status);
       }),
   );

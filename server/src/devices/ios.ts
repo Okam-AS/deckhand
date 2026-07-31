@@ -268,7 +268,21 @@ export class Simctl {
     if (res.code !== 0) throw new SimctlError(`simctl erase failed: ${res.stderr.trim().slice(0, 200)}`);
   }
 
+  /**
+   * Delete a simulator. Throws on failure, like every other mutating call here.
+   *
+   * It used to swallow the exit code, which made a guard one layer up a no-op:
+   * `bootIos` deletes a pooled device whose erase failed and only creates a
+   * replacement if the delete SUCCEEDED — because two simulators sharing one
+   * pool name means a later lease can bind the stale one, still holding the
+   * previous tenant's container and keychain, while the tenant map says it is
+   * clean. With a silent delete that catch was unreachable and the replacement
+   * was created anyway, so the "the machine is wedged" error it promises could
+   * never be raised. Every other call site already wraps this in
+   * `.catch(() => {})` where best-effort is what it wants.
+   */
   async delete(udid: string): Promise<void> {
-    await this.run(["delete", udid]);
+    const res = await this.run(["delete", udid]);
+    if (res.code !== 0) throw new SimctlError(`simctl delete failed: ${res.stderr.trim().slice(0, 200)}`);
   }
 }

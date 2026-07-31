@@ -64,6 +64,20 @@ export class AndroidError extends Error {
 // --- pure parsing / selection ----------------------------------------------
 
 /** Parse `avdmanager list avd` output → AVD names. */
+/**
+ * `adb devices` → serials. Skips the "List of devices attached" banner, blank
+ * lines, and any device not in a usable state (`offline`, `unauthorized`) —
+ * those still HOLD the console port, so they must count as taken.
+ */
+export function parseAdbDevices(stdout: string): string[] {
+  return stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith("List of devices"))
+    .map((l) => l.split(/\s+/)[0]!)
+    .filter(Boolean);
+}
+
 export function parseAvdList(text: string): string[] {
   const names: string[] = [];
   for (const line of text.split("\n")) {
@@ -175,6 +189,20 @@ export class AndroidManager {
   async listAvds(): Promise<string[]> {
     const res = await this.run("avdmanager", ["list", "avd"]);
     return parseAvdList(res.stdout.toString());
+  }
+
+  /**
+   * Every device the shared adb server can currently see, by serial.
+   *
+   * This is the only source of truth for "is console port N already taken".
+   * Deckhand's own port set knows nothing about emulators it did not start —
+   * the developer's Android Studio AVD, or one of its own that is still exiting
+   * — and adb is a host-wide daemon, so a stranger's `emulator-5554` is fully
+   * addressable and answers `wait-for-device` instantly.
+   */
+  async attachedSerials(): Promise<string[]> {
+    const res = await this.adb(null, ["devices"]);
+    return parseAdbDevices(res.stdout.toString());
   }
 
   /** Create (or replace) an AVD from a system image. */

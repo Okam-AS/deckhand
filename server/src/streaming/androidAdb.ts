@@ -4,6 +4,12 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { allocatePort, helperBasePath, type AttachedStream, type StreamDeviceRef, type StreamingBackend } from "./backend.ts";
 import { AvccSource } from "./androidH264.ts";
 
+/**
+ * How long to keep asking a freshly booted emulator for a frame. Matches the
+ * iOS backend's window: a cold `screencap` under load is slow, not broken.
+ */
+const FIRST_FRAME_TIMEOUT_MS = 20_000;
+
 // ---------------------------------------------------------------------------
 // Android streaming backend.
 //
@@ -264,9 +270,21 @@ export class AndroidAdbBackend implements StreamingBackend {
     return {
       origin,
       helperBasePath: base,
-      waitForFirstFrame: async () => {
-        const res = await backend.adb(helper.serial, ["exec-out", "screencap", "-p"], { timeoutMs: 5000 });
-        return res.code === 0 && res.stdout.length > 0;
+      waitForFirstFrame: async (timeoutMs = FIRST_FRAME_TIMEOUT_MS) => {
+        // Poll to a deadline rather than taking one 5s shot. `screencap` renders
+        // the whole framebuffer to PNG, and on an emulator that has just booted
+        // — while sibling previews are building and other devices are starting —
+        // that routinely takes longer than five seconds. A single tight attempt
+        // reported a perfectly healthy device as "produced no first frame", and
+        // the engine's retry just repeated the same too-short wait three times.
+        // The iOS backend already probes to a 20s deadline; this matches it.
+        const deadline = Date.now() + timeoutMs;
+        for (;;) {
+          const res = await backend.adb(helper.serial, ["exec-out", "screencap", "-p"], { timeoutMs: 8000 });
+          if (res.code === 0 && res.stdout.length > 0) return true;
+          if (Date.now() >= deadline) return false;
+          await new Promise((r) => setTimeout(r, 500));
+        }
       },
       describe: async () => {
         await backend.adb(helper.serial, ["shell", "uiautomator", "dump", "/sdcard/deckhand-ui.xml"]);

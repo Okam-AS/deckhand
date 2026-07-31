@@ -261,7 +261,7 @@ doctor-builds, reports `ready` → agent offers the first `start_preview`.
 |---|---|---|
 | `list_apps` | member | → apps with `{id, repo, type, defaultBranch, lastDoctor}` |
 | `list_devices` | member | → available iOS runtimes + device types (`simctl list -j`), Android API levels/system images (P2), current capacity vs `limits` |
-| `start_preview` | member | `{app, ref?, pr?, devices?: [{platform: "ios"\|"android", runtime?, model?}], share?: {access: "public"\|"password"}}` → `{previewId, url, source, alreadyRunning, nextStep, devices: [...]}`. **Idempotent**: an equivalent live preview (same app+source(+ref)) is returned as-is with `alreadyRunning: true` — this is also how the agent answers "what's the link?". No ref/pr on a `path` app → local dev mode. Returns immediately; work continues async. |
+| `start_preview` | member | `{app, ref?, pr?, devices?: [{platform: "ios"\|"android", runtime?, model?}], alongside?: [{app?\|ref?\|worktree?\|repo?}], items?, share: {access: "public"\|"pin", pin?}}` → `{previewId, url, source, alreadyRunning, alongside?, nextStep, devices: [...]}`. **Idempotent**: an equivalent live preview (same app+source(+ref)) is returned as-is with `alreadyRunning: true` — this is also how the agent answers "what's the link?". No ref/pr on a `path` app → local dev mode. Returns immediately; work continues async. **Amended (2026-07-31):** `alongside` puts extra sources on the SAME page — the page is a set of panes, so one link and one PIN cover however many sources. `{}` means the app's registered `migratesFrom`. This absorbed `compare_start`; see "One page, several sources" below. |
 | `restart_preview` | member | `{previewId?}` or `{app?}` → rebuild in place on the same booted devices, same shareId/URL. Local: re-run the livesync build (needed after native-level changes; ordinary edits livesync by themselves). Git: fetch the ref's new tip, reset the worktree, rebuild — the post-push step of the loop. |
 | `preview_status` | member | `{previewId?}` or `{app?}` → per-device `{phase, detail, error?, logTail?}`; overall `{ready, url, source}` |
 | `stop_preview` | member | `{previewId}` → teardown (devices deleted, worktree removed per policy; a local app's source dir is never touched) |
@@ -272,7 +272,7 @@ doctor-builds, reports `ready` → agent offers the first `start_preview`.
 | `add_app` | admin | `{repo, type?}` → clone, detect, **doctor build** on a default device, structured report (`ready` or `missing: [...]`) |
 | `remove_app` | admin | `{id, deleteCheckout?}` |
 | `start_test_run` / `update_test_run` / `finish_test_run` | member | **Amended (2026-07-17):** agent-driven end-to-end testing. The agent (the brain) reports what it's testing — `{title, steps}`, per-step `running`/`passed`/`failed`, then a verdict + summary — surfaced live in the viewer as a calm spinner button + step popover. deckhand records; the agent writes the human report in chat. |
-| `start_migration_preview` | member | **Added (2026-07-18):** `{target, devices?, share}` → (re)open the paired migration preview: boot the TARGET app next to its SOURCE (the `migratesFrom` app) on matching devices, and return one viewer link that renders old vs new side by side plus the parity ledger. Named `_preview` because a migration spans many sessions — this idempotently re-opens the same stable link, it does not "run" the migration. Source boots public; target takes the chosen access. Both booted via `start_preview` internally. |
+| `parity_set` / `parity_status` | member | **Renamed (2026-07-31, was `compare_set`/`compare_status`):** maintain and read the per-item parity checklist (`pending`/`doing`/`done`/`adjusted`/`regression`). Deliberately NOT merged with the `*_test_run` tools: a test run is one ephemeral pass whose steps go pending → running → passed, parity is a durable per-screen verdict, and the viewer renders them as separate sections precisely because the statuses do not mean the same thing. |
 
 **Amended (2026-07-17): `describe`/`ui` backend = SimDeck, control-only.** The 2026-07-09
 rejection of SimDeck (row §2) was about its **video transport** (WebRTC/TURN); its
@@ -313,6 +313,41 @@ translator. Three small additions close the gap:
    the existing stable per-app shareIds). Boundary: deckhand runs and shows both apps and
    reads the ledger; the agent translates code, judges parity, and writes the ledger — and
    deckhand never writes to either repo (§11.4).
+
+**One page, several sources (amended 2026-07-31).** The above was built as a *pair*: one
+working preview plus one reference, on two URLs, the reference forced public because there
+was no cross-share unlock (the "PIN caveat" above). That shape could not say "old app +
+`main` + this branch", and it made comparing a mode the viewer entered rather than something
+a page simply was. Generalised:
+
+1. **The page is a set of panes.** `shareState` returns `panes[]` — every live source, in
+   old → new order, this share's own last — instead of a singular `pairedWith`. An ordinary
+   preview has exactly one pane, so the viewer renders a list and never asks "is this a
+   comparison?". `CompareView` is deleted; there is one stage.
+2. **One link, one PIN.** `pairedShareIds()` fans the unlock out over the whole set, so the
+   "PIN caveat" is closed and the public-by-construction reference is gone. Panes still
+   stream from **their own** shareIds — §8's proxy contract ("only for device IDs belonging
+   to that share's preview") and §11.6's narrow allow-list are untouched, so no new route is
+   forwarded and the streaming seam did not change. The proxy's unlock minting did: it fans
+   out from a single partner to the set, FORWARD ONLY — a pane never mints for the page
+   holding it, because panes are content-keyed and two pages can share one.
+3. **Still no persisted session.** The pane set stays in-memory on the working preview, as
+   the compare session already was. Nothing new lands in `state.json` (a protected pane's PIN uses the existing `pins` map, so it survives a restart), and share ids stay
+   stable per app: the page lives at the primary app's existing URL, and extra panes are
+   additive content on it. A bookmarked link does not rot.
+4. **`start_preview` absorbed `compare_start`** via `alongside` (see the tool table), so
+   there is one way to start something. Both capability gates moved with it (§11.3).
+
+**Accepted risk — reach across owner boundaries (2026-07-31).** A page may now show panes
+from more than two registered apps, and whoever holds the link plus any one pane's PIN
+reaches all of them. This is a difference of degree, not of kind: the two-app case was
+already accepted above and in `partnerIsReachable`, whose rule is preserved unchanged — a
+protected pane joins only when the page itself is protected, so access is never granted
+from nothing. The panes are chosen by an operator whose token already passed
+`canAccessApp` for each one. Revisit if deckhand ever serves mutually-untrusted parties on
+one hostname; the fix then is a per-page principal, not a narrower pane list. Note this
+compounds the cookie-jar risk in §11.6 for `web` panes specifically — "per share" stops
+being a sufficient scope unit when one page spans several apps.
 
 Validation rules enforced server-side (never trust the model): app must exist; ref/PR must
 resolve in that app's repo; device count within limits; disk tier not critical; token
@@ -676,9 +711,12 @@ change eases in/out — nothing snaps.
 2. **MCP auth**: per-person 256-bit path tokens, hashed lookup, constant-time compare,
    404 on miss, roles + optional owner scoping, JSONL audit of every call.
 3. **Capability bounding**: no arbitrary shell tool; only registered apps; only refs in
-   those repos; device-count + disk-tier limits. (`compare_start`'s `against.worktree` /
-   `against.repo` reach past "registered apps" by design — both are gated: worktree on
-   `requireAdmin`, repo on the caller's owner scope. Fork PRs are *not* gated; see §6.)
+   those repos; device-count + disk-tier limits. (`start_preview`'s `alongside[].worktree` /
+   `alongside[].repo` reach past "registered apps" by design — both are gated: worktree on
+   `requireAdmin`, repo on the caller's owner scope. **Amended 2026-07-31:** these branches
+   moved off the removed `compare_start` onto `start_preview`, so they now hang off a tool
+   every member already calls — the gates carry more weight there, not less. Fork PRs are
+   *not* gated; see §6.)
 4. **GitHub**: App with Contents:Read-only — deckhand can never write to any repo. Hourly
    installation tokens, never persisted, never in argv/URLs/logs. **Ambient-credential
    note (2026-07-15):** with `githubAmbient` (no PAT/App configured, `gh` logged in on
