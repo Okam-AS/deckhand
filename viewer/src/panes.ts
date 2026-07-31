@@ -55,8 +55,22 @@ export interface Stage {
   multiSource: boolean;
 }
 
+/**
+ * The narrowest a source's column can get and still be worth looking at. Below
+ * this a phone renders too small to judge a screen by, which is the only reason
+ * to have it on screen at all — so it is better to show one source properly and
+ * switch between them.
+ */
+export const MIN_PANE_WIDTH = 340;
+
 export interface StageOptions {
   isMobile: boolean;
+  /**
+   * Viewport width in CSS pixels. Sources sit side by side while they all fit at
+   * MIN_PANE_WIDTH; below that the stage shows ONE, exactly as it does on a
+   * phone. Omit and everything is assumed to fit.
+   */
+  viewportWidth?: number;
   /**
    * Explicit per-group device choice (group key → pane key), from the picker.
    * A stale entry (the device went away) is ignored rather than blanking the group.
@@ -131,9 +145,12 @@ export function computeStage(sharePanes: SharePane[], opts: StageOptions): Stage
   const all = groups.flatMap((g) => g.panes);
   const multiSource = groups.length > 1;
 
-  // Mobile has room for exactly one device — several on a phone screen help
-  // no one, and the dock switches between them.
-  if (opts.isMobile) {
+  // One device on screen when the columns cannot all be a usable width. A phone
+  // is the extreme case of that, not a separate mode — and the picker switches
+  // between sources, so nothing becomes unreachable, it just takes a click.
+  const width = opts.viewportWidth ?? Infinity;
+  const columnsFit = groups.length * MIN_PANE_WIDTH <= width;
+  if (opts.isMobile || !columnsFit) {
     const focused = opts.focusKey && all.some((p) => p.key === opts.focusKey) ? opts.focusKey : (groups[0]?.activeKey ?? "");
     return { groups, panes: all, visible: new Set(focused ? [focused] : []), multiSource };
   }

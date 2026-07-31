@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { computeStage, paneKey, shortDeviceName } from "./panes.ts";
+import { computeStage, paneKey, shortDeviceName, MIN_PANE_WIDTH } from "./panes.ts";
 import type { SharePane } from "./api.ts";
 
 const dev = (deviceId: string, platform: string, label = deviceId) => ({ deviceId, platform, label, phase: "ready" });
@@ -33,6 +33,31 @@ describe("computeStage — how many devices are on screen", () => {
     assert.equal(s.panes.length, 4, "all four stay mounted…");
     assert.equal(s.visible.size, 2, "…but only one per source is on screen");
     assert.deepEqual([...s.visible].sort(), [paneKey("new", "ios-0"), paneKey("old", "ios-0")].sort());
+  });
+
+  it("puts sources side by side while they all fit at a usable width", () => {
+    const s = computeStage(twoSources, { isMobile: false, viewportWidth: MIN_PANE_WIDTH * 2 });
+    assert.equal(s.visible.size, 2);
+  });
+
+  it("drops to one device when the columns would be too narrow to judge by", () => {
+    // The stage used to size columns by height alone, so on a narrow window they
+    // wrapped: the second source rendered full-size BELOW the fold, which reads
+    // as "the other app is missing" — the one thing a comparison must not do.
+    const s = computeStage(twoSources, { isMobile: false, viewportWidth: MIN_PANE_WIDTH * 2 - 1 });
+    assert.equal(s.visible.size, 1);
+    assert.equal(s.panes.length, 4, "and the rest stay mounted, one picker click away");
+  });
+
+  it("needs more width for three sources than for two", () => {
+    const three = [...twoSources, pane("third", "r/c", "main", [dev("ios-0", "ios")])];
+    const width = MIN_PANE_WIDTH * 2;
+    assert.equal(computeStage(twoSources, { isMobile: false, viewportWidth: width }).visible.size, 2);
+    assert.equal(computeStage(three, { isMobile: false, viewportWidth: width }).visible.size, 1, "a fixed breakpoint could not express this");
+  });
+
+  it("assumes everything fits when width is unknown", () => {
+    assert.equal(computeStage(twoSources, { isMobile: false }).visible.size, 2);
   });
 
   it("shows exactly one device on mobile, whatever the source count", () => {

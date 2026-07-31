@@ -1400,6 +1400,16 @@ figcaption {
 .stage--grouped {
   align-items: stretch;
   gap: clamp(1rem, 3vw, 2.4rem);
+  /* Never wrap: the stage decides in JS how many sources fit (MIN_PANE_WIDTH in
+     panes.ts) and shows one when they don't. Wrapping instead put the second
+     source below the fold at full size, which reads as "the other app is
+     missing" — the one thing a comparison must not do. */
+  flex-wrap: nowrap;
+}
+.stage--grouped .pane-group {
+  /* Equal columns that shrink together, rather than each demanding its natural
+     width and pushing the next one onto a new row. */
+  flex: 1 1 0;
 }
 .pane-group {
   display: flex;

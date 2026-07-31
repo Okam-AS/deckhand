@@ -22,6 +22,10 @@ export function App() {
   const [preferredPlatform, setPreferredPlatform] = useState<string | undefined>(undefined);
   const [hiddenKeys, setHiddenKeys] = useState<string[]>([]);
   const [focusKey, setFocusKey] = useState<string | null>(null);
+  // Width decides how many sources fit side by side (see MIN_PANE_WIDTH). Read
+  // from the window rather than a media query: the threshold depends on how many
+  // sources the page has, which no fixed breakpoint can express.
+  const [viewportWidth, setViewportWidth] = useState(() => (typeof window === "undefined" ? Infinity : window.innerWidth));
   const stageRef = useRef<HTMLElement>(null);
   const prevRects = useRef<Map<string, DOMRect>>(new Map());
   const isMobile = useIsMobile();
@@ -39,6 +43,12 @@ export function App() {
     (key: string, deg: number) => setRotations((r) => (r[key] === deg ? r : { ...r, [key]: deg })),
     [],
   );
+
+  useEffect(() => {
+    const onResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   useEffect(() => {
     if (!shareId) return;
@@ -66,8 +76,16 @@ export function App() {
   // The whole layout, derived. Memoised on the inputs that actually change it, so
   // the 1.2s status poll doesn't rebuild pane objects and churn React keys.
   const stage = useMemo(
-    () => computeStage(state?.panes ?? [], { isMobile, choices, preferredPlatform, hiddenKeys, focusKey: focusKey ?? undefined }),
-    [state?.panes, isMobile, choices, preferredPlatform, hiddenKeys, focusKey],
+    () =>
+      computeStage(state?.panes ?? [], {
+        isMobile,
+        viewportWidth,
+        choices,
+        preferredPlatform,
+        hiddenKeys,
+        focusKey: focusKey ?? undefined,
+      }),
+    [state?.panes, isMobile, viewportWidth, choices, preferredPlatform, hiddenKeys, focusKey],
   );
 
   // FLIP: after each layout change, slide/zoom every device figure from its old
