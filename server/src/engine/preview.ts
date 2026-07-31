@@ -1383,7 +1383,15 @@ export class PreviewEngine {
       const exists = (await safeList<string>(() => android.listAvds())).includes(avdName);
       wipeData = this.poolTenants.get(avdName) !== p.app.id;
       if (!exists) await android.createAvd(avdName, image, profile);
-      this.poolTenants.set(avdName, p.app.id);
+      // Do NOT claim tenancy yet. The wipe is a `-wipe-data` flag on the boot
+      // below, so at this point it has not happened — and bootEmulator can throw
+      // or time out (240s). Recording the new tenant here meant the retry
+      // computed wipeData=false and handed this app an AVD still holding the
+      // PREVIOUS tenant's data: its app storage, accounts and cookies, across
+      // owner scopes, silently. iOS gets this right by erasing first and
+      // recording after; the comment there even claims Android was already
+      // correct, which is what made this easy to miss. Claimed after the boot
+      // returns instead — see below.
     } else {
       avdName = `deckhand_${p.record.previewId}_${dev.record.deviceId}`.replace(/[^A-Za-z0-9_]/g, "_");
       dev.deviceName = avdName; // see bootIos: spare it by name while createAvd runs
@@ -1406,6 +1414,10 @@ export class PreviewEngine {
     let serial: string;
     try {
       serial = await android.bootEmulator(avdName, port, undefined, { wipeData, signal: dev.abort.signal });
+      // The wipe has now actually run, so the AVD really does belong to this app.
+      // A boot that threw leaves the old tenant recorded, so the next attempt
+      // wipes again — the safe direction to be wrong in.
+      if (avdName.startsWith(POOL_AVD_PREFIX)) this.poolTenants.set(avdName, p.app.id);
     } catch (err) {
       // bootEmulator launches QEMU detached and only *waits* here, so a throw —
       // abort or timeout — leaves an emulator running that nothing can address:

@@ -1331,6 +1331,48 @@ describe("PreviewEngine idle sweep", () => {
     assert.ok(h.simctlCalls.some((c) => c.startsWith("delete ")));
   });
 
+  it("re-wipes a pooled AVD when the boot that should have wiped it failed", async () => {
+    // The tenant was recorded BEFORE the wipe ran — the wipe is a `-wipe-data`
+    // flag on a boot that can throw or time out after 240s. A failed boot
+    // therefore left the new app recorded as the owner, so the retry computed
+    // wipeData=false and handed it an AVD still holding the PREVIOUS tenant's
+    // app storage, accounts and cookies, across owner scopes, in silence.
+    const wipes: boolean[] = [];
+    let failNext = true;
+    const cfg = { ...config, limits: { ...config.limits, reuseDevices: true, maxTotalDevices: 8 } };
+    const h = makeEngine({
+      config: cfg,
+      android: {
+        ...(androidFake() as object),
+        bootEmulator: async (_avd: string, port: number, _img: unknown, opts: { wipeData?: boolean } = {}) => {
+          wipes.push(!!opts.wipeData);
+          if (failNext) throw new Error("emulator: timed out waiting for boot");
+          return `emulator-${port}`;
+        },
+      } as unknown as PreviewEngineDeps["android"],
+    });
+
+    const android = () => ({ platform: "android" as const, runtime: "34" });
+    // App A takes the pooled AVD (nothing to wipe — it is fresh).
+    h.engine.startPreview({ app: { ...rnApp, id: "app-a" }, source: "git", spec: { kind: "branch", branch: "main" }, devices: [android()], access: "public" });
+    await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
+    // Release the lease, or app B is handed a SECOND (fresh) pool slot and never
+    // exercises the reuse path at all.
+    await h.engine.stopPreview("pv1");
+
+    // App B takes the same slot next: the wipe is requested, and the boot fails.
+    h.engine.startPreview({ app: { ...rnApp, id: "app-b" }, source: "git", spec: { kind: "branch", branch: "main" }, devices: [android()], access: "public" });
+    await waitForPhase(h.engine, "pv2", ["ready", "failed"]);
+    assert.equal(wipes[wipes.length - 1], true, "app B asked for a wipe");
+    await h.engine.stopPreview("pv2");
+
+    // App B retries. The wipe never actually happened, so it must be asked for again.
+    failNext = false;
+    h.engine.startPreview({ app: { ...rnApp, id: "app-b" }, source: "git", spec: { kind: "branch", branch: "main" }, devices: [android()], access: "public" });
+    await waitForPhase(h.engine, "pv3", ["ready", "failed"]);
+    assert.equal(wipes[wipes.length - 1], true, "a boot that failed cannot count as the wipe having run");
+  });
+
   it("never allocates a console port an emulator already holds", async () => {
     // The worst-behaved bug in the audit. `emulator -port <busy>` fails to bind
     // and exits, but `adb -s emulator-<port> wait-for-device` resolves INSTANTLY
