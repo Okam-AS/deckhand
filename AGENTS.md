@@ -62,8 +62,9 @@ invariants clean).
 at another ref, a worktree, an arbitrary repo, or `{}` for the registered `migratesFrom` —
 and `shareState` returns `panes[]` (old → new, own share last). One link, one PIN, however
 many sources; `pairedShareIds()` fans the unlock across them, so the old public-by-
-construction reference pane is gone. Panes still stream from their **own** shareIds, which
-is why none of this touched the proxy or the streaming seam. The viewer has ONE stage:
+construction reference pane is gone. Panes still stream from their **own** shareIds, so the
+streaming seam is untouched and no new route is forwarded — the one proxy change is the
+unlock minting fanning out from a single partner to the set. The viewer has ONE stage:
 `computeStage` in `viewer/src/panes.ts` decides grouping and visibility as a pure function
 (one source → all its devices; several → one each; mobile → one), and it is the only
 tested code in `viewer/` — keep new layout rules there, not in `App.tsx`.

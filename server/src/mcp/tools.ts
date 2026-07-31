@@ -721,7 +721,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool(
     "parity_set",
     {
-      title: "Set a compare verdict",
+      title: "Record a checklist verdict",
       description:
         "Record your verdict on one checklist item after you've judged it in the viewer. YOU maintain this list — it is what the person watching reads to see how far along you are, so keep it current as you go rather than in a batch at the end. verdict: done (verified fine — use this when there is nothing to compare against, and when the port matches the reference) · adjusted (deliberately different from the reference and fine — a redesign, not a bug) · regression (unwanted divergence, still to fix) · doing (in progress) · pending (not looked at). An unknown item name is appended. Returns the updated counts. Pass previewId or the app id.",
       inputSchema: {
@@ -746,7 +746,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool(
     "parity_status",
     {
-      title: "Get the compare checklist",
+      title: "Read the checklist",
       description:
         "Return the parity checklist — the extra pane(s) on the page, every item with its verdict/note, and the counts. Call this at the START of a session to pull the full checklist into context and see what's left. Pass previewId or the working app id.",
       inputSchema: {

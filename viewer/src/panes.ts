@@ -34,10 +34,8 @@ export interface StageGroup {
   shareId: string;
   repo: string;
   ref: string;
-  /** What to show as the column heading. */
+  /** Names the source in the mobile dock's grouped picker. */
   label: string;
-  /** The secondary line under it: the branch, or "local" for a working copy. */
-  meta: string;
   self: boolean;
   /** Every device of this source. All stay mounted; only `visible` ones decode. */
   panes: StagePane[];
@@ -121,11 +119,10 @@ export function computeStage(sharePanes: SharePane[], opts: StageOptions): Stage
         shareId: p.shareId,
         repo: p.repo,
         ref: p.ref,
-        // Heading is the repo, subheading the branch. No agent-supplied name:
-        // an invented label ("Old app", "the Expo port") says less than the two
-        // facts that actually identify a source, and drifts from them over time.
-        // The branch has to be here, not just the repo — two panes are often the
-        // SAME repo at different refs, and then the repo alone names neither.
+        // No agent-supplied name: an invented label ("Old app", "the Expo port")
+        // says less than the repo itself and drifts from it over time. Repo and
+        // branch are shown in full behind each frame's (i) button; this is just
+        // the short name the dock's picker groups by.
         label: repoShortName(p.repo) || p.shareId,
         meta: p.ref,
         self: p.self === true,

@@ -1462,26 +1462,6 @@ figcaption {
   gap: 0.8rem;
   min-width: 0;
 }
-.pane-head {
-  display: flex;
-  align-items: baseline;
-  gap: 0.5rem;
-  min-width: 0;
-}
-.pane-name {
-  font-weight: 600;
-  font-size: 0.95rem;
-  letter-spacing: -0.01em;
-  white-space: nowrap;
-}
-.pane-meta {
-  font-family: var(--mono);
-  font-size: 0.74rem;
-  color: var(--ink-faint);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .pane-stage {
   display: flex;
   flex-wrap: wrap;
@@ -1503,10 +1483,7 @@ figcaption {
 }
 
 @media (max-width: 700px) {
-  /* One pane, full height, no headings — the dock names what you are looking at. */
-  .app--grouped .pane-head {
-    display: none;
-  }
+  /* One pane, full height. The dock names what you are looking at. */
   /* The stage centres its children by default, which leaves the column at its
      content height — so the size container below has no definite height and the
      cq units inside it resolve to zero. Stretch, then fill down the chain. */

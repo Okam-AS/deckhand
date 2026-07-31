@@ -175,10 +175,9 @@ describe("computeStage — which device each source shows", () => {
 });
 
 describe("computeStage — headings", () => {
-  it("names a source by its repo, with the branch underneath", () => {
+  it("names a source by its repo", () => {
     const s = computeStage(twoSources, { isMobile: false });
     assert.deepEqual(s.groups.map((g) => g.label), ["legacy", "app"]);
-    assert.deepEqual(s.groups.map((g) => g.meta), ["dev", "feature/x"]);
   });
 
   it("distinguishes two refs of the SAME repo by the branch line", () => {
@@ -190,7 +189,11 @@ describe("computeStage — headings", () => {
     ];
     const s = computeStage(sameRepo, { isMobile: false });
     assert.deepEqual(s.groups.map((g) => g.label), ["app", "app"]);
-    assert.deepEqual(s.groups.map((g) => g.meta), ["main", "feature/x"], "the branch is what tells them apart");
+    assert.deepEqual(
+      s.groups.map((g) => g.ref),
+      ["main", "feature/x"],
+      "same repo twice — the ref is what tells them apart, and it reaches the (i) panel",
+    );
   });
 
   it("marks exactly one source as the page's own", () => {

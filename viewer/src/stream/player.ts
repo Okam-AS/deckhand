@@ -171,7 +171,17 @@ export class DevicePlayer {
     const demux = new AvccDemuxer();
     let gotFrame = false;
 
+    // Clear the PREVIOUS attempt's watchdog before arming this one. Only
+    // teardownStreams() cleared it, and the reconnect path
+    // (upstreamEnded → scheduleReconnect → startAvcc) does not go through
+    // teardown — so a connection that closed before its first frame left a timer
+    // armed over a stale `gotFrame`, which then fired four seconds into a
+    // perfectly healthy reconnected stream and demoted it to MJPEG for good.
+    if (this.firstFrameTimer) clearTimeout(this.firstFrameTimer);
     this.firstFrameTimer = setTimeout(() => {
+      // `this.abort !== ac` means a newer connection owns the player now; an old
+      // timer must never speak for it. Belt-and-braces with the clear above.
+      if (this.abort !== ac) return;
       if (!gotFrame && !this.disposed && this.active) {
         this.report("avcc no first frame", `nothing decoded within ${FIRST_FRAME_TIMEOUT_MS}ms — falling back to mjpeg`);
         this.fallbackToMjpeg();

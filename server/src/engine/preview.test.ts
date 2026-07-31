@@ -939,6 +939,66 @@ describe("PreviewEngine compare session", () => {
     assert.deepEqual(h.engine.pairedShareIds("no-such-share"), []);
   });
 
+  it("tears down a pane the page stopped referencing, unless another page has it", async () => {
+    // start_preview is idempotent and is the documented way to re-answer "what's
+    // the link?", so re-calling it with a different `alongside` is expected. The
+    // dropped pane used to keep its simulator, Metro port and worktree with no
+    // previewId ever returned to the agent and no way for stop_preview to reach
+    // it — only the idle sweep, an hour later.
+    const h = makeEngine({ ...uniqIds(), config: { ...config, limits: { ...config.limits, maxTotalDevices: 8 } } });
+    const mk = (branch: string) =>
+      h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch }, devices: [{ platform: "ios" }], access: "public" });
+    const old = mk("v1");
+    const next = mk("v2");
+    const page = mk("feature");
+    for (const p of [old, next, page]) await waitForPhase(h.engine, p.previewId, ["ready", "failed"]);
+
+    h.engine.startCompare(page.previewId, [{ shareId: old.shareId, repo: "r", ref: "v1", previewId: old.previewId }], []);
+    h.engine.startCompare(page.previewId, [{ shareId: next.shareId, repo: "r", ref: "v2", previewId: next.previewId }], []);
+    await new Promise((r) => setTimeout(r, 50)); // the teardown is fire-and-forget
+    assert.equal(h.engine.getStatus(old.previewId), null, "the dropped pane is collected");
+    assert.ok(h.engine.getStatus(next.previewId), "and the new one is not");
+  });
+
+  it("keeps a dropped pane alive while another page still shows it", async () => {
+    const h = makeEngine({ ...uniqIds(), config: { ...config, limits: { ...config.limits, maxTotalDevices: 8 } } });
+    const mk = (branch: string) =>
+      h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch }, devices: [{ platform: "ios" }], access: "public" });
+    const shared = mk("v1");
+    const pageA = mk("a");
+    const pageB = mk("b");
+    for (const p of [shared, pageA, pageB]) await waitForPhase(h.engine, p.previewId, ["ready", "failed"]);
+    const ref = { shareId: shared.shareId, repo: "r", ref: "v1", previewId: shared.previewId };
+
+    h.engine.startCompare(pageA.previewId, [ref], []);
+    h.engine.startCompare(pageB.previewId, [ref], []);
+    h.engine.startCompare(pageA.previewId, [], []); // A drops it; B still has it
+    await new Promise((r) => setTimeout(r, 50));
+    assert.ok(h.engine.getStatus(shared.previewId), "content-keyed panes are shared, so dropping one reference is not enough");
+  });
+
+  it("hides a pane the page can no longer unlock, instead of hanging it", () => {
+    // Panes inherit the page's access at boot, so the two normally match — until
+    // `set_pin --remove` makes the page public while the pane keeps its PIN. The
+    // pane was still advertised but no longer minted for, so the viewer mounted
+    // it and had its WS refused once a second forever, with no pad: the pad only
+    // renders for the page's own shareId. The migratesFrom branch had guarded
+    // this from the start; the compare branch never did.
+    const h = makeEngine(uniqIds());
+    const pane = h.engine.startPreview({ app: { ...rnApp, id: "pane-app" }, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "password" });
+    const page = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "feature" }, devices: [{ platform: "ios" }], access: "password" });
+    h.engine.setAppPin("pane-app", "1111");
+    h.engine.setAppPin(rnApp.id, "2222");
+    h.engine.startCompare(page.previewId, [{ shareId: pane.shareId, repo: "acme/app", ref: "main" }], []);
+
+    assert.equal(h.engine.shareState(page.shareId)!.panes.length, 2, "both protected: the pane shows");
+    assert.deepEqual(h.engine.pairedShareIds(page.shareId), [pane.shareId]);
+
+    h.engine.setAppPin(rnApp.id, null); // the page goes public; the pane does not
+    assert.equal(h.engine.shareState(page.shareId)!.panes.length, 1, "an unreachable pane is not advertised");
+    assert.deepEqual(h.engine.pairedShareIds(page.shareId), [], "…and not minted for either");
+  });
+
   it("never lets one page's PIN reach another page that shares a pane", () => {
     // The escalation this replaced: pages A and B both name the same source, so
     // they land on ONE pane P (content-keyed, deliberately — it is what makes

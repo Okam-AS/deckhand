@@ -21,6 +21,7 @@ import { resolveAndroidEnv } from "../devices/toolEnv.ts";
 import { Reaper, POOL_SIM_PREFIX, POOL_AVD_PREFIX } from "./reaper.ts";
 import { METRO_MARKER_ENV } from "./metro.ts";
 import { DEV_MARKER_ENV } from "./devProcess.ts";
+import { BUILD_MARKER_ENV } from "./procs.ts";
 import { MetroManager } from "./metro.ts";
 import { buildPlan, usesMetroDeepLink, nativescriptDevRun, webDevRun, webRootDevRun, GENERAL_IDLE_MS, METRO_PORT } from "./recipes.ts";
 import { runStep as defaultRunStep, type RunResult } from "./procs.ts";
@@ -684,6 +685,14 @@ export class PreviewEngine {
             // one, and pairedShareIds won't mint a cookie for it either.
             const live = this.liveByShareId(r.shareId);
             if (!live) continue;
+            // Same rule the migratesFrom branch has always had, and the compare
+            // branch never did: only advertise a pane this page can actually
+            // unlock. Access is inherited at boot, so the two normally match —
+            // until `set_pin --remove` makes the page public while the pane
+            // keeps its PIN. The pane then mounted and had its WS refused once a
+            // second forever, with no pad, because the pad only ever renders for
+            // the page's own shareId.
+            if (!this.partnerIsReachable(p.record.shareId, r.shareId)) continue;
             refPanes.push({
               shareId: r.shareId,
               repo: r.repo,
@@ -778,7 +787,9 @@ export class PreviewEngine {
           // Forward: this page's own panes. Only a LIVE one counts — the viewer
           // never mounts a dead pane, so don't mint a cookie for it either.
           for (const r of p.compare.references) {
-            if (this.liveByShareId(r.shareId)) out.add(r.shareId);
+            // Mirrors shareState exactly: never mint for a pane we did not
+            // advertise, and never advertise one we cannot mint for.
+            if (this.liveByShareId(r.shareId) && this.partnerIsReachable(shareId, r.shareId)) out.add(r.shareId);
           }
         }
         // FORWARD ONLY. There used to be a reverse direction here — unlocking a
@@ -2440,7 +2451,26 @@ export class PreviewEngine {
     // by design (setCompareItem appends unknown names) and there is no removal
     // API, so dropping them could only ever lose work.
     for (const item of prior.values()) if (!uniq.includes(item.name)) merged.push(item);
+    // Panes this page is dropping. `start_preview` is idempotent and documented
+    // as the way to re-answer "what's the link?", so re-calling it with a
+    // different `alongside` is expected — and the old panes then held a
+    // simulator, a Metro port and a worktree with no previewId ever returned to
+    // the agent and no path for `stop_preview` to reach them. Only the idle
+    // sweep would eventually collect them, an hour later.
+    const kept = new Set(refs.map((r) => r.shareId));
+    const dropped = (p.compare?.references ?? []).filter((r) => !kept.has(r.shareId));
+
     p.compare = { references: refs, items: merged };
+
+    for (const r of dropped) {
+      if (!r.previewId || !this.previews.has(r.previewId)) continue;
+      // Shared panes are the point of content-keying: another page may be
+      // showing this one right now.
+      const stillUsed = [...this.previews.values()].some((o) =>
+        (o.compare?.references ?? []).some((x) => x.previewId === r.previewId),
+      );
+      if (!stillUsed) void this.stopPreview(r.previewId).catch(() => {});
+    }
     return PreviewEngine.countCompare(p.compare.items);
   }
 
@@ -2496,9 +2526,6 @@ export class PreviewEngine {
         // Metro reap ahead of it did exactly that, and the in-flight test caught
         // it.) Metro and devices are independent, so order costs nothing here.
         const devices = await reaper.reap(this.liveDeviceHandles());
-        // Metro outlives the server too (spawned detached), and leaked one per
-        // restart until the whole port range was held. Nothing is owned at boot,
-        // so every marked process is an orphan.
         // Metro AND the livesync runners: both are spawned detached and tracked
         // only in memory, so both were reparented to launchd on every restart.
         // The livesync leak was the worse of the two by far — 36 orphans at 418%
@@ -2513,6 +2540,8 @@ export class PreviewEngine {
         for (const [tool, marker, keep] of [
           ["reap_metro", METRO_MARKER_ENV, () => this.d.metro?.livePids() ?? []],
           ["reap_dev_run", DEV_MARKER_ENV, () => this.d.devProcs?.livePids() ?? []],
+          // Build steps are awaited, so nothing is owned across a boot.
+          ["reap_build", BUILD_MARKER_ENV, () => []],
         ] as const) {
           const killed = await reaper.reapOrphansByMarker(marker, keep()).catch(() => [] as number[]);
           if (killed.length) this.d.audit.record({ actor: "engine", tool, args: { killed: killed.length }, result: "ok" });

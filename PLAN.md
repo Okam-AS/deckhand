@@ -261,7 +261,7 @@ doctor-builds, reports `ready` → agent offers the first `start_preview`.
 |---|---|---|
 | `list_apps` | member | → apps with `{id, repo, type, defaultBranch, lastDoctor}` |
 | `list_devices` | member | → available iOS runtimes + device types (`simctl list -j`), Android API levels/system images (P2), current capacity vs `limits` |
-| `start_preview` | member | `{app, ref?, pr?, devices?: [{platform: "ios"\|"android", runtime?, model?}], alongside?: [{app?\|ref?\|worktree?\|repo?, label?}], label?, items?, share?: {access: "public"\|"password"}}` → `{previewId, url, source, alreadyRunning, alongside?, nextStep, devices: [...]}`. **Idempotent**: an equivalent live preview (same app+source(+ref)) is returned as-is with `alreadyRunning: true` — this is also how the agent answers "what's the link?". No ref/pr on a `path` app → local dev mode. Returns immediately; work continues async. **Amended (2026-07-31):** `alongside` puts extra sources on the SAME page — the page is a set of panes, so one link and one PIN cover however many sources. `{}` means the app's registered `migratesFrom`. This absorbed `compare_start`; see "One page, several sources" below. |
+| `start_preview` | member | `{app, ref?, pr?, devices?: [{platform: "ios"\|"android", runtime?, model?}], alongside?: [{app?\|ref?\|worktree?\|repo?}], items?, share: {access: "public"\|"pin", pin?}}` → `{previewId, url, source, alreadyRunning, alongside?, nextStep, devices: [...]}`. **Idempotent**: an equivalent live preview (same app+source(+ref)) is returned as-is with `alreadyRunning: true` — this is also how the agent answers "what's the link?". No ref/pr on a `path` app → local dev mode. Returns immediately; work continues async. **Amended (2026-07-31):** `alongside` puts extra sources on the SAME page — the page is a set of panes, so one link and one PIN cover however many sources. `{}` means the app's registered `migratesFrom`. This absorbed `compare_start`; see "One page, several sources" below. |
 | `restart_preview` | member | `{previewId?}` or `{app?}` → rebuild in place on the same booted devices, same shareId/URL. Local: re-run the livesync build (needed after native-level changes; ordinary edits livesync by themselves). Git: fetch the ref's new tip, reset the worktree, rebuild — the post-push step of the loop. |
 | `preview_status` | member | `{previewId?}` or `{app?}` → per-device `{phase, detail, error?, logTail?}`; overall `{ready, url, source}` |
 | `stop_preview` | member | `{previewId}` → teardown (devices deleted, worktree removed per policy; a local app's source dir is never touched) |
@@ -272,7 +272,7 @@ doctor-builds, reports `ready` → agent offers the first `start_preview`.
 | `add_app` | admin | `{repo, type?}` → clone, detect, **doctor build** on a default device, structured report (`ready` or `missing: [...]`) |
 | `remove_app` | admin | `{id, deleteCheckout?}` |
 | `start_test_run` / `update_test_run` / `finish_test_run` | member | **Amended (2026-07-17):** agent-driven end-to-end testing. The agent (the brain) reports what it's testing — `{title, steps}`, per-step `running`/`passed`/`failed`, then a verdict + summary — surfaced live in the viewer as a calm spinner button + step popover. deckhand records; the agent writes the human report in chat. |
-| `parity_set` / `parity_status` | member | **Renamed (2026-07-31, was `compare_set`/`compare_status`):** maintain and read the per-item parity checklist (`pending`/`doing`/`matches`/`adjusted`/`regression`). Deliberately NOT merged with the `*_test_run` tools: a test run is one ephemeral pass whose steps go pending → running → passed, parity is a durable per-screen verdict, and the viewer renders them as separate sections precisely because the statuses do not mean the same thing. |
+| `parity_set` / `parity_status` | member | **Renamed (2026-07-31, was `compare_set`/`compare_status`):** maintain and read the per-item parity checklist (`pending`/`doing`/`done`/`adjusted`/`regression`). Deliberately NOT merged with the `*_test_run` tools: a test run is one ephemeral pass whose steps go pending → running → passed, parity is a durable per-screen verdict, and the viewer renders them as separate sections precisely because the statuses do not mean the same thing. |
 
 **Amended (2026-07-17): `describe`/`ui` backend = SimDeck, control-only.** The 2026-07-09
 rejection of SimDeck (row §2) was about its **video transport** (WebRTC/TURN); its
@@ -327,10 +327,12 @@ a page simply was. Generalised:
 2. **One link, one PIN.** `pairedShareIds()` fans the unlock out over the whole set, so the
    "PIN caveat" is closed and the public-by-construction reference is gone. Panes still
    stream from **their own** shareIds — §8's proxy contract ("only for device IDs belonging
-   to that share's preview") and §11.6's narrow allow-list are untouched, which is why this
-   needed no new proxy or stream code.
+   to that share's preview") and §11.6's narrow allow-list are untouched, so no new route is
+   forwarded and the streaming seam did not change. The proxy's unlock minting did: it fans
+   out from a single partner to the set, FORWARD ONLY — a pane never mints for the page
+   holding it, because panes are content-keyed and two pages can share one.
 3. **Still no persisted session.** The pane set stays in-memory on the working preview, as
-   the compare session already was. Nothing new lands in `state.json`, and share ids stay
+   the compare session already was. Nothing new lands in `state.json` (a protected pane's PIN uses the existing `pins` map, so it survives a restart), and share ids stay
    stable per app: the page lives at the primary app's existing URL, and extra panes are
    additive content on it. A bookmarked link does not rot.
 4. **`start_preview` absorbed `compare_start`** via `alongside` (see the tool table), so
