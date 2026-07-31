@@ -421,6 +421,26 @@ describe("PIN gate (path-based share)", () => {
     assert.equal(body.locked, false);
   });
 
+  it("survives a malformed cookie instead of losing every cookie on the request", async () => {
+    // A browser sends every cookie set on this hostname, including ones deckhand
+    // never wrote — a web preview's own app can set them. decodeURIComponent
+    // throws URIError on a stray '%', and one bad value used to take the whole
+    // header down with it: on an HTTP route a 500, and on the WS upgrade (which
+    // has no error boundary) a destroyed socket, leaving the viewer retrying
+    // forever with nothing on screen and nothing in any log.
+    const good = await fetch(`${base()}/s/share1/unlock`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pin: "1234" }),
+    });
+    const own = (good.headers.getSetCookie?.() ?? []).find((c) => c.includes("Path=/s/share1"))!;
+    const unlock = `deck_unlock=${/deck_unlock=([^;]+)/.exec(own)![1]}`;
+
+    const res = await fetch(`${base()}/s/share1/state`, { headers: { cookie: `junk=100%; ${unlock}` } });
+    assert.equal(res.status, 200, "a value we cannot decode must not invalidate the ones we can");
+    assert.equal(((await res.json()) as { locked?: boolean }).locked, false);
+  });
+
   it("one PIN unlocks both panes of a compare session", async () => {
     // The compare viewer is ONE page showing two shares, but the reference pane
     // streams from its OWN shareId, so its own path-scoped cookie. Before this,

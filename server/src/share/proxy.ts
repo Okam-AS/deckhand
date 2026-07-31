@@ -173,7 +173,20 @@ function parseCookies(header: string | undefined): Record<string, string> {
     const i = part.indexOf("=");
     if (i < 0) continue;
     const k = part.slice(0, i).trim();
-    if (k) out[k] = decodeURIComponent(part.slice(i + 1).trim());
+    if (!k) continue;
+    const raw = part.slice(i + 1).trim();
+    // decodeURIComponent throws URIError on a stray '%' — and a browser will
+    // happily send any cookie set on this hostname, including ones deckhand
+    // never wrote (a web preview's app can set its own). One malformed value
+    // then took down EVERY cookie on the request: on an HTTP route that is a
+    // 500, but the WS upgrade path has no error boundary at all, so it
+    // destroyed the socket and the viewer retried forever with nothing on
+    // screen. A value we cannot decode is not a reason to lose the ones we can.
+    try {
+      out[k] = decodeURIComponent(raw);
+    } catch {
+      out[k] = raw;
+    }
   }
   return out;
 }

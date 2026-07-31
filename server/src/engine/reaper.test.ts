@@ -54,7 +54,7 @@ describe("Reaper.reap", () => {
     assert.deepEqual(report.sims, ["AAA", "BBB"]);
     assert.deepEqual(report.avds, ["deckhand_pv1_android_0", "deckhand_pv2_android_1"]);
     // The serve-sim helper dies before its simulator disappears underneath it.
-    assert.deepEqual(calls.slice(0, 3), ["kill serve-sim AAA", "sim shutdown AAA", "sim delete AAA"]);
+    assert.deepEqual(calls.slice(0, 3), ["kill serve-sim[^/]*[[:space:]]AAA([[:space:]]|$)", "sim shutdown AAA", "sim delete AAA"]);
     // Emulators are killed by their -avd argument (console ports collide across
     // orphans, so `adb emu kill` cannot be trusted to reach the right one).
     // Anchored so a sibling pool slot (`…_2`) isn't killed along with it.
@@ -115,5 +115,35 @@ describe("Reaper.reap", () => {
     const report = await reaper.reap();
     assert.deepEqual(report, { sims: [], avds: [], keptPooled: [] });
     assert.deepEqual(calls, []);
+  });
+});
+
+describe("the serve-sim kill pattern", () => {
+  // The pattern is a bare string handed to `pkill -f`, so nothing type-checks it
+  // and nothing notices when it stops matching. It had not matched since it was
+  // written: the real argv is ".../serve-sim.js <udid> --port N", and the pattern
+  // looked for "serve-sim <udid>" — the ".js" between them meant every detached
+  // helper survived every restart, holding its port. Pin it to a real argv.
+  const ARGV =
+    "/usr/local/bin/node /repo/node_modules/serve-sim/dist/serve-sim.js AAA --port 3100 --host 127.0.0.1";
+  /**
+   * POSIX ERE (what pkill reads) → JS RegExp. Only `[[:space:]]` needs
+   * translating; everything else in the pattern is common to both dialects,
+   * which is itself the reason to keep the pattern free of POSIX-only classes.
+   */
+  const asRegExp = (p: string) => new RegExp(p.replaceAll("[[:space:]]", "\\s"));
+
+  it("matches the helper's real command line", async () => {
+    const { reaper, calls } = makeReaper();
+    await reaper.reap();
+    const pattern = calls.find((c) => c.startsWith("kill serve-sim"))!.slice("kill ".length);
+    assert.match(ARGV, asRegExp(pattern));
+  });
+
+  it("spares a helper streaming a different device", async () => {
+    const { reaper, calls } = makeReaper();
+    await reaper.reap();
+    const pattern = calls.find((c) => c.startsWith("kill serve-sim"))!.slice("kill ".length);
+    assert.equal(asRegExp(pattern).test(ARGV.replace(" AAA ", " ZZZ ")), false);
   });
 });

@@ -89,7 +89,17 @@ export class Reaper {
     const sims = orphanSims(await this.list(() => this.d.simctl.listDevices(), []), keepUdids, keepNames);
     for (const sim of sims) {
       // The helper streams from the UDID; kill it before the device disappears.
-      await this.kill(`serve-sim ${sim.udid}`).catch(() => {});
+      //
+      // The pattern has to survive the helper's REAL argv, which is
+      //   node .../node_modules/serve-sim/dist/serve-sim.js <udid> --port N --host 127.0.0.1
+      // `serve-sim <udid>` never matched that — the ".js" sits between them — so
+      // this reap had silently killed nothing since it was written, and every
+      // detached helper survived every restart. That is what left orphans
+      // holding ports across restarts. Anchor on the udid, which is unique and
+      // cannot collide, and allow any suffix on the binary name. `[^/]*` keeps
+      // the suffix from running across a path separator into an unrelated arg,
+      // and the trailing class stops `AAA` from matching a longer `AAA-2`.
+      await this.kill(`serve-sim[^/]*[[:space:]]${sim.udid}([[:space:]]|$)`).catch(() => {});
       await this.d.simctl.shutdown(sim.udid).catch(() => {});
       // Pooled devices are the point of the pool: keep them on disk, just make
       // sure nothing is still running against them. The engine wipes one whose

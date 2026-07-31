@@ -93,10 +93,28 @@ export function attachUpgrade(httpServer: Server, engine: PreviewEngine, pinGate
     },
   });
   httpServer.on("upgrade", (req, socket, head) => {
-    // Subdomain-web HMR sockets first (matched by Host), then apex share sockets.
-    if (handleHostWebUpgrade(engine, pinGate, wss, req, socket, head)) return;
-    if (!handleShareUpgrade(engine, pinGate, wss, req, socket, head)) {
-      socket.destroy(); // no other upgrade routes
+    // An 'upgrade' listener has NO error boundary: express never sees these, so
+    // anything thrown here escapes to the process-level handler and the client
+    // just gets a dead socket with no status and no log line. The viewer then
+    // retries forever showing "Connecting…", which is indistinguishable from a
+    // network problem. Contain it, and say so on the way out.
+    try {
+      // Subdomain-web HMR sockets first (matched by Host), then apex share sockets.
+      if (handleHostWebUpgrade(engine, pinGate, wss, req, socket, head)) return;
+      if (!handleShareUpgrade(engine, pinGate, wss, req, socket, head)) {
+        socket.destroy(); // no other upgrade routes
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      try {
+        socket.write(`HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n`);
+      } catch {
+        /* the socket may already be gone */
+      }
+      socket.destroy();
+      // daemon.log, not the audit trail: this is a server fault, not an actor's
+      // action, and the URL is the only handle for finding it again.
+      console.error(`ws upgrade threw for ${req.url ?? "?"}: ${msg.slice(0, 200)}`);
     }
   });
 }
