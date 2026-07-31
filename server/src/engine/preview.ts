@@ -677,7 +677,11 @@ export class PreviewEngine {
             refPanes.push({
               shareId: r.shareId,
               repo: r.repo,
-              ref: r.ref,
+              // The LIVE record, not the snapshot taken when the pane was booted.
+              // A local pane's ref starts as "local" and is replaced by its real
+              // branch a moment later, so the snapshot would show "local" forever
+              // — and a restarted pane's ref can move under it too.
+              ref: live.record.ref || r.ref,
               devices: sanitizeDevices(live),
             });
           }
