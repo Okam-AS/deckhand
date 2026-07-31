@@ -168,6 +168,7 @@ function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (
     config: overrides.config ?? config,
     android,
     worktrees: {
+      localBranch: async () => "main",
       createWorktree: async (_app: App, previewId: string) => {
         worktreeCalls.push(`create ${previewId}`);
         return { path: `/wt/${previewId}`, ref: "refs/x", description: "main", usedToken: false };

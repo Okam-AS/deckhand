@@ -60,6 +60,7 @@ function fakeEngine(): PreviewEngine {
   const deps: PreviewEngineDeps = {
     config,
     worktrees: {
+      localBranch: async () => "main",
       createWorktree: async (_a: App, id: string) => ({ path: `/wt/${id}`, ref: "r", description: "main", usedToken: false }),
       removeWorktree: async () => {},
     } as unknown as PreviewEngineDeps["worktrees"],
@@ -427,6 +428,7 @@ function onboardingEngine(): PreviewEngine {
           hasEntry: async (p: string) => Object.keys(nsFiles).some((k) => k === p || k.startsWith(`${p}/`)),
         };
       },
+      localBranch: async () => "main",
       createWorktree: async (_a: App, id: string) => ({ path: `/wt/${id}`, ref: "r", description: "main", usedToken: false }),
       removeWorktree: async () => {},
     } as unknown as PreviewEngineDeps["worktrees"],

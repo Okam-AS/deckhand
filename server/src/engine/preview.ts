@@ -1072,8 +1072,10 @@ export class PreviewEngine {
     // is. The viewer polls, so it picks this up within a poll. Read-only —
     // deckhand never writes to a borrowed checkout (PLAN §11.4).
     if (req.source === "local" && req.app.path) {
-      void this.d.worktrees
-        .localBranch(req.app.path)
+      // Wrapped: this is a cosmetic lookup, and nothing cosmetic may be able to
+      // fail start_preview. (It did — a WorktreeManager without the method threw
+      // synchronously, past the .catch() that only covers a rejected promise.)
+      void (async () => this.d.worktrees.localBranch?.(req.app.path!))()
         .then((branch) => {
           if (!branch || record.ref !== "local") return;
           record.ref = branch;
