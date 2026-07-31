@@ -19,6 +19,7 @@ import { Simctl, selectRuntime, selectDeviceType, deviceLabel, type SimDevice } 
 import { AndroidManager, selectSystemImage, portForSerial, serialForPort } from "../devices/android.ts";
 import { resolveAndroidEnv } from "../devices/toolEnv.ts";
 import { Reaper, POOL_SIM_PREFIX, POOL_AVD_PREFIX } from "./reaper.ts";
+import { METRO_MARKER_ENV } from "./metro.ts";
 import { MetroManager } from "./metro.ts";
 import { buildPlan, usesMetroDeepLink, nativescriptDevRun, webDevRun, webRootDevRun, GENERAL_IDLE_MS, METRO_PORT } from "./recipes.ts";
 import { runStep as defaultRunStep, type RunResult } from "./procs.ts";
@@ -2485,7 +2486,18 @@ export class PreviewEngine {
     const report = await (async () => {
       try {
         const reaper = this.d.reaper ?? new Reaper({ simctl: this.d.simctl, android: this.android() });
-        return await reaper.reap(this.liveDeviceHandles());
+        // Device reap FIRST, and with no await before it: `liveDeviceHandles()`
+        // is what spares a device being created right now, and every await
+        // between reading it and acting on it widens that window. (Putting the
+        // Metro reap ahead of it did exactly that, and the in-flight test caught
+        // it.) Metro and devices are independent, so order costs nothing here.
+        const devices = await reaper.reap(this.liveDeviceHandles());
+        // Metro outlives the server too (spawned detached), and leaked one per
+        // restart until the whole port range was held. Nothing is owned at boot,
+        // so every marked process is an orphan.
+        const metro = await reaper.reapOrphanMetro(METRO_MARKER_ENV).catch(() => [] as number[]);
+        if (metro.length) this.d.audit.record({ actor: "engine", tool: "reap_metro", args: { killed: metro.length }, result: "ok" });
+        return devices;
       } catch {
         return { sims: [], avds: [], keptPooled: [] };
       }

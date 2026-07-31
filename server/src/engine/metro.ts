@@ -134,6 +134,9 @@ function pidAlive(pid: number): boolean {
 }
 
 /** Manages the Metro dev-server (one app at a time, on a port deckhand owns). */
+/** Env var stamped on every Metro deckhand spawns, so a restart can find its own. */
+export const METRO_MARKER_ENV = "DECKHAND_METRO";
+
 export class MetroManager {
   /**
    * One Metro per (app, checkout, env), NOT one in total.
@@ -175,6 +178,15 @@ export class MetroManager {
       ...process.env,
       ...appEnv,
       REACT_NATIVE_PACKAGER_HOSTNAME: "127.0.0.1",
+      // A marker so a LATER deckhand can recognise this process as its own.
+      // Metro is spawned detached, so it outlives the server — and nothing could
+      // tell a leaked one from the developer's own `expo start`, because the
+      // argv is identical. Nineteen server restarts left nineteen Metros holding
+      // the whole 8081-8099 range, after which every preview failed with "no
+      // free Metro port". Deliberately in the ENV rather than argv: expo would
+      // reject an unknown flag, and cwd is the developer's own checkout for a
+      // local preview, so neither can carry the mark.
+      [METRO_MARKER_ENV]: "1",
     } as Record<string, string>;
   }
 

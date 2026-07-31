@@ -59,17 +59,75 @@ const defaultKiller: Killer = (pattern) =>
     execFile("pkill", ["-f", pattern], () => resolve());
   });
 
+/** Pids of processes whose environment carries `marker`. Injected for tests. */
+export type MarkedPidLister = (marker: string) => Promise<number[]>;
+
+const defaultMarkedPids: MarkedPidLister = (marker) =>
+  new Promise((resolve) => {
+    // `ps -E` prints each process's environment after its argv, which is the
+    // only place a Metro can be told apart from the developer's own `expo
+    // start` — the command lines are identical.
+    execFile("ps", ["-E", "-ax", "-o", "pid=,command="], { maxBuffer: 8 * 1024 * 1024 }, (_e, stdout) =>
+      resolve(
+        stdout
+          .toString()
+          .split("\n")
+          .filter((l) => l.includes(`${marker}=1`))
+          .map((l) => Number(l.trim().split(/\s+/)[0]))
+          .filter((n) => Number.isInteger(n) && n > 0),
+      ),
+    );
+  });
+
 export interface ReaperDeps {
   simctl: Simctl;
   android: AndroidManager;
   kill?: Killer;
+  /** Lists pids carrying an env marker (orphan Metro detection). */
+  markedPids?: MarkedPidLister;
+  killPid?: (pid: number) => void;
   log?: (line: string) => void;
 }
 
 export class Reaper {
   private readonly kill: Killer;
+  private readonly markedPids: MarkedPidLister;
+  private readonly killPid: (pid: number) => void;
   constructor(private readonly d: ReaperDeps) {
     this.kill = d.kill ?? defaultKiller;
+    this.markedPids = d.markedPids ?? defaultMarkedPids;
+    this.killPid = d.killPid ?? ((pid) => process.kill(pid));
+  }
+
+  /**
+   * Kill Metro dev servers left behind by a previous deckhand.
+   *
+   * Metro is spawned `detached`, so it survives the server that started it, and
+   * nothing collected it: each restart leaked one, and after enough of them the
+   * whole 8081-8099 range was held and every preview failed with "no free Metro
+   * port". They are identified by an env marker deckhand stamps on its own
+   * (METRO_MARKER_ENV), never by argv or port — the developer's own `expo start`
+   * looks exactly the same from the outside, and killing that would be the
+   * device-hijack mistake in another costume.
+   *
+   * Called at boot only, before anything is owned, so every marked process
+   * found is by definition an orphan. `keepPids` exists for callers that run it
+   * later.
+   */
+  async reapOrphanMetro(marker: string, keepPids: Iterable<number> = []): Promise<number[]> {
+    const keep = new Set(keepPids);
+    const pids = await this.markedPids(marker).catch(() => [] as number[]);
+    const killed: number[] = [];
+    for (const pid of pids) {
+      if (keep.has(pid) || pid === process.pid) continue;
+      try {
+        this.killPid(pid);
+        killed.push(pid);
+      } catch {
+        /* already gone, or not ours to signal */
+      }
+    }
+    return killed;
   }
 
   /**

@@ -150,3 +150,37 @@ describe("the serve-sim kill pattern", () => {
     assert.equal(asRegExp(pattern).test(ARGV.replace(" AAA ", " ZZZ ")), false);
   });
 });
+
+describe("Reaper.reapOrphanMetro", () => {
+  // Metro is spawned detached, so it outlives the server that started it, and
+  // nothing collected it: each restart leaked one until the whole 8081-8099
+  // range was held and every preview failed with "no free Metro port".
+  const make = (pids: number[]) => {
+    const killed: number[] = [];
+    const reaper = new Reaper({
+      simctl: { listDevices: async () => [] } as unknown as ReaperDeps["simctl"],
+      android: { listAvds: async () => [], attachedSerials: async () => [] } as unknown as ReaperDeps["android"],
+      markedPids: async () => pids,
+      killPid: (pid) => void killed.push(pid),
+    });
+    return { reaper, killed };
+  };
+
+  it("kills every process carrying deckhand's marker", async () => {
+    const { reaper, killed } = make([111, 222]);
+    assert.deepEqual(await reaper.reapOrphanMetro("DECKHAND_METRO"), [111, 222]);
+    assert.deepEqual(killed, [111, 222]);
+  });
+
+  it("spares pids the caller still owns, and never signals itself", async () => {
+    const { reaper, killed } = make([111, 222, process.pid]);
+    assert.deepEqual(await reaper.reapOrphanMetro("DECKHAND_METRO", [222]), [111]);
+    assert.deepEqual(killed, [111]);
+  });
+
+  it("kills nothing when the marker matches nothing — the developer's own `expo start` looks identical from the outside", async () => {
+    const { reaper, killed } = make([]);
+    assert.deepEqual(await reaper.reapOrphanMetro("DECKHAND_METRO"), []);
+    assert.deepEqual(killed, []);
+  });
+});
