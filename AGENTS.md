@@ -105,6 +105,56 @@ Non-negotiables while implementing:
 - Structured, actionable MCP errors: the model relaying the error to a human must be able
   to say exactly what to do next.
 
+## How work lands here
+
+**Never commit to `main`.** Every change — including a one-line fix — goes:
+
+```
+git switch -c feature/<short-name>     # branch first, always
+… work, committing as you go …
+npm run ci                             # exactly what CI runs; must be green
+gh pr create --base main               # PR, with the reasoning in the body
+gh pr merge <n> --squash --delete-branch
+```
+
+Why a PR for a one-liner. It is not ceremony — it is the only point where a
+reader who has not seen the change looks at it. A fifty-bug audit of one session
+marked three defect classes NOTHING PRACTICAL for automation, and they included
+the worst bug in the set: a cross-page authentication bypass, found by cold
+readers, two of them independently. There is no tool that replaces that step, so
+the workflow has to create it.
+
+The PR body carries the reasoning, not a changelog. What was wrong, why this is
+the fix, and what you verified — a reviewer's questions, answered before they
+ask. If you fixed a bug, say what you did to prove the test fails without the
+fix.
+
+**Delete the branch on merge.** `--delete-branch` does it; a stale branch is a
+second version of the truth waiting to be mistaken for the current one.
+
+**Deploy after merging, not before.** `launchctl kickstart -k
+gui/$(id -u)/no.deckhand.server` tears down every booted simulator on the
+machine — so a restart mid-session costs whoever is watching a preview several
+minutes of rebuilding. Batch them, and say so before you do it.
+
+## Running the checks
+
+```
+npm run ci              # typecheck + tests + build — EXACTLY what CI runs
+npm run hooks:install   # once: makes the above run before every commit
+npm run test:device     # real simulator, real helper, real first frame
+```
+
+`npm run ci` exists so "will CI pass?" is answerable in fifteen seconds instead
+of after a push. The pre-commit hook runs the same command — if the two ever
+diverge, the hook is the one that is wrong. `--no-verify` deliberately still
+works: a hook that cannot be skipped gets uninstalled instead of respected.
+
+`test:device` is not in the hook (it boots a simulator, ~40s) and not in CI
+(GitHub runners cannot do Android emulators, so a green run there would mean
+"half the devices" while reading as "all of them"). Run it by hand after
+anything that touches the streaming path.
+
 ## The guardrails — read this before you change anything
 
 `server/src/test-support/` holds checks that fail the build when a decision this
@@ -143,12 +193,7 @@ make the check pass.
    test sees that — only a reader who is looking for it. Adversarial review is
    not optional here; it is the only thing that catches this class.
 
-### Running them
-
-`npm run hooks:install` once, and the two mechanical gates run before every
-commit (`--no-verify` escapes; a hook that cannot be skipped gets uninstalled
-instead). The device gate stays manual — it boots a simulator and is too slow to
-sit in front of a commit.
+### Reviewing
 
 Reviewing a diff — yours or someone else's — is the `reviewing-deckhand` skill in
 `.claude/skills/`. It covers only what the guardrails cannot: preconditions a
@@ -156,16 +201,6 @@ diff invalidated, bookkeeping written before the effect it records, an assumptio
 of "one" surviving a move to N, permissive defaults on ambiguous failures, and
 tests that assert less than they appear to. Those are the classes a fifty-bug
 audit marked NOTHING PRACTICAL, and they include the worst bug in the set.
-
-`npm test` runs everything, including the guardrails. `npm run typecheck` is the
-other half — the fakes and branded types do their work at compile time, not run
-time. CI runs both on every PR.
-
-`deckhand doctor --smoke` is the only check that touches real hardware: it
-creates a simulator, boots it, attaches a stream and waits for a first frame. Run
-it after anything that touches the streaming path, because a whole class of bug
-here — deadlines calibrated against an idle machine — is invisible to every test
-above.
 
 ## Later: setup runbook
 

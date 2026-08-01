@@ -1,9 +1,14 @@
 #!/bin/sh
 # Deckhand pre-commit gate.
 #
-# Runs the two checks CI runs, before the commit exists rather than after the
-# push. Installed by `npm run hooks:install` (git does not version .git/hooks,
-# so the file lives here and is symlinked in).
+# Runs exactly what CI runs (`npm run ci`), before the commit exists rather than
+# after the push. Installed by `npm run hooks:install` (git does not version
+# .git/hooks, so the file lives here and is symlinked in).
+#
+# "Exactly" is the point: the hook used to skip `npm run build`, so a build-only
+# failure surfaced in CI after a push — which is the one place a gate is no use.
+# The build takes ~1.4s. If CI and the hook ever diverge again, the hook is the
+# one that is wrong.
 #
 # Deliberately NOT the device gate: `npm run test:device` boots a simulator and
 # takes ~40s, which is too slow to sit in front of every commit and would train
@@ -33,6 +38,16 @@ if ! npm test >/tmp/deckhand-precommit.log 2>&1; then
   grep -E '✖|not ok|AssertionError' /tmp/deckhand-precommit.log | head -20
   echo
   echo "Commit blocked. Full log: /tmp/deckhand-precommit.log"
+  exit 1
+fi
+printf 'ok\n'
+
+printf 'deckhand: build… '
+if ! npm run build >/tmp/deckhand-precommit.log 2>&1; then
+  printf 'FAILED\n\n'
+  tail -30 /tmp/deckhand-precommit.log
+  echo
+  echo "Commit blocked. CI builds too — this would have failed there instead."
   exit 1
 fi
 printf 'ok\n'
