@@ -249,19 +249,34 @@ You will be asked "how do I install this" and "why is my connector not working".
 Get these exactly right — three times in one day an agent (me) told a user to run
 something that did not exist, and each time they assumed the fault was theirs.
 
-**Install, from nothing:**
+**Install, from nothing.** Do NOT write out the steps from memory — this section
+deliberately does not list them, because it drifted from the code within a day of
+being written. Run the command and relay what it says:
 
 ```sh
 git clone https://github.com/Okam-AS/deckhand && cd deckhand
 npm install && npm run build
-cloudflared tunnel login                    # opens a browser; they must do this
-npx tsx server/src/cli.ts setup --hostname deckhand.<their-domain>
+npx tsx server/src/cli.ts setup          # no arguments, on purpose
 ```
 
-They need a domain on Cloudflare. `setup` does everything else — tunnel, DNS,
-config, the `deckhand` command itself, the LaunchAgents, doctor — and is safe to
-re-run, so it is also the repair tool. It is `npx tsx …` for the first run only,
-because `deckhand` is not on PATH until setup links it.
+`setup` with no arguments is a preflight. It prints every prerequisite with **who
+can fix it**:
+
+- `fix: <command>` — yours to run. Run it.
+- `you: <explanation>` — the user's. Relay it and stop.
+- a **NEEDS YOU** block — a browser and their Cloudflare account. **Never attempt
+  these.** `cloudflared tunnel login` opens a browser and will hang you forever,
+  and no amount of retrying changes that.
+
+Then ask the user for a hostname on a domain they have on Cloudflare, and run
+`setup --hostname <that>`. It does the rest — tunnel, DNS, the cloudflared config
+(merged, never overwritten), the `deckhand` command, the LaunchAgents, doctor —
+and is safe to re-run, so it is also the repair tool.
+
+`npx tsx …` for the first run only: `deckhand` is not on PATH until setup links it.
+
+Android is **optional**. Without the SDK, iOS previews work and Android does not;
+`doctor` says so as a warning. Do not treat it as a failed install.
 
 **Their connector URL:** `deckhand token`. Creates one the first time, prints the
 same one after. NOT `token list`, which masks them by design. It is a credential —

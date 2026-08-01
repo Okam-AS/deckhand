@@ -197,6 +197,29 @@ describe("docs describe the code that exists", () => {
     assert.deepEqual([...new Set(missing)], [], "the docs tell people to run commands that do not exist");
   });
 
+  it("never puts a human-only command in a block an agent will copy", () => {
+    // preflight.ts classifies each prerequisite by WHO can fix it, and the human-only ones
+    // need a browser and someone's Cloudflare account. A doc that lists `cloudflared tunnel
+    // login` inside the install block an agent copy-pastes undoes that classification
+    // entirely — the agent runs it and hangs on a prompt nobody sees.
+    //
+    // AGENTS.md had exactly that, one day after the section was written, because it restated
+    // the flow instead of pointing at the command that cannot drift.
+    const HUMAN_ONLY = [/cloudflared tunnel login/];
+    const agentFacing = readFileSync(join(REPO, "AGENTS.md"), "utf8");
+    const shellBlocks = [...agentFacing.matchAll(/```(?:sh|bash|console)\n([\s\S]*?)```/g)].map((m) => m[1]!);
+    for (const block of shellBlocks) {
+      for (const banned of HUMAN_ONLY) {
+        assert.doesNotMatch(
+          block,
+          banned,
+          `AGENTS.md puts a human-only command in a runnable block. Describe it in prose as ` +
+            `something to ASK for, or let \`deckhand setup\` report it — it already does.`,
+        );
+      }
+    }
+  });
+
   it("names no source file that does not exist", () => {
     // PLAN §4 described a layout that had drifted from the tree: janitor.ts,
     // scrcpy.ts, server/test/, fixtures/, scripts/ — five paths a new agent
