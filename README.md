@@ -93,15 +93,34 @@ and Phase 4 (ops hardening + AI setup runbook).
 The complete build plan lives in [PLAN.md](./PLAN.md); background knowledge in
 [docs/reference/](./docs/reference/).
 
-## Run it (dev)
+## Install it
+
+You need a Mac with Xcode, Node 22+, and a domain on Cloudflare.
 
 ```sh
+git clone https://github.com/Okam-AS/deckhand && cd deckhand
 npm install
-npm run build --workspace @deckhand/viewer      # build the viewer once
-deckhand init --hostname <host>                 # add --github-app-id/--github-app-pem
-                                                # for a GitHub App; omit to use `gh`
-deckhand token add <you> --role admin           # prints your connector URL
-deckhand app add <id> github.com/owner/repo     # or: --path <local-checkout>
-npm run dev                                     # or: deckhand serve
-deckhand doctor --smoke                         # end-to-end check on the Mac
+npm run build                                   # viewer + landing
+cloudflared tunnel login                        # opens a browser, once
+npx tsx server/src/cli.ts setup \
+  --hostname deckhand.example.com \
+  --web-host previews.example.com               # optional, for web previews
 ```
+
+`setup` creates the Cloudflare tunnel and DNS route, merges your cloudflared
+config (it never overwrites rules for other services), links `deckhand` onto your
+PATH, writes deckhand's config, prints your admin **connector URL**, installs the
+LaunchAgents so it survives sleep and reboot, and runs `doctor`.
+
+Re-run it any time: every step reports what it found and changes only what is
+missing, so it doubles as a repair tool.
+
+Then register something to preview:
+
+```sh
+deckhand app add myapp --path /abs/path/to/a/checkout    # local — no GitHub needed
+deckhand app add myapp github.com/owner/repo             # from git
+deckhand doctor --device-only                            # boots a real sim + emulator
+```
+
+Give the connector URL to claude.ai as an MCP connector, and ask for a preview.
