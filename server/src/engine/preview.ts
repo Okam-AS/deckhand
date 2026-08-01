@@ -1675,7 +1675,12 @@ export class PreviewEngine {
         this.setPhase(p, dev, "building", dev === builder ? "building the app" : "building the app (shared)");
       }
       await this.runBuildPlan(p, builder, platform, builderHandle, sourceDir, appEnv, local);
-      if (platform === "ios" && usesMetroDeepLink(p.app.type)) slug = await this.resolveExpoSlug(sourceDir, appEnv);
+      // Both platforms, not just iOS. The Android dev-client deep link needs the slug for
+      // the identical reason, and it read it straight out of app.json — which is empty for a
+      // project whose config is a dynamic app.config.*, the whole case this resolves. That
+      // Android path landed on main after this branch was written, so the rebase merged
+      // cleanly and left it calling a helper this branch deletes: textually fine, broken.
+      if (usesMetroDeepLink(p.app.type)) slug = await this.resolveExpoSlug(sourceDir, appEnv);
 
       if (local && p.app.type === "nativescript") {
         // Livesync builds, installs, launches, then keeps watching for saves.
@@ -2022,8 +2027,7 @@ export class PreviewEngine {
   ): Promise<void> {
     if (dev.record.platform === "android") {
       if (usesMetroDeepLink(p.app.type)) {
-        const slug = expoSlug(safeReadJson(join(worktreePath, "app.json")));
-        if (!slug) throw new PreviewError("could not read the Expo slug from app.json");
+        if (!slug) throw new PreviewError("could not resolve the Expo slug from app.json or app.config.*");
         const metro = await this.d.metro.ensure(p.app.id, worktreePath, appEnv);
         await this.reverseMetroPorts(handle, metro.port);
         // Cold start, then name the server explicitly. Both halves are needed:
