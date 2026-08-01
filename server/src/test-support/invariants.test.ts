@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { auditedTools, registeredTools, registerToolCallCount } from "./toolNames.ts";
 
 /**
  * The rules PLAN.md states as acceptance criteria, as executable checks.
@@ -53,13 +54,46 @@ describe("PLAN §2 — locked decisions", () => {
       "react",
       "react-dom",
     ]);
-    for (const ws of ["server", "viewer", "landing"]) {
+    // The ROOT package.json is in this list because it was the cheapest way around the rule:
+    // a dependency added there hoists into the shared node_modules and is importable from
+    // every workspace, while a check that only read the three workspaces saw nothing.
+    for (const ws of ["", "server", "viewer", "landing"]) {
       const pkg = JSON.parse(read(join(REPO, ws, "package.json"))) as { dependencies?: Record<string, string> };
       for (const dep of Object.keys(pkg.dependencies ?? {})) {
         assert.ok(
           approved.has(dep),
-          `${ws}/package.json adds "${dep}", which is not in PLAN §3's approved list. ` +
+          `${ws || "."}/package.json adds "${dep}", which is not in PLAN §3's approved list. ` +
             `Adding a dependency is a PLAN §2 decision — argue it there first, then widen this set.`,
+        );
+      }
+    }
+  });
+
+  it("adds no build-time dependency outside the approved set either", () => {
+    // devDependencies were unchecked, and "it's only a devDependency" is exactly the argument
+    // a future agent reaching for a familiar library will make. The set is separate because
+    // the tradeoff is: these never ship to the mini, but they do have to be installed,
+    // audited and kept working, which is the cost PLAN §2 is protecting.
+    const approvedDev = new Set([
+      "patch-package",
+      "typescript",
+      "tsx",
+      "@types/node",
+      "@types/express",
+      "@types/ws",
+      "@types/react",
+      "@types/react-dom",
+      "@types/dom-webcodecs",
+      "vite",
+      "@vitejs/plugin-react",
+    ]);
+    for (const ws of ["", "server", "viewer", "landing"]) {
+      const pkg = JSON.parse(read(join(REPO, ws, "package.json"))) as { devDependencies?: Record<string, string> };
+      for (const dep of Object.keys(pkg.devDependencies ?? {})) {
+        assert.ok(
+          approvedDev.has(dep),
+          `${ws || "."}/package.json adds devDependency "${dep}", which is not approved. ` +
+            `Same rule as runtime deps (PLAN §2): argue it there first, then widen this set.`,
         );
       }
     }
@@ -68,8 +102,9 @@ describe("PLAN §2 — locked decisions", () => {
   it("uses no database driver", () => {
     // PLAN.md:49 — "No database." State is config.yaml/apps.yaml/tokens.yaml +
     // a small state.json.
-    const banned = /\b(pg|mysql2?|sqlite3?|better-sqlite3|mongodb|mongoose|redis|ioredis|prisma|drizzle-orm|typeorm|knex)\b/;
-    for (const ws of ["server", "viewer", "landing"]) {
+    const banned =
+      /\b(pg|postgres|postgres\.js|mysql2?|sqlite3?|better-sqlite3|libsql|@libsql\/client|mongodb|mongoose|redis|ioredis|prisma|drizzle-orm|sequelize|typeorm|kysely|knex|lowdb|nedb)\b/;
+    for (const ws of ["", "server", "viewer", "landing"]) {
       const pkg = read(join(REPO, ws, "package.json"));
       assert.doesNotMatch(pkg, banned, `${ws}/package.json looks like it added a database driver`);
     }
@@ -100,7 +135,10 @@ describe("PLAN §8 — the streaming seam", () => {
     // is for — they are named here so the exception is a decision rather than
     // an erosion.
     const roots = new Set(["server/src/server.ts", "server/src/cli/doctor.ts"]);
-    const backends = /from "\.{1,2}\/(streaming\/)?(serveSim|androidAdb|androidH264|web)\.ts"/;
+    // `(\.\.?\/)+` rather than `\.{1,2}\/`: the old form only matched one level, so a file two
+    // directories deep imported a backend directly and passed. `import(` covers the dynamic
+    // form, which cli.ts already uses elsewhere and which has no `from` for a pattern to find.
+    const backends = /(?:from|import\()\s*"(?:\.\.?\/)+(?:streaming\/)?(?:serveSim|androidAdb|androidH264|web)\.ts"/;
     for (const file of sourceFiles()) {
       if (rel(file).startsWith("server/src/streaming/") || roots.has(rel(file))) continue;
       assert.doesNotMatch(
@@ -118,23 +156,57 @@ describe("PLAN §11 — security model", () => {
     // PLAN.md:712 — "JSONL audit of every call". Nothing enforced it, so a tool
     // added without the wrapper is invisible to the audit trail and no test
     // fails. Pair each registerTool with the audited() call in its handler.
+    // One parse, shared with docs.test.ts (see toolNames.ts): a tool this scan cannot read is
+    // exempt from the audit rule AND from the documentation rule, and neither would fail.
     const tools = read(join(SRC, "mcp", "tools.ts"));
-    const registered = [...tools.matchAll(/server\.registerTool\(\s*"([a-z_]+)"/g)].map((m) => m[1]!);
-    const audited = new Set([...tools.matchAll(/audited\(\s*"([a-z_]+)"/g)].map((m) => m[1]!));
+    const registered = registeredTools(tools);
+    const audited = auditedTools(tools);
     assert.ok(registered.length > 0, "no tools found — the registerTool pattern changed, fix this check");
+    assert.equal(
+      registered.length,
+      registerToolCallCount(tools),
+      "a registerTool() call uses a computed name, which opts it out of this check entirely",
+    );
     for (const name of registered) {
       assert.ok(audited.has(name), `MCP tool "${name}" is registered but never wrapped in audited() — PLAN §11.2`);
     }
   });
 
-  it("binds the HTTP server to loopback and nowhere else", () => {
-    // PLAN.md:43 — "Deckhand binds 127.0.0.1 only." Everything public reaches it
-    // through the tunnel; a wildcard bind would put the whole MCP surface on the
-    // LAN.
-    const server = read(join(SRC, "server.ts"));
-    const listens = [...server.matchAll(/\.listen\(([^)]*)\)/g)].map((m) => m[1]!);
+  it("binds every listening socket to loopback and nowhere else", () => {
+    // PLAN.md:43 — "Deckhand binds 127.0.0.1 only." Everything public reaches it through the
+    // tunnel; a wildcard bind would put the whole MCP surface on the LAN.
+    //
+    // Repo-wide, because it used to read server.ts alone while AGENTS.md stated the guarantee
+    // for the whole tree. The per-device Android helper (androidAdb.ts) binds a socket too,
+    // and rewriting it as a wildcard would have passed — including past the test next to it,
+    // which asserts on a hardcoded `http://127.0.0.1:${port}` template string built two lines
+    // AFTER the listen() call and unaffected by its host argument.
+    //
+    // The exemption is by file+reason, not by silence: metro.ts's second listen() is a
+    // bindability PROBE that binds and immediately closes, deliberately without a host,
+    // because "is this port free" must mean free on every interface — a loopback-only probe
+    // would report a port free that something else holds on 0.0.0.0.
+    // Argument-less `.listen()` needs an exemption too, not a pass: `srv.listen()` really does
+    // bind every interface on a random port. cli.ts's is a delegation to the server object,
+    // whose own bind is the one checked below.
+    const exempt = new Map([
+      ["server/src/engine/metro.ts", "port-availability probe, bound and closed immediately"],
+      ["server/src/cli.ts", "delegates to createServer().listen(); the real bind is in server.ts"],
+    ]);
+    for (const file of sourceFiles()) {
+      if (exempt.has(rel(file))) continue;
+      for (const m of read(file).matchAll(/\.listen\(([^)]*)\)/g)) {
+        assert.match(
+          m[1]!,
+          /"127\.0\.0\.1"/,
+          `${rel(file)} binds .listen(${m[1]}) — PLAN §11.1 requires loopback only. If this is a probe rather ` +
+            `than a server, add it to the exempt map with the reason.`,
+        );
+      }
+    }
+    // The composition root keeps its stricter rule: exactly one server socket.
+    const listens = [...read(join(SRC, "server.ts")).matchAll(/\.listen\(([^)]*)\)/g)];
     assert.equal(listens.length, 1, `expected exactly one .listen() in server.ts, found ${listens.length}`);
-    assert.match(listens[0]!, /"127\.0\.0\.1"/, `server.ts binds ${listens[0]} — PLAN §11.1 requires loopback only`);
   });
 
   it("keeps secrets out of the MCP surface", () => {
@@ -153,19 +225,27 @@ describe("PLAN §11 — security model", () => {
     // Express dispatches string routes case-insensitively, so a case-sensitive
     // gate regex let /Dev/ and /RESTART reach a locked share's stream and
     // rebuild with no PIN. That was a live auth bypass, fixed with one flag.
-    // Matched by locating the line rather than by parsing the literal: a regex
-    // that parses a regex breaks on any harmless edit, and a guardrail that
-    // cries wolf gets deleted.
-    const gate = read(join(SRC, "share", "proxy.ts"))
+    // Matched by locating the line rather than by parsing the literal: a regex that parses a
+    // regex breaks on any harmless edit, and a guardrail that cries wolf gets deleted.
+    //
+    // EVERY matching line, and comments stripped first. This used to take `.find()` — the
+    // FIRST match — over the raw source, so writing the pattern in a comment above the real
+    // line (this codebase's own comment style) satisfied the assertion from the comment and
+    // left the check permanently inert, with no signal. A guardrail that can be disabled by
+    // documenting it is worse than none.
+    const src = read(join(SRC, "share", "proxy.ts"))
       .split("\n")
-      .find((l) => l.includes("(dev|web|restart)"));
-    assert.ok(gate, "the share-gate route matcher moved — find it and re-pin this check");
-    assert.match(
-      gate,
-      /\/[a-z]*i[a-z]*\.exec/,
-      "the share gate regex lost its `i` flag — Express dispatches routes case-insensitively, " +
-        "so /Dev/ and /RESTART would reach a locked share's stream and rebuild with no PIN",
-    );
+      .map((l) => l.replace(/\/\/.*$/, ""))
+      .filter((l) => l.includes("(dev|web|restart)"));
+    assert.ok(src.length, "the share-gate route matcher moved — find it and re-pin this check");
+    for (const gate of src) {
+      assert.match(
+        gate,
+        /\/[gimsuy]*i[gimsuy]*\.exec/,
+        "the share gate regex lost its `i` flag — Express dispatches routes case-insensitively, " +
+          "so /Dev/ and /RESTART would reach a locked share's stream and rebuild with no PIN",
+      );
+    }
   });
 });
 
@@ -181,9 +261,13 @@ describe("the detached-spawn rule", () => {
     // mentioned it — a guardrail passing for the wrong reason, which is exactly
     // the bug class it exists to catch. File-level rather than near the spawn,
     // because Metro stamps correctly but indirectly, through a baseEnv() helper.
+    // The trigger matches any `detached:` that is not literally `false`. Pinned to
+    // `detached: true`, the guard was skipped entirely by `detached: !opts.foreground` or by
+    // hiding the option in a spread — so the way to avoid the rule was to write the spawn
+    // slightly differently, which is not a rule.
     for (const file of sourceFiles()) {
       const src = read(file);
-      if (!/detached:\s*true/.test(src)) continue;
+      if (!/detached:\s*(?!false\b)/.test(src)) continue;
       assert.match(
         src,
         /MARKER_ENV\]:/,
