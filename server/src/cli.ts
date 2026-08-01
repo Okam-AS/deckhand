@@ -45,7 +45,15 @@ function fail(msg: string): never {
 
 const USAGE = `deckhand — simulator previews over MCP
 
-Usage:
+New here? One command does the whole install:
+
+  deckhand setup --hostname deckhand.example.com [--web-host previews.example.com]
+
+  It creates the Cloudflare tunnel and DNS route, writes the config, mints your
+  admin connector URL, installs the LaunchAgents, and runs doctor. Re-runnable:
+  every step reports what it found and changes only what is missing.
+
+Everything else, for when you already know what you want:
   deckhand serve                                   run the server
   deckhand doctor [--smoke]                        verify the install
   deckhand init --hostname H [--github-app-id N --github-app-pem P] [--port 4300]
@@ -119,6 +127,19 @@ async function main(): Promise<void> {
       for (const c of gate.failed) console.error(`gate failed: ${c.name}${c.detail ? ` — ${c.detail}` : ""}`);
       if (gate.reason) console.error(`gate did not run: ${gate.reason}`);
       process.exit(gate.code);
+    }
+
+    case "setup": {
+      // The one command a new user runs. Everything else is for when you already know what
+      // you are doing — see ops/README.md and the usage above.
+      const { cmdSetup } = await import("./cli/setup.ts");
+      return cmdSetup({
+        hostname: str(flags.hostname),
+        webHost: str(flags["web-host"]),
+        port: flags.port ? Number(flags.port) : undefined,
+        tokenName: str(flags.token),
+        noServices: Boolean(flags["no-services"]),
+      });
     }
 
     case "init":
