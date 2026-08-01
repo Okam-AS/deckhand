@@ -320,6 +320,53 @@ describe("tests never touch the real ~/.deckhand", () => {
   });
 });
 
+describe("deckhand ships nothing about one particular install", () => {
+  it("names no specific host, user or private repo in shipped code or docs", () => {
+    // A brand-new machine must not learn about somebody else's tunnel or somebody else's
+    // repos. The landing page shipped one person's hostname as the product screenshot
+    // (`deckhand.<someone>.no/s/••••••`), a viewer doc comment used a private repo as its
+    // worked example, and AGENTS recorded a validation run by naming both. None of it broke
+    // anything — it just quietly told every new user that this is somebody's internal tool.
+    //
+    // Tests are exempt: a fixture needs SOME concrete string, and a test does not ship.
+    // `Okam-AS/deckhand` is allowed because that genuinely is where deckhand lives.
+    const banned = /\b(sharghi|okam(?!-AS\/deckhand)|unox|elton-mobility|asharghi)\b/i;
+    // Its own walker, because sourceFiles() filters to `.ts` — so every .tsx in the viewer
+    // and the landing page was invisible to the first version of this check, which is exactly
+    // where the offending string lived. Caught by mutation: putting the hostname back into a
+    // component failed nothing.
+    const shipped = (dir: string, out: string[] = []): string[] => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        if (statSync(full).isDirectory()) {
+          if (entry !== "node_modules" && entry !== "dist") shipped(full, out);
+          continue;
+        }
+        if (/\.(ts|tsx|css|html)$/.test(entry) && !entry.includes(".test.")) out.push(full);
+      }
+      return out;
+    };
+    const docs = ["README.md", "AGENTS.md", "PLAN.md"];
+    const offenders: string[] = [];
+    for (const root of ["server/src", "viewer/src", "landing/src"]) {
+      for (const file of shipped(join(REPO, root))) {
+        const m = banned.exec(read(file));
+        if (m) offenders.push(`${rel(file)}: "${m[0]}"`);
+      }
+    }
+    for (const doc of docs) {
+      const body = readFileSync(join(REPO, doc), "utf8");
+      const m = banned.exec(body);
+      if (m) offenders.push(`${doc}: "${m[0]}"`);
+    }
+    assert.deepEqual(
+      offenders,
+      [],
+      "shipped code and docs must describe deckhand, not one installation of it. Use example.com / acme.",
+    );
+  });
+});
+
 describe("fakes are complete", () => {
   it("uses test-support/fakes.ts for every dependency that has one", () => {
     // `{ ... } as unknown as Simctl` disables BOTH excess-property and missing-property

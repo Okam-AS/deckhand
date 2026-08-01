@@ -35,9 +35,9 @@ carry `host: {hostname, user}` and steer a co-located agent to register an exist
 local checkout (`deckhand app add <id> --path <dir>`) before any credential flow.
 
 **Validated:** iOS + Android orchestration logic (faked unit tests), MCP over HTTP e2e,
-the **Cloudflare named tunnel** (2026-07-15: `deckhand.sharghi.no` → loopback :4300,
-healthz answers publicly, tokenless paths 404). **2026-07-15: first full real previews ran
-end-to-end** on a dev Mac with `Okam-AS/AdminApp` (NativeScript), cloned via the ambient
+the **Cloudflare named tunnel** (2026-07-15: a named tunnel → loopback :4300, healthz
+answers publicly, tokenless paths 404). **2026-07-15: first full real previews ran
+end-to-end** on a dev Mac with a private NativeScript app, cloned via the ambient
 gh credential: iOS (iPhone 17 Pro + iPad Pro 13" M5, one shared build, parallel install)
 and **Android (pixel_7 · API 29 emulator, first real NativeScript Android build+stream)**.
 Verified live over the tunnel share proxy on **both** platforms: touch/navigation, typing

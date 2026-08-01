@@ -72,7 +72,7 @@ export interface ShareState {
   ledger?: { screens: ShareLedgerScreen[] };
 }
 
-/** "github.com/Okam-AS/AdminApp" → "Okam-AS/AdminApp" (host + .git stripped). */
+/** "github.com/acme/store-app" → "acme/store-app" (host + .git stripped). */
 export function repoName(repo: string): string {
   if (!repo) return "";
   return repo
