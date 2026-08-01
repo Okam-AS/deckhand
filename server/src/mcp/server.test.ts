@@ -1,3 +1,4 @@
+import { fakeMetro, fakeDevProcs, fakeSimctl, fakeWorktrees } from "../test-support/fakes.ts";
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -59,12 +60,12 @@ function fakeEngine(): PreviewEngine {
   };
   const deps: PreviewEngineDeps = {
     config,
-    worktrees: {
+    worktrees: fakeWorktrees({
       localBranch: async () => "main",
       createWorktree: async (_a: App, id: string) => ({ path: `/wt/${id}`, ref: "r", description: "main", usedToken: false }),
       removeWorktree: async () => {},
-    } as unknown as PreviewEngineDeps["worktrees"],
-    simctl: {
+    }),
+    simctl: fakeSimctl({
       listRuntimes: async () => [{ identifier: "rt26", name: "iOS 26.0", version: "26.0", isAvailable: true }],
       listDeviceTypes: async () => [{ identifier: "dt", name: "iPhone 16 Pro" }],
       create: async () => "UDID",
@@ -75,19 +76,19 @@ function fakeEngine(): PreviewEngine {
       shutdown: async () => {},
       delete: async () => {},
       screenshotPng: async () => Buffer.from([0x89, 0x50, 0x4e, 0x47]),
-    } as unknown as PreviewEngineDeps["simctl"],
+    }),
     streaming: { attach: async (_d: StreamDeviceRef) => fakeStream, reapOrphans: async () => {} } as unknown as PreviewEngineDeps["streaming"],
-    metro: { ensure: async () => ({ manifestUrl: "http://127.0.0.1:8081" }), stop: async () => {}, stopApp: async () => {} } as unknown as PreviewEngineDeps["metro"],
+    metro: fakeMetro({ ensure: async () => ({ manifestUrl: "http://127.0.0.1:8081", port: 8081 }), stop: async () => {}, stopApp: async () => {} }),
     store: new StateStore(`/tmp/deckhand-mcp-${Math.random().toString(36).slice(2)}.json`),
     audit: { record: () => {} } as unknown as PreviewEngineDeps["audit"],
-    devProcs: {
+    devProcs: fakeDevProcs({
       start: () => {},
       isAlive: () => true,
       exitCode: () => null,
       restart: () => true,
       stop: () => {},
       stopAll: () => {},
-    } as unknown as PreviewEngineDeps["devProcs"],
+    }),
     runStep: async () => ({ code: 0, timedOut: false, aborted: false }),
     secretsEnv: () => ({}),
     simdeck: {
@@ -415,7 +416,7 @@ function onboardingEngine(): PreviewEngine {
   };
   const deps: PreviewEngineDeps = {
     config,
-    worktrees: {
+    worktrees: fakeWorktrees({
       defaultBranch: async (app: App) => {
         if (/needs-cred/.test(app.repo ?? "")) throw new CredentialsMissingError("okam-as", "no credential configured");
         return "trunk"; // not "main" — proves add_app auto-detects the real default branch
@@ -431,13 +432,13 @@ function onboardingEngine(): PreviewEngine {
       localBranch: async () => "main",
       createWorktree: async (_a: App, id: string) => ({ path: `/wt/${id}`, ref: "r", description: "main", usedToken: false }),
       removeWorktree: async () => {},
-    } as unknown as PreviewEngineDeps["worktrees"],
-    simctl: {
+    }),
+    simctl: fakeSimctl({
       listRuntimes: async () => [],
       listDeviceTypes: async () => [],
-    } as unknown as PreviewEngineDeps["simctl"],
+    }),
     streaming: { attach: async () => ({}) as AttachedStream, reapOrphans: async () => {} } as unknown as PreviewEngineDeps["streaming"],
-    metro: {} as unknown as PreviewEngineDeps["metro"],
+    metro: fakeMetro({}),
     store: new StateStore(`/tmp/deckhand-onboard-${Math.random().toString(36).slice(2)}.json`),
     audit: { record: () => {} } as unknown as PreviewEngineDeps["audit"],
     runStep: async () => ({ code: 0, timedOut: false, aborted: false }),

@@ -35,6 +35,19 @@ function sourceFiles(dir = SRC, out: string[] = []): string[] {
   return out;
 }
 
+/** Test files, which `sourceFiles` deliberately skips — some rules apply only to them. */
+function testFiles(dir = SRC, out: string[] = []): string[] {
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) {
+      if (entry !== "test-support") testFiles(full, out);
+      continue;
+    }
+    if (entry.endsWith(".test.ts")) out.push(full);
+  }
+  return out;
+}
+
 const read = (f: string) => readFileSync(f, "utf8");
 const rel = (f: string) => f.slice(REPO.length + 1);
 
@@ -244,6 +257,31 @@ describe("PLAN §11 — security model", () => {
         /\/[gimsuy]*i[gimsuy]*\.exec/,
         "the share gate regex lost its `i` flag — Express dispatches routes case-insensitively, " +
           "so /Dev/ and /RESTART would reach a locked share's stream and rebuild with no PIN",
+      );
+    }
+  });
+});
+
+describe("fakes are complete", () => {
+  it("uses test-support/fakes.ts for every dependency that has one", () => {
+    // `{ ... } as unknown as Simctl` disables BOTH excess-property and missing-property
+    // checking, so a method added to the real class leaves the fake silently behind and the
+    // failure surfaces far from the cause. It cost four bugs in one day, and once made the
+    // entire orphan sweep a no-op THAT REPORTED SUCCESS.
+    //
+    // Scoped to the dependencies a complete fake exists for, deliberately. A one- or
+    // two-member interface (`audit`, `streaming`) is safe to write inline — the point is not
+    // to ban a syntax, it is to stop hand-rolling a partial stand-in for a 14-method class
+    // when a complete one is a function call away. Widen the alternation when you add a fake.
+    const covered = "simctl|android|worktrees|reaper|metro|devProcs";
+    const banned = new RegExp(`as unknown as \\w*Deps\\["(${covered})"\\]`);
+    for (const file of testFiles()) {
+      const m = banned.exec(read(file));
+      assert.equal(
+        m,
+        null,
+        `${rel(file)} hand-rolls a fake for "${m?.[1]}" — use fake${(m?.[1] ?? "").replace(/^./, (c) => c.toUpperCase())}() ` +
+          `from test-support/fakes.ts, which is checked against the real class at compile time.`,
       );
     }
   });

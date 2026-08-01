@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fakeMetro, fakeDevProcs } from "../test-support/fakes.ts";
+import { fakeMetro, fakeDevProcs, fakeSimctl, fakeAndroid, fakeWorktrees, fakeReaper } from "../test-support/fakes.ts";
 import { PreviewEngine, PreviewError, buildStepDetail, redactForShare, type PreviewEngineDeps } from "./preview.ts";
 import type { SimDeckControl } from "../testing/control.ts";
 import type { App, Config } from "../config.ts";
@@ -60,7 +60,7 @@ interface Harness {
  * device manager to change a single answer.
  */
 function androidFake(calls: string[] = []) {
-  return {
+  return fakeAndroid({
     // No emulator is attached in the fake world, so every console port is free.
     // Tests about port collisions override this.
     attachedSerials: async () => [] as string[],
@@ -83,7 +83,7 @@ function androidFake(calls: string[] = []) {
     shutdown: async () => {},
     deleteAvd: async () => {},
     describe: async () => "tree",
-  } as unknown as PreviewEngineDeps["android"];
+  });
 }
 
 function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (step: CommandStep) => RunResult = () => ({ code: 0, timedOut: false, aborted: false })): Harness {
@@ -96,7 +96,7 @@ function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (
   const audit: { tool: string; args: unknown }[] = [];
 
   const devAlive = new Set<string>();
-  const devProcs = {
+  const devProcs = fakeDevProcs({
     start: (spec: DevRunSpec) => {
       devProcCalls.push(`start ${spec.key} ${spec.command} ${spec.args.join(" ")}`);
       devAlive.add(spec.key);
@@ -113,12 +113,12 @@ function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (
       devAlive.delete(k);
     },
     stopAll: () => {},
-  } as unknown as PreviewEngineDeps["devProcs"];
+  });
   // Completed through the shared fake so a new DevProcessManager method is a
   // compile error here rather than a silently swallowed throw at runtime.
   const devProcsComplete = fakeDevProcs(devProcs as Partial<PreviewEngineDeps["devProcs"]>);
 
-  const simctl = {
+  const simctl = fakeSimctl({
     listRuntimes: async () => [{ identifier: "rt.26", name: "iOS 26.0", version: "26.0", isAvailable: true }],
     listDeviceTypes: async () => [{ identifier: "dt.16pro", name: "iPhone 16 Pro" }],
     create: async (name: string) => {
@@ -143,7 +143,7 @@ function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (
     delete: async (u: string) => {
       simctlCalls.push(`delete ${u}`);
     },
-  } as unknown as PreviewEngineDeps["simctl"];
+  });
 
   // Queue of probe outcomes; empty = healthy. Lets a test declare "the kept
   // helper is dead" for exactly one probe (attachAndReady's liveness check).
@@ -171,7 +171,7 @@ function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (
   const deps: PreviewEngineDeps = {
     config: overrides.config ?? config,
     android,
-    worktrees: {
+    worktrees: fakeWorktrees({
       localBranch: async () => "main",
       createWorktree: async (_app: App, previewId: string) => {
         worktreeCalls.push(`create ${previewId}`);
@@ -184,7 +184,7 @@ function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (
       removeWorktree: async (_app: App, previewId: string) => {
         removedWorktrees.push(previewId);
       },
-    } as unknown as PreviewEngineDeps["worktrees"],
+    }),
     simctl,
     streaming: streaming as unknown as PreviewEngineDeps["streaming"],
     metro: fakeMetro(),
@@ -430,11 +430,13 @@ describe("PreviewEngine.stopPreview", () => {
     const h = makeEngine({
       genPreviewId: () => `pv${++n}`,
       genShareId: () => `share-${n}`,
-      metro: {
-        ensure: async () => ({ manifestUrl: "http://127.0.0.1:8081" }),
+      metro: fakeMetro({
+        // `port` is not optional on MetroHandle. The old inline cast hid that; declaring the
+        // override as Partial<MetroManager> does not.
+        ensure: async () => ({ manifestUrl: "http://127.0.0.1:8081", port: 8081 }),
         stop: async () => {},
         stopApp: async (appId: string) => void stoppedApps.push(appId),
-      } as unknown as PreviewEngineDeps["metro"],
+      }),
     });
     // TWO live previews of the same app (different refs — one Metro serves
     // whichever is current). Stopping the first must NOT pull the dev server
@@ -591,14 +593,14 @@ describe("local (dev-mode) previews", () => {
 
   it("fails the device with a livesync error when the dev process dies", async () => {
     const h = makeEngine({
-      devProcs: {
+      devProcs: fakeDevProcs({
         start: () => {},
         isAlive: () => false,
         exitCode: () => 1,
         restart: () => false,
         stop: () => {},
         stopAll: () => {},
-      } as unknown as PreviewEngineDeps["devProcs"],
+      }),
     });
     startLocal(h);
     const phase = await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
@@ -1387,7 +1389,7 @@ describe("PreviewEngine idle sweep", () => {
       now: () => clock.t,
       genPreviewId: () => `pv${++ids.n}`,
       genShareId: () => `share-${ids.n}`,
-      simctl: {
+      simctl: fakeSimctl({
         listRuntimes: async () => [{ identifier: "rt.26", name: "iOS 26.0", version: "26.0", isAvailable: true }],
         listDeviceTypes: async () => [{ identifier: "dt.16pro", name: "iPhone 16 Pro" }],
         listDevices: async () => [],
@@ -1403,7 +1405,7 @@ describe("PreviewEngine idle sweep", () => {
         openUrl: async () => {},
         shutdown: async (u: string) => void simCalls.push(`shutdown ${u}`),
         delete: async (u: string) => void simCalls.push(`delete ${u}`),
-      } as unknown as PreviewEngineDeps["simctl"],
+      }),
     } as unknown as Partial<PreviewEngineDeps>);
 
     h.engine.startPreview({
@@ -1456,14 +1458,14 @@ describe("PreviewEngine idle sweep", () => {
     const cfg = { ...config, limits: { ...config.limits, reuseDevices: true, maxTotalDevices: 8 } };
     const h = makeEngine({
       config: cfg,
-      android: {
+      android: fakeAndroid({
         ...(androidFake() as object),
         bootEmulator: async (_avd: string, port: number, _img: unknown, opts: { wipeData?: boolean } = {}) => {
           wipes.push(!!opts.wipeData);
           if (failNext) throw new Error("emulator: timed out waiting for boot");
           return `emulator-${port}`;
         },
-      } as unknown as PreviewEngineDeps["android"],
+      }),
     });
 
     const android = () => ({ platform: "android" as const, runtime: "34" });
@@ -1525,13 +1527,13 @@ describe("PreviewEngine idle sweep", () => {
       // in the test for the bug that motivated it.
       metro: fakeMetro({ livePids: () => [4242] }),
       devProcs: fakeDevProcs({ livePids: () => [7777] }),
-      reaper: {
+      reaper: fakeReaper({
         reap: async () => ({ sims: [], avds: [], keptPooled: [] }),
         reapOrphansByMarker: async (marker: string, keep: Iterable<number> = []) => {
           keepSeen[marker] = [...keep];
           return [];
         },
-      } as unknown as PreviewEngineDeps["reaper"],
+      }),
     });
 
     await h.engine.reapOrphans();
@@ -1582,14 +1584,14 @@ describe("PreviewEngine idle sweep", () => {
     // developer's own Android Studio AVD, which the reaper deliberately spares.
     const booted: string[] = [];
     const h = makeEngine({
-      android: {
+      android: fakeAndroid({
         ...(androidFake() as object),
         attachedSerials: async () => ["emulator-5554", "emulator-5556"], // not ours
         bootEmulator: async (_avd: string, port: number) => {
           booted.push(`emulator-${port}`);
           return `emulator-${port}`;
         },
-      } as unknown as PreviewEngineDeps["android"],
+      }),
     });
     h.engine.startPreview({
       app: rnApp,
@@ -1607,12 +1609,12 @@ describe("PreviewEngine idle sweep", () => {
     // guessing "empty" is precisely the permissive direction that hijacks a
     // stranger's emulator. Fail loudly instead.
     const h = makeEngine({
-      android: {
+      android: fakeAndroid({
         ...(androidFake() as object),
         attachedSerials: async () => {
           throw new Error("adb: not found");
         },
-      } as unknown as PreviewEngineDeps["android"],
+      }),
     });
     h.engine.startPreview({
       app: rnApp,
@@ -1659,13 +1661,13 @@ describe("PreviewEngine idle sweep", () => {
     let keepSeen: { udids?: Iterable<string>; avds?: Iterable<string>; names?: Iterable<string> } = {};
     const h = makeEngine({
       config: { ...config, limits: { ...config.limits, reuseDevices: false } },
-      reaper: {
+      reaper: fakeReaper({
         reap: async (keep: typeof keepSeen = {}) => {
           keepSeen = keep;
           return { sims: [], avds: [], keptPooled: [] };
         },
-      } as unknown as PreviewEngineDeps["reaper"],
-      simctl: {
+      }),
+      simctl: fakeSimctl({
         listRuntimes: async () => [{ identifier: "rt.26", name: "iOS 26.0", version: "26.0", isAvailable: true }],
         listDeviceTypes: async () => [{ identifier: "dt.16pro", name: "iPhone 16 Pro" }],
         listDevices: async () => [],
@@ -1680,7 +1682,7 @@ describe("PreviewEngine idle sweep", () => {
         openUrl: async () => {},
         shutdown: async () => {},
         delete: async () => {},
-      } as unknown as PreviewEngineDeps["simctl"],
+      }),
     } as unknown as Partial<PreviewEngineDeps>);
 
     h.engine.startPreview({
@@ -1707,7 +1709,7 @@ describe("PreviewEngine idle sweep", () => {
     // collide with it and stream the abandoned device.
     const androidCalls: string[] = [];
     const h = makeEngine({
-      android: {
+      android: fakeAndroid({
         listSystemImages: async () => [{ pkg: "system-images;android-34;google_apis;arm64-v8a", api: 34 }],
         listAvds: async () => [],
         attachedSerials: async () => [],
@@ -1723,7 +1725,7 @@ describe("PreviewEngine idle sweep", () => {
         launch: async () => {},
         findApk: async () => "/wt/app-debug.apk",
         describe: async () => "tree",
-      } as unknown as PreviewEngineDeps["android"],
+      }),
     } as unknown as Partial<PreviewEngineDeps>);
 
     h.engine.startPreview({
@@ -1793,7 +1795,7 @@ describe("PreviewEngine idle sweep", () => {
     let shutdowns = 0;
     const h = makeEngine(
       {
-        simctl: {
+        simctl: fakeSimctl({
           listRuntimes: async () => [{ identifier: "rt.26", name: "iOS 26.0", version: "26.0", isAvailable: true }],
           listDeviceTypes: async () => [{ identifier: "dt.16pro", name: "iPhone 16 Pro" }],
           listDevices: async () => [],
@@ -1808,7 +1810,7 @@ describe("PreviewEngine idle sweep", () => {
             if (u.endsWith("2")) await gate;
           },
           delete: async () => {},
-        } as unknown as PreviewEngineDeps["simctl"],
+        }),
       },
       (step) => ({ code: step.name === "build" ? 1 : 0, timedOut: false, aborted: false }),
     );
@@ -1853,7 +1855,7 @@ describe("device pool", () => {
     const sims: { udid: string; name: string; state: string }[] = [];
     const avds: string[] = [];
     const calls: string[] = [];
-    const simctl = {
+    const simctl = fakeSimctl({
       listRuntimes: async () => [{ identifier: "rt.26", name: "iOS 26.0", version: "26.0", isAvailable: true }],
       listDeviceTypes: async () => [{ identifier: "dt.16pro", name: "iPhone 16 Pro" }],
       listDevices: async () => sims,
@@ -1875,8 +1877,8 @@ describe("device pool", () => {
         const i = sims.findIndex((s) => s.udid === u);
         if (i >= 0) sims.splice(i, 1);
       },
-    } as unknown as PreviewEngineDeps["simctl"];
-    const android = {
+    });
+    const android = fakeAndroid({
       listSystemImages: async () => [{ pkg: "system-images;android-34;google_apis;arm64-v8a", api: 34 }],
       listAvds: async () => avds,
       attachedSerials: async () => [],
@@ -1898,7 +1900,7 @@ describe("device pool", () => {
         const i = avds.indexOf(n);
         if (i >= 0) avds.splice(i, 1);
       },
-    } as unknown as PreviewEngineDeps["android"];
+    });
     return { simctl, android, calls, sims, avds };
   }
 
@@ -2030,7 +2032,7 @@ describe("auto-teardown edge cases", () => {
     // Boot itself fails (an unavailable runtime, a full disk): no simulator is
     // ever created, so these devices occupy nothing on the machine.
     const h = makeSwept({
-      simctl: {
+      simctl: fakeSimctl({
         listRuntimes: async () => [{ identifier: "rt.26", name: "iOS 26.0", version: "26.0", isAvailable: true }],
         listDeviceTypes: async () => [{ identifier: "dt.16pro", name: "iPhone 16 Pro" }],
         create: async () => {
@@ -2038,7 +2040,7 @@ describe("auto-teardown edge cases", () => {
         },
         shutdown: async () => {},
         delete: async () => {},
-      } as unknown as PreviewEngineDeps["simctl"],
+      }),
     });
     h.engine.startPreview({
       app: rnApp,
@@ -2094,7 +2096,7 @@ describe("pool leases and wedged previews", () => {
       now: () => clock.t,
       genPreviewId: () => `pv${++ids.n}`,
       genShareId: () => `share-${ids.n}`,
-      simctl: {
+      simctl: fakeSimctl({
         listRuntimes: async () => [{ identifier: "rt.26", name: "iOS 26.0", version: "26.0", isAvailable: true }],
         listDeviceTypes: async () => [{ identifier: "dt.16pro", name: "iPhone 16 Pro" }],
         listDevices: async () => [],
@@ -2114,7 +2116,7 @@ describe("pool leases and wedged previews", () => {
         openUrl: async () => {},
         shutdown: async () => {},
         delete: async () => {},
-      } as unknown as PreviewEngineDeps["simctl"],
+      }),
     });
 
     h.engine.startPreview({
