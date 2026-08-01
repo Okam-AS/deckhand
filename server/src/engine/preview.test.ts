@@ -1519,8 +1519,12 @@ describe("PreviewEngine idle sweep", () => {
     // reap guards this exact window with liveDeviceHandles(); this one did not.
     const keepSeen: Record<string, number[]> = {};
     const h = makeEngine({
-      metro: { livePids: () => [4242], stopIfUnused: async () => {}, stopAll: async () => {} } as unknown as PreviewEngineDeps["metro"],
-      devProcs: { livePids: () => [7777], stop: () => {}, stopAll: () => {} } as unknown as PreviewEngineDeps["devProcs"],
+      // Through the complete fakes, not an inline cast: the literal that used to sit here
+      // declared `stopIfUnused` and `stopAll`, neither of which exists on MetroManager —
+      // dead method names hidden by the very cast this harness was written to eliminate,
+      // in the test for the bug that motivated it.
+      metro: fakeMetro({ livePids: () => [4242] }),
+      devProcs: fakeDevProcs({ livePids: () => [7777] }),
       reaper: {
         reap: async () => ({ sims: [], avds: [], keptPooled: [] }),
         reapOrphansByMarker: async (marker: string, keep: Iterable<number> = []) => {
@@ -1533,6 +1537,39 @@ describe("PreviewEngine idle sweep", () => {
     await h.engine.reapOrphans();
     assert.deepEqual(keepSeen["DECKHAND_METRO"], [4242], "the running Metro is spared");
     assert.deepEqual(keepSeen["DECKHAND_DEV_RUN"], [7777], "and the running livesync tree");
+  });
+
+  it("sweeps streaming helpers at boot, sparing the devices a live preview holds", async () => {
+    // serve-sim daemonizes ITSELF (`--detach`), so it carries no `detached: true` in our
+    // source and no env marker — the marker sweep above cannot see it, and neither can the
+    // guardrail that enforces markers. It needs this explicit call, and for a while it had
+    // none: StreamingRouter.reapOrphans() was written, tested, and never reached from boot,
+    // so the orphan that motivated it (a helper 2h48m old serving a dead simulator's last
+    // frame forever) survived every restart. Nothing failed, because nothing asked.
+    const reapKeep: (readonly string[])[] = [];
+    const h = makeEngine({
+      streaming: {
+        attach: async () => ({
+          origin: "http://127.0.0.1:3100",
+          helperBasePath: "/helper/x",
+          waitForFirstFrame: async () => true,
+          describe: async () => "tree",
+          detach: async () => {},
+        }),
+        reapOrphans: async (keep?: ReadonlySet<string>) => void reapKeep.push([...(keep ?? [])]),
+      },
+    });
+
+    await h.engine.reapOrphans();
+    assert.equal(reapKeep.length, 1, "the boot sweep must reach the streaming backends");
+    assert.deepEqual(reapKeep[0], [], "at boot nothing is live, so nothing is spared");
+
+    // And with a preview holding a device, that device's helper survives the sweep — the
+    // same window liveDeviceHandles() guards for simulators.
+    h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+    await h.engine.reapOrphans();
+    assert.ok(reapKeep[1]!.length > 0, "a live preview's device must be named, or the sweep kills its own helper");
   });
 
   it("never allocates a console port an emulator already holds", async () => {

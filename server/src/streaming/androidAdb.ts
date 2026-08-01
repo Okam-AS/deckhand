@@ -453,8 +453,18 @@ export class AndroidAdbBackend implements StreamingBackend {
     helper.stop();
   }
 
-  async reapOrphans(): Promise<void> {
-    for (const helper of this.helpers.values()) helper.stop();
-    this.helpers.clear();
+  /**
+   * Unlike serve-sim's detached daemons, these helpers are HTTP servers in THIS process — they
+   * die with it, so the in-memory map really is their owner and a fresh process has nothing of
+   * ours to collect. This matters at boot (a no-op) and during the janitor sweep (not a no-op).
+   * The one Android resource that does outlive us is the on-device `screenrecord`, which
+   * androidH264.ts kills opportunistically when it re-attaches.
+   */
+  async reapOrphans(keep: ReadonlySet<string> = new Set()): Promise<void> {
+    for (const [serial, helper] of [...this.helpers]) {
+      if (keep.has(serial)) continue;
+      helper.stop();
+      this.helpers.delete(serial);
+    }
   }
 }

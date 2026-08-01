@@ -21,6 +21,32 @@ export interface Check {
   /** A non-failing advisory (rendered ⚠, does not make doctor exit non-zero). */
   warn?: boolean;
   detail?: string;
+  /**
+   * Part of the `--device-only` regression gate (`npm run test:device`): this check can be
+   * broken by a code change, as opposed to by a missing install. Set here rather than matched
+   * on the name — `serve-sim (vendored, 1.2.3)` builds its own label at runtime, so a
+   * name-prefix filter is coupled to a display string nobody thinks of as an interface.
+   */
+  gate?: true;
+  /** The check that actually boots a device. Its absence must fail the gate, not pass it. */
+  smoke?: true;
+}
+
+/**
+ * The `--device-only` exit code, as a pure decision so it can be tested without a simulator.
+ *
+ * Two rules, and the second is the one that was missing: a gate that produced no smoke check
+ * has not passed, it has not run. `runDoctor` pushes the smoke test only inside `if (config)`,
+ * so a config-load failure left this with nothing but toolchain checks — which pass on any Mac
+ * with Xcode — and `npm run test:device` reported success having booted nothing.
+ */
+export function deviceGateExit(checks: readonly Check[]): { code: 0 | 1; failed: Check[]; reason?: string } {
+  const failed = checks.filter((c) => c.gate && !c.ok && !c.skipped && !c.warn);
+  if (failed.length) return { code: 1, failed };
+  if (!checks.some((c) => c.smoke)) {
+    return { code: 1, failed, reason: "no smoke check was produced (config load failed?) — the gate did not run" };
+  }
+  return { code: 0, failed };
 }
 
 function which(cmd: string, args: readonly string[]): Promise<{ ok: boolean; out: string }> {
@@ -40,7 +66,7 @@ async function checkToolchains(): Promise<Check[]> {
     ["simctl", "xcrun", ["simctl", "help"]],
   ] as const) {
     const r = await which(cmd, args);
-    checks.push({ name, ok: r.ok, detail: r.ok ? r.out : "not found" });
+    checks.push({ name, ok: r.ok, gate: true, detail: r.ok ? r.out : "not found" });
   }
   return checks;
 }
@@ -55,7 +81,7 @@ function checkServeSim(): Check {
   let name = "serve-sim (vendored)";
   try {
     const bin = vendoredServeSimBin();
-    if (!existsSync(bin)) return { name, ok: false, detail: "not installed — run `npm install`" };
+    if (!existsSync(bin)) return { name, ok: false, gate: true, detail: "not installed — run `npm install`" };
     // Best-effort version for the label; a truncated package.json must not mask
     // the real state of the bundle (which we check next), so don't let it throw.
     const pkgRoot = dirname(dirname(bin)); // .../dist/serve-sim.js → .../dist → pkg root
@@ -68,10 +94,10 @@ function checkServeSim(): Check {
     name = `serve-sim (vendored, ${version})`;
     const patched = readFileSync(bin, "utf8").includes("deckhand:exec disabled");
     return patched
-      ? { name, ok: true, detail: "installed, exec routes stripped" }
-      : { name, ok: false, detail: "UNPATCHED (exec route present) — run `npx patch-package`" };
+      ? { name, ok: true, gate: true, detail: "installed, exec routes stripped" }
+      : { name, ok: false, gate: true, detail: "UNPATCHED (exec route present) — run `npx patch-package`" };
   } catch {
-    return { name, ok: false, detail: "not resolvable — run `npm install`" };
+    return { name, ok: false, gate: true, detail: "not resolvable — run `npm install`" };
   }
 }
 
@@ -153,9 +179,21 @@ async function smokeTest(config: Config): Promise<Check> {
     const stream = await backend.attach({ platform: "ios", udid });
     const framed = await stream.waitForFirstFrame();
     await stream.detach();
-    return { name: "smoke: sim + serve-sim first frame", ok: framed, detail: framed ? "got a frame" : "no first frame" };
+    return {
+      name: "smoke: sim + serve-sim first frame",
+      ok: framed,
+      gate: true,
+      smoke: true,
+      detail: framed ? "got a frame" : "no first frame",
+    };
   } catch (e) {
-    return { name: "smoke: sim + serve-sim first frame", ok: false, detail: (e as Error).message.slice(0, 160) };
+    return {
+      name: "smoke: sim + serve-sim first frame",
+      ok: false,
+      gate: true,
+      smoke: true,
+      detail: (e as Error).message.slice(0, 160),
+    };
   } finally {
     if (udid) {
       await simctl.shutdown(udid).catch(() => {});
