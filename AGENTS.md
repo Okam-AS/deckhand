@@ -290,6 +290,17 @@ and is safe to re-run, so it is also the repair tool.
 Android is **optional**. Without the SDK, iOS previews work and Android does not;
 `doctor` says so as a warning. Do not treat it as a failed install.
 
+**When setup finishes, lead with the one action — do not report status.**
+deckhand is installed and *does nothing* until the connector is pasted into
+claude.ai. That is not one item in a list of five; it is the step. Say it first,
+in two lines:
+
+> Run `deckhand token` and paste the URL into claude.ai → Settings → Connectors.
+
+Then, if it is useful, what you did. Not before. A user who reads three lines and
+stops must still have the thing they need — and they will stop, because a numbered
+list of green ticks reads as "nothing left to do".
+
 **Their connector URL:** `deckhand token`. Creates one the first time, prints the
 same one after. NOT `token list`, which masks them by design. It is a credential —
 never repeat it back in chat, and never put it in a commit or a PR.

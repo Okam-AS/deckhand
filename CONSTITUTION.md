@@ -26,7 +26,7 @@ that other people exist.
 
 ---
 
-## The eight
+## The nine
 
 Each of these was paid for. The parenthetical is what it cost.
 
@@ -96,7 +96,18 @@ one — do not remove it.
 *(`deckhand token` prints your URL. `token list` and `token url <name>` still exist,
 for the team that needs them.)*
 
-### 8. Whatever a human catches, a check must catch next time
+### 8. Lead with the action, not the report
+
+The reader stops after three lines. If the thing they must do is item four in a
+list of green ticks, it did not happen.
+
+*(A setup run ended by listing three next steps; the only one that mattered — paste
+the connector URL — came third, and the install sat unusable.)*
+
+**So:** one action, first, in the fewest words that can be acted on. Status after,
+or not at all.
+
+### 9. Whatever a human catches, a check must catch next time
 
 A defect found by a person reading, not a test running, is unfinished work. Fix it,
 then write the check — and if it cannot be mechanical, say so where the next reader
