@@ -19,7 +19,8 @@
     "build": "npm run build --workspace @deckhand/viewer && npm run build --workspace @deckhand/landing -- --outDir ../dist && node landing/scripts/prepare-hosting.mjs",
     "dev": "npm run dev --workspace @deckhand/server",
     "postinstall": "patch-package",
-    "test:device": "npm run --workspace @deckhand/server test:device"
+    "test:device": "npm run --workspace @deckhand/server test:device",
+    "hooks:install": "ln -sf ../../ops/hooks/pre-commit .git/hooks/pre-commit && echo 'pre-commit hook installed'"
   },
   "devDependencies": {
     "patch-package": "^8.0.1"

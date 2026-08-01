@@ -145,6 +145,18 @@ make the check pass.
 
 ### Running them
 
+`npm run hooks:install` once, and the two mechanical gates run before every
+commit (`--no-verify` escapes; a hook that cannot be skipped gets uninstalled
+instead). The device gate stays manual — it boots a simulator and is too slow to
+sit in front of a commit.
+
+Reviewing a diff — yours or someone else's — is the `reviewing-deckhand` skill in
+`.claude/skills/`. It covers only what the guardrails cannot: preconditions a
+diff invalidated, bookkeeping written before the effect it records, an assumption
+of "one" surviving a move to N, permissive defaults on ambiguous failures, and
+tests that assert less than they appear to. Those are the classes a fifty-bug
+audit marked NOTHING PRACTICAL, and they include the worst bug in the set.
+
 `npm test` runs everything, including the guardrails. `npm run typecheck` is the
 other half — the fakes and branded types do their work at compile time, not run
 time. CI runs both on every PR.

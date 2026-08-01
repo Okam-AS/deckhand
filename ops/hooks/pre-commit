@@ -1,0 +1,38 @@
+#!/bin/sh
+# Deckhand pre-commit gate.
+#
+# Runs the two checks CI runs, before the commit exists rather than after the
+# push. Installed by `npm run hooks:install` (git does not version .git/hooks,
+# so the file lives here and is symlinked in).
+#
+# Deliberately NOT the device gate: `npm run test:device` boots a simulator and
+# takes ~40s, which is too slow to sit in front of every commit and would train
+# people to pass --no-verify. Run it by hand after touching the streaming path —
+# AGENTS.md says when.
+#
+# Escape hatch: `git commit --no-verify`. It exists because a hook that cannot be
+# skipped gets uninstalled instead.
+set -e
+
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+
+printf 'deckhand: typecheck… '
+if ! npm run typecheck >/tmp/deckhand-precommit.log 2>&1; then
+  printf 'FAILED\n\n'
+  tail -30 /tmp/deckhand-precommit.log
+  echo
+  echo "Commit blocked. Fix the above, or 'git commit --no-verify' if you know why it is wrong."
+  exit 1
+fi
+printf 'ok\n'
+
+printf 'deckhand: tests… '
+if ! npm test >/tmp/deckhand-precommit.log 2>&1; then
+  printf 'FAILED\n\n'
+  grep -E '✖|not ok|AssertionError' /tmp/deckhand-precommit.log | head -20
+  echo
+  echo "Commit blocked. Full log: /tmp/deckhand-precommit.log"
+  exit 1
+fi
+printf 'ok\n'
