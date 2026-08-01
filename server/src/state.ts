@@ -104,22 +104,69 @@ const EMPTY: PersistedState = { version: 1, previews: [], shareIds: {}, pins: {}
 export class StateStore {
   constructor(private readonly file: string = paths.state()) {}
 
+  /**
+   * Read the persisted state. An unreadable file is never quietly treated as an empty one.
+   *
+   * Every failure used to collapse to EMPTY — a missing file, a permissions error, a truncated
+   * write, a hand edit (AGENTS.md tells agents to READ this file, so hand edits happen). The
+   * server then came up looking healthy and the first `persist()` overwrote it, destroying
+   * every stable share id and every scrypt PIN hash on the machine, with no log line, no audit
+   * entry and no error. Bookmarked links rot and every protected share silently becomes public
+   * on its next mint. Silent, total, and indistinguishable from a first boot.
+   *
+   * So the three cases are now told apart:
+   *   missing        the only legitimate empty — a first boot
+   *   unreadable     THROW. A permissions or IO fault is an operator problem, and a server
+   *                  that cannot read this file must not start and overwrite it.
+   *   unparseable    quarantine the file, then start empty. The data is preserved on disk and
+   *                  named in the log, so it can be recovered by hand.
+   */
   load(): PersistedState {
     let text: string;
     try {
       text = readFileSync(this.file, "utf8");
-    } catch {
-      return structuredClone(EMPTY);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return structuredClone(EMPTY);
+      throw new Error(
+        `cannot read ${this.file} (${(e as Error).message}). Refusing to start: continuing would ` +
+          `overwrite it and destroy every share id and PIN hash it holds. Fix the permissions, or ` +
+          `move the file aside deliberately.`,
+      );
     }
+    let parsed: Partial<PersistedState> | null = null;
     try {
-      const parsed = JSON.parse(text) as Partial<PersistedState>;
-      if (parsed && parsed.version === 1 && Array.isArray(parsed.previews)) {
-        return { version: 1, previews: parsed.previews, shareIds: parsed.shareIds ?? {}, pins: parsed.pins ?? {} };
-      }
-      return structuredClone(EMPTY);
+      parsed = JSON.parse(text) as Partial<PersistedState>;
     } catch {
-      return structuredClone(EMPTY);
+      parsed = null;
     }
+    if (parsed && parsed.version === 1 && Array.isArray(parsed.previews)) {
+      return { version: 1, previews: parsed.previews, shareIds: parsed.shareIds ?? {}, pins: parsed.pins ?? {} };
+    }
+    return this.quarantine(text.length);
+  }
+
+  /**
+   * Move an unusable state file aside and start clean.
+   *
+   * Renamed rather than deleted, and named in the log: whatever is in there is the only copy of
+   * every share id and PIN hash, and "it did not parse" is not a reason to be the one who
+   * destroys it. If even the rename fails we throw, for the same reason as an unreadable file.
+   */
+  private quarantine(bytes: number): PersistedState {
+    const aside = `${this.file}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+    try {
+      renameSync(this.file, aside);
+    } catch (e) {
+      throw new Error(
+        `${this.file} is not valid deckhand state and could not be moved aside (${(e as Error).message}). ` +
+          `Refusing to start rather than overwrite it.`,
+      );
+    }
+    console.error(
+      `deckhand: ${this.file} was not valid state (${bytes} bytes) — moved to ${aside} and starting empty. ` +
+        `It holds every stable share id and PIN hash; recover them from that file if you need them.`,
+    );
+    return structuredClone(EMPTY);
   }
 
   /** Atomically overwrite the state file (temp file + rename). */

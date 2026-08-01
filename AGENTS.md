@@ -110,6 +110,11 @@ Non-negotiables while implementing:
   argv/URLs/logs.
 - Structured, actionable MCP errors: the model relaying the error to a human must be able
   to say exactly what to do next.
+- Comment sparsely. Much of this codebase carries heavy comment blocks; do not match that
+  density. Most code is self-explanatory — write a comment only when it states something
+  the code cannot (a precondition, a decided tradeoff, a why), and remember: a comment
+  that states a precondition needs a test that fails when the precondition breaks (see
+  the three rules below). Never narrate what the next line does.
 
 ## How work lands here
 
