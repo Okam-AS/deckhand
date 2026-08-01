@@ -77,19 +77,25 @@ one-time setup URL for secrets), 4 (ops + AI runbook).
 If you are here to **implement further**, your instructions are:
 
 1. Read [PLAN.md](./PLAN.md) end to end. It is the source of truth: locked decisions,
-   architecture, module specs, and ordered phases with acceptance criteria.
+   architecture, module specs, the MCP surface, and the security model.
 2. Before writing streaming or viewer code, read
    [docs/reference/serve-sim-notes.md](./docs/reference/serve-sim-notes.md); before engine
    or viewer code, read
    [docs/reference/auto-mate-learnings.md](./docs/reference/auto-mate-learnings.md)
    (14 concrete pitfalls that cost the predecessor project weeks).
    `docs/reference/simdeck-notes.md` is historical — do not implement against it.
-3. Work the phases in order (PLAN.md §12). Phase 0 is done (scaffold, green CI). Do not
-   start a phase before the previous phase's acceptance criterion passes. Keep `npm test`
-   green on every commit.
+3. Deckhand is built. PLAN describes what it IS — architecture, the MCP surface, the
+   streaming seam, the security model — not a build order. The phase list and the
+   pre-build risk register were deleted once they started naming modules nobody had built
+   and decisions long since made. Add to PLAN when you change what the system is; git
+   holds how it got here.
+   **Every bug fixed gets a regression test in the closest layer** — the one rule from the
+   old §13 that is not covered by `npm run ci` or the guardrails.
 4. The streaming layer is **decided** (PLAN.md §2/§8): iOS via **serve-sim**
-   (H.264-over-WebSocket + WebCodecs, MJPEG fallback), Android via **scrcpy** in Phase 2,
-   both behind the `StreamingBackend` seam. **No WebRTC, no TURN, and no SimDeck for VIDEO** —
+   (H.264-over-WebSocket + WebCodecs, MJPEG fallback), Android via **adb** — `screencap`
+   for MJPEG and on-device `screenrecord` for H.264, NOT scrcpy, which was evaluated and
+   not taken — and web via a proxy to the dev server. All behind the `StreamingBackend`
+   seam. **No WebRTC, no TURN, and no SimDeck for VIDEO** —
 SimDeck's REST control surface *is* used for `describe`/`ui` (PLAN §6 amendment 2026-07-17);
 the 2026-07-09 rejection was about its video transport only. Vendor
    serve-sim's client parsing (Apache-2.0, keep attribution) instead of inventing a wire
@@ -116,6 +122,24 @@ npm run ci                             # exactly what CI runs; must be green
 gh pr create --base main               # PR, with the reasoning in the body
 gh pr merge <n> --squash --delete-branch
 ```
+
+**Branch from `main`, never from another PR's branch.** Stacking looks efficient
+when two changes touch the same files. It is not, and both failure modes were
+paid for in one session:
+
+- Squash-merging the bottom PR rewrites its commits, so the PR above it still
+  carries the originals and its diff double-counts. It has to be rebased before
+  it means anything.
+- Deleting the bottom branch on merge **auto-closes** every PR based on it —
+  and a closed PR whose base branch is gone can be neither reopened nor
+  retargeted. The work survives on `refs/pull/<n>/head`; the PR does not.
+
+If two changes really are entangled, put them in one PR, or land the first and
+wait. `main` is protected and requires green CI, so waiting costs one CI run.
+
+**Watch out for `--delete-branch`**: it switches you to `main` without saying so.
+Chaining `gh pr merge ... --delete-branch && git switch <next>` silently skips
+the switch, and the next command runs against `main`.
 
 Why a PR for a one-liner. It is not ceremony — it is the only point where a
 reader who has not seen the change looks at it. A fifty-bug audit of one session

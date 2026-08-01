@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { registeredTools, registerToolCallCount } from "./toolNames.ts";
@@ -126,6 +126,30 @@ describe("docs describe the code that exists", () => {
         if (!existsSync(join(REPO, path))) missing.push(path);
       }
     }
-    assert.deepEqual([...new Set(missing)], [], `documented paths that do not exist`);
+    // Bare module names too — `janitor.ts` and `scrcpy.ts` sat in PLAN for months naming
+    // files nobody ever wrote, and this check could not see them: it required a directory
+    // prefix, and PLAN's architecture prose and its repo-layout tree both write the module
+    // alone. A bare name is checked by BASENAME anywhere under the workspaces, because that
+    // is the strongest claim the prose actually makes ("there is a module called this").
+    const sources = new Set<string>();
+    const walk = (dir: string): void => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        if (e.name === "node_modules" || e.name === "dist" || e.name.startsWith(".")) continue;
+        if (e.isDirectory()) walk(join(dir, e.name));
+        else sources.add(e.name);
+      }
+    };
+    for (const ws of ["server", "viewer", "landing"]) walk(join(REPO, ws, "src"));
+    for (const doc of [PLAN, AGENTS]) {
+      for (const m of doc.matchAll(/(?:`|\s)([a-zA-Z][A-Za-z0-9_-]*\.tsx?)\b/g)) {
+        const name = m[1]!;
+        if (!sources.has(name)) missing.push(name);
+      }
+    }
+    assert.deepEqual(
+      [...new Set(missing)],
+      [],
+      `PLAN.md / AGENTS.md name source files that do not exist. Either build them, or delete the mention.`,
+    );
   });
 });

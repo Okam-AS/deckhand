@@ -35,7 +35,7 @@ implementation:
 | Area | Decision |
 |---|---|
 | Streaming (iOS) | **[serve-sim](https://github.com/EvanBacon/serve-sim)** (Apache-2.0, npm) — H.264-over-WebSocket decoded with WebCodecs, automatic MJPEG-over-HTTP fallback, input + accessibility tree + logs over the same helper. Free, no relay infrastructure, rides the tunnel as plain WSS/HTTPS. Captures via `simctl io` (a public Apple interface — survives new iOS runtimes as long as simctl does). Pin the npm version. |
-| Streaming (Android, Phase 2) | **scrcpy-based** H.264-over-WebSocket. scrcpy (Genymobile) is the most battle-tested Android screen/input stack; an emulator is just an adb device. Whether to adopt `ws-scrcpy` or embed `scrcpy-server` behind a thin WS bridge is a **scoped Phase 2 evaluation** — both are free and tunnel-native. |
+| Streaming (Android) | **adb-based**, not scrcpy. The decision gate (ws-scrcpy vs embedded scrcpy-server) resolved against both: scrcpy's raw H.264 wire protocol is version-specific and needs extensive on-device iteration, which cannot be validated without a live emulator. Shipped: `screencap` MJPEG plus on-device `screenrecord` H.264, behind the same `StreamingBackend` seam — see §8 for the full outcome. A scrcpy upgrade remains possible behind that seam; it is not planned. |
 | NOT WebRTC/TURN, NOT SimDeck | An earlier revision of this plan used SimDeck + WebRTC relayed through Cloudflare TURN. **Rejected (2026-07-09):** TURN costs $0.05/GB and adds a credential/relay subsystem; SimDeck removed its WS transport (v0.1.31) and its display bridge rides private CoreSimulator APIs (unhedgeable risk against future Xcode); most of the predecessor project's operational scar tissue (display-heal ladder, daemon port cleanup, token discovery) was SimDeck-specific pathology. WS-carried H.264 has none of these problems: free, and exactly as firewall-proof as claude.ai itself. `docs/reference/simdeck-notes.md` is retained as historical context only. |
 | App types (day one) | React Native (Expo **and** bare) + NativeScript. Flutter / plain-Xcode later. **Amended (2026-07-15): `web`.** A fourth app type hosts a **frontend web project** (a Vite dev server). It is unlike the mobile types: no device/simulator, **local-`path` only** (registered on the machine via `deckhand app add <id> --path <dir> --type web`, never over MCP), and the "preview" IS the running dev server — `start_preview` starts `npm run dev` as a long-lived process (reusing `DevProcessManager`, like NativeScript livesync) on a loopback port and reverse-proxies it through the share URL. Ready = the dev server answers HTTP 200 (no first-frame/screenshot; `screenshot` returns a clear error for web). The dev server is started with Vite's `--base=/s/<shareId>/web/ --host 127.0.0.1 --port <p>` so every asset URL (and HMR) sits under the share path. Vite-first; Next.js/others and git-based web previews are follow-ups. |
 | Build strategy | Build locally on the mini: git worktree → install deps → native build. No CI artifacts. |
@@ -69,7 +69,7 @@ claude.ai / Claude Code / Routines / any MCP client        share-link viewers (a
 │              │              │                │                  │                         │
 │         audit log     git worktrees     simctl / avdmanager   iOS: serve-sim helper       │
 │                       + build recipes   + emulator + adb        (one per device, 3100+)   │
-│                                                               Android (P2): scrcpy bridge │
+│                                                               Android: adb screencap/screenrecord │
 └───────────────────────────────────────────────────────────────────────────────────────────┘
 
 on-disk:  ~/.deckhand/{config.yaml, apps.yaml, tokens.yaml, github-app.pem, state.json,
@@ -109,7 +109,8 @@ deckhand/
 │   │   │   ├── metro.ts         # Metro/Expo dev-server lifecycle (port 8081, env-signature keyed)
 │   │   │   ├── worktree.ts      # clone, fetch ref/PR, detached worktrees, local-first resolution
 │   │   │   ├── procs.ts         # spawn helpers: logging, idle watchdogs, kill trees
-│   │   │   └── janitor.ts       # disk budget, orphan cleanup (incl. helpers)
+│   │   │   ├── devProcess.ts   # long-lived dev runs (NativeScript livesync, web dev servers)
+│   │   │   └── reaper.ts       # orphan sims/AVDs/processes, by env marker and name
 │   │   ├── devices/
 │   │   │   ├── ios.ts           # simctl: runtimes, create, boot(status), install, launch, delete
 │   │   │   ├── android.ts       # (P2) sdkmanager/avdmanager, emulator boot, adb, pm path verify
@@ -117,7 +118,9 @@ deckhand/
 │   │   ├── streaming/
 │   │   │   ├── backend.ts       # the swappable interface (see §8)
 │   │   │   ├── serveSim.ts      # iOS backend: spawn/track/kill serve-sim helpers, endpoints
-│   │   │   └── scrcpy.ts        # (P2) Android backend
+│   │   │   ├── androidAdb.ts    # Android backend: per-device helper, adb screencap
+│   │   │   ├── androidH264.ts   # Android H.264 via on-device screenrecord
+│   │   │   └── web.ts           # web backend: proxy to a local dev server
 │   │   ├── github/
 │   │   │   └── appAuth.ts       # App JWT → installation tokens (cache ~55m), askpass injection
 │   │   ├── share/
@@ -267,7 +270,7 @@ doctor-builds, reports `ready` → agent offers the first `start_preview`.
 | `stop_preview` | member | `{previewId}` → teardown (devices deleted, worktree removed per policy; a local app's source dir is never touched) |
 | `screenshot` | member | `{previewId, deviceId}` → MCP image content (PNG). iOS: `xcrun simctl io <udid> screenshot`; Android: `adb -s <serial> exec-out screencap -p` |
 | `describe` | member | `{previewId, deviceId}` → accessibility tree. iOS: serve-sim's ax endpoint (token-efficient, built for agents); Android: `adb shell uiautomator dump` (parsed/compacted) |
-| `ui` | member | `{previewId, deviceId, action}` where action ∈ `{tap {x,y}, type {text}, key {name}, button {name}, home, openUrl {url}}` (normalized 0..1 coords) — validated passthrough. iOS: serve-sim gesture/button/type commands; Android: adb input / scrcpy control |
+| `ui` | member | `{previewId, deviceId, action}` where action ∈ `{tap {x,y}, type {text}, key {name}, button {name}, home, openUrl {url}}` (normalized 0..1 coords) — validated passthrough. iOS: serve-sim gesture/button/type commands; Android: adb input |
 | `logs` | member | `{previewId, deviceId?, source: "build"\|"metro"\|"app", tailLines?}` → text. `app` taps the streaming helper's forwarded simulator logs (serve-sim event-log) / adb logcat |
 | `add_app` | admin | `{repo, type?}` → clone, detect, **doctor build** on a default device, structured report (`ready` or `missing: [...]`) |
 | `remove_app` | admin | `{id, deleteCheckout?}` |
@@ -640,8 +643,9 @@ dir is never touched).
 ### Stream client (ours, in `viewer/`)
 
 - **H.264-over-WS + WebCodecs `VideoDecoder`** painted to a canvas, matching serve-sim's
-  own client. Vendor/adapt serve-sim's client utilities where practical (Apache-2.0 with
-  attribution): `avcc-codec.ts`, `avcc-fallback.ts`, `mjpeg-frame-parser.ts`, `hid.ts`.
+  own client. Built by adapting serve-sim's client utilities (Apache-2.0, attribution kept)
+  into `viewer/src/stream/`: `avcc.ts` (codec + fallback), `mjpeg.ts` (frame parsing),
+  `input.ts` (pointer/key encoding), `player.ts` (the decode loop and reconnect).
   Do not invent a new wire format — speak exactly what the helper serves.
 - Apply the battle-tested, transport-agnostic behaviors from
   `docs/reference/auto-mate-learnings.md` §2: feed no deltas before a true IDR, monotonic
@@ -748,122 +752,7 @@ change eases in/out — nothing snaps.
    the cookie jar per share, not to re-narrow the header list.
 7. **Host hygiene** (documented in runbook, not code): dedicated macOS user, no personal
    credentials on the machine, FileVault on.
-
-## 12. Implementation phases
-
-Work top to bottom; each phase ends with its acceptance test passing. Commit in small
-reviewable units; keep `npm test` green throughout.
-
-### Phase 0 — Scaffold ✅ (done)
-Workspaces (`server`, `viewer`), TypeScript strict ESM, `node:test` + `npm test`,
-GitHub Actions CI (typecheck + unit tests on macOS runner). CI is green.
-
-### Phase 1 — Core loop, iOS, single device (the big one)
-1. `config.ts`, `auth.ts`, `state.ts`, `audit.ts` (+ unit tests).
-2. `github/appAuth.ts`: App JWT → installation token, 55-min cache, askpass wrapper.
-3. `worktree.ts` + `detect.ts` + `recipes.ts` (expo, react-native, nativescript — command
-   builders unit-tested as pure functions).
-4. `devices/ios.ts` + `streaming/backend.ts` + `streaming/serveSim.ts` (spawn, first-frame
-   probe, detach, orphan kill).
-5. `engine/preview.ts`: single-device pipeline with boot/prep overlap, install verification
-   polling, watchdogs, log capture.
-6. MCP server with `list_apps`, `list_devices`, `start_preview` (1 iOS device),
-   `preview_status`, `stop_preview`, `screenshot`.
-7. Viewer page: one device, H.264-WS WebCodecs client (vendored serve-sim client utils) +
-   MJPEG fallback + touch input, public share, proxied end to end.
-8. Manual tunnel setup documented; `deckhand serve` + minimal `deckhand doctor` (toolchains
-   + serve-sim first-frame + GitHub checks).
-**Done when:** from claude.ai with the connector configured, "start a preview of
-`<app>` branch `<x>`" yields a link that streams and accepts touch **from a phone outside
-the LAN**, `preview_status` reports phases truthfully, `stop_preview` tears down cleanly
-(no orphan helpers, sims, or worktrees), and a failed build surfaces a useful `logTail`
-through `preview_status`.
-
-### Phase 2 — Multi-device + Android
-Build-once-install-many; parallel per-device pipelines; **scrcpy decision gate** (timeboxed
-eval: ws-scrcpy vs embedded scrcpy-server + WS bridge — pick by maintenance, embed-ability,
-input latency) → `streaming/scrcpy.ts`; `devices/android.ts` (AVD create, emulator boot,
-serial from console port, pm-path verify, uiautomator describe); runtime/model selection in
-`start_preview`; viewer device grid with per-device labels/status.
-**Done when:** one `start_preview` call with iOS 26 + iOS 27 + an Android emulator produces
-a single page with all three live and controllable; total wall-clock ≈ slowest device, not
-the sum.
-
-### Phase 2.5 — Local dev mode + daily-loop contract ✅ (done 2026-07-15, user-directed)
-Pulled forward ahead of Phase 3 (§2 amendment 2026-07-15): app `path` source; in-place
-builds with guarded deps; NativeScript livesync dev process (`engine/devProcess.ts`);
-named refs always fetch (stale-branch fix) + `updateWorktree` (fetch + reset for warm
-git restarts); idempotent `start_preview`; persisted per-app stable share ids;
-`restart_preview` tool (+ status/restart by app id); viewer Rebuild button via
-rate-limited `POST /s/:shareId/restart` (local shares only); `deckhand app add --path`
-with dir-based type/bundle-id detection.
-**Done when (met):** unit + e2e tests cover the loop: start → edit (livesync, no calls) →
-restart-in-place → same URL after stop/start and server restart; teardown never touches
-the source dir.
-
-### Phase 3 — Sharing + agent control + governance + onboarding
-Password shares (scrypt + signed cookie + WS gate — shipped as a numeric PIN gate);
-`describe`, `ui`, `logs` tools; `add_app`/`remove_app` with doctor-build report;
-(**dropped 2026-07-17, user-directed:** the idle reaper + share `expiresAt` — previews
-end on `stop_preview`, not on an idle timer; the `idleTeardownMinutes` config knob was
-removed too. Don't reintroduce automatic idle teardown without a new decision.)
-**the onboarding contract (§6)**: empty-state `nextStep`s, agent-relayable `add_app`
-failure instructions, PAT auth mode, one-time setup URL for secrets;
-token roles + owner scoping enforced; audit log complete.
-**Done when:** a password link works on a device that has never seen the app; a member
-token cannot call `add_app` nor touch apps outside its `owners` scope; Claude can navigate
-an app to a named screen using only `describe`/`ui`/`screenshot`; **and a fresh agent
-given only the MCP token takes a new user from zero apps to a ready preview of a private
-repo — asking the user for repo choice and PAT via the setup link — without SSH and
-without any secret appearing in the conversation.**
-
-### Phase 4 — Ops hardening + the AI runbook
-Full `deckhand init` (idempotent, flags, tunnel + launchd install); full `deckhand doctor`
-(incl. public-hostname check + smoke test); `janitor.ts` (disk tiers, orphan worktrees,
-stale sims/AVDs, **orphan streaming helpers** via serve-sim `--list`/`--kill` + pid
-tracking, `simctl delete unavailable` ≤1/24 h); helper-restart escalation (stream unhealthy
-→ kill + respawn helper, then recreate device — cheap, no global daemon to heal); GitHub
-App installation health warnings; **rewrite `AGENTS.md`/`CLAUDE.md` as the setup runbook**:
-preflight checks with exact verification commands (incl. Apple Silicon check), ordered
-steps, explicit ask-the-user-only-when rules (target: 3 questions), and "finish =
-`deckhand doctor` green".
-**Done when:** a fresh agent given only SSH access and the repo URL completes setup asking
-≤3 questions, and `deckhand doctor` passes including the public smoke test.
-
-### Phase 5 (later, explicitly out of scope now)
-Warm device pool (pre-booted bare devices, ~40 s saved per preview), OAuth 2.1 for Claude
-Enterprise org-wide connector rollout, Flutter + plain-Xcode recipes, artifact-based builds.
-**Per-share subdomain hosting for non-Vite web frameworks** (Nuxt 2, Next.js, static) so
-they can be hosted with zero checkout edits — design in
-[docs/web-wildcard-hosting-plan.md](./docs/web-wildcard-hosting-plan.md).
-
-## 13. Testing strategy
-
-- **Unit** (`node:test`, colocated): recipe command builders, config/token validation, auth
-  (timing-safe, role gates), share password + cookie logic, worktree ref resolution
-  (local-first), GitHub App JWT shape, proxy path scoping, backend interface conformance.
-  These run in CI on every push.
-- **Integration (mac-only, opt-in `npm run test:device`)**: against a real booted simulator:
-  serve-sim helper attaches and yields a decodable first frame, screenshot non-empty, input
-  tap acknowledged, teardown leaves no sims/worktrees/helpers behind.
-- **`deckhand doctor`** is the permanent end-to-end test — keep it honest and fast.
-- Every bug fixed gets a regression test in the closest layer.
-
-## 14. Known risks / open investigations
-
-| Risk | Mitigation |
-|---|---|
-| serve-sim is a young project | Apache-2.0 and small: vendor/fork if abandoned. It rides public `simctl` interfaces (not private frameworks). The backend seam (§8) makes replacement a contained change; our viewer client is ours. |
-| serve-sim helper is arm64-only | Locked decision: Apple Silicon mini. Runbook preflight checks `uname -m == arm64`. |
-| Android wrapper choice (ws-scrcpy vs embed scrcpy-server) | Timeboxed Phase 2 decision gate with explicit criteria; both options are free and satisfy the same backend interface; scrcpy itself is Genymobile-maintained and battle-tested. |
-| New iOS runtimes (e.g. iOS 27 beta) break capture | Lower risk than private-API bridges (simctl is the public seam), but verify on beta Xcode early; `doctor` smoke test catches it. |
-| Helper process sprawl / orphans after crashes | Deckhand owns child pids; janitor sweeps via pid table + serve-sim state file (`--list`/`--kill`). Integration test asserts zero leftovers. |
-| Streaming lots of video through Cloudflare Tunnel | Free tier is fine for a small team's dev usage; not a 24/7 broadcast workload. If it ever grows, revisit (self-hosted relay or Tunnel paid plan) — the backend seam keeps this a config problem. |
-| First build of a real app fails on missing secrets/registries | `add_app` doctor-build reports exactly what's missing; secrets flow via one-time setup URL or SSH (§6/§11.5). |
-| Long cold builds (2–5 min) feel broken in chat | `start_preview` returns immediately; `preview_status` gives phase-level truth; viewer shows the same phases calmly. |
-| Disk exhaustion from worktrees/DerivedData | Janitor tiers + refuse-new-work threshold (simple free-space check already in Phase 1). |
-
-## 15. Reference material
+## 12. Reference material
 
 - `docs/reference/serve-sim-notes.md` — serve-sim's CLI, endpoints, embedding/middleware
   API, state file, and constraints, as verified from its source. **Read before implementing
@@ -877,7 +766,7 @@ they can be hosted with zero checkout edits — design in
 - serve-sim source: `git clone --depth 1 https://github.com/EvanBacon/serve-sim.git` —
   especially `packages/serve-sim/src/client/` (stream client to vendor) and
   `packages/serve-sim/README.md` (embedding, proxy, X-Forwarded-Proto).
-- scrcpy: https://github.com/Genymobile/scrcpy (Phase 2).
+- scrcpy: https://github.com/Genymobile/scrcpy — evaluated and NOT adopted (§8); kept only as the reference for a possible future H.264 upgrade behind the streaming seam.
 - The predecessor repo (`auto-mate`) may exist at `~/auto-mate/auto-mate` on the dev
   machine; file references in the learnings doc point into it. It is a reference only —
   **do not import code or patterns wholesale; this project stays small.**
