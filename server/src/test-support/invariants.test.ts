@@ -292,6 +292,34 @@ describe("the boot sweep spares what is live", () => {
   });
 });
 
+describe("tests never touch the real ~/.deckhand", () => {
+  it("no test calls a writer that resolves paths from DECKHAND_HOME", () => {
+    // paths.ts says "tests point it at a temp dir" — a precondition nothing enforced. A test
+    // that calls writeApps/writeTokens/writeSecretEnv without setting DECKHAND_HOME writes to
+    // the DEVELOPER'S OWN config, and apps.yaml is a file whose loss costs every registered
+    // app. Pass the file/dir explicitly, or set DECKHAND_HOME first.
+    const writers = /\b(writeApps|writeTokens|writeSecretEnv)\s*\(/;
+    for (const file of testFiles()) {
+      const src = read(file);
+      if (!writers.test(src)) continue;
+      // An ASSIGNMENT, not a mention: the first version matched the bare name, which the
+      // cleanup line `delete process.env.DECKHAND_HOME` satisfies on its own.
+      //
+      // Honest limit, since a green check should not imply more than it proves: this catches
+      // a file that never sets DECKHAND_HOME at all — the realistic case, someone adding a
+      // test that calls writeApps without thinking about isolation. It cannot tell a setup
+      // assignment from the restore in `after()`, so deleting only the setup line still
+      // passes. Verified by mutation both ways.
+      assert.match(
+        src,
+        /process\.env\.DECKHAND_HOME\s*=/,
+        `${rel(file)} calls a config writer but never sets DECKHAND_HOME — it would write to the ` +
+          `developer's real ~/.deckhand. Point it at a temp dir for the duration of the test.`,
+      );
+    }
+  });
+});
+
 describe("fakes are complete", () => {
   it("uses test-support/fakes.ts for every dependency that has one", () => {
     // `{ ... } as unknown as Simctl` disables BOTH excess-property and missing-property

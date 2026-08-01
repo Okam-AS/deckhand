@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import express from "express";
 import { WebSocketServer } from "ws";
-import { loadConfig, loadApps, loadTokens, githubPatPath, resolveShareSecret, type App, type Config } from "./config.ts";
+import { loadConfig, loadAppsForBoot, loadTokens, githubPatPath, resolveShareSecret, type App, type Config } from "./config.ts";
 import { watchApps } from "./appsWatcher.ts";
 import { TokenAuthenticator } from "./auth.ts";
 import { AuditLog } from "./audit.ts";
@@ -131,7 +131,9 @@ export interface DeckhandServer {
 /** Assemble the full server from config files under ~/.deckhand. */
 export function createServer(): DeckhandServer {
   const config = loadConfig();
-  const apps = loadApps();
+  // Never fatal: a server that cannot start cannot be repaired through add_app or the setup
+  // URL, which is all a remote agent has. The reason is logged and surfaced through list_apps.
+  const { apps, error: appsError } = loadAppsForBoot();
   const tokens = loadTokens();
 
   const [lo, hi] = config.streaming.serveSim.helperPortRange;
@@ -198,6 +200,13 @@ export function createServer(): DeckhandServer {
       // Log the running commit, and start the first update check. Not awaited: `ls-remote`
       // is a network call and nothing about serving depends on the answer. It exists so the
       // first tool response after a boot already has something to say.
+      // Loud, and next to the listen line, because a server that came up with NO apps looks
+      // healthy from the outside and its first `list_apps` looks like a fresh install.
+      if (appsError) {
+        console.error(`deckhand: apps.yaml could not be loaded — starting with NO registered apps.`);
+        console.error(`  ${appsError}`);
+        console.error(`  The file is untouched. Fix that entry and deckhand picks it up without a restart.`);
+      }
       void refreshVersion().then((v) => {
         if (!v) return;
         console.log(`deckhand ${v.describe}${v.dirty ? " (uncommitted changes)" : ""} on ${v.branch ?? "a detached HEAD"}`);
