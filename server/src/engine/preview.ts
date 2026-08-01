@@ -2546,6 +2546,15 @@ export class PreviewEngine {
           const killed = await reaper.reapOrphansByMarker(marker, keep()).catch(() => [] as number[]);
           if (killed.length) this.d.audit.record({ actor: "engine", tool, args: { killed: killed.length }, result: "ok" });
         }
+        // Streaming helpers. serve-sim daemonizes ITSELF (`--detach`), so our source never
+        // passes a detached spawn option for it and it carries no env marker — the sweep above cannot
+        // see it, and neither can the guardrail that enforces markers. It needs its own
+        // call, and until this line existed it had none: StreamingRouter.reapOrphans() was
+        // written, tested, and never reached from boot, so the 2h48m orphan that motivated
+        // it (see serveSim.ts) would have survived every restart. Spare what is live, for
+        // the same reason the device reap does.
+        const live = this.liveDeviceHandles();
+        await this.d.streaming.reapOrphans(new Set([...live.udids, ...live.avds])).catch(() => {});
         return devices;
       } catch {
         return { sims: [], avds: [], keptPooled: [] };

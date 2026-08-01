@@ -24,7 +24,7 @@ export class StreamingRouter implements StreamingBackend {
     return this.ios;
   }
 
-  async reapOrphans(): Promise<void> {
-    await Promise.all([this.ios.reapOrphans(), this.android.reapOrphans(), this.web.reapOrphans()]);
+  async reapOrphans(keep?: ReadonlySet<string>): Promise<void> {
+    await Promise.all([this.ios.reapOrphans(keep), this.android.reapOrphans(keep), this.web.reapOrphans(keep)]);
   }
 }

@@ -90,6 +90,40 @@ describe("ServeSimBackend — surviving helpers", () => {
     assert.deepEqual(killed.sort(), [12100, 12102], "every surviving listener in the range must be signalled");
   });
 
+  it("spares a helper a live preview holds, and still kills the rest", async () => {
+    // The sweep runs after the port is bound (deliberately — that ordering is what makes a
+    // second `deckhand serve` die on EADDRINUSE before deleting the running server's
+    // devices), so a start_preview can be mid-attach. `serve-sim -k` with NO udid kills
+    // every helper on the machine, including the one just spawned.
+    const killArgs: string[][] = [];
+    const killedPids: number[] = [];
+    const backend = new ServeSimBackend({
+      portRange: [3100, 3102],
+      detachImpl: async (_bin, args) => JSON.stringify({ streamUrl: `http://127.0.0.1:${args[2]}/helper/LIVE/stream.mjpeg` }),
+      killImpl: async (_bin, args) => void killArgs.push([...args]),
+      // 3100 free at attach time, so the live helper lands there; 3101 holds a survivor
+      // from a previous process, which is what the sweep exists for.
+      listenersImpl: async (port) => (port === 3101 ? [9101] : []),
+      killPidImpl: (pid) => killedPids.push(pid),
+    });
+    const stream = await backend.attach({ platform: "ios", udid: "LIVE" } as never);
+    const livePort = Number(new URL(stream.origin).port);
+
+    await backend.reapOrphans(new Set(["LIVE"]));
+
+    assert.ok(
+      !killArgs.some((a) => a.length === 1 && a[0] === "-k"),
+      "the blanket `serve-sim -k` takes the live helper with it — name the dead ones instead",
+    );
+    assert.equal(livePort, 3100, "fixture sanity: the live helper holds a port inside the swept range");
+    assert.deepEqual(killedPids, [9101], "the survivor goes; the live helper's port is not signalled");
+
+    // Sparing must not forget it: the record is what stops the next attach reallocating
+    // that port and adopting a daemon bound to a simulator that is already gone.
+    const again = await backend.attach({ platform: "ios", udid: "LIVE" } as never);
+    assert.equal(again.origin, stream.origin, "the spared helper is still remembered after the sweep");
+  });
+
   it("a pid that dies between the scan and the signal is not an error", async () => {
     const backend = new ServeSimBackend({
       portRange: [3100, 3100],
