@@ -150,10 +150,38 @@ of after a push. The pre-commit hook runs the same command — if the two ever
 diverge, the hook is the one that is wrong. `--no-verify` deliberately still
 works: a hook that cannot be skipped gets uninstalled instead of respected.
 
-`test:device` is not in the hook (it boots a simulator, ~40s) and not in CI
-(GitHub runners cannot do Android emulators, so a green run there would mean
-"half the devices" while reading as "all of them"). Run it by hand after
-anything that touches the streaming path.
+`test:device` is not in the hook and not in CI (GitHub runners cannot do Android
+emulators, so a green run there would mean "half the devices" while reading as
+"all of them"). It boots a real simulator AND a real emulator, so it takes
+several minutes. Run it by hand.
+
+### Nothing is "tested" until this is green
+
+`npm run test:device` is the only check that touches hardware. It verifies three
+capabilities on **both** platforms, as six independent checks:
+
+|  | boot | stream | describe |
+|---|---|---|---|
+| **ios** | `simctl create` + boot | serve-sim first frame | accessibility tree |
+| **android** | AVD create + emulator boot | adb helper first frame | `uiautomator dump` |
+
+They are separate checks on purpose: "it booted" must never stand in for "it
+streamed". A device that comes up and never produces a frame is the most common
+failure on this machine, and it was invisible while one check covered both.
+
+**Do not report a change to the device, streaming, or control path as tested
+without pasting this output.** Not "tests pass" — that is `npm run ci`, which
+never touches a device. If you cannot run it, say which of the six is unverified
+and who has to run it. `?` is an honest answer; a tick you did not earn is not.
+
+What it does NOT cover, so do not imply it does: **input injection**. A tap
+landing on the device rides the WebSocket bridge and needs a viewer on the other
+end. `describe` proves the control path can READ; nothing here proves it writes.
+
+The gate found a real bug on its first run against hardware: `describe` returned
+`""` for a failed `uiautomator dump`, so a failed lookup and a blank screen were
+the same value — and an agent reading that tree would confidently report an empty
+screen. That is the class this exists to catch.
 
 ## The guardrails — read this before you change anything
 

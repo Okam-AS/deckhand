@@ -62,6 +62,51 @@ describe("AndroidManager.launch", () => {
   });
 });
 
+describe("AndroidManager.describe", () => {
+  const TREE = '<hierarchy><node text="Hello" bounds="[0,0][100,100]"/></hierarchy>';
+
+  it("retries while uiautomator is not idle, instead of reporting a blank screen", async () => {
+    // `uiautomator dump` refuses while a window is animating — the normal condition for the
+    // first seconds after a boot, an app launch, or any navigation — and says so on STDOUT
+    // while exiting 0. Both exit codes used to be discarded, so this returned "" and the
+    // `describe` tool told the agent the screen was empty. A confident wrong answer.
+    let dumps = 0;
+    const { mgr } = fakeManager((args) => {
+      if (args.includes("uiautomator")) {
+        dumps++;
+        return dumps < 3 ? { stdout: buf("ERROR: could not get idle state.") } : { stdout: buf("UI hierchary dumped to: /sdcard/deckhand-ui.xml") };
+      }
+      if (args.includes("cat")) return { stdout: buf(dumps >= 3 ? TREE : "") };
+      return {};
+    });
+    const tree = await mgr.describe("emulator-5680", 10_000);
+    assert.match(tree, /Hello/);
+    assert.equal(dumps, 3, "it polled rather than taking a single shot");
+  });
+
+  it("throws with what adb actually said, rather than returning an empty tree", async () => {
+    // The failure the device gate caught on its first real run: an empty string is
+    // indistinguishable from a screen with nothing on it, one layer up.
+    const { mgr } = fakeManager((args) =>
+      args.includes("uiautomator") ? { stdout: buf("ERROR: could not get idle state.") } : {},
+    );
+    await assert.rejects(() => mgr.describe("emulator-5680", 1_500), (e: Error) => {
+      assert.ok(e instanceof AndroidError);
+      assert.match(e.message, /could not get idle state/, "the operator needs adb's own words");
+      assert.match(e.message, /attempt/);
+      return true;
+    });
+  });
+
+  it("treats a dump that succeeds but reads back empty as a failure too", async () => {
+    // The other half: `dump` exits 0, the file is there, and `cat` yields nothing.
+    const { mgr } = fakeManager((args) =>
+      args.includes("uiautomator") ? { stdout: buf("UI hierchary dumped to: /sdcard/deckhand-ui.xml") } : { stdout: buf("") },
+    );
+    await assert.rejects(() => mgr.describe("emulator-5680", 1_500), /read back empty/);
+  });
+});
+
 describe("AndroidManager.findApk", () => {
   const withApk = (layout: string[]): { wt: string; apk: string } => {
     const wt = mkdtempSync(join(tmpdir(), "dh-apk-"));
