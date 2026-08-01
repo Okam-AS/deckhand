@@ -41,6 +41,22 @@ function killTree(pid: number, signal: NodeJS.Signals): void {
 export const BUILD_MARKER_ENV = "DECKHAND_BUILD";
 
 /** Run a single build step to completion, killing the tree on idle-timeout or abort. */
+/**
+ * Pids of build steps this process is running right now.
+ *
+ * The boot orphan sweep hunts BUILD_MARKER_ENV with an empty keep-set, on the reasoning that
+ * "build steps are awaited, so nothing is owned across a boot". That is true of a boot, and
+ * false of the sweep, because the sweep runs AFTER the port is bound — deliberately, so a
+ * second `deckhand serve` dies on EADDRINUSE before it deletes the running server's devices.
+ * An agent's `start_preview` can therefore land in the seconds between, and its brand-new
+ * xcodebuild/gradle carries the same marker. Metro and the livesync runners already spare
+ * their own via livePids(); builds had no equivalent to spare.
+ */
+const liveBuildPids = new Set<number>();
+export function buildPids(): number[] {
+  return [...liveBuildPids];
+}
+
 export function runStep(step: CommandStep, opts: RunOptions = {}): Promise<RunResult> {
   const idleMs = opts.idleTimeoutMs ?? step.idleTimeoutMs;
   const killGraceMs = opts.killGraceMs ?? 5_000;
@@ -63,6 +79,7 @@ export function runStep(step: CommandStep, opts: RunOptions = {}): Promise<RunRe
     let killTimer: NodeJS.Timeout | undefined;
 
     const pid = child.pid;
+    if (pid) liveBuildPids.add(pid);
 
     const hardKill = () => {
       if (pid) killTree(pid, "SIGKILL");
@@ -108,6 +125,10 @@ export function runStep(step: CommandStep, opts: RunOptions = {}): Promise<RunRe
       if (idleTimer) clearTimeout(idleTimer);
       if (killTimer) clearTimeout(killTimer);
       opts.signal?.removeEventListener("abort", onAbort);
+      // Both settle paths run cleanup, so this is the one place the pid is forgotten. A pid
+      // left in the set would spare a DEAD build forever, and — worse — could spare an
+      // unrelated process that later reuses the number.
+      if (pid) liveBuildPids.delete(pid);
     };
 
     child.on("error", (err) => {

@@ -271,6 +271,27 @@ describe("PLAN §11 — security model", () => {
   });
 });
 
+describe("the boot sweep spares what is live", () => {
+  it("passes a keep-set to every marker reap, never an empty one", () => {
+    // The build reap passed `[]` on the reasoning that "build steps are awaited, so nothing is
+    // owned across a boot". True of a boot; false of THIS sweep, which runs after the port is
+    // bound — so a start_preview lands in between and its brand-new xcodebuild carries the
+    // same marker and is SIGTERMed by the server it just asked for a preview. Metro and the
+    // livesync runners already spared their own; builds were the one resource that did not.
+    // Behavioural coverage is in procs.test.ts (buildPids lifecycle); this catches the wiring
+    // being reverted, which no unit test can see because the harness fakes runStep.
+    const src = read(join(SRC, "engine", "preview.ts"));
+    const reap = src.slice(src.indexOf("reapOrphansByMarker"));
+    const table = src.slice(src.indexOf("[\"reap_metro\""), src.indexOf("] as const"));
+    assert.ok(reap.length > 0 && table.length > 0, "the marker reap table moved — find it and re-pin this check");
+    assert.doesNotMatch(
+      table.replace(/\/\/.*$/gm, ""),
+      /=>\s*\[\]/,
+      "a marker reap with an empty keep-set kills the running server's own children",
+    );
+  });
+});
+
 describe("fakes are complete", () => {
   it("uses test-support/fakes.ts for every dependency that has one", () => {
     // `{ ... } as unknown as Simctl` disables BOTH excess-property and missing-property
