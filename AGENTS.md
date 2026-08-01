@@ -215,6 +215,19 @@ before trusting the preview phase, because a preview with one failed device and
 one ready device reports `ready` (`preview.ts:952`). The how-to, including a
 ready-to-paste poller, is the `waiting-for-a-preview` skill in `.claude/skills/`.
 
+## If a tool response says an update is available
+
+Every successful tool response carries `updateAvailable` when the deckhand
+checkout is on `main` and `main` has moved. **Relay the `nextStep` to the user
+and stop there.** Do not pull, and do not restart: a restart tears down every
+booted simulator on the machine, so someone may be mid-test on a preview you
+cannot see. It is their call.
+
+The version is the commit (`version.ts`) — nothing to bump, so nothing to forget.
+It only speaks when the checkout is a clean `main`; a feature branch or a dirty
+tree gets a factual note instead of a nag, because a notice that fires when it
+should not is one nobody reads when it should.
+
 ## Before you change an area, read its rule
 
 `.claude/rules/` holds one file per area, each scoped to the paths it covers, so

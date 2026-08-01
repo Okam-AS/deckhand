@@ -752,6 +752,33 @@ change eases in/out — nothing snaps.
    the cookie jar per share, not to re-narrow the header list.
 7. **Host hygiene** (documented in runbook, not code): dedicated macOS user, no personal
    credentials on the machine, FileVault on.
+## 11a. Staying current
+
+Deckhand reports whether it is running the latest code; it never updates itself.
+
+**The version is the commit.** `server/src/version.ts` reads the running
+checkout's sha and `git describe --tags --always`, and compares against
+`git ls-remote origin refs/heads/main`. Nothing is stored and nothing is bumped:
+a version number in `package.json` is only true while someone remembers to
+change it, and a sha cannot drift from the code because it *is* the code. Tag
+when a round number is wanted; nothing depends on it.
+
+`ls-remote` rather than the GitHub API — it reuses the credential the checkout
+already clones with, needs no token wiring and no dependency, works for a
+private repo, and touches nothing on disk. Deckhand must never fetch into its
+own checkout behind the operator's back.
+
+The answer is cached for 30 minutes and refreshed in the background, so no tool
+response ever waits on the network. It is attached to every successful MCP
+response through the shared `ok()` funnel — and only when there is something to
+say, so the normal case is unchanged and a tool added later cannot forget it.
+
+It speaks only for a clean checkout on `main`. A feature branch or a dirty tree
+gets a factual note, never an update prompt.
+
+**Never automatic.** Updating means restarting, and a restart tears down every
+booted simulator on the machine. The tool reports; the human decides.
+
 ## 12. Reference material
 
 - `docs/reference/serve-sim-notes.md` — serve-sim's CLI, endpoints, embedding/middleware

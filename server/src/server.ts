@@ -16,6 +16,7 @@ import { AndroidManager } from "./devices/android.ts";
 import { ServeSimBackend, vendoredServeSimBin } from "./streaming/serveSim.ts";
 import { AndroidAdbBackend } from "./streaming/androidAdb.ts";
 import { WebBackend } from "./streaming/web.ts";
+import { refreshVersion } from "./version.ts";
 import { StreamingRouter } from "./streaming/router.ts";
 import { buildTokenResolver } from "./github/credentials.ts";
 import { createMcpRouter } from "./mcp/index.ts";
@@ -194,6 +195,14 @@ export function createServer(): DeckhandServer {
       // sweeping idle previews for as long as we run.
       await engine.reapOrphans().catch(() => {});
       engine.startJanitor();
+      // Log the running commit, and start the first update check. Not awaited: `ls-remote`
+      // is a network call and nothing about serving depends on the answer. It exists so the
+      // first tool response after a boot already has something to say.
+      void refreshVersion().then((v) => {
+        if (!v) return;
+        console.log(`deckhand ${v.describe}${v.dirty ? " (uncommitted changes)" : ""} on ${v.branch ?? "a detached HEAD"}`);
+        if (v.note) console.log(`  ${v.note}`);
+      });
       // Registering an app must not cost a restart — a restart tears down every
       // booted simulator on the machine.
       watchApps(apps, {
