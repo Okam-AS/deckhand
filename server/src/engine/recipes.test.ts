@@ -363,3 +363,40 @@ describe("webRootDevRun (subdomain hosting — no base, no checkout edit)", () =
     assert.ok(!vite.args.includes("--base"));
   });
 });
+
+describe("pods never rewrite a borrowed checkout", () => {
+  const podsScriptFor = (local: boolean): string => {
+    const plan = buildPlan({ ...baseInput, local, type: "react-native", platform: "ios" });
+    const step = plan.find((s) => s.name === "pods");
+    assert.ok(step, "the react-native iOS plan has a pods step");
+    return step!.run.kind === "shell" ? (step!.run as { script: string }).script : "";
+  };
+
+  it("uses --deployment in local mode, so Podfile.lock is never rewritten", () => {
+    // `pod install` rewrites ios/Podfile.lock — a TRACKED file — in the developer's own
+    // working copy. That is the one build step that broke borrow-never-own, and it broke it
+    // silently: the developer finds their checkout dirty with no idea what did it.
+    const local = podsScriptFor(true);
+    assert.match(local, /pod install --deployment/);
+    // Only the EXECUTED part: the guidance message deliberately contains the bare command,
+    // because that is what the developer is being told to run themselves.
+    const executed = local.slice(0, local.indexOf("|| { echo"));
+    assert.doesNotMatch(executed, /pod install(?! --deployment)/, "no un-frozen pod install may run in local mode");
+    assert.match(local, /pod install' here yourself/, "and the developer is told the command to run");
+    assert.match(local, /exit 1/, "a stale Pods dir fails rather than being fixed for them");
+  });
+
+  it("still installs normally in a disposable git worktree", () => {
+    // The worktree is thrown away, so rewriting its lockfile costs nothing — and refusing
+    // would brick a preview of a branch whose Pods legitimately moved.
+    const git = podsScriptFor(false);
+    assert.match(git, /pod install/);
+    assert.doesNotMatch(git, /--deployment/);
+  });
+
+  it("still skips the step entirely when Pods are already in sync", () => {
+    for (const local of [true, false]) {
+      assert.match(podsScriptFor(local), /cmp -s ios\/Podfile\.lock ios\/Pods\/Manifest\.lock/);
+    }
+  });
+});
