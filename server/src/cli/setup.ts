@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { paths } from "../paths.ts";
 import { mergeTunnelConfig, renderTunnelConfig, parseTunnelConfig, tunnelIdFor, needsLogin } from "./tunnelConfig.ts";
-import { checkPrereqs, humanOnlySteps, formatPrereqs, blocking, type Probe } from "./preflight.ts";
+import { checkPrereqs, humanInput, formatPrereqs, blocking, type Probe } from "./preflight.ts";
 
 // ---------------------------------------------------------------------------
 // `deckhand setup` — one command from a bare Mac to a working connector URL.
@@ -157,17 +157,34 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
       env: process.env,
     };
     const prereqs = checkPrereqs(probe);
-    const humanSteps = humanOnlySteps(probe, { hostnameGiven: Boolean(opts.hostname) });
-    say(formatPrereqs(prereqs, humanSteps));
+    const human = humanInput(probe, { hostnameGiven: Boolean(opts.hostname) });
+    say(formatPrereqs(prereqs, human));
 
     const stoppers = blocking(prereqs);
-    if (stoppers.length || humanSteps.length) {
+    if (stoppers.length || human.blockers.length || human.questions.length) {
       const agentFixable = stoppers.filter((c) => c.fix?.who === "agent");
+      // The message is written for whoever runs this — most often an agent — and says which
+      // of the three things to DO, in the order that gets to a working install fastest.
+      const parts: string[] = [];
+      if (agentFixable.length) parts.push(`Run: ${agentFixable.map((c) => c.fix!.how).join(" && ")}`);
+      if (human.blockers.length) parts.push("Relay the BLOCKED items to the user and stop — you cannot do those.");
+      if (human.questions.length && !human.blockers.length && !stoppers.length) {
+        // Nothing is broken and nothing is blocked: the ONLY thing left is an answer. Say so
+        // in one line, so an agent asks a question instead of filing a status report.
+        parts.push(
+          `Nothing is missing. Ask the user this, in these words: "${human.questions[0]!.ask}" — then run ` +
+            `\`setup --hostname <their answer>\`. That is the whole remaining step; do not report status.`,
+        );
+      } else if (human.questions.length) {
+        parts.push("Then ask the ASK THE USER questions above and re-run with the answers.");
+      }
       throw new SetupError(
-        stoppers.length ? `missing: ${stoppers.map((c) => c.name).join(", ")}` : "waiting on you",
-        agentFixable.length
-          ? `Run: ${agentFixable.map((c) => c.fix!.how).join(" && ")}\n  Then handle the NEEDS YOU items above and run setup again.`
-          : "Handle the items above, then run setup again. Everything else is automatic.",
+        stoppers.length
+          ? `missing: ${stoppers.map((c) => c.name).join(", ")}`
+          : human.blockers.length
+            ? "blocked on something only the user can do"
+            : "one answer needed",
+        parts.join("\n  "),
       );
     }
 

@@ -267,16 +267,21 @@ npx tsx server/src/cli.ts setup          # no arguments, on purpose
 ```
 
 `setup` with no arguments is a preflight. It prints every prerequisite with **who
-can fix it**:
+can fix it**, and — this is the part to get right — it distinguishes an errand
+from a question:
 
 - `fix: <command>` — yours to run. Run it.
-- `you: <explanation>` — the user's. Relay it and stop.
-- a **NEEDS YOU** block — a browser and their Cloudflare account. **Never attempt
-  these.** `cloudflared tunnel login` opens a browser and will hang you forever,
-  and no amount of retrying changes that.
+- **BLOCKED** — an errand needing a browser or their Cloudflare account. Relay it
+  and stop. **Never attempt these**; `cloudflared tunnel login` opens a browser
+  and will hang you forever, and retrying changes nothing.
+- **ASK THE USER** — an input, not an obstacle. Ask the one question in the words
+  given, take the answer, and carry on yourself.
 
-Then ask the user for a hostname on a domain they have on Cloudflare, and run
-`setup --hostname <that>`. It does the rest — tunnel, DNS, the cloudflared config
+**Do not paste the report at the user.** When nothing is missing and nothing is
+blocked, the only thing left is one answer — so ask one question. An agent that
+files a status report there has turned a ten-second exchange into a puzzle.
+
+Then run `setup --hostname <their answer>`. It does the rest — tunnel, DNS, the cloudflared config
 (merged, never overwritten), the `deckhand` command, the LaunchAgents, doctor —
 and is safe to re-run, so it is also the repair tool.
 

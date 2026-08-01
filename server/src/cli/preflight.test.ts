@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { checkPrereqs, humanOnlySteps, formatPrereqs, blocking, type Probe } from "./preflight.ts";
+import { checkPrereqs, humanInput, formatPrereqs, blocking, type Probe } from "./preflight.ts";
 
 /**
  * Getting "who can fix this" wrong is the failure this module exists to prevent.
@@ -61,34 +61,52 @@ describe("who can fix what", () => {
   });
 });
 
-describe("the NEEDS YOU list", () => {
-  it("names the browser login when cloudflared is not authenticated", () => {
-    const steps = humanOnlySteps(probe({ run: () => ({ code: 1, out: "cert.pem missing" }) }), { hostnameGiven: true });
-    assert.equal(steps.length, 1);
-    assert.match(steps[0]!, /cloudflared tunnel login/);
-    assert.match(steps[0]!, /browser/, "so the agent does not sit waiting on it");
+describe("errands versus questions", () => {
+  // Treating these alike produced the wrong behaviour in the field: an agent handed a repo
+  // URL filed a STATUS REPORT and quoted a paragraph of English at the user, when all it
+  // needed to say was "which domain?". An errand needs a browser and stops you; a question
+  // needs one word and does not.
+  it("classifies the browser login as a BLOCKER, not a question", () => {
+    const h = humanInput(probe({ run: () => ({ code: 1, out: "cert.pem missing" }) }), { hostnameGiven: true });
+    assert.equal(h.blockers.length, 1);
+    assert.match(h.blockers[0]!, /cloudflared tunnel login/);
+    assert.match(h.blockers[0]!, /browser/, "so the agent does not sit waiting on it");
+    assert.deepEqual(h.questions, [], "there is nothing to ask — it is an errand");
   });
 
-  it("is silent about login once authenticated", () => {
-    assert.deepEqual(humanOnlySteps(probe(), { hostnameGiven: true }), []);
+  it("classifies the hostname as a QUESTION, not a blocker", () => {
+    const h = humanInput(probe(), { hostnameGiven: false });
+    assert.deepEqual(h.blockers, [], "nothing is broken; the agent is one answer from done");
+    assert.equal(h.questions[0]?.flag, "--hostname");
+    assert.match(h.questions[0]!.ask, /\?$/, "phrased as a question, because it is one");
+    assert.equal(h.questions.find((q) => q.flag === "--web-host")?.optional, true);
   });
 
-  it("asks for the hostname, because only the user knows their domain", () => {
-    const steps = humanOnlySteps(probe(), { hostnameGiven: false });
-    assert.match(steps.join(" "), /--hostname/);
+  it("has nothing to say once it has both", () => {
+    const h = humanInput(probe(), { hostnameGiven: true });
+    assert.deepEqual(h.blockers, []);
+    assert.deepEqual(h.questions, []);
   });
 });
 
 describe("the report an agent relays", () => {
   it("marks each line with who is responsible", () => {
     const p = probe({ which: (cmd) => cmd !== "cloudflared", nodeMajor: 18 });
-    const out = formatPrereqs(checkPrereqs(p), humanOnlySteps(p, { hostnameGiven: false }));
+    const out = formatPrereqs(checkPrereqs(p), humanInput(p, { hostnameGiven: false }));
     assert.match(out, /fix: brew install cloudflared/, "agent-fixable reads as an instruction to run");
     assert.match(out, /you: Install Node 22/, "human-only reads as a request");
-    assert.match(out, /NEEDS YOU/);
   });
 
-  it("does not shout about optional things that are present", () => {
-    assert.doesNotMatch(formatPrereqs(checkPrereqs(probe()), []), /NEEDS YOU|✗|⚠/);
+  it("tells the agent to ask rather than to paste", () => {
+    const p = probe();
+    const out = formatPrereqs(checkPrereqs(p), humanInput(p, { hostnameGiven: false }));
+    assert.match(out, /ASK THE USER/);
+    assert.match(out, /Do NOT paste this report/, "the label is an instruction to whoever is reading it");
+    assert.doesNotMatch(out, /BLOCKED/, "nothing is blocked — saying so would stop an agent that could continue");
+  });
+
+  it("does not shout when everything is present and answered", () => {
+    const p = probe();
+    assert.doesNotMatch(formatPrereqs(checkPrereqs(p), humanInput(p, { hostnameGiven: true })), /ASK|BLOCKED|✗|⚠/);
   });
 });

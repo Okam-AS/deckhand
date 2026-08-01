@@ -99,41 +99,81 @@ export function checkPrereqs(p: Probe): Prereq[] {
 }
 
 /**
- * The two things only a person can decide, however good the tooling gets.
+ * What the tooling cannot supply — split by what the agent should DO about it.
  *
- * Both are the same shape: they need a browser and an account. An agent that tries them
- * anyway blocks on a prompt the user never sees.
+ * These are two different things and treating them alike produced exactly the wrong
+ * behaviour: an agent handed a repo URL printed a status report and quoted a paragraph
+ * of English at the user, when all it needed to say was "which domain?".
+ *
+ * `blockers` are errands: a browser, an account, someone's password. Relay them and stop —
+ * there is nothing to proceed to.
+ * `questions` are inputs: one short question with a one-word answer, after which the agent
+ * carries on by itself. Never relay these as prose; just ask.
  */
-export function humanOnlySteps(p: Probe, opts: { hostnameGiven: boolean }): string[] {
-  const steps: string[] = [];
+export interface HumanInput {
+  /** Errands. The agent cannot proceed until the user goes and does these. */
+  blockers: string[];
+  /**
+   * Questions. Ask, take the answer, continue — `flag` is where the answer goes.
+   * `ask` is the whole question and nothing else, so an agent can relay it verbatim and have
+   * it read as a question. The example goes in `hint`, which is for the report, not the ask.
+   */
+  questions: { ask: string; hint: string; flag: string; optional?: boolean }[];
+}
+
+export function humanInput(p: Probe, opts: { hostnameGiven: boolean }): HumanInput {
+  const blockers: string[] = [];
+  const questions: HumanInput["questions"] = [];
+
   if (p.which("cloudflared")) {
     const list = p.run("cloudflared", ["tunnel", "list"]);
     if (list.code !== 0) {
-      steps.push(
+      blockers.push(
         "`cloudflared tunnel login` — opens a browser and asks which of your Cloudflare domains to authorise. You must be signed in to Cloudflare, and the domain must already be on your account.",
       );
     }
   }
   if (!opts.hostnameGiven) {
-    steps.push(
-      "Choose a hostname on that domain, e.g. `deckhand.yourdomain.com`, and pass it as `--hostname`. Add `--web-host previews.yourdomain.com` too if you want to preview web apps.",
-    );
+    questions.push({
+      ask: "Which hostname should deckhand use?",
+      hint: "any subdomain on a domain you have in Cloudflare, e.g. deckhand.yourdomain.com",
+      flag: "--hostname",
+    });
+    questions.push({
+      ask: "Do you want to preview web apps too?",
+      hint: "if yes, a second hostname for them, e.g. previews.yourdomain.com; if no, skip it",
+      flag: "--web-host",
+      optional: true,
+    });
   }
-  return steps;
+  return { blockers, questions };
 }
 
-/** Render the report an agent relays verbatim. */
-export function formatPrereqs(prereqs: Prereq[], humanSteps: string[]): string {
+/**
+ * The report. Blockers and questions are rendered DIFFERENTLY on purpose — the labels are
+ * instructions to the agent reading them, and an agent that cannot tell an errand from a
+ * question will relay both as prose and then wait.
+ */
+export function formatPrereqs(prereqs: Prereq[], human: HumanInput): string {
   const lines: string[] = [];
   for (const c of prereqs) {
     const mark = c.ok ? "✓" : c.optional ? "⚠" : "✗";
     lines.push(`  ${mark} ${c.name}${c.detail ? ` — ${c.detail}` : ""}`);
     if (!c.ok && c.fix) lines.push(`      ${c.fix.who === "agent" ? "fix:" : "you:"} ${c.fix.how}`);
   }
-  if (humanSteps.length) {
+  if (human.blockers.length) {
     lines.push("");
-    lines.push("  NEEDS YOU — I cannot do these, they need a browser and your Cloudflare account:");
-    for (const s of humanSteps) lines.push(`    • ${s}`);
+    lines.push("  BLOCKED — relay these and stop. They need a browser and the user's Cloudflare account:");
+    for (const s of human.blockers) lines.push(`    • ${s}`);
+  }
+  if (human.questions.length) {
+    lines.push("");
+    lines.push("  ASK THE USER — one short question each, then run setup again with the answers.");
+    lines.push("  Do NOT paste this report at them; just ask.");
+    for (const q of human.questions) {
+      lines.push(`    ${q.ask}${q.optional ? "  (optional)" : ""}`);
+      lines.push(`        → ${q.flag}   ${q.hint}`);
+    }
   }
   return lines.join("\n");
 }
