@@ -82,7 +82,13 @@ async function measure(): Promise<UpdateStatus | null> {
     git(["rev-parse", "--short", "HEAD"], root),
     git(["describe", "--tags", "--always"], root),
     git(["rev-parse", "--abbrev-ref", "HEAD"], root),
-    git(["status", "--porcelain"], root),
+    // TRACKED modifications only. `git status --porcelain` also lists untracked files, so a
+    // stray .DS_Store, an editor scratch file or a node_modules symlink made `dirty` true —
+    // and dirty suppresses the update notice, permanently and silently. That is the exact
+    // opposite of this module's job: the checkouts most likely to accumulate stray files are
+    // the long-lived ones most likely to fall behind. An untracked file does not change which
+    // code is running; a tracked edit does, and only that should mute the notice.
+    git(["status", "--porcelain", "--untracked-files=no"], root),
   ]);
   if (!sha) return null;
 

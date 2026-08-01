@@ -69,6 +69,24 @@ describe("versionStatus", () => {
   });
 });
 
+describe("dirtiness means TRACKED edits, not stray files", () => {
+  it("asks git for tracked modifications only", () => {
+    // `git status --porcelain` also lists untracked files, so a stray .DS_Store, an editor
+    // scratch file or a node_modules symlink set dirty=true — and dirty suppresses the update
+    // notice, permanently and silently. Exactly backwards: the checkouts most likely to
+    // accumulate stray files are the long-lived ones most likely to have fallen behind.
+    //
+    // Verified against a real clone before the fix: HEAD 6 commits behind origin/main, one
+    // untracked file present, and the notice was suppressed with "uncommitted local changes".
+    // After: updateAvailable true, dirty false, same clone, same file.
+    assert.match(
+      readFileSync(join(SRC, "version.ts"), "utf8"),
+      /"status",\s*"--porcelain",\s*"--untracked-files=no"/,
+      "an untracked file does not change which code is running, so it must not mute the notice",
+    );
+  });
+});
+
 describe("the update check is actually wired in", () => {
   /**
    * The bug this exists to prevent has already happened once here, one layer over:
