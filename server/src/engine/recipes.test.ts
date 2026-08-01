@@ -70,7 +70,11 @@ describe("install-deps — package manager dispatch", () => {
       assert.match(script, /elif \[ -f pnpm-lock\.yaml \]; then/);
       assert.match(script, /elif \[ -f package-lock\.json \]; then/);
       // npm is the fallback, so it must be tested last of the four.
-      const order = ["bun.lock", "yarn.lock", "pnpm-lock.yaml", "package-lock.json"].map((f) => script.indexOf(f));
+      // Measured from the dispatch chain only: local mode prefixes a staleness guard that
+      // names every lockfile (in mtime order, not detection order), so indexOf over the whole
+      // script compares positions in the guard rather than in the install.
+      const chain = script.slice(script.indexOf("if [ -f bun.lock ]"));
+      const order = ["bun.lock", "yarn.lock", "pnpm-lock.yaml", "package-lock.json"].map((f) => chain.indexOf(f));
       assert.deepEqual(order, [...order].sort((a, b) => a - b), "detection order must be bun, yarn, pnpm, npm");
     }
   });
@@ -289,11 +293,13 @@ describe("buildPlan — local dev mode", () => {
       // the public registry and 404s.
       assert.ok(script.indexOf("bun.lock") < script.indexOf("package-lock.json"), "bun must be checked first");
       assert.match(script, /bun install --frozen-lockfile/, "never rewrite the borrowed lockfile");
-      // The availability check is the shared `pm_need` helper (which is
-      // `command -v "$1"`), applied per manager rather than bun-only.
+      // The availability check is the shared `pm_need` helper (which is `command -v "$1"`),
+      // applied per manager rather than bun-only. Asserted on the FULL script: the helper is
+      // DEFINED above the dispatch chain, so the slice above cuts its definition off.
       assert.match(script, /then pm_need bun;/, "a missing bun must say so, not fall through to npm");
-      assert.match(script, /command -v "\$1"/);
-      assert.match(script, /exit 127/, "a missing manager is a command-not-found condition");
+      assert.match(full, /command -v "\$1"/);
+      // Also on the full script: `exit 127` lives inside the pm_need definition.
+      assert.match(full, /exit 127/, "a missing manager is a command-not-found condition");
     }
   });
 });
