@@ -183,6 +183,14 @@ The gate found a real bug on its first run against hardware: `describe` returned
 the same value — and an agent reading that tree would confidently report an empty
 screen. That is the class this exists to catch.
 
+## Waiting for a preview to build
+
+An agent on THIS machine should read `~/.deckhand/state.json` rather than
+sleep-looping `preview_status` — and must check every device for an `error`
+before trusting the preview phase, because a preview with one failed device and
+one ready device reports `ready` (`preview.ts:952`). The how-to, including a
+ready-to-paste poller, is the `waiting-for-a-preview` skill in `.claude/skills/`.
+
 ## The guardrails — read this before you change anything
 
 `server/src/test-support/` holds checks that fail the build when a decision this
