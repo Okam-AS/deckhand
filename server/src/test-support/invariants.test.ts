@@ -251,6 +251,15 @@ describe("PLAN §11 — security model", () => {
       .map((l) => l.replace(/\/\/.*$/, ""))
       .filter((l) => l.includes("(dev|web|restart)"));
     assert.ok(src.length, "the share-gate route matcher moved — find it and re-pin this check");
+    // The gate must resolve the shareId the way the HANDLERS do. `req.path` is not
+    // percent-decoded and `req.params` is, so a gate reading the raw segment authorises a
+    // different share than the one it then serves — the third bypass on this seam, after
+    // case-sensitivity and pane pairing. All three had the same cause.
+    assert.match(
+      read(join(SRC, "share", "proxy.ts")),
+      /decodeURIComponent\(m\[1\]/,
+      "the share gate must percent-decode the id it authorises, because req.params does and the handlers read that",
+    );
     for (const gate of src) {
       assert.match(
         gate,

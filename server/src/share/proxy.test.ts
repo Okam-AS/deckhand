@@ -582,3 +582,50 @@ describe("PIN gate (path-based share)", () => {
     assert.equal(last, 429, "the fifth wrong attempt is locked out");
   });
 });
+
+describe("the PIN gate resolves the same shareId the handlers do", () => {
+  // The gate only means anything when there IS a PIN, so lock share1 for this block —
+  // without it the control below passes vacuously and the bypass test proves nothing.
+  before(() => {
+    pinState.current = { shareId: "share1", length: 4, pin: "1234" };
+  });
+  after(() => {
+    pinState.current = null;
+  });
+
+  it("is not bypassed by percent-encoding the share id", async () => {
+    // Third bypass on this path, same shape as the first two: the gate and the handler
+    // disagree about what the shareId IS. `req.path` is NOT percent-decoded; `req.params`
+    // is. So `/s/%73hare1/...` gates on the literal "%73hare1" — a share nobody has, hence
+    // no PIN record, hence "public" — and then serves "share1", which is locked.
+    for (const path of [
+      "/s/%73hare1/web/index.html",
+      "/s/%73hare1/dev/dev-0/stream.mjpeg",
+      "/s/%73hare1/dev/dev-0/ax",
+    ]) {
+      const plain = await fetch(`${proxyBase}${path.replace("%73", "s")}`);
+      const encoded = await fetch(`${proxyBase}${path}`);
+      assert.equal(plain.status, 401, `${path}: fixture sanity — the plain spelling is locked`);
+      assert.equal(
+        encoded.status,
+        401,
+        `${path} returned ${encoded.status} instead of 401 — the gate read the raw path ("%73hare1", ` +
+          `which has no PIN record and is therefore treated as public) while the handler read the ` +
+          `DECODED param ("share1", which is locked)`,
+      );
+    }
+    const restart = await fetch(`${proxyBase}/s/%73hare1/restart`, { method: "POST" });
+    assert.equal(restart.status, 401, "and a link holder must not be able to rebuild a locked share");
+  });
+
+  it("still gates the ordinary spelling", async () => {
+    assert.equal((await fetch(`${proxyBase}/s/share1/dev/dev-0/ax`)).status, 401);
+  });
+
+  it("fails closed on a malformed escape rather than waving it through", async () => {
+    // decodeURIComponent throws on "%zz". A request whose target we cannot resolve is not a
+    // request we may pass to the handlers — that is how the bypass above worked.
+    const res = await fetch(`${proxyBase}/s/%zzhare1/dev/dev-0/ax`);
+    assert.ok(res.status === 400 || res.status === 401, `expected a refusal, got ${res.status}`);
+  });
+});
