@@ -1,5 +1,12 @@
 # Agent guide — deckhand
 
+
+## Read this first
+
+[`CONSTITUTION.md`](./CONSTITUTION.md) — what deckhand is, who it is for, and the
+seven principles that settle an argument PLAN and this file do not. It is one page.
+Every principle in it was paid for by a bug in this repo.
+
 ## Current state: Phases 1, 2 & 2.5 implemented (iOS + Android, multi-device, local dev mode)
 
 Phases 0–2.5 are done, and most of Phase 3 (CI green). The server has config/auth/state/audit,
@@ -235,6 +242,49 @@ The version is the commit (`version.ts`) — nothing to bump, so nothing to forg
 It only speaks when the checkout is a clean `main`; a feature branch or a dirty
 tree gets a factual note instead of a nag, because a notice that fires when it
 should not is one nobody reads when it should.
+
+## Setting a user up, or unsticking one
+
+You will be asked "how do I install this" and "why is my connector not working".
+Get these exactly right — three times in one day an agent (me) told a user to run
+something that did not exist, and each time they assumed the fault was theirs.
+
+**Install, from nothing:**
+
+```sh
+git clone https://github.com/Okam-AS/deckhand && cd deckhand
+npm install && npm run build
+cloudflared tunnel login                    # opens a browser; they must do this
+npx tsx server/src/cli.ts setup --hostname deckhand.<their-domain>
+```
+
+They need a domain on Cloudflare. `setup` does everything else — tunnel, DNS,
+config, the `deckhand` command itself, the LaunchAgents, doctor — and is safe to
+re-run, so it is also the repair tool. It is `npx tsx …` for the first run only,
+because `deckhand` is not on PATH until setup links it.
+
+**Their connector URL:** `deckhand token`. Creates one the first time, prints the
+same one after. NOT `token list`, which masks them by design. It is a credential —
+never repeat it back in chat, and never put it in a commit or a PR.
+
+**Registering something to preview:**
+
+```sh
+deckhand app add <id> --path /abs/path/to/their/checkout   # local, no GitHub needed
+deckhand app add <id> github.com/owner/repo                # from git
+```
+
+Local is the default when they are working in a project. See the `nextStep` that
+`list_apps` returns on an empty install — it is written for you, and it is right.
+
+**When something is wrong:** `deckhand doctor` first, always. It names the missing
+piece and the command that fixes it. `deckhand doctor --device-only` boots a real
+simulator and emulator; it takes minutes and is the only check that touches
+hardware.
+
+**Never** run `launchctl kickstart` on the server without saying so first: it tears
+down every booted simulator on the machine, and somebody may be watching a preview
+you cannot see.
 
 ## Before you change an area, read its rule
 
