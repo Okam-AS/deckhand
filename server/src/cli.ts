@@ -92,9 +92,23 @@ async function main(): Promise<void> {
     }
 
     case "doctor": {
-      const { checks, ok } = await runDoctor({ smoke: Boolean(flags.smoke) });
+      // `--device-only` is the regression gate (`npm run test:device`): it runs
+      // the same checks but its EXIT CODE reflects only the ones a code change
+      // can break. Plain `doctor` also fails on install problems — no GitHub
+      // credential, no launchd agent — which are real, and are exactly the wrong
+      // reason for a code gate to go red. A gate that fails for reasons the
+      // author cannot fix gets ignored within a week.
+      const deviceOnly = Boolean(flags["device-only"]);
+      const { checks, ok } = await runDoctor({ smoke: Boolean(flags.smoke) || deviceOnly });
       console.log(formatChecks(checks));
-      process.exit(ok ? 0 : 1);
+      if (!deviceOnly) {
+        process.exit(ok ? 0 : 1);
+        return;
+      }
+      const gated = checks.filter((c) => /^(smoke|serve-sim|simctl|xcodebuild)/.test(c.name));
+      const failed = gated.filter((c) => !c.ok && !c.skipped && !c.warn);
+      for (const c of failed) console.error(`gate failed: ${c.name}${c.detail ? ` — ${c.detail}` : ""}`);
+      process.exit(failed.length ? 1 : 0);
       return;
     }
 

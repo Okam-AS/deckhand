@@ -18,7 +18,8 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "build": "npm run build --workspace @deckhand/viewer && npm run build --workspace @deckhand/landing -- --outDir ../dist && node landing/scripts/prepare-hosting.mjs",
     "dev": "npm run dev --workspace @deckhand/server",
-    "postinstall": "patch-package"
+    "postinstall": "patch-package",
+    "test:device": "npm run --workspace @deckhand/server test:device"
   },
   "devDependencies": {
     "patch-package": "^8.0.1"

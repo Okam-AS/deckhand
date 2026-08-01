@@ -33,3 +33,14 @@ jobs:
 
       - name: Build viewer
         run: npm run build
+
+  # `test:device` is deliberately NOT here. It creates a simulator, boots it,
+  # attaches a stream and waits for a first frame — the only check that catches
+  # deadlines calibrated against an idle machine, which is the bug class that hit
+  # twice in one session. GitHub's macOS runners can do iOS, but Android
+  # emulators need nested virtualisation they do not provide, so a green CI would
+  # mean "half the devices" while reading as "all of them". Run it on the mini:
+  #
+  #     npm run test:device
+  #
+  # after anything that touches the streaming path.
