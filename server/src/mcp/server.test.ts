@@ -25,6 +25,8 @@ const config: Config = {
   githubApp: { appId: 1, privateKeyPath: "k.pem" },
   githubAmbient: true,
   allowPublicRepos: false,
+  // Sentinel: asserted verbatim below, proving the recipe is config-driven.
+  modelHints: { claude: "haiku-recipe-from-config" },
   limits: { maxDevicesPerPreview: 4, maxTotalDevices: 6, idleMinutes: 45, failedGraceMinutes: 15, stuckMinutes: 90, reuseDevices: false, disk: { watch: 50, pressure: 35, critical: 20 } },
 };
 
@@ -966,6 +968,26 @@ describe("agent-driven testing tools (describe/ui + test runs)", () => {
     assert.equal(parse(await admin.callTool({ name: "finish_test_run", arguments: { previewId, status: "passed" } })).ok, true);
     const asserted = parse(await admin.callTool({ name: "ui", arguments: { previewId, deviceId, action: { type: "assert", selector: { text: "x" } } } }));
     assert.equal(asserted.hint, undefined, "verifiers must not nudge");
+    await admin.close();
+  });
+
+  it("steers the drive loop onto a cheaper model, with the recipe taken from config", async () => {
+    // Deckhand cannot pick the caller's model — delegating the mechanical drive loop to a
+    // subagent is the only lever the AGENT controls, so the ask has to ride where the agent
+    // already reads its orders: the drive contract on start_preview, and the response of
+    // start_test_run (the last call before driving begins).
+    const admin = await client(ADMIN);
+    const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
+    assert.equal(started.ok, true);
+    assert.match(String(started.nextStep), /cheapest fast model/, "the delegation ask must ride the drive contract");
+    assert.match(String(started.nextStep), /haiku-recipe-from-config/, "the per-harness recipe comes from config.modelHints, not code");
+
+    const run = parse(
+      await admin.callTool({ name: "start_test_run", arguments: { previewId: started.previewId as string, title: "Model hint", steps: ["Tap"] } }),
+    );
+    assert.equal(run.ok, true);
+    assert.match(String(run.modelHint), /haiku-recipe-from-config/, "start_test_run repeats the recipe as a structured field");
+    assert.equal(parse(await admin.callTool({ name: "finish_test_run", arguments: { previewId: started.previewId as string, status: "passed" } })).ok, true);
     await admin.close();
   });
 
