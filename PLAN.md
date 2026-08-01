@@ -60,7 +60,7 @@ claude.ai / Claude Code / Routines / any MCP client        share-link viewers (a
                                │
 ┌──────────────────────────────▼─── deckhand server (Node, 127.0.0.1:4300) ────────────────┐
 │                                                                                           │
-│  /mcp/<token>              MCP Streamable HTTP (stateless), ~11 tools, role-gated         │
+│  /mcp/<token>              MCP Streamable HTTP (stateless), role-gated tools             │
 │  /s/<shareId>              viewer page (our built static assets + preview metadata)       │
 │  /s/<shareId>/dev/<id>/*   scoped proxy → that device's streaming helper                  │
 │                            (video WS / MJPEG, input WS — nothing else)                    │
@@ -271,7 +271,7 @@ doctor-builds, reports `ready` → agent offers the first `start_preview`.
 | `logs` | member | `{previewId, deviceId?, source: "build"\|"metro"\|"app", tailLines?}` → text. `app` taps the streaming helper's forwarded simulator logs (serve-sim event-log) / adb logcat |
 | `add_app` | admin | `{repo, type?}` → clone, detect, **doctor build** on a default device, structured report (`ready` or `missing: [...]`) |
 | `remove_app` | admin | `{id, deleteCheckout?}` |
-| `start_test_run` / `update_test_run` / `finish_test_run` | member | **Amended (2026-07-17):** agent-driven end-to-end testing. The agent (the brain) reports what it's testing — `{title, steps}`, per-step `running`/`passed`/`failed`, then a verdict + summary — surfaced live in the viewer as a calm spinner button + step popover. deckhand records; the agent writes the human report in chat. |
+| `start_test_run` / `update_test_run` / `finish_test_run` / `clear_test_run` | member | **Amended (2026-07-17):** agent-driven end-to-end testing. The agent (the brain) reports what it's testing — `{title, steps}`, per-step `running`/`passed`/`failed`, then a verdict + summary — surfaced live in the viewer as a calm spinner button + step popover. deckhand records; the agent writes the human report in chat. |
 | `parity_set` / `parity_status` | member | **Renamed (2026-07-31, was `compare_set`/`compare_status`):** maintain and read the per-item parity checklist (`pending`/`doing`/`done`/`adjusted`/`regression`). Deliberately NOT merged with the `*_test_run` tools: a test run is one ephemeral pass whose steps go pending → running → passed, parity is a durable per-screen verdict, and the viewer renders them as separate sections precisely because the statuses do not mean the same thing. |
 
 **Amended (2026-07-17): `describe`/`ui` backend = SimDeck, control-only.** The 2026-07-09
@@ -300,7 +300,7 @@ translator. Three small additions close the gap:
    source preview's shareId + sanitized devices) whenever a target's `migratesFrom` source
    is running. The viewer renders a second column reusing `DeviceFrame` against the source's
    shareId — **zero new proxy/stream code**; PIN caveat: v1 assumes the source preview is
-   public (no cross-share unlock). `start_migration_preview` is the ergonomic entry point
+   public (no cross-share unlock). `start_preview`'s `alongside` was the eventual entry point
    (named `_preview` — a migration spans many sessions, so it re-opens the paired preview
    idempotently rather than "running" a one-shot migration).
 3. **Parity ledger**: an agent-maintained `deckhand.migration.yaml` in the TARGET repo root

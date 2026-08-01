@@ -1179,7 +1179,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         migratesFrom: z
           .string()
           .optional()
-          .describe("app id this is being migrated FROM (the source/oracle) — enables start_migration_preview and the side-by-side view"),
+          .describe("app id this is being migrated FROM (the source/oracle) — start_preview then shows it alongside this app by default"),
       },
     },
     (args) =>

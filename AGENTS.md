@@ -2,7 +2,7 @@
 
 ## Current state: Phases 1, 2 & 2.5 implemented (iOS + Android, multi-device, local dev mode)
 
-Phases 0–2.5 are done (168 tests green, CI green). The server has config/auth/state/audit,
+Phases 0–2.5 are done, and most of Phase 3 (CI green). The server has config/auth/state/audit,
 GitHub App auth + git worktrees, build recipes + detection (Expo/RN/NativeScript, iOS +
 Android), iOS simctl control, Android device layer (avdmanager/emulator/adb, uiautomator
 describe, toolEnv), the streaming router (serve-sim for iOS, H.264/screencap backend for
@@ -89,7 +89,9 @@ If you are here to **implement further**, your instructions are:
    green on every commit.
 4. The streaming layer is **decided** (PLAN.md §2/§8): iOS via **serve-sim**
    (H.264-over-WebSocket + WebCodecs, MJPEG fallback), Android via **scrcpy** in Phase 2,
-   both behind the `StreamingBackend` seam. **No WebRTC, no TURN, no SimDeck.** Vendor
+   both behind the `StreamingBackend` seam. **No WebRTC, no TURN, and no SimDeck for VIDEO** —
+SimDeck's REST control surface *is* used for `describe`/`ui` (PLAN §6 amendment 2026-07-17);
+the 2026-07-09 rejection was about its video transport only. Vendor
    serve-sim's client parsing (Apache-2.0, keep attribution) instead of inventing a wire
    format.
 
@@ -102,6 +104,56 @@ Non-negotiables while implementing:
   argv/URLs/logs.
 - Structured, actionable MCP errors: the model relaying the error to a human must be able
   to say exactly what to do next.
+
+## The guardrails — read this before you change anything
+
+`server/src/test-support/` holds checks that fail the build when a decision this
+project already made gets broken. They exist because prose did not work: PLAN §2
+and §11 say they are "acceptance criteria, not suggestions", and they were
+broken repeatedly anyway by agents who had not read 885 lines.
+
+If one of these fails, it is telling you about a decision — not asking you to
+make the check pass.
+
+| Check | What it protects |
+|---|---|
+| dependency allow-list · no DB driver | PLAN §2 "keep the list ruthlessly short". Adding a dep is a PLAN decision — argue it there, then widen the set |
+| serve-sim pinned exactly + a matching patch file | The pin is a SECURITY control: serve-sim ships `/exec`, reachable from inside the simulator, which shares the host's loopback. `patch-package` strips it. A caret range drifts past the patch |
+| no concrete backend imported outside `streaming/` | PLAN §8's seam. Two composition roots are named explicitly, so the exception is a decision rather than an erosion |
+| every MCP tool wrapped in `audited()` | PLAN §11.2. A tool added without it is invisible to the audit trail and nothing else fails |
+| exactly one `.listen()`, on 127.0.0.1 | PLAN §11.1. A wildcard bind puts the whole MCP surface on the LAN |
+| the share gate keeps its `i` flag | Express dispatches routes case-insensitively. Losing it was a live auth bypass |
+| every `detached: true` spawn stamps a marker | Four resources outlive the server; three leaked, one to 36 orphans at 418% CPU that starved the emulators. An in-memory Map is not an owner |
+| docs name only tools and files that exist | PLAN documented a tool nobody built, and the dead name leaked into a tool *description* — text a model reads as instructions |
+
+### Three rules that are not checkable, and cost the most when broken
+
+1. **A new test must fail before it passes.** Write it, remove the fix, watch it
+   fail, put the fix back. Every test in this repo that was added without that
+   step turned out to assert nothing — including one that passed because a POSIX
+   character class means something else in JavaScript.
+2. **Fakes are complete or they lie.** Use `test-support/fakes.ts`, never
+   `as unknown as X` on a literal. That form disables missing-property checking,
+   so a new method on a real class leaves every fake silently behind. It cost
+   four bugs in one day, and once made the orphan sweep a no-op that reported
+   success.
+3. **A comment that states a precondition needs a test that fails when the
+   precondition breaks.** The worst bug of the last review was a correct comment
+   ("a pane belongs to one page") that the same diff made false. No type, lint or
+   test sees that — only a reader who is looking for it. Adversarial review is
+   not optional here; it is the only thing that catches this class.
+
+### Running them
+
+`npm test` runs everything, including the guardrails. `npm run typecheck` is the
+other half — the fakes and branded types do their work at compile time, not run
+time. CI runs both on every PR.
+
+`deckhand doctor --smoke` is the only check that touches real hardware: it
+creates a simulator, boots it, attaches a stream and waits for a first frame. Run
+it after anything that touches the streaming path, because a whole class of bug
+here — deadlines calibrated against an idle machine — is invisible to every test
+above.
 
 ## Later: setup runbook
 
