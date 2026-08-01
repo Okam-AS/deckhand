@@ -524,7 +524,21 @@ export function createShareRouter(deps: ShareDeps): express.Router {
     // accessibility tree of a PIN-locked share with no PIN at all.
     const m = /^\/([^/]+)\/(dev|web|restart)(?:\/|$)/i.exec(req.path);
     if (!m) return next();
-    const shareId = m[1]!;
+    // DECODE, because `req.path` does not and `req.params` does. The handlers below read
+    // `req.params.shareId`, so a gate reading the raw segment resolves a DIFFERENT share:
+    // `/s/%73hare1/web/…` gated on the literal "%73hare1" — an id nobody holds, therefore no
+    // PIN record, therefore treated as public — and then served "share1", which is locked.
+    // That is the third bypass on this seam and the third time its cause was the gate and the
+    // handler disagreeing about what the shareId IS (case, then pane pairing, now encoding).
+    // A malformed escape fails CLOSED: decodeURIComponent throws on "%zz", and a request we
+    // cannot resolve is not a request we may wave through.
+    let shareId: string;
+    try {
+      shareId = decodeURIComponent(m[1]!);
+    } catch {
+      res.status(400).json({ error: "bad_request" });
+      return;
+    }
     if (deps.pinGate.allowed(req.headers.cookie, shareId)) return next();
     res.status(401).json({ error: "locked", ...deps.pinGate.info(shareId) });
   });
