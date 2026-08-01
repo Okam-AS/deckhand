@@ -24,7 +24,7 @@ import { DEV_MARKER_ENV } from "./devProcess.ts";
 import { BUILD_MARKER_ENV } from "./procs.ts";
 import { MetroManager } from "./metro.ts";
 import { buildPlan, usesMetroDeepLink, nativescriptDevRun, webDevRun, webRootDevRun, GENERAL_IDLE_MS, METRO_PORT } from "./recipes.ts";
-import { runStep as defaultRunStep, type RunResult } from "./procs.ts";
+import { runStep as defaultRunStep, buildPids, type RunResult } from "./procs.ts";
 import type { CommandStep } from "./recipes.ts";
 import {
   detectBundleIdFromDir,
@@ -2621,8 +2621,14 @@ export class PreviewEngine {
         for (const [tool, marker, keep] of [
           ["reap_metro", METRO_MARKER_ENV, () => this.d.metro?.livePids() ?? []],
           ["reap_dev_run", DEV_MARKER_ENV, () => this.d.devProcs?.livePids() ?? []],
-          // Build steps are awaited, so nothing is owned across a boot.
-          ["reap_build", BUILD_MARKER_ENV, () => []],
+          // NOT an empty keep-set. "Build steps are awaited, so nothing is owned across a
+          // boot" is true of a boot and false of this sweep: it runs AFTER the port is bound
+          // (deliberately — that is what makes a second `deckhand serve` die on EADDRINUSE
+          // before deleting the running server's devices), so an agent's start_preview can
+          // land in the seconds between, and its brand-new xcodebuild/gradle carries the same
+          // marker. Same window liveDeviceHandles() guards for devices and livePids() for
+          // Metro; builds were the one resource with nothing to spare them.
+          ["reap_build", BUILD_MARKER_ENV, () => buildPids()],
         ] as const) {
           const killed = await reaper.reapOrphansByMarker(marker, keep()).catch(() => [] as number[]);
           if (killed.length) this.d.audit.record({ actor: "engine", tool, args: { killed: killed.length }, result: "ok" });
@@ -2737,16 +2743,31 @@ export class PreviewEngine {
       }
       if (idleMinutes > 0 && now - p.lastActivityAt > idleMinutes * 60_000) doomed.push({ id, reason: "idle" });
     }
+    const stopped: string[] = [];
     for (const { id, reason } of doomed) {
+      // Re-check immediately before tearing this one down. `doomed` is decided for the whole
+      // set before the first await, and each stopPreview takes seconds — shutting down and
+      // deleting simulators — so by the time the loop reaches the second entry, someone may
+      // have opened the viewer on it or an agent may have called screenshot/describe/ui,
+      // both of which reset lastActivityAt. Tearing it down then is the worst outcome this
+      // sweep has: a preview somebody is actively watching disappears under them, and
+      // recovery costs a full rebuild.
+      const p = this.previews.get(id);
+      if (!p) continue;
+      if (reason === "idle" && this.d.now!() - p.lastActivityAt <= idleMinutes * 60_000) {
+        this.d.audit.record({ actor: "engine", tool: "auto_stop_skipped", args: { preview: id, reason: "reactivated" }, result: "ok" });
+        continue;
+      }
       this.d.audit.record({ actor: "engine", tool: "auto_stop", args: { preview: id, reason }, result: "ok" });
       await this.stopPreview(id).catch(() => {});
+      stopped.push(id);
     }
     await this.reassertAndroidReverse();
     // Teardown keeps the checkout (it is the next build's warm cache), so this
     // sweep is the only thing that ever gives that disk back on a server that
     // isn't restarted. It only touches checkouts idle past the grace window.
     await this.pruneDisk();
-    return doomed.map((d) => d.id);
+    return stopped;
   }
 
   /**

@@ -1576,6 +1576,45 @@ describe("PreviewEngine idle sweep", () => {
     );
   });
 
+  it("does not tear down a preview that was reactivated mid-sweep", async () => {
+    // `doomed` is decided for the whole set before the first await, and each stopPreview takes
+    // seconds — it shuts down and deletes simulators. So when several previews go idle
+    // together (the normal case: a session's previews all age out while the user is away),
+    // someone can open the viewer on the second one while the first is still being torn down.
+    // Tearing it down anyway is the worst thing this sweep can do: a preview somebody is
+    // actively watching vanishes under them, and recovery costs a full rebuild.
+    let clock = 1_000_000;
+    let n = 0;
+    const h = makeEngine({
+      now: () => clock,
+      genPreviewId: () => `pv${++n}`,
+      genShareId: () => `share-${n}`,
+      config: { ...config, limits: { ...config.limits, idleMinutes: 10 } },
+    });
+    for (const ref of ["a", "b"]) {
+      h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: ref }, devices: [{ platform: "ios" }], access: "public" });
+    }
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+    assert.equal(await waitForPhase(h.engine, "pv2", ["ready", "failed"]), "ready");
+
+    clock += 20 * 60_000; // both are now well past idleMinutes
+
+    // Somebody opens pv2 the instant the sweep starts working through the list.
+    const realStop = h.engine.stopPreview.bind(h.engine);
+    h.engine.stopPreview = async (id: string) => {
+      if (id === "pv1") h.engine.getStatus("pv2"); // a status poll counts as activity
+      return realStop(id);
+    };
+
+    const stopped = await h.engine.sweepIdle();
+    assert.deepEqual(stopped, ["pv1"], "the idle one goes; the reactivated one does not");
+    assert.ok(h.engine.getStatus("pv2"), "pv2 is still alive");
+    assert.ok(
+      h.audit.some((e) => e.tool === "auto_stop_skipped"),
+      "and the skip is recorded — a sweep that silently changes its mind is unexplainable later",
+    );
+  });
+
   it("forgets an unregistered app's share id and PIN hash", () => {
     // Both are keyed by app id and were written on first preview but never removed, so
     // state.json grew an entry per app that ever existed — including the scrypt hash of a PIN
