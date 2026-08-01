@@ -187,6 +187,21 @@ function expoIosPlan(i: BuildPlanInput): CommandStep[] {
   ];
 }
 
+/**
+ * The CocoaPods step. `--deployment` in local mode, and an error naming the command the
+ * developer should run themselves rather than deckhand running it for them.
+ */
+function podsScript(local: boolean): string {
+  const guard = "[ -f ios/Podfile ] && ! cmp -s ios/Podfile.lock ios/Pods/Manifest.lock";
+  if (!local) return `if ${guard}; then (cd ios && (bundle exec pod install || pod install)); fi`;
+  return (
+    `if ${guard}; then (cd ios && (bundle exec pod install --deployment || pod install --deployment)) || ` +
+    `{ echo "deckhand: this checkout's Pods are out of sync with ios/Podfile.lock, and deckhand will not ` +
+    `rewrite a tracked file in a borrowed checkout — run 'cd ios && pod install' here yourself, then retry" >&2; ` +
+    `exit 1; }; fi`
+  );
+}
+
 function reactNativeIosPlan(i: BuildPlanInput): CommandStep[] {
   return [
     depsStep(i),
@@ -194,11 +209,15 @@ function reactNativeIosPlan(i: BuildPlanInput): CommandStep[] {
       name: "pods",
       // Only run pod install when the lockfile and installed manifest differ —
       // keeps warm worktrees fast. Matches the learnings verbatim.
-      run: {
-        kind: "shell",
-        script:
-          "if [ -f ios/Podfile ] && ! cmp -s ios/Podfile.lock ios/Pods/Manifest.lock; then (cd ios && (bundle exec pod install || pod install)); fi",
-      },
+      //
+      // In LOCAL mode `--deployment` is load-bearing, not tidiness: a plain `pod install`
+      // rewrites ios/Podfile.lock, which is a TRACKED file in the developer's own working
+      // copy. Borrow-never-own says deckhand does not modify a checkout it only borrowed,
+      // and this was the one build step that did. `--deployment` disallows any change to
+      // the Podfile or the lockfile and fails instead — the same frozen-versus-updating
+      // split the dependency install above already makes, and for the same reason: a
+      // disposable git worktree may be rewritten, someone's working copy may not.
+      run: { kind: "shell", script: podsScript(Boolean(i.local)) },
       cwd: i.worktreePath,
       env: i.appEnv,
       idleTimeoutMs: GENERAL_IDLE_MS,
