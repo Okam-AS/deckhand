@@ -7,6 +7,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { App, AppType, Config } from "../config.ts";
 import { appSchema, ConfigError, parseRepo, publicBaseUrl } from "../config.ts";
+import { versionStatus } from "../version.ts";
 import type { Principal } from "../auth.ts";
 import { canAccessApp, isAdmin, visibleApps } from "../auth.ts";
 import type { PreviewEngine, CompareReference } from "../engine/preview.ts";
@@ -42,8 +43,19 @@ export interface ToolContext {
   setup?: SetupStore;
 }
 
+/**
+ * Every successful tool response, and the one place the update notice can be attached
+ * without anyone having to remember to.
+ *
+ * Attached only when there is genuinely something to say (this checkout is on main and main
+ * has moved), so the normal case is byte-identical to before. Deliberately not restricted to
+ * `start_preview`: whichever tool the agent reaches for next is the one that should tell it,
+ * and a notice on a funnel cannot be forgotten by the next tool somebody adds.
+ */
 function ok(data: Record<string, unknown>): CallToolResult {
-  return { content: [{ type: "text", text: JSON.stringify({ ok: true, ...data }) }] };
+  const version = versionStatus();
+  const notice = version?.updateAvailable ? { updateAvailable: true, version: version.current, latest: version.latest, nextStep: version.note } : {};
+  return { content: [{ type: "text", text: JSON.stringify({ ok: true, ...data, ...notice }) }] };
 }
 
 function fail(code: string, message: string, hint?: string): CallToolResult {
