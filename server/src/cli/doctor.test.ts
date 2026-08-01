@@ -17,30 +17,52 @@ import { deviceGateExit, type Check } from "./doctor.ts";
  * entry point full of `process.exit`. That extraction IS the fix; these tests only pin it.
  */
 
-const smoke = (ok: boolean): Check => ({ name: "smoke: sim + serve-sim first frame", ok, gate: true, smoke: true });
+const smoke = (platform: "ios" | "android", ok = true): Check => ({ name: `smoke ${platform}: boot`, ok, gate: true, smoke: platform });
+/** Both legs green — the only shape that may exit 0. */
+const bothPlatforms = (): Check[] => [smoke("ios"), smoke("android")];
 const tool = (name: string, ok: boolean): Check => ({ name, ok, gate: true });
 
 describe("deviceGateExit", () => {
   it("fails when no smoke check was produced", () => {
-    // The shipped bug, exactly: config threw, so runDoctor never reached the smoke test.
+    // The shipped bug, exactly: config threw, so runDoctor never reached the smoke tests.
     const r = deviceGateExit([{ name: "config files", ok: false }, tool("xcodebuild", true), tool("simctl", true)]);
     assert.equal(r.code, 1, "a gate that booted no device has not passed");
     assert.match(r.reason ?? "", /did not run/);
   });
 
+  it("fails when only one platform was exercised", () => {
+    // The gate was iOS-only while ci.yml justified excluding it from CI *because* CI cannot
+    // do Android. Half the devices, reading as all of them — one layer further down.
+    const r = deviceGateExit([tool("xcodebuild", true), smoke("ios")]);
+    assert.equal(r.code, 1);
+    assert.match(r.reason ?? "", /android/, "the missing platform must be named");
+  });
+
   it("passes only when the smoke check ran and every gated check is green", () => {
-    const r = deviceGateExit([{ name: "config files", ok: true }, tool("xcodebuild", true), smoke(true)]);
+    const r = deviceGateExit([{ name: "config files", ok: true }, tool("xcodebuild", true), ...bothPlatforms()]);
     assert.equal(r.code, 0);
     assert.equal(r.reason, undefined);
   });
 
   it("fails on a failed smoke check", () => {
-    const r = deviceGateExit([tool("xcodebuild", true), smoke(false)]);
+    const r = deviceGateExit([tool("xcodebuild", true), smoke("ios"), smoke("android", false)]);
     assert.equal(r.code, 1);
     assert.deepEqual(
       r.failed.map((c) => c.name),
-      ["smoke: sim + serve-sim first frame"],
+      ["smoke android: boot"],
     );
+  });
+
+  it("fails when a capability below boot is red, even though both platforms booted", () => {
+    // boot/stream/describe are separate checks precisely so "it booted" cannot stand in for
+    // "it streamed". A device that comes up and never produces a frame is the single most
+    // common failure on this machine.
+    const r = deviceGateExit([
+      ...bothPlatforms(),
+      { name: "smoke android: stream", ok: false, gate: true, detail: "no first frame" },
+    ]);
+    assert.equal(r.code, 1);
+    assert.deepEqual(r.failed.map((c) => c.name), ["smoke android: stream"]);
   });
 
   it("ignores checks outside the gate, however they fail", () => {
@@ -50,13 +72,13 @@ describe("deviceGateExit", () => {
     const r = deviceGateExit([
       { name: "github credential", ok: false, detail: "no PAT" },
       { name: "auto-restart services (launchd)", ok: false, warn: true },
-      smoke(true),
+      ...bothPlatforms(),
     ]);
     assert.equal(r.code, 0);
   });
 
   it("treats skipped and warn gated checks as non-failures", () => {
-    const r = deviceGateExit([{ name: "serve-sim (vendored)", ok: false, gate: true, skipped: true }, smoke(true)]);
+    const r = deviceGateExit([{ name: "serve-sim (vendored)", ok: false, gate: true, skipped: true }, ...bothPlatforms()]);
     assert.equal(r.code, 0);
   });
 
@@ -64,7 +86,7 @@ describe("deviceGateExit", () => {
     // `serve-sim (vendored, 1.2.3)` builds its label at runtime and `smoke: …` is prose.
     // The previous filter was a regex over those strings, so renaming the one check that
     // boots a device would have silently dropped it from the gate and kept exiting 0.
-    const renamed: Check = { name: "first frame (real device)", ok: false, gate: true, smoke: true };
-    assert.equal(deviceGateExit([renamed]).code, 1, "the flag travels with the check, the name does not");
+    const renamed: Check = { name: "first frame (real device)", ok: false, gate: true, smoke: "ios" };
+    assert.equal(deviceGateExit([renamed, smoke("android")]).code, 1, "the flag travels with the check, the name does not");
   });
 });
