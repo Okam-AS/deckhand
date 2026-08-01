@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fakeMetro, fakeDevProcs } from "../test-support/fakes.ts";
 import { PreviewEngine, PreviewError, buildStepDetail, redactForShare, type PreviewEngineDeps } from "./preview.ts";
 import type { SimDeckControl } from "../testing/control.ts";
 import type { App, Config } from "../config.ts";
@@ -113,6 +114,9 @@ function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (
     },
     stopAll: () => {},
   } as unknown as PreviewEngineDeps["devProcs"];
+  // Completed through the shared fake so a new DevProcessManager method is a
+  // compile error here rather than a silently swallowed throw at runtime.
+  const devProcsComplete = fakeDevProcs(devProcs as Partial<PreviewEngineDeps["devProcs"]>);
 
   const simctl = {
     listRuntimes: async () => [{ identifier: "rt.26", name: "iOS 26.0", version: "26.0", isAvailable: true }],
@@ -183,10 +187,10 @@ function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (
     } as unknown as PreviewEngineDeps["worktrees"],
     simctl,
     streaming: streaming as unknown as PreviewEngineDeps["streaming"],
-    metro: { ensure: async () => ({ manifestUrl: "http://127.0.0.1:8081" }), stop: async () => {}, stopApp: async () => {} } as unknown as PreviewEngineDeps["metro"],
+    metro: fakeMetro(),
     store: new StateStore(`/tmp/deckhand-noop-${Math.random().toString(36).slice(2)}.json`),
     audit: { record: (e: { tool: string; args: unknown }) => void audit.push({ tool: e.tool, args: e.args }) } as unknown as PreviewEngineDeps["audit"],
-    devProcs,
+    devProcs: devProcsComplete,
     runStep: async (step, opts) => {
       buildEnvSeen.push(step.env);
       opts?.onLog?.(`running ${step.name}`, "stdout");
