@@ -220,6 +220,28 @@ describe("docs describe the code that exists", () => {
     }
   });
 
+  it("documents every CLI verb, the way it documents every MCP tool", () => {
+    // The existing checks all run ONE WAY: they catch PLAN naming something that does not
+    // exist. Nothing caught the reverse — code existing that PLAN has never heard of — and it
+    // rotted exactly as you would expect. `deckhand setup`, the single most important command
+    // in the product, appeared in PLAN zero times; §10 meanwhile credited `init` with
+    // creating the tunnel, the DNS route, the launchd agents and the first token, none of
+    // which it has ever done.
+    //
+    // Verbs, not files. A file list in a document is drift by construction — this one has
+    // rotted twice — but the CLI's verbs are the contract a user actually types.
+    const cli = readFileSync(join(SRC, "cli.ts"), "utf8");
+    const verbs = [...cli.matchAll(/case "([a-z-]+)":/g)].map((m) => m[1]!);
+    assert.ok(verbs.length > 4, `only ${verbs.length} verbs parsed — the switch changed, fix this check`);
+    for (const verb of verbs) {
+      assert.ok(
+        new RegExp(`\`deckhand ${verb}[\`\\s]`).test(PLAN),
+        `\`deckhand ${verb}\` is a command but PLAN.md never mentions it. PLAN calls itself the ` +
+          `single source of truth; a command it has not heard of is invisible to the next agent.`,
+      );
+    }
+  });
+
   it("names no source file that does not exist", () => {
     // PLAN §4 described a layout that had drifted from the tree: janitor.ts,
     // scrcpy.ts, server/test/, fixtures/, scripts/ — five paths a new agent

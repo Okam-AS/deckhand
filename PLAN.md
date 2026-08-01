@@ -121,6 +121,13 @@ deckhand/
 │   │   │   ├── androidAdb.ts    # Android backend: per-device helper, adb screencap
 │   │   │   ├── androidH264.ts   # Android H.264 via on-device screenrecord
 │   │   │   └── web.ts           # web backend: proxy to a local dev server
+│   │   ├── cli/
+│   │   │   ├── setup.ts        # `deckhand setup`: preflight → tunnel → config → services
+│   │   │   ├── preflight.ts    # what is missing, and WHO can fix it (agent vs human)
+│   │   │   ├── tunnelConfig.ts # merge ~/.cloudflared/config.yml, never generate it
+│   │   │   ├── doctor.ts       # the verification loop + the device gate's exit code
+│   │   │   └── configWrite.ts  # config/token/app writers (validate before writing)
+│   │   ├── version.ts          # "am I running the latest?" — the version IS the commit
 │   │   ├── github/
 │   │   │   └── appAuth.ts       # App JWT → installation tokens (cache ~55m), askpass injection
 │   │   ├── share/
@@ -696,14 +703,24 @@ change eases in/out — nothing snaps.
 
 `deckhand` CLI subcommands (same binary as the server):
 
-- `deckhand init` — **idempotent and resumable**: detects what is already configured, does
-  the next missing step, prints what remains. Non-interactive flags for everything:
-  `--github-app-id`, `--github-app-pem <path>`, `--hostname`, `--port`. Steps: create
-  `~/.deckhand`, write configs, install + **pin** serve-sim (record exact version in
-  config), verify Xcode/simctl (and, P2, Android toolchains), configure cloudflared named
-  tunnel (`cloudflared tunnel create deckhand`, DNS route `<hostname>`, config ingress →
-  `http://127.0.0.1:4300`), install launchd plists (deckhand + cloudflared), generate first
-  admin token.
+- `deckhand setup` — **the only command a new install needs.** Run with no arguments it is a
+  PREFLIGHT: it reports every prerequisite (Node, Xcode, cloudflared, Android SDK) with *who
+  can fix it* — `fix:` for what a non-interactive process can do, `you:` and a **NEEDS YOU**
+  block for what needs a browser and someone's Cloudflare account. That classification
+  (`cli/preflight.ts`) exists because an agent handed only a repo URL will otherwise run
+  `cloudflared tunnel login` and block on a prompt nobody sees.
+  Run with `--hostname` it does the rest: adopt-or-create the named tunnel, DNS route,
+  **merge** `~/.cloudflared/config.yml` (`cli/tunnelConfig.ts` — never generate it; that file
+  routinely carries other services), `npm link` the `deckhand` command onto PATH, write
+  `config.yaml`, mint the admin connector URL, install the launchd agents, run doctor.
+  Idempotent by design, so it is also the repair tool.
+- `deckhand init` — writes `config.yaml` only. `setup` calls it; you rarely call it directly.
+  Flags: `--hostname`, `--port`, and optionally `--github-app-id`/`--github-app-pem` (the App
+  is optional — without it deckhand uses the ambient `gh` CLI session).
+- `deckhand token` — **your connector URL**, creating one on first use. `token list` shows who
+  has access with the URLs MASKED; `token url <name>` prints one in full; `token add` mints
+  another. Roles and owner scoping are a team feature that a solo install never has to meet
+  (CONSTITUTION principle 7).
 - `deckhand doctor` — the verification loop, each check independently reportable:
   toolchains present (xcodebuild, simctl, node; P2: java, sdkmanager, adb, emulator),
   serve-sim helper spawns for a booted sim + **stream WS upgrades + a first frame decodes**
