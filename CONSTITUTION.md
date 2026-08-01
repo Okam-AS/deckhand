@@ -26,7 +26,7 @@ that other people exist.
 
 ---
 
-## The seven
+## The eight
 
 Each of these was paid for. The parenthetical is what it cost.
 
@@ -95,6 +95,18 @@ one — do not remove it.
 
 *(`deckhand token` prints your URL. `token list` and `token url <name>` still exist,
 for the team that needs them.)*
+
+### 8. Whatever a human catches, a check must catch next time
+
+A defect found by a person reading, not a test running, is unfinished work. Fix it,
+then write the check — and if it cannot be mechanical, say so where the next reader
+will be.
+
+*(Every guardrail in this repo was born this way. Four were born in one day, from
+things a user found by typing what we had told them to.)*
+
+**So:** the `shipping-a-change` skill runs before every PR, and step 5 of it is that
+conversion. Skipping it is how the docs went stale four times in a day.
 
 ---
 

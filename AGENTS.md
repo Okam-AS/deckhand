@@ -128,12 +128,19 @@ Non-negotiables while implementing:
 
 ## How work lands here
 
+**Run the `shipping-a-change` skill before you open the PR. Every time, including
+the one-line fix.** It is in `.claude/skills/shipping-a-change/`. Nothing can force
+you to — that is exactly why it is written down, and why step 5 of it turns whatever
+you caught into a check that fires next time. Four of this repo's guardrails exist
+because that step was skipped and a user found the defect instead.
+
 **Never commit to `main`.** Every change — including a one-line fix — goes:
 
 ```
 git switch -c feature/<short-name>     # branch first, always
 … work, committing as you go …
 npm run ci                             # exactly what CI runs; must be green
+# ← run the shipping-a-change skill HERE, before the next line
 gh pr create --base main               # PR, with the reasoning in the body
 gh pr merge <n> --squash --delete-branch
 ```
