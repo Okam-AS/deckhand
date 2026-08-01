@@ -222,7 +222,6 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
     }
 
     step("Admin token");
-    let printedToken = false;
     const list = deckhandCli(["token", "list"]);
     if (list.code === 0 && /admin/.test(list.out)) {
       ok("an admin token already exists — `deckhand token url <name>` prints its connector URL");
@@ -230,8 +229,9 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
       const name = opts.tokenName ?? process.env.USER ?? "me";
       const added = deckhandCli(["token", "add", name, "--role", "admin"]);
       if (added.code !== 0) throw new SetupError(`could not create a token: ${added.out}`, "Fix the above, then re-run.");
-      say(added.out.split("\n").map((l) => `  ${l}`).join("\n"));
-      printedToken = true;
+      // Only the name. The URL is a credential and belongs in exactly one place: the single
+      // step at the end, which the user is about to run deliberately.
+      say(`  ✓ created an admin token for "${opts.tokenName ?? process.env.USER ?? "me"}"`);
     }
 
     if (!opts.noServices) {
@@ -251,14 +251,24 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
     const doctor = deckhandCli(["doctor"]);
     say(doctor.out.split("\n").map((l) => `  ${l}`).join("\n"));
 
-    say("\nDone. Next: register an app, then ask your agent for a preview.");
-    say(`  deckhand app add <id> --path /abs/path/to/a/checkout    (local — no GitHub needed)`);
-    say(`  deckhand app add <id> github.com/owner/repo             (from git)`);
-    say(
-      printedToken
-        ? `\nGive the connector URL above to claude.ai as an MCP connector.`
-        : `\nYour connector URL: \`deckhand token url <name>\` (\`deckhand token list\` shows the names). Give it to claude.ai as an MCP connector.`,
-    );
+    // ONE action, last, and impossible to miss.
+    //
+    // The previous ending listed three next steps and buried the only one that matters. An
+    // agent relaying it produced a five-item status report with the actual instruction third
+    // from the top, and people do not read that far — deckhand is installed and unusable
+    // until the connector is pasted in, so that step is not one of several, it is the step.
+    say("");
+    say("  ┌─────────────────────────────────────────────────────────────┐");
+    say("  │  ONE THING LEFT — deckhand does nothing until you do it.     │");
+    say("  └─────────────────────────────────────────────────────────────┘");
+    say("");
+    say("   1.  deckhand token          ← prints your connector URL");
+    say("   2.  Paste it into claude.ai → Settings → Connectors → Add");
+    say("");
+    say("   It is a password. Do not paste it into a chat or a commit.");
+    say("");
+    say("   After that: `deckhand app add <id> --path /path/to/a/checkout`,");
+    say("   then ask Claude for a preview.");
   } catch (e) {
     if (e instanceof SetupError) {
       console.error(`\n✗ ${e.message}\n\n  ${e.fix}\n`);
