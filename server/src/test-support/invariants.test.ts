@@ -367,6 +367,25 @@ describe("deckhand ships nothing about one particular install", () => {
   });
 });
 
+describe("config that changes at runtime is watched", () => {
+  it("watches tokens.yaml as well as apps.yaml", () => {
+    // tokens.yaml was read once at boot. `setup` starts the server and THEN mints the admin
+    // token, so a brand-new install's only token was invisible: /mcp/<token> answered 404 and
+    // claude.ai, finding no MCP server, reported an OAuth failure for a server that does not
+    // use OAuth. The user's first impression of deckhand was a broken connector.
+    //
+    // A unit test cannot see the wiring — the same gap that left StreamingRouter.reapOrphans
+    // written, tested and never called.
+    const server = read(join(SRC, "server.ts"));
+    for (const [what, call] of [
+      ["apps.yaml", /watchApps\(/],
+      ["tokens.yaml", /watchTokens\(/],
+    ] as const) {
+      assert.match(server, call, `${what} must be watched — reading it once at boot means an edit needs a restart, and nothing says so`);
+    }
+  });
+});
+
 describe("fakes are complete", () => {
   it("uses test-support/fakes.ts for every dependency that has one", () => {
     // `{ ... } as unknown as Simctl` disables BOTH excess-property and missing-property

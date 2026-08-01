@@ -5,6 +5,7 @@ import express from "express";
 import { WebSocketServer } from "ws";
 import { loadConfig, loadAppsForBoot, loadTokens, githubPatPath, resolveShareSecret, type App, type Config } from "./config.ts";
 import { watchApps } from "./appsWatcher.ts";
+import { watchTokens } from "./tokensWatcher.ts";
 import { TokenAuthenticator } from "./auth.ts";
 import { AuditLog } from "./audit.ts";
 import { StateStore } from "./state.ts";
@@ -135,6 +136,8 @@ export function createServer(): DeckhandServer {
   // URL, which is all a remote agent has. The reason is logged and surfaced through list_apps.
   const { apps, error: appsError } = loadAppsForBoot();
   const tokens = loadTokens();
+  // Named, because watchTokens updates THIS instance in place — createApp closes over it.
+  const auth = new TokenAuthenticator(tokens);
 
   const [lo, hi] = config.streaming.serveSim.helperPortRange;
   const mid = Math.floor((lo + hi) / 2);
@@ -165,7 +168,7 @@ export function createServer(): DeckhandServer {
     apps, // mutable + shared: add_app/remove_app edit this array in place
     config,
     audit: new AuditLog(),
-    auth: new TokenAuthenticator(tokens),
+    auth,
     pinGate,
     viewerDist,
     persistApps: writeApps,
@@ -214,6 +217,14 @@ export function createServer(): DeckhandServer {
       });
       // Registering an app must not cost a restart — a restart tears down every
       // booted simulator on the machine.
+      // A token minted while the server runs must work immediately. It did not: setup starts
+      // the LaunchAgent and then mints the admin token, so a brand-new install's only token
+      // was invisible until a restart — the connector 404'd and claude.ai reported an OAuth
+      // failure for a server that does not use OAuth.
+      watchTokens(auth, {
+        onReload: (names) => console.log(`tokens.yaml: reloaded (${names.length}: ${names.join(", ")})`),
+        onError: (err) => console.error(`tokens.yaml: keeping the previous list — ${(err as Error).message}`),
+      });
       watchApps(apps, {
         onReload: (_apps, { added, removed }) => {
           for (const id of added) console.log(`apps.yaml: registered "${id}"`);
