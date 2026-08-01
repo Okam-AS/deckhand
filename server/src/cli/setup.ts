@@ -160,6 +160,20 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
     for (const h of hostnames) ensureRoute(tunnelId, h);
     ensureTunnelConfig(tunnelId, hostnames, port);
 
+    step("The `deckhand` command");
+    if (run("which", ["deckhand"]).out.trim()) {
+      ok("`deckhand` is on your PATH");
+    } else {
+      // Every document in this repo tells people to type `deckhand <something>`, and until
+      // there was a bin entry no such command existed. `npm link` puts it in the same prefix
+      // npm/npx already use, so it needs no sudo and no PATH edit; undo with `npm unlink -g
+      // @deckhand/server`.
+      const repoRoot = join(dirname(new URL(import.meta.url).pathname), "..", "..", "..");
+      const linked = spawnSync("npm", ["link", "--workspace", "@deckhand/server"], { cwd: repoRoot, encoding: "utf8" });
+      if ((linked.status ?? 1) === 0 && run("which", ["deckhand"]).out.trim()) ok("linked `deckhand` onto your PATH");
+      else info(`could not link it — keep using \`npx tsx ${join(repoRoot, "server/src/cli.ts")}\`, or add server/bin to PATH.`);
+    }
+
     step("deckhand config");
     if (existsSync(paths.config())) {
       ok(`${paths.config()} already exists — leaving it alone`);
@@ -170,6 +184,7 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
     }
 
     step("Admin token");
+    let printedToken = false;
     const list = deckhandCli(["token", "list"]);
     if (list.code === 0 && /admin/.test(list.out)) {
       ok("an admin token already exists — `deckhand token list` shows the connector URL");
@@ -178,6 +193,7 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
       const added = deckhandCli(["token", "add", name, "--role", "admin"]);
       if (added.code !== 0) throw new SetupError(`could not create a token: ${added.out}`, "Fix the above, then re-run.");
       say(added.out.split("\n").map((l) => `  ${l}`).join("\n"));
+      printedToken = true;
     }
 
     if (!opts.noServices) {
@@ -200,7 +216,11 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
     say("\nDone. Next: register an app, then ask your agent for a preview.");
     say(`  deckhand app add <id> --path /abs/path/to/a/checkout    (local — no GitHub needed)`);
     say(`  deckhand app add <id> github.com/owner/repo             (from git)`);
-    say(`\nGive the connector URL above to claude.ai as an MCP connector.`);
+    say(
+      printedToken
+        ? `\nGive the connector URL above to claude.ai as an MCP connector.`
+        : `\nYour connector URL is in \`deckhand token list\` — give it to claude.ai as an MCP connector.`,
+    );
   } catch (e) {
     if (e instanceof SetupError) {
       console.error(`\n✗ ${e.message}\n\n  ${e.fix}\n`);
