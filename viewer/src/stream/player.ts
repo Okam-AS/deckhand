@@ -1,3 +1,4 @@
+import { acceptsChunk, backlogVerdict, isOrganicFeed, shouldHealStall, mayRecover, STALL_MS, MAX_RECOVERY, MAX_DECODE_QUEUE } from "./policy.ts";
 import { AvccDemuxer, avcCodecString, isAvccSupported } from "./avcc.ts";
 import { createMjpegFrameParser } from "./mjpeg.ts";
 
@@ -21,20 +22,8 @@ import { createMjpegFrameParser } from "./mjpeg.ts";
 // ---------------------------------------------------------------------------
 
 const FIRST_FRAME_TIMEOUT_MS = 4000;
-const MAX_DECODE_QUEUE = 2;
-const MAX_RECOVERY = 8;
-// Longest quiet gap seen on a live stream with a blinking caret is ~430 ms —
-// 600 ms only fires when the screen has truly gone still with frames owed.
-const STALL_MS = 600;
-// Feeds separated by more than this are organic activity, not the helper's
-// connection-opening GOP replay (written as one contiguous burst). A pure
-// replay always ends with one frame held in Safari's decoder, so stall-healing
-// on it would reconnect → replay → hold again, forever, on an idle screen.
-const ORGANIC_GAP_MS = 500;
-// Queue depth over MAX_DECODE_QUEUE must persist this long before it counts as
-// latency drift. The replay burst spikes the queue legitimately; tripping on
-// instantaneous depth caused a reconnect→replay→reconnect loop (3–4 Hz, phones).
-const BACKLOG_MS = 1500;
+// The rest of the tuning, and the decisions it drives, live in ./policy.ts — pure, and
+// therefore the only part of this file `node --test` can reach. Their reasoning is there.
 // Enough to capture a whole failed connect + its retries; small enough that a
 // misbehaving stream can't turn the diagnostic channel into traffic of its own.
 const MAX_REPORTS = 40;
@@ -276,32 +265,25 @@ export class DevicePlayer {
   private feed(isKey: boolean, payload: Uint8Array): void {
     const dec = this.decoder;
     if (!dec || dec.state !== "configured") return;
-    // IDR gate: don't feed deltas until the first keyframe.
-    if (!this.sawKeyframe && !isKey) return;
+    if (!acceptsChunk(this.sawKeyframe, isKey)) return;
     if (isKey) this.sawKeyframe = true;
-    // Backlog reset: catch up instead of drifting into latency. Must be a
-    // reconnect — a bare decoder reset would gate on a mid-stream keyframe
-    // that serve-sim never sends, freezing the stream for good. Sustained-only
-    // (BACKLOG_MS): a transient spike is just the GOP replay draining, and
-    // reconnecting on it re-triggers the very replay that caused the spike.
-    if (dec.decodeQueueSize > MAX_DECODE_QUEUE) {
+    {
       const now = performance.now();
-      if (this.backlogSince === null) {
-        this.backlogSince = now;
-      } else if (now - this.backlogSince > BACKLOG_MS) {
-        this.report("decode backlog", `queue ${dec.decodeQueueSize} for ${Math.round(now - this.backlogSince)}ms — reconnecting`);
+      const before = this.backlogSince;
+      const verdict = backlogVerdict(dec.decodeQueueSize, now, { since: before });
+      this.backlogSince = verdict.state.since;
+      if (verdict.reconnect) {
+        this.report("decode backlog", `queue ${dec.decodeQueueSize} for ${Math.round(now - (before ?? now))}ms — reconnecting`);
         this.reconnectAvcc();
         return;
       }
-    } else {
-      this.backlogSince = null;
     }
     this.ts += 1; // monotonic
     try {
       dec.decode(new EncodedVideoChunk({ type: isKey ? "key" : "delta", timestamp: this.ts, data: payload }));
       this.fed += 1;
       const now = performance.now();
-      if (this.lastFeedAt !== 0 && now - this.lastFeedAt > ORGANIC_GAP_MS) this.organicFeed = true;
+      if (isOrganicFeed(this.lastFeedAt, now)) this.organicFeed = true;
       this.lastFeedAt = now;
       this.armStallCheck();
     } catch {
