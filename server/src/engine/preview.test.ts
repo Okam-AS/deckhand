@@ -43,6 +43,8 @@ const rnApp: App = {
 
 interface Harness {
   engine: PreviewEngine;
+  /** The state store the engine persists into, so a test can read back what was written. */
+  store: StateStore;
   simctlCalls: string[];
   buildEnvSeen: (Record<string, string> | undefined)[];
   removedWorktrees: string[];
@@ -167,6 +169,9 @@ function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (
   };
 
   const android = androidFake(simctlCalls);
+  // Named so a test can read back what was persisted; the engine has no snapshot accessor
+  // and should not grow one just for tests.
+  const store = new StateStore(`/tmp/deckhand-noop-${Math.random().toString(36).slice(2)}.json`);
 
   const deps: PreviewEngineDeps = {
     config: overrides.config ?? config,
@@ -188,7 +193,7 @@ function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (
     simctl,
     streaming: streaming as unknown as PreviewEngineDeps["streaming"],
     metro: fakeMetro(),
-    store: new StateStore(`/tmp/deckhand-noop-${Math.random().toString(36).slice(2)}.json`),
+    store,
     audit: { record: (e: { tool: string; args: unknown }) => void audit.push({ tool: e.tool, args: e.args }) } as unknown as PreviewEngineDeps["audit"],
     devProcs: devProcsComplete,
     runStep: async (step, opts) => {
@@ -201,7 +206,7 @@ function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (
     genShareId: () => "share-abc",
     ...overrides,
   };
-  return { engine: new PreviewEngine(deps), simctlCalls, buildEnvSeen, removedWorktrees, worktreeCalls, devProcCalls, detached, audit, firstFrameResults, attachCalls };
+  return { engine: new PreviewEngine(deps), store, simctlCalls, buildEnvSeen, removedWorktrees, worktreeCalls, devProcCalls, detached, audit, firstFrameResults, attachCalls };
 }
 
 async function waitForPhase(engine: PreviewEngine, previewId: string, phases: string[], timeoutMs = 2000): Promise<string> {
@@ -1511,6 +1516,36 @@ describe("PreviewEngine idle sweep", () => {
 
     assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "failed");
     assert.match(h.engine.getStatus("pv1")!.devices[0]!.error ?? "", /no first frame \(3 attempts\)/);
+  });
+
+  it("forgets an unregistered app's share id and PIN hash", () => {
+    // Both are keyed by app id and were written on first preview but never removed, so
+    // state.json grew an entry per app that ever existed — including the scrypt hash of a PIN
+    // for a share nobody can reach any more. Neither is reachable without the app.
+    const h = makeEngine();
+    h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    h.engine.setAppPin(rnApp.id, "1234");
+
+    const before = h.store.load();
+    assert.ok(before.shareIds[rnApp.id], "fixture sanity: the app has a stable share id");
+    assert.ok(before.pins[rnApp.id], "fixture sanity: and a PIN hash");
+
+    h.engine.forgetApp(rnApp.id);
+
+    const after = h.store.load();
+    assert.equal(after.shareIds[rnApp.id], undefined, "the share id is gone");
+    assert.equal(after.pins[rnApp.id], undefined, "and so is the credential hash");
+    assert.ok(
+      h.audit.some((e) => e.tool === "forget_app"),
+      "recorded — dropping a share id is a state change somebody may need to explain later",
+    );
+  });
+
+  it("is a no-op for an app it never knew, and does not churn state", () => {
+    const h = makeEngine();
+    const audits = h.audit.length;
+    h.engine.forgetApp("never-registered");
+    assert.equal(h.audit.length, audits, "nothing happened, so nothing is recorded");
   });
 
   it("spares its own live processes when reaping orphans by marker", async () => {

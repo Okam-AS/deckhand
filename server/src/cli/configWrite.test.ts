@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { addTokenEntry, addAppEntry, buildInitConfig, parseEnvAssignment, generateToken } from "./configWrite.ts";
+import { addTokenEntry, addAppEntry, buildInitConfig, parseEnvAssignment, generateToken, writeApps } from "./configWrite.ts";
 import type { App, TokenEntry } from "../config.ts";
 
 describe("generateToken", () => {
@@ -99,5 +99,25 @@ describe("parseEnvAssignment", () => {
     assert.throws(() => parseEnvAssignment("noequals"), /KEY=VALUE/);
     assert.throws(() => parseEnvAssignment("=v"), /KEY=VALUE/);
     assert.throws(() => parseEnvAssignment("1bad=v"), /invalid env key/);
+  });
+});
+
+describe("writeApps refuses to write a file that would not load back", () => {
+  it("throws rather than persisting a list the schema rejects", () => {
+    // The write path and the read path had no relationship, so anything producing an
+    // in-memory list `loadApps` would later reject got written happily — and surfaced on the
+    // NEXT BOOT as "apps.yaml is invalid", with every registered app gone from the running
+    // server and nothing pointing at the operation responsible.
+    const bad = [{ id: "", repo: "owner/name", type: "expo" }] as unknown as App[];
+    assert.throws(() => writeApps(bad), /would not load back/);
+  });
+
+  it("names the field, so the failure is actionable", () => {
+    const bad = [{ id: "ok", type: "expo" }] as unknown as App[];
+    assert.throws(() => writeApps(bad), (e: Error) => {
+      assert.match(e.message, /refusing to write apps\.yaml/);
+      assert.match(e.message, /existing file is unchanged/, "the operator needs to know nothing was lost");
+      return true;
+    });
   });
 });

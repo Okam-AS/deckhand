@@ -1,8 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { writeFileSync, mkdirSync, renameSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { stringify as toYaml } from "yaml";
-import { appSchema, tokenSchema, type App, type Role, type TokenEntry } from "../config.ts";
+import { stringify as toYaml, parse as parseYaml } from "yaml";
+import { appSchema, appsSchema, tokenSchema, type App, type Role, type TokenEntry } from "../config.ts";
 import { parseEnvFile } from "../secrets.ts";
 import { paths } from "../paths.ts";
 
@@ -98,8 +98,31 @@ export function writeTokens(tokens: TokenEntry[]): void {
   atomicWrite(paths.tokens(), toYaml({ tokens }), 0o600);
 }
 
+/**
+ * Write apps.yaml, having first confirmed it can be read back.
+ *
+ * The write path and the read path had no relationship: anything that produced an in-memory
+ * list the schema would later reject — a field the yaml round-trip drops, a shape a future
+ * edit introduces — got written happily, and the failure appeared on the NEXT BOOT as
+ * "apps.yaml is invalid", with every registered app gone from the running server and nothing
+ * pointing at the operation that did it. `remove_app` is the likely trigger simply because it
+ * is the one that rewrites the file with a different list than it read.
+ *
+ * So the file is parsed back through the very schema `loadApps` uses, before it is written.
+ * A failure here throws — the caller sees it, the old file is untouched, and the server keeps
+ * running on the config it already has. An unwritten change is recoverable; an unloadable
+ * apps.yaml is an outage.
+ */
 export function writeApps(apps: App[]): void {
-  atomicWrite(paths.apps(), toYaml({ apps }), 0o644);
+  const body = toYaml({ apps });
+  const check = appsSchema.safeParse(parseYaml(body));
+  if (!check.success) {
+    throw new Error(
+      `refusing to write apps.yaml: it would not load back (${check.error.issues[0]?.path.join(".") ?? "?"}: ` +
+        `${check.error.issues[0]?.message ?? "invalid"}). The existing file is unchanged.`,
+    );
+  }
+  atomicWrite(paths.apps(), body, 0o644);
 }
 
 export function writeSecretEnv(appId: string, key: string, value: string): void {

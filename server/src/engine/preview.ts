@@ -841,6 +841,33 @@ export class PreviewEngine {
     return !this.pinInfoForShare(partnerShareId).required || this.pinInfoForShare(shareId).required;
   }
 
+  /**
+   * Drop the stable share id and PIN of an app that is no longer registered.
+   *
+   * Both are keyed by app id and were written on first preview but never removed, so
+   * state.json accumulated an entry per app that ever existed — including the scrypt hash of
+   * a PIN for a share nobody can reach any more. Neither is reachable without the app, so
+   * keeping them buys nothing and keeps a credential hash on disk indefinitely.
+   *
+   * Called when apps.yaml loses an app, which covers `remove_app` and a hand edit alike.
+   * Re-registering the same id mints a fresh share id — deliberate: the old link was
+   * unregistered, and silently reviving it would resurrect access somebody removed.
+   */
+  forgetApp(appId: string): void {
+    const hadShare = appId in this.stableShareIds;
+    const hadPin = appId in this.pins;
+    if (!hadShare && !hadPin) return;
+    delete this.stableShareIds[appId];
+    delete this.pins[appId];
+    this.persist();
+    this.d.audit.record({
+      actor: "engine",
+      tool: "forget_app",
+      args: { app: appId, shareId: hadShare, pin: hadPin },
+      result: "ok",
+    });
+  }
+
   private persist(): void {
     this.d.store.persist(
       [...this.previews.values()].map((p) => p.record),
