@@ -24,13 +24,29 @@ function sha256(s: string): Buffer {
  * caller turns that into a 404, indistinguishable from a wrong path.
  */
 export class TokenAuthenticator {
-  private readonly entries: { hash: Buffer; principal: Principal }[];
+  private entries: { hash: Buffer; principal: Principal }[];
 
   constructor(tokens: TokenEntry[]) {
-    this.entries = tokens.map((t) => ({
+    this.entries = TokenAuthenticator.digest(tokens);
+  }
+
+  private static digest(tokens: TokenEntry[]): { hash: Buffer; principal: Principal }[] {
+    return tokens.map((t) => ({
       hash: sha256(t.token),
       principal: { name: t.name, role: t.role, ...(t.owners ? { owners: t.owners } : {}) },
     }));
+  }
+
+  /**
+   * Swap the token set without replacing the authenticator.
+   *
+   * `createApp` closes over this instance, so a reload has to mutate rather than rebuild.
+   * Used by `watchTokens`: tokens.yaml was read once at boot, which meant the token `setup`
+   * mints was invisible to the server it had just started — the connector 404'd and claude.ai
+   * blamed OAuth.
+   */
+  replace(tokens: TokenEntry[]): void {
+    this.entries = TokenAuthenticator.digest(tokens);
   }
 
   authenticate(candidate: string): Principal | null {
