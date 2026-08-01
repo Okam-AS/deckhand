@@ -397,9 +397,6 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
       {isThumb ? (
         <figcaption className="thumb-cap">{device.label.split(" · ")[0]}</figcaption>
       ) : (
-        // The caption is gone: its three facts now live behind the (i) button in
-        // the control row, where they are one click away instead of permanently
-        // occupying space under every device.
         null
       )}
     </figure>

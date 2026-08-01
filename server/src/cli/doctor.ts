@@ -350,7 +350,6 @@ async function smokeAndroid(): Promise<Check[]> {
 export async function runDoctor(opts: { smoke?: boolean } = {}): Promise<{ checks: Check[]; ok: boolean }> {
   const checks: Check[] = [];
 
-  // config
   let config: Config | null = null;
   let apps: App[] = [];
   try {

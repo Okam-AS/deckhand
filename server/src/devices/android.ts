@@ -63,7 +63,6 @@ export class AndroidError extends Error {
 
 // --- pure parsing / selection ----------------------------------------------
 
-/** Parse `avdmanager list avd` output → AVD names. */
 /**
  * `adb devices` → serials. Skips the "List of devices attached" banner, blank
  * lines, and any device not in a usable state (`offline`, `unauthorized`) —

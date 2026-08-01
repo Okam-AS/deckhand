@@ -133,7 +133,6 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-/** Manages the Metro dev-server (one app at a time, on a port deckhand owns). */
 /** Env var stamped on every Metro deckhand spawns, so a restart can find its own. */
 export const METRO_MARKER_ENV = "DECKHAND_METRO";
 
@@ -287,7 +286,6 @@ export class MetroManager {
     const manifestUrl = `http://127.0.0.1:${port}`;
     this.running.set(key, { appId, worktreePath, sig, child, port, manifestUrl, startedAt: Date.now() });
 
-    // Wait for readiness (up to ~60s).
     const deadline = Date.now() + 60_000;
     while (Date.now() < deadline) {
       if (await this.healthyImpl(port)) {

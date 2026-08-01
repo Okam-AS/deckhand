@@ -114,7 +114,10 @@ Non-negotiables while implementing:
   density. Most code is self-explanatory — write a comment only when it states something
   the code cannot (a precondition, a decided tradeoff, a why), and remember: a comment
   that states a precondition needs a test that fails when the precondition breaks (see
-  the three rules below). Never narrate what the next line does.
+  the three rules below). Never narrate what the next line does. And when a file you are
+  already editing carries bloat comments — narration of the next line, restatements of
+  the code, before/after changelog notes — delete them as you pass. Preconditions, whys
+  and tradeoffs stay.
 
 ## How work lands here
 

@@ -156,14 +156,12 @@ function cmdInit(flags: Args["flags"]): void {
 
   const homePem = join(paths.home(), "github-app.pem");
   if (pemPath) {
-    // Copy the PEM into ~/.deckhand (0600).
     writeFileSync(homePem, readFileSync(pemPath, "utf8"), { mode: 0o600 });
   } else if (existsSync(homePem)) {
     console.log(`note: ${homePem} is still on disk but this config has no githubApp — it will be ignored.`);
   }
   // 0600: the schema permits an inline `shareSecret`, and that key signs every
   // unlock cookie. Cheaper to protect the file than to rely on nobody using it.
-  // (Kept from main: this branch predates it and would otherwise write 0644.)
   writeFileSync(paths.config(), toYaml(config), { mode: 0o600 });
   if (!existsSync(paths.apps())) writeApps([]);
   if (!existsSync(paths.tokens())) writeTokens([]);
@@ -274,7 +272,6 @@ function cmdEnvSet(appId: string | undefined, assignment: string | undefined): v
   console.log(`set ${key} for app "${appId}" (stored 0600, never exposed via MCP)`);
 }
 
-// helpers
 function str(v: string | boolean | undefined): string | undefined {
   return typeof v === "string" ? v : undefined;
 }
