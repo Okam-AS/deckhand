@@ -215,6 +215,22 @@ before trusting the preview phase, because a preview with one failed device and
 one ready device reports `ready` (`preview.ts:952`). The how-to, including a
 ready-to-paste poller, is the `waiting-for-a-preview` skill in `.claude/skills/`.
 
+## Before you change an area, read its rule
+
+`.claude/rules/` holds one file per area, each scoped to the paths it covers, so
+Claude Code surfaces the right one the moment you open a file there. They carry
+what a guardrail cannot: WHY the rule exists, and what it cost when it was
+broken. Every rule cites the check that enforces it, and a check renamed out
+from under a citation fails `docs.test.ts`.
+
+| Rule | Covers |
+|---|---|
+| `streaming.md` | `server/src/streaming/**` — the backend seam, loopback binds, helper ownership |
+| `engine.md` | `server/src/engine/**`, `server/src/devices/**` — detached spawns, ordering, borrow-never-own |
+| `share-proxy.md` | `server/src/share/**` — the public surface; both auth bypasses lived here |
+| `mcp-tools.md` | `server/src/mcp/**` — the agent-facing surface, where a description IS a prompt |
+| `tests.md` | every `*.test.ts` — see it fail first; fakes are complete or they lie |
+
 ## The guardrails — read this before you change anything
 
 `server/src/test-support/` holds checks that fail the build when a decision this

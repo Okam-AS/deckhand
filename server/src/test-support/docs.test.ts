@@ -114,6 +114,44 @@ describe("docs describe the code that exists", () => {
     );
   });
 
+  it("keeps the path-scoped rules pointing at checks that exist", () => {
+    // `.claude/rules/*.md` is what an agent is handed the moment it opens a file in that
+    // area, and each rule cites the guardrail that enforces it — `→ invariants.test.ts
+    // "binds every listening socket to loopback"`. That citation is the whole reason the
+    // rule is trustworthy rather than one more paragraph of prose, so a renamed check must
+    // not leave it pointing at nothing. Same failure as a doc naming a file that does not
+    // exist, one layer up.
+    const rulesDir = join(REPO, ".claude", "rules");
+    const testNames = new Set<string>();
+    for (const f of readdirSync(join(SRC, "test-support"))) {
+      if (!f.endsWith(".test.ts")) continue;
+      for (const m of readFileSync(join(SRC, "test-support", f), "utf8").matchAll(/\bit\(\s*"([^"]+)"/g)) {
+        testNames.add(m[1]!);
+      }
+    }
+    assert.ok(testNames.size > 5, "no guardrail test names parsed — the `it(\"...\")` pattern changed");
+
+    const dangling: string[] = [];
+    for (const f of readdirSync(rulesDir)) {
+      const src = readFileSync(join(rulesDir, f), "utf8");
+      // `→ <file>.test.ts "<check name>"`, possibly abbreviated — match on the quoted name
+      // being a PREFIX of a real one, so a rule may cite a check by its first clause.
+      // The backticks are not optional decoration to skip: the first version of this regex
+      // required `\S+\.test\.ts` followed by whitespace, so it matched none of the
+      // backticked citations actually written here and the check was vacuous. It only
+      // showed up under mutation — renaming a cited check produced no failure at all.
+      for (const m of src.matchAll(/→\s*`?\S*?\.test\.ts`?\s+"([^"]+)"/g)) {
+        const cited = m[1]!;
+        if (![...testNames].some((n) => n.startsWith(cited))) dangling.push(`${f}: "${cited}"`);
+      }
+    }
+    assert.deepEqual(
+      dangling,
+      [],
+      "a rule in .claude/rules/ cites a guardrail check that no longer exists under that name",
+    );
+  });
+
   it("names no source file that does not exist", () => {
     // PLAN §4 described a layout that had drifted from the tree: janitor.ts,
     // scrcpy.ts, server/test/, fixtures/, scripts/ — five paths a new agent
