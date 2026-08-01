@@ -123,4 +123,12 @@ deckhand app add myapp github.com/owner/repo             # from git
 deckhand doctor --device-only                            # boots a real sim + emulator
 ```
 
-Give the connector URL to claude.ai as an MCP connector, and ask for a preview.
+Then paste your connector URL into claude.ai → Settings → Connectors:
+
+```sh
+deckhand token          # prints your URL (creates one the first time)
+```
+
+It is a credential — treat it like a password. `deckhand token list` shows who
+else has access, with the URLs masked; `deckhand token url <name>` prints one in
+full.

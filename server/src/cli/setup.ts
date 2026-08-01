@@ -187,7 +187,7 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
     let printedToken = false;
     const list = deckhandCli(["token", "list"]);
     if (list.code === 0 && /admin/.test(list.out)) {
-      ok("an admin token already exists — `deckhand token list` shows the connector URL");
+      ok("an admin token already exists — `deckhand token url <name>` prints its connector URL");
     } else {
       const name = opts.tokenName ?? process.env.USER ?? "me";
       const added = deckhandCli(["token", "add", name, "--role", "admin"]);
@@ -219,7 +219,7 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
     say(
       printedToken
         ? `\nGive the connector URL above to claude.ai as an MCP connector.`
-        : `\nYour connector URL is in \`deckhand token list\` — give it to claude.ai as an MCP connector.`,
+        : `\nYour connector URL: \`deckhand token url <name>\` (\`deckhand token list\` shows the names). Give it to claude.ai as an MCP connector.`,
     );
   } catch (e) {
     if (e instanceof SetupError) {
