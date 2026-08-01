@@ -83,7 +83,7 @@ if ! (cd "$staging" && npm run ci) >"$log" 2>&1; then
   echo
   echo "Commit blocked. This is what CI would have said, and it is about the STAGED"
   echo "content — your working tree was not touched and is exactly as you left it."
-  echo "Override with \'git commit --no-verify\' if you know why it is wrong."
+  echo "Override with 'git commit --no-verify' if you know why it is wrong."
   exit 1
 fi
 printf 'ok\n'

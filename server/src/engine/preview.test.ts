@@ -41,6 +41,25 @@ const rnApp: App = {
   env: { EXPO_PUBLIC_API_URL: "https://staging" },
 };
 
+/** A real on-disk web project, minimal enough for the pipeline to accept it. */
+function webDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), "deckhand-webapp-"));
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "my-web", scripts: { dev: "vite" }, devDependencies: { vite: "^5" } }));
+  return dir;
+}
+
+/** A LOCAL web app: `path` source, so no worktree, and the web pipeline instead of a device. */
+const webApp: App = {
+  id: "my-web",
+  repo: "github.com/ainfrastructure/my-web",
+  type: "web",
+  // A real directory: the web pipeline checks the local source exists, and this test is about
+  // what happens AFTER the stream attaches, so it has to get that far.
+  path: webDir(),
+  defaultBranch: "main",
+  env: {},
+};
+
 interface Harness {
   engine: PreviewEngine;
   /** The state store the engine persists into, so a test can read back what was written. */
@@ -1516,6 +1535,44 @@ describe("PreviewEngine idle sweep", () => {
 
     assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "failed");
     assert.match(h.engine.getStatus("pv1")!.devices[0]!.error ?? "", /no first frame \(3 attempts\)/);
+  });
+
+  it("will not unprotect a web preview whose dev server is still attached", async () => {
+    // The guard used to key on PHASE, and the proxy's web resolver keys on the ATTACHED
+    // STREAM — it never looks at the phase. Those are different questions, and the gap was an
+    // auth hole: a `failed` web preview whose dev server was still running stayed fully
+    // reachable, while this guard skipped it and let `set_pin remove:true` make it public —
+    // exactly the state startPreview refuses to create at boot.
+    const h = makeEngine();
+    h.engine.setAppPin(webApp.id, "1234"); // a web app may not be previewed without one
+    h.engine.startPreview({ app: webApp, source: "local", devices: [{ platform: "web" }], access: "password" });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"], 8000), "ready");
+
+    assert.throws(
+      () => h.engine.setAppPin(webApp.id, null),
+      /cannot be made public/,
+      "while a dev server is attached, removing the PIN exposes it",
+    );
+
+    // Once torn down there is nothing attached and nothing to protect, so it is allowed.
+    await h.engine.stopPreview("pv1");
+    h.engine.setAppPin(webApp.id, null);
+  });
+
+  it("stops a failed web device's dev server instead of leaving it running", async () => {
+    // attachWebAndReady attaches the stream BEFORE waiting for the dev server, and failDevice
+    // used to do neither of these — so a failure left a live dev server on its port with an
+    // attached stream. Driven through an early failure (a source dir that does not exist),
+    // because the real readiness timeout is 180s and not worth waiting for here.
+    const h = makeEngine();
+    const missing: App = { ...webApp, id: "gone-web", path: "/definitely/not/here" };
+    h.engine.setAppPin(missing.id, "1234");
+    h.engine.startPreview({ app: missing, source: "local", devices: [{ platform: "web" }], access: "password" });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"], 8000), "failed");
+    assert.ok(
+      h.devProcCalls.some((c) => c === "stop gone-web:web"),
+      `the web dev process is stopped on failure — saw ${JSON.stringify(h.devProcCalls)}`,
+    );
   });
 
   it("forgets an unregistered app's share id and PIN hash", () => {

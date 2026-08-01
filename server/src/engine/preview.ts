@@ -945,12 +945,23 @@ export class PreviewEngine {
     return rec ? { required: true, length: rec.length } : { required: false, length: 0 };
   }
 
-  /** Whether the app has a live (non-terminal) preview serving a web device. */
+  /**
+   * Whether the app has a web preview that could still be SERVED.
+   *
+   * Keyed on the attached stream rather than the phase, because those are not the same
+   * question and the difference was an auth hole: the proxy's web upstream resolver requires
+   * an attached stream and never looks at the phase, so a `failed` preview whose dev server
+   * was still running remained fully reachable — while this guard skipped it and let
+   * `set_pin remove:true` make it public. Phase is what we REPORT; the attached stream is
+   * what is actually reachable, and a guard must be keyed on the latter.
+   *
+   * `stopped` still short-circuits: teardownDevices detaches every stream, so there is
+   * nothing to serve and nothing to protect.
+   */
   private hasLiveWebPreview(appId: string): boolean {
     for (const p of this.previews.values()) {
-      const ph = p.record.phase;
-      if (p.record.appId !== appId || ph === "stopped" || ph === "failed") continue;
-      if (p.devices.some((d) => d.record.platform === "web")) return true;
+      if (p.record.appId !== appId || p.record.phase === "stopped") continue;
+      if (p.devices.some((d) => d.record.platform === "web" && p.attached.has(d.record.deviceId))) return true;
     }
     return false;
   }
@@ -1620,6 +1631,21 @@ export class PreviewEngine {
     // the share holder had nothing to relay and no next step. First line only,
     // capped: a build error's stack is for `logs`, not for a device frame.
     this.setPhase(p, dev, "failed", this.failureDetail(dev.record.error));
+    // A failed WEB device must stop serving, not just stop being reported as ready.
+    //
+    // attachWebAndReady inserts the stream into `p.attached` BEFORE it waits for the dev
+    // server to answer, so a readiness timeout left a live dev server with an attached
+    // stream and the preview in phase `failed`. The share proxy's web upstream resolver
+    // only requires an attached stream — it never looks at the phase — so the dev server
+    // stayed fully reachable. Combined with the PIN guard below, which skipped `failed`
+    // previews, `set_pin remove:true` then made a still-serving web preview PUBLIC, which
+    // is the exact state startPreview refuses to create.
+    if (dev.record.platform === "web") {
+      this.d.devProcs?.stop(devKey(p.app.id, "web"));
+      const stream = p.attached.get(dev.record.deviceId);
+      p.attached.delete(dev.record.deviceId);
+      void stream?.detach().catch(() => {});
+    }
     this.d.audit.record({
       actor: "engine",
       tool: "device_failed",
@@ -1704,9 +1730,7 @@ export class PreviewEngine {
       await this.runBuildPlan(p, builder, platform, builderHandle, sourceDir, appEnv, local);
       // Both platforms, not just iOS. The Android dev-client deep link needs the slug for
       // the identical reason, and it read it straight out of app.json — which is empty for a
-      // project whose config is a dynamic app.config.*, the whole case this resolves. That
-      // Android path landed on main after this branch was written, so the rebase merged
-      // cleanly and left it calling a helper this branch deletes: textually fine, broken.
+      // project whose config is a dynamic app.config.*, the whole case this resolves.
       if (usesMetroDeepLink(p.app.type)) slug = await this.resolveExpoSlug(sourceDir, appEnv);
 
       if (local && p.app.type === "nativescript") {
@@ -2145,7 +2169,7 @@ export class PreviewEngine {
         // Clear terminal phases so failDevice/setPhase transitions apply cleanly.
         for (const dev of group) {
           dev.record.error = undefined;
-          dev.record.phase = "pending"; // clear the terminal "failed" so setPhase applies again
+          dev.record.phase = "pending";
           this.setPhase(p, dev, "preparing", "restarting");
         }
         const handleOf = async (i: number): Promise<string> => {
@@ -2231,7 +2255,6 @@ export class PreviewEngine {
     return this.previews.get(previewId)?.record.reference === true;
   }
 
-  /** The live (non-terminal) preview for an app, if any — newest first. */
   /** Whether some preview of this app is live right now (a reference pane about to be reused). */
   hasLivePreviewForApp(appId: string): boolean {
     return this.livePreviewForApp(appId) !== null;
