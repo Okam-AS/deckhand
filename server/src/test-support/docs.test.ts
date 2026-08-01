@@ -242,6 +242,27 @@ describe("docs describe the code that exists", () => {
     }
   });
 
+  it("references only skills that exist", () => {
+    // AGENTS and CONSTITUTION now make `shipping-a-change` mandatory before every PR. A
+    // mandatory procedure that points at a directory nobody wrote is worse than no procedure:
+    // the reader concludes the instruction is stale and skips the rest of the file too.
+    // Same failure as a doc naming a command that does not exist, one layer up.
+    const named = new Set<string>();
+    for (const doc of [AGENTS, PLAN, readFileSync(join(REPO, "CONSTITUTION.md"), "utf8")]) {
+      for (const m of doc.matchAll(/`([a-z][a-z0-9-]+)`\s*skill|\.claude\/skills\/([a-z0-9-]+)/g)) {
+        const name = m[1] ?? m[2];
+        if (name) named.add(name);
+      }
+    }
+    assert.ok(named.size > 0, "no skills referenced — the pattern changed, fix this check");
+    for (const name of named) {
+      assert.ok(
+        existsSync(join(REPO, ".claude", "skills", name, "SKILL.md")),
+        `a doc points at the "${name}" skill, which does not exist at .claude/skills/${name}/SKILL.md`,
+      );
+    }
+  });
+
   it("names no source file that does not exist", () => {
     // PLAN §4 described a layout that had drifted from the tree: janitor.ts,
     // scrcpy.ts, server/test/, fixtures/, scripts/ — five paths a new agent
