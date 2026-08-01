@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { paths } from "../paths.ts";
 import { mergeTunnelConfig, renderTunnelConfig, parseTunnelConfig, tunnelIdFor, needsLogin } from "./tunnelConfig.ts";
+import { checkPrereqs, humanOnlySteps, formatPrereqs, blocking, type Probe } from "./preflight.ts";
 
 // ---------------------------------------------------------------------------
 // `deckhand setup` — one command from a bare Mac to a working connector URL.
@@ -144,19 +145,39 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
   say("deckhand setup — from a bare Mac to a connector URL.\n");
 
   try {
-    step("Cloudflare tunnel");
-    if (!run("which", ["cloudflared"]).out) {
-      throw new SetupError("cloudflared is not installed", "brew install cloudflared");
-    }
-    if (!opts.hostname) {
+    // Everything a bare Mac might be missing, and — the part that matters for an agent that
+    // was handed a repo URL and nothing else — WHO can fix each one. An agent that runs
+    // `cloudflared tunnel login` blocks on a browser prompt nobody sees; one that claims to
+    // install Xcode does not install Xcode. Better to say plainly which is which.
+    step("Prerequisites");
+    const probe: Probe = {
+      which: (cmd) => Boolean(run("which", [cmd]).out.trim()),
+      run: (cmd, args) => run(cmd, args),
+      nodeMajor: Number(process.versions.node.split(".")[0]),
+      env: process.env,
+    };
+    const prereqs = checkPrereqs(probe);
+    const humanSteps = humanOnlySteps(probe, { hostnameGiven: Boolean(opts.hostname) });
+    say(formatPrereqs(prereqs, humanSteps));
+
+    const stoppers = blocking(prereqs);
+    if (stoppers.length || humanSteps.length) {
+      const agentFixable = stoppers.filter((c) => c.fix?.who === "agent");
       throw new SetupError(
-        "no --hostname given",
-        "Pick a hostname on a domain you have on Cloudflare, e.g. `deckhand setup --hostname deckhand.example.com`. " +
-          "Add `--web-host previews.example.com` too if you want to preview web apps.",
+        stoppers.length ? `missing: ${stoppers.map((c) => c.name).join(", ")}` : "waiting on you",
+        agentFixable.length
+          ? `Run: ${agentFixable.map((c) => c.fix!.how).join(" && ")}\n  Then handle the NEEDS YOU items above and run setup again.`
+          : "Handle the items above, then run setup again. Everything else is automatic.",
       );
     }
+
+    step("Cloudflare tunnel");
+    // Unreachable: humanOnlySteps above already stops when there is no hostname. Stated
+    // rather than assumed, so the invariant survives someone editing the preflight.
+    const hostname = opts.hostname;
+    if (!hostname) throw new SetupError("no --hostname given", "Pass --hostname deckhand.yourdomain.com");
     const tunnelId = ensureTunnel();
-    const hostnames = [opts.hostname, ...(opts.webHost ? [opts.webHost] : [])];
+    const hostnames = [hostname, ...(opts.webHost ? [opts.webHost] : [])];
     for (const h of hostnames) ensureRoute(tunnelId, h);
     ensureTunnelConfig(tunnelId, hostnames, port);
 
@@ -178,7 +199,7 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
     if (existsSync(paths.config())) {
       ok(`${paths.config()} already exists — leaving it alone`);
     } else {
-      const init = deckhandCli(["init", "--hostname", opts.hostname, "--port", String(port)]);
+      const init = deckhandCli(["init", "--hostname", hostname, "--port", String(port)]);
       if (init.code !== 0) throw new SetupError(`deckhand init failed: ${init.out}`, "Fix the above, then re-run.");
       ok(`wrote ${paths.config()}`);
     }

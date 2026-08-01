@@ -92,6 +92,22 @@ async function checkToolchains(): Promise<Check[]> {
     const r = await which(cmd, args);
     checks.push({ name, ok: r.ok, gate: true, detail: r.ok ? r.out : "not found" });
   }
+  // Android, which doctor was blind to entirely — half the product, and an install could
+  // report itself healthy while no emulator could ever boot. A WARNING rather than a failure:
+  // an iOS-only deckhand is a legitimate, working install, and failing it would train people
+  // to ignore a red doctor. Not gated either: `test:device` has its own Android leg.
+  for (const [name, cmd, args] of [
+    ["adb", "adb", ["version"]],
+    ["emulator", "emulator", ["-version"]],
+  ] as const) {
+    const r = await which(cmd, args);
+    checks.push({
+      name: `android: ${name}`,
+      ok: r.ok,
+      warn: !r.ok,
+      detail: r.ok ? r.out.slice(0, 60) : "not found — iOS previews work, Android will not (brew install --cask android-commandlinetools)",
+    });
+  }
   return checks;
 }
 

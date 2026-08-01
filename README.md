@@ -95,17 +95,39 @@ The complete build plan lives in [PLAN.md](./PLAN.md); background knowledge in
 
 ## Install it
 
-You need a Mac with Xcode, Node 22+, and a domain on Cloudflare.
+Hand an agent this repo URL and it can do most of it. Two things it cannot, and
+they are both yours: **a Cloudflare login** (a browser and your account) and
+**a hostname** on a domain you own.
 
 ```sh
 git clone https://github.com/Okam-AS/deckhand && cd deckhand
 npm install
 npm run build                                   # viewer + landing
-cloudflared tunnel login                        # opens a browser, once
-npx tsx server/src/cli.ts setup \
-  --hostname deckhand.example.com \
-  --web-host previews.example.com               # optional, for web previews
+npx tsx server/src/cli.ts setup                 # ← run this first, with no arguments
 ```
+
+With no arguments, `setup` checks the machine and prints exactly what is missing
+and **who can fix it** — the things it can install itself, and the things it
+needs you for. Do those, then run it again with your hostname:
+
+```sh
+cloudflared tunnel login                        # you: opens a browser, once
+npx tsx server/src/cli.ts setup \
+  --hostname deckhand.yourdomain.com \
+  --web-host previews.yourdomain.com            # optional, for web previews
+```
+
+### If you are the agent
+
+- Run `setup` with no arguments first. Relay its **NEEDS YOU** list verbatim and
+  stop; do not attempt those steps. `cloudflared tunnel login` opens a browser
+  and will hang you forever.
+- Install what it says you can install. Then ask the user for a hostname on a
+  domain they have on Cloudflare, and run `setup --hostname <that>`.
+- Xcode is a ~10 GB App Store download needing an Apple ID and a `sudo` licence
+  accept. Ask; do not claim to have done it.
+- Android is optional. Without it, iOS previews work and Android does not —
+  `doctor` says so as a warning rather than a failure.
 
 `setup` creates the Cloudflare tunnel and DNS route, merges your cloudflared
 config (it never overwrites rules for other services), links `deckhand` onto your
