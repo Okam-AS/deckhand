@@ -261,7 +261,7 @@ doctor-builds, reports `ready` → agent offers the first `start_preview`.
 |---|---|---|
 | `list_apps` | member | → apps with `{id, repo, type, defaultBranch, lastDoctor}` |
 | `list_devices` | member | → available iOS runtimes + device types (`simctl list -j`), Android API levels/system images (P2), current capacity vs `limits` |
-| `start_preview` | member | `{app, ref?, pr?, devices?: [{platform: "ios"\|"android", runtime?, model?}], alongside?: [{app?\|ref?\|worktree?\|repo?}], items?, share: {access: "public"\|"pin", pin?}}` → `{previewId, url, source, alreadyRunning, alongside?, nextStep, devices: [...]}`. **Idempotent**: an equivalent live preview (same app+source(+ref)) is returned as-is with `alreadyRunning: true` — this is also how the agent answers "what's the link?". No ref/pr on a `path` app → local dev mode. Returns immediately; work continues async. **Amended (2026-07-31):** `alongside` puts extra sources on the SAME page — the page is a set of panes, so one link and one PIN cover however many sources. `{}` means the app's registered `migratesFrom`. This absorbed `compare_start`; see "One page, several sources" below. |
+| `start_preview` | member | `{app, ref?, pr?, devices?: [{platform: "ios"\|"android", runtime?, model?}], alongside?: [{app?\|ref?\|worktree?\|repo?}], items?, share: {access: "public"\|"pin", pin?}}` → `{previewId, url, source, alreadyRunning, alongside?, nextStep, devices: [...]}`. **Idempotent**: an equivalent live preview (same app+source(+ref)) is returned as-is with `alreadyRunning: true` — this is also how the agent answers "what's the link?". No ref/pr on a `path` app → local dev mode. Returns immediately; work continues async. **Amended (2026-07-31):** `alongside` puts extra sources on the SAME page — the page is a set of panes, so one link and one PIN cover however many sources. `{}` means the app's registered `migratesFrom`. See "One page, several sources" below. |
 | `restart_preview` | member | `{previewId?}` or `{app?}` → rebuild in place on the same booted devices, same shareId/URL. Local: re-run the livesync build (needed after native-level changes; ordinary edits livesync by themselves). Git: fetch the ref's new tip, reset the worktree, rebuild — the post-push step of the loop. |
 | `preview_status` | member | `{previewId?}` or `{app?}` → per-device `{phase, detail, error?, logTail?}`; overall `{ready, url, source}` |
 | `stop_preview` | member | `{previewId}` → teardown (devices deleted, worktree removed per policy; a local app's source dir is never touched) |
@@ -272,7 +272,7 @@ doctor-builds, reports `ready` → agent offers the first `start_preview`.
 | `add_app` | admin | `{repo, type?}` → clone, detect, **doctor build** on a default device, structured report (`ready` or `missing: [...]`) |
 | `remove_app` | admin | `{id, deleteCheckout?}` |
 | `start_test_run` / `update_test_run` / `finish_test_run` / `clear_test_run` | member | **Amended (2026-07-17):** agent-driven end-to-end testing. The agent (the brain) reports what it's testing — `{title, steps}`, per-step `running`/`passed`/`failed`, then a verdict + summary — surfaced live in the viewer as a calm spinner button + step popover. deckhand records; the agent writes the human report in chat. |
-| `parity_set` / `parity_status` | member | **Renamed (2026-07-31, was `compare_set`/`compare_status`):** maintain and read the per-item parity checklist (`pending`/`doing`/`done`/`adjusted`/`regression`). Deliberately NOT merged with the `*_test_run` tools: a test run is one ephemeral pass whose steps go pending → running → passed, parity is a durable per-screen verdict, and the viewer renders them as separate sections precisely because the statuses do not mean the same thing. |
+| `parity_set` / `parity_status` | member | Maintain and read the per-item parity checklist (`pending`/`doing`/`done`/`adjusted`/`regression`). Deliberately NOT merged with the `*_test_run` tools: a test run is one ephemeral pass whose steps go pending → running → passed, parity is a durable per-screen verdict, and the viewer renders them as separate sections precisely because the statuses do not mean the same thing. |
 
 **Amended (2026-07-17): `describe`/`ui` backend = SimDeck, control-only.** The 2026-07-09
 rejection of SimDeck (row §2) was about its **video transport** (WebRTC/TURN); its
@@ -335,8 +335,8 @@ a page simply was. Generalised:
    the compare session already was. Nothing new lands in `state.json` (a protected pane's PIN uses the existing `pins` map, so it survives a restart), and share ids stay
    stable per app: the page lives at the primary app's existing URL, and extra panes are
    additive content on it. A bookmarked link does not rot.
-4. **`start_preview` absorbed `compare_start`** via `alongside` (see the tool table), so
-   there is one way to start something. Both capability gates moved with it (§11.3).
+4. **`start_preview` covers this via `alongside`** (see the tool table), so there is one
+   way to start something. Both capability gates live on it (§11.3).
 
 **Accepted risk — reach across owner boundaries (2026-07-31).** A page may now show panes
 from more than two registered apps, and whoever holds the link plus any one pane's PIN
@@ -713,9 +713,8 @@ change eases in/out — nothing snaps.
 3. **Capability bounding**: no arbitrary shell tool; only registered apps; only refs in
    those repos; device-count + disk-tier limits. (`start_preview`'s `alongside[].worktree` /
    `alongside[].repo` reach past "registered apps" by design — both are gated: worktree on
-   `requireAdmin`, repo on the caller's owner scope. **Amended 2026-07-31:** these branches
-   moved off the removed `compare_start` onto `start_preview`, so they now hang off a tool
-   every member already calls — the gates carry more weight there, not less. Fork PRs are
+   `requireAdmin`, repo on the caller's owner scope. These branches hang off a tool every member already
+   calls, so the gates carry more weight there, not less. Fork PRs are
    *not* gated; see §6.)
 4. **GitHub**: App with Contents:Read-only — deckhand can never write to any repo. Hourly
    installation tokens, never persisted, never in argv/URLs/logs. **Ambient-credential

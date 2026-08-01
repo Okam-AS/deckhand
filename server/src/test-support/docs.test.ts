@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { registeredTools, registerToolCallCount } from "./toolNames.ts";
 
 /**
  * PLAN.md and AGENTS.md, checked against the code they claim to describe.
@@ -31,11 +32,25 @@ const PLAN = read("PLAN.md");
 const AGENTS = read("AGENTS.md");
 const TOOLS = read("server/src/mcp/tools.ts");
 
-const registered = [...TOOLS.matchAll(/server\.registerTool\(\s*"([a-z_]+)"/g)].map((m) => m[1]!);
+const registered = registeredTools(TOOLS);
 
 describe("docs describe the code that exists", () => {
   it("finds tools to check", () => {
     assert.ok(registered.length > 5, `only ${registered.length} tools parsed — the registerTool pattern changed`);
+  });
+
+  it("registers every tool under a name this file can read", () => {
+    // A `registerTool(TOOL.SET_PIN, …)` or `registerTool(\`ui_\${v}\`, …)` is invisible to the
+    // scan, and an invisible tool is exempt from BOTH the documentation check below and the
+    // audited() check in invariants.test.ts. Neither would fail — the other tools keep the
+    // sentinels green. So the ban is on the unreadable form itself.
+    const all = registerToolCallCount(TOOLS);
+    assert.equal(
+      registered.length,
+      all,
+      `${all} registerTool() calls but only ${registered.length} readable names — the rest use a computed or ` +
+        `template name, which is exempt from every check keyed on it. Use a plain string literal.`,
+    );
   });
 
   it("documents every registered MCP tool in PLAN", () => {
@@ -47,40 +62,55 @@ describe("docs describe the code that exists", () => {
     }
   });
 
-  it("mentions no MCP tool that was never built", () => {
-    // PLAN documented `start_migration_preview` — a tool that never existed —
-    // for two weeks, and §11.3 gated a `compare_start` it never defined. Worse,
-    // the dead name leaked into a tool DESCRIPTION, i.e. into text an agent
-    // reads as instructions.
-    // A name is allowed on a line that says it is gone — "was `compare_set`",
-    // "absorbed `compare_start`", "the removed X" are how this document records
-    // its own history, and deleting that history is its own kind of drift. What
-    // is not allowed is a dead name presented as callable.
-    const historical = /\b(was|were|removed|renamed|dropped|absorbed|no longer|never built|superseded|instead of)\b/i;
-    const ghosts = PLAN.split("\n")
-      .filter((line) => !historical.test(line))
-      .flatMap((line) => [
-        ...line.matchAll(/`(start_[a-z_]+|list_[a-z_]+|add_[a-z_]+|remove_[a-z_]+|compare_[a-z_]+|parity_[a-z_]+)`/g),
-      ])
+  it("mentions no MCP tool that does not exist", () => {
+    // PLAN documented `start_migration_preview` — a tool that never existed — for two weeks,
+    // and §11.3 gated a `compare_start` it never defined. Worse, the dead name leaked into a
+    // tool DESCRIPTION, i.e. into text an agent reads as instructions.
+    //
+    // There is no escape hatch for "recording history". There was one — any line containing
+    // was/were/removed/renamed/dropped — and it exempted the WHOLE line on words that occur in
+    // ordinary prose, so "call `start_x` when the preview was created by a migration" passed.
+    // These documents describe what exists now; a rename is a rename, and git holds the past.
+    //
+    // Matched on the SHAPE of a tool name (backticked snake_case) rather than on six known
+    // prefixes: of the 19 live tools, `describe`, `ui`, `logs`, `screenshot`, `set_pin` and
+    // the `*_test_run` family had shapes the old pattern could never see, so a dead name in
+    // any of them was unpoliced. The allow-list below is for the handful of snake_case terms
+    // in these docs that are genuinely not tools.
+    const NOT_TOOLS = new Set(["deck_unlock", "github_auth_missing", "needs_access_choice", "node_modules", "web_needs_pin"]);
+    const ghosts = [PLAN, AGENTS]
+      .flatMap((doc) => [...doc.matchAll(/`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`/g)])
       .map((m) => m[1]!)
-      .filter((name) => !registered.includes(name));
+      .filter((name) => !registered.includes(name) && !NOT_TOOLS.has(name));
     assert.deepEqual(
       [...new Set(ghosts)],
       [],
-      `PLAN.md names MCP tools that are not registered. Either build them, or say plainly that they were dropped.`,
+      `PLAN.md / AGENTS.md name MCP tools that are not registered. Either build them, or delete the mention — ` +
+        `if the name is not a tool at all, add it to NOT_TOOLS with that as the reason.`,
     );
   });
 
   it("keeps dead tool names out of agent-facing text", () => {
-    // The strictest of these: a stale name in a tool description is not drift in
-    // a document a human might skim — it is an instruction the model follows.
-    const ghostsInSource = [...TOOLS.matchAll(/(start_migration_preview|compare_start|compare_set|compare_status)/g)].map(
-      (m) => m[1]!,
-    );
+    // The strictest of these: a stale name in a tool description is not drift in a document a
+    // human might skim — it is an instruction the model follows.
+    //
+    // Derived, not hardcoded. This was a fixed list of four dead names, which by construction
+    // could only catch the renames that had ALREADY happened — the next one would sail past
+    // the check written for exactly that failure. So: any tool-shaped name appearing in
+    // tools.ts that nothing registers.
+    // Scoped to BACKTICKED snake_case, which is how this file's prose refers to a tool
+    // (`compare_start` was written exactly that way). Bare identifiers are not usable here:
+    // tools.ts is full of snake_case error codes — `unknown_app`, `needs_pin`, `bad_request` —
+    // that share the shape and are not tools. Names without an underscore (`describe`, `ui`,
+    // `logs`) are ordinary English and stay out of reach; that is the honest limit of a
+    // text scan.
+    const ghostsInSource = [...TOOLS.matchAll(/`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`/g)]
+      .map((m) => m[1]!)
+      .filter((name) => !registered.includes(name));
     assert.deepEqual(
       [...new Set(ghostsInSource)],
       [],
-      `tools.ts mentions a tool that no longer exists — an agent reading that description will try to call it`,
+      `tools.ts mentions a tool-shaped name that is not registered — an agent reading that description will try to call it`,
     );
   });
 
