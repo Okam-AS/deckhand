@@ -270,6 +270,31 @@ export function loadApps(file = paths.apps()): App[] {
   return parseWith(appsSchema, file, readYaml(file)).apps;
 }
 
+/**
+ * The registry for BOOT: an unusable apps.yaml must not stop the server coming up.
+ *
+ * `loadApps` throwing is right for the CLI, where the operator is standing there. At boot it
+ * was fatal, and that is the wrong trade for the one moment it matters most: a new user whose
+ * first `add_app` half-succeeded, or anyone who hand-edited the file, gets a server that will
+ * not start — and therefore cannot be repaired through its own onboarding path (the setup URL,
+ * `add_app`, `list_apps`), which is the only path a remote agent has.
+ *
+ * Worse, it was LATENT. `watchApps` keeps the last good list when a reload fails, so a running
+ * server tolerates the same file indefinitely and only dies on the next restart, long after
+ * whatever wrote it.
+ *
+ * So: come up with an empty registry, keep the file exactly as it is (it is the operator's
+ * work, and the error names the entry to fix), and return the reason so the server can log it
+ * and `list_apps` can hand it to the agent verbatim.
+ */
+export function loadAppsForBoot(file = paths.apps()): { apps: App[]; error?: string } {
+  try {
+    return { apps: loadApps(file) };
+  } catch (e) {
+    return { apps: [], error: (e as Error).message };
+  }
+}
+
 export function loadTokens(file = paths.tokens()): TokenEntry[] {
   return parseWith(tokensSchema, file, readYaml(file)).tokens;
 }

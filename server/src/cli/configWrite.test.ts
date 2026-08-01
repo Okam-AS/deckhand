@@ -1,5 +1,8 @@
-import { describe, it } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { addTokenEntry, addAppEntry, buildInitConfig, parseEnvAssignment, generateToken, writeApps } from "./configWrite.ts";
 import type { App, TokenEntry } from "../config.ts";
 
@@ -103,6 +106,24 @@ describe("parseEnvAssignment", () => {
 });
 
 describe("writeApps refuses to write a file that would not load back", () => {
+  // DECKHAND_HOME first, always. `writeApps` resolves paths.apps() from it, so without this
+  // the test writes to the DEVELOPER'S OWN ~/.deckhand/apps.yaml — a file whose loss costs
+  // every registered app. It is safe today only because the validation below throws before
+  // the write; that is one refactor away from not being true, and this test exists precisely
+  // to be run against versions where it is not.
+  let home: string;
+  let prevHome: string | undefined;
+  before(() => {
+    prevHome = process.env.DECKHAND_HOME;
+    home = mkdtempSync(join(tmpdir(), "deckhand-cw-"));
+    process.env.DECKHAND_HOME = home;
+  });
+  after(() => {
+    if (prevHome === undefined) delete process.env.DECKHAND_HOME;
+    else process.env.DECKHAND_HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
+  });
+
   it("throws rather than persisting a list the schema rejects", () => {
     // The write path and the read path had no relationship, so anything producing an
     // in-memory list `loadApps` would later reject got written happily — and surfaced on the

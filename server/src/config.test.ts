@@ -1,6 +1,6 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -11,6 +11,7 @@ import {
   parseRepo,
   repoOwner,
   githubPrivateKeyPath,
+  loadAppsForBoot,
 } from "./config.ts";
 
 let dir: string;
@@ -242,5 +243,54 @@ describe("parseRepo / repoOwner", () => {
 
   it("throws on an unparseable repo", () => {
     assert.throws(() => parseRepo("justaname"), (e) => e instanceof ConfigError);
+  });
+});
+
+describe("loadAppsForBoot", () => {
+  const withFile = (body: string, fn: (file: string) => void): void => {
+    const dir = mkdtempSync(join(tmpdir(), "deckhand-apps-boot-"));
+    const file = join(dir, "apps.yaml");
+    writeFileSync(file, body);
+    try {
+      fn(file);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it("comes up with no apps rather than refusing to start", () => {
+    // The trade that matters for a NEW user: a half-finished `add_app`, or a hand edit, used
+    // to produce a server that would not boot — and therefore could not be repaired through
+    // add_app or the setup URL, which is all a remote agent has. It was latent too: watchApps
+    // keeps the last good list, so a running server tolerates the same file until the next
+    // restart, long after whatever wrote it.
+    withFile("apps:\n  - id: ok\n    type: expo\n", (file) => {
+      const r = loadAppsForBoot(file);
+      assert.deepEqual(r.apps, [], "empty, not fatal");
+      assert.match(r.error ?? "", /repo, a local path, or both/, "and the reason names the entry to fix");
+    });
+  });
+
+  it("leaves the file alone, because it is the operator's work", () => {
+    const body = "apps:\n  - id: ok\n    type: expo\n";
+    withFile(body, (file) => {
+      loadAppsForBoot(file);
+      assert.equal(readFileSync(file, "utf8"), body, "unchanged — the fix belongs to whoever wrote it");
+    });
+  });
+
+  it("reports no error for a file that loads", () => {
+    withFile("apps:\n  - id: a\n    repo: github.com/o/r\n    type: expo\n", (file) => {
+      const r = loadAppsForBoot(file);
+      assert.equal(r.error, undefined);
+      assert.equal(r.apps[0]?.id, "a");
+    });
+  });
+
+  it("treats a missing file as an empty registry, with no error", () => {
+    // A first boot, before `deckhand init` has written anything.
+    const r = loadAppsForBoot(join(tmpdir(), "deckhand-nope", "apps.yaml"));
+    assert.deepEqual(r.apps, []);
+    assert.ok(r.error, "still reported, so a typo'd DECKHAND_HOME is visible rather than silent");
   });
 });
