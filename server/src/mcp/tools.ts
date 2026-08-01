@@ -1332,8 +1332,18 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             "call stop_preview for it first, then remove_app again",
           );
         }
-        const [removed] = apps.splice(idx, 1);
-        persistApps(apps);
+        // Persist FIRST, mutate the live registry only once the write succeeded.
+        //
+        // This used to splice and then write, so a write that throws — and it can: apps.yaml's
+        // schema rejects a `migratesFrom` naming an app that is no longer registered, which is
+        // precisely the shape `remove_app` creates — left the app gone from the array
+        // `createServer` closed over while apps.yaml still had it. The tool then returned
+        // internal_error saying "the existing file is unchanged", which was true of the disk
+        // and false of the running server: the app was unreachable until a restart, and the
+        // message actively told the operator not to look.
+        const removed = apps[idx]!;
+        persistApps(apps.filter((_, i) => i !== idx));
+        apps.splice(idx, 1);
         if (args.deleteCheckout && removed) {
           try {
             // realpath BEFORE deleting: `git worktree add` records the RESOLVED

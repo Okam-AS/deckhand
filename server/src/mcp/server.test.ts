@@ -450,6 +450,8 @@ function onboardingEngine(): PreviewEngine {
 describe("MCP onboarding contract (add_app / empty state / setup URL)", () => {
   const registry: App[] = []; // starts empty — the "fresh install" state
   const persisted: App[][] = [];
+  /** Swappable so a test can make the apps.yaml write fail — it genuinely can. */
+  let persistApps: (a: App[]) => void = (a) => persisted.push([...a]);
   const setupStore = new SetupStore();
   const patPath = join(tmpdir(), `deckhand-pat-${Math.random().toString(36).slice(2)}`);
 
@@ -466,7 +468,7 @@ describe("MCP onboarding contract (add_app / empty state / setup URL)", () => {
       audit: { record: () => {} } as never,
       auth: new TokenAuthenticator(tokens),
       pinGate: createPinGate(oengine, "test-secret"),
-      persistApps: (a) => persisted.push([...a]),
+      persistApps: (a) => persistApps(a),
       setup: { store: setupStore, patPath },
     });
     oserver = createServer(app);
@@ -602,6 +604,34 @@ describe("MCP onboarding contract (add_app / empty state / setup URL)", () => {
     };
     assert.equal(rm.error?.code, "forbidden");
     await member.close();
+  });
+
+  it("leaves the live registry untouched when the write fails", async () => {
+    // The write CAN fail, and in a shape remove_app itself creates: apps.yaml's schema rejects
+    // a `migratesFrom` naming an app that is no longer registered. This used to splice first
+    // and write second, so a throw left the app gone from the array createServer closed over
+    // while apps.yaml still had it — and the tool replied "the existing file is unchanged",
+    // true of the disk, false of the running server. The app was unreachable until a restart,
+    // and the message told the operator not to look.
+    const before = registry.length;
+    const boom = new Error("refusing to write apps.yaml: it would not load back");
+    const original = persistApps;
+    persistApps = () => {
+      throw boom;
+    };
+    try {
+      const admin = await oclient(ADMIN);
+      const res = parse(await admin.callTool({ name: "remove_app", arguments: { id: "admin-app" } })) as {
+        ok: boolean;
+        error?: { code: string };
+      };
+      assert.equal(res.ok, false, "the failure is reported");
+      await admin.close();
+    } finally {
+      persistApps = original;
+    }
+    assert.equal(registry.length, before, "and the app is STILL registered, matching what the file says");
+    assert.ok(registry.some((a) => a.id === "admin-app"));
   });
 
   it("remove_app unregisters and the empty state returns", async () => {
