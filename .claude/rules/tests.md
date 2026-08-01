@@ -12,7 +12,11 @@ Say in the commit message that you saw it fail. That sentence is the only eviden
 
 **2. Fakes are complete or they lie.** Use `test-support/fakes.ts`; never `as unknown as X` on an object literal. That form disables missing-property checking, so adding a method to a real class leaves every fake silently behind and the failure surfaces far from the cause. It has cost four bugs in one day, and once made the entire orphan sweep a no-op **that reported success**.
 
-`fakes.ts` currently covers 2 of the 12 injected dependencies, so most fakes in this tree still take the banned form. **Convert the one you touch** rather than copying it. The pattern is `PublicOf<T>` — `keyof` on a class yields only public members, so a missing method is a compile error in `fakes.ts` instead of silence in eleven files.
+`fakes.ts` covers the six injected dependencies that are classes — `metro`, `devProcs`,
+`simctl`, `android`, `worktrees`, `reaper` — and a guardrail fails any test file that
+hand-rolls one of them instead. A one- or two-member interface (`audit`, `streaming`) is
+still fine inline: the rule is not "never write this syntax", it is "do not hand-roll a
+partial stand-in for a fourteen-method class when a complete one is a function call away". The pattern is `PublicOf<T>` — `keyof` on a class yields only public members, so a missing method is a compile error in `fakes.ts` instead of silence in eleven files.
 
 Two known limits of that mechanism, so you do not over-trust it: method parameters are **bivariant**, so an override with a wrong-but-compatible signature still compiles; and optional members may be omitted entirely.
 

@@ -1,3 +1,4 @@
+import { fakeSimctl, fakeAndroid } from "../test-support/fakes.ts";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { Reaper, orphanSims, orphanAvds, type ReaperDeps } from "./reaper.ts";
@@ -31,16 +32,16 @@ describe("orphan selection", () => {
 function makeReaper(overrides: Partial<ReaperDeps> = {}) {
   const calls: string[] = [];
   const deps: ReaperDeps = {
-    simctl: {
+    simctl: fakeSimctl({
       listDevices: async () => sims,
       shutdown: async (u: string) => void calls.push(`sim shutdown ${u}`),
       delete: async (u: string) => void calls.push(`sim delete ${u}`),
-    } as unknown as ReaperDeps["simctl"],
-    android: {
+    }),
+    android: fakeAndroid({
       listAvds: async () => avds,
       attachedSerials: async () => [],
       deleteAvd: async (n: string) => void calls.push(`avd delete ${n}`),
-    } as unknown as ReaperDeps["android"],
+    }),
     kill: async (pattern: string) => void calls.push(`kill ${pattern}`),
     ...overrides,
   };
@@ -82,16 +83,16 @@ describe("Reaper.reap", () => {
     const pooledSims: SimDevice[] = [{ udid: "PPP", name: "deckhand-pool-iphone-16-pro-ios-26-0", state: "Booted" }];
     const seen: string[] = [];
     const { reaper } = makeReaper({
-      simctl: {
+      simctl: fakeSimctl({
         listDevices: async () => pooledSims,
         shutdown: async (u: string) => void seen.push(`sim shutdown ${u}`),
         delete: async (u: string) => void seen.push(`sim delete ${u}`),
-      } as unknown as ReaperDeps["simctl"],
-      android: {
+      }),
+      android: fakeAndroid({
         listAvds: async () => ["deckhand_pool_pixel_7_api34"],
         attachedSerials: async () => [],
         deleteAvd: async (n: string) => void seen.push(`avd delete ${n}`),
-      } as unknown as ReaperDeps["android"],
+      }),
     });
     const report = await reaper.reap();
     assert.deepEqual(report.sims, []);
@@ -103,17 +104,17 @@ describe("Reaper.reap", () => {
 
   it("survives a missing Xcode or Android SDK", async () => {
     const { reaper, calls } = makeReaper({
-      simctl: {
+      simctl: fakeSimctl({
         listDevices: async () => {
           throw new Error("xcrun: not found");
         },
-      } as unknown as ReaperDeps["simctl"],
-      android: {
+      }),
+      android: fakeAndroid({
         listAvds: async () => {
           throw new Error("avdmanager: not found");
         },
         attachedSerials: async () => [],
-      } as unknown as ReaperDeps["android"],
+      }),
     });
     const report = await reaper.reap();
     assert.deepEqual(report, { sims: [], avds: [], keptPooled: [] });
@@ -159,8 +160,8 @@ describe("Reaper.reapOrphansByMarker", () => {
   const make = (pids: number[]) => {
     const killed: number[] = [];
     const reaper = new Reaper({
-      simctl: { listDevices: async () => [] } as unknown as ReaperDeps["simctl"],
-      android: { listAvds: async () => [], attachedSerials: async () => [] } as unknown as ReaperDeps["android"],
+      simctl: fakeSimctl({ listDevices: async () => [] }),
+      android: fakeAndroid({ listAvds: async () => [], attachedSerials: async () => [] }),
       markedPids: async () => pids,
       killPid: (pid) => void killed.push(pid),
     });
