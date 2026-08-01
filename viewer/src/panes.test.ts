@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { computeStage, paneKey, shortDeviceName, MIN_PANE_WIDTH } from "./panes.ts";
+import { computeStage, stillUnlocked, paneKey, shortDeviceName, MIN_PANE_WIDTH } from "./panes.ts";
 import type { SharePane } from "./api.ts";
 
 const dev = (deviceId: string, platform: string, label = deviceId) => ({ deviceId, platform, label, phase: "ready" });
@@ -222,5 +222,27 @@ describe("shortDeviceName", () => {
   it("drops the runtime suffix the picker has no room for", () => {
     assert.equal(shortDeviceName("iPhone 16 Pro · iOS 26.5"), "iPhone 16 Pro");
     assert.equal(shortDeviceName("pixel_7"), "pixel_7");
+  });
+});
+
+describe("stillUnlocked", () => {
+  it("keeps the pad away while the server says the share is open", () => {
+    assert.equal(stillUnlocked(true, false), true);
+  });
+
+  it("brings the pad back when the server locks again", () => {
+    // The bug: `unlocked` was a one-way latch, so `locked && !unlocked` stayed false forever.
+    // The locked state carries no panes and no devices, so the tab rendered the CONTENT branch
+    // with nothing in it — a permanently blank screen, no error, and no way back except a
+    // manual reload. Two ordinary triggers: the unlock cookie's 12h TTL expiring on a tab left
+    // open overnight, and an operator setting a new PIN on a share somebody already has open.
+    assert.equal(stillUnlocked(true, true), false);
+  });
+
+  it("never unlocks on its own", () => {
+    // The latch may only ever bridge FORWARD from the server's answer — the moment between a
+    // correct PIN and the refetched state arriving. It must not invent access.
+    assert.equal(stillUnlocked(false, false), false, "an open share still needs its own state to say so");
+    assert.equal(stillUnlocked(false, true), false);
   });
 });
