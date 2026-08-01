@@ -280,6 +280,24 @@ describe("buildPlan — local dev mode", () => {
     assert.ok(!script.includes("[ -d node_modules ]"), "worktrees want the reproducible npm ci path");
   });
 
+  it("installs yarn with --frozen-lockfile, never --immutable", () => {
+    // Not style. Measured against yarn 1.22.22 and yarn 4.18.0 with a stale lockfile
+    // (2026-08-01): `--immutable` on yarn 1 exits 0 and REWRITES the lockfile, because
+    // yarn 1 ignores unknown flags — so switching to it would silently break
+    // borrow-never-own in a local checkout, which is the invariant local mode exists for.
+    // `--frozen-lockfile` is deprecated on berry but still enforces, and is correct on both.
+    for (const local of [true, false]) {
+      const plan = buildPlan({ ...base, local, type: "expo" });
+      const script = plan[0]!.run.kind === "shell" ? (plan[0]!.run as { script: string }).script : "";
+      assert.match(script, /yarn install --frozen-lockfile/);
+      assert.doesNotMatch(
+        script,
+        /yarn install --immutable/,
+        "--immutable is a no-op on yarn 1.x, so a stale lockfile in a borrowed checkout is rewritten",
+      );
+    }
+  });
+
   it("prefers bun when the project has a bun lockfile, in both modes", () => {
     for (const local of [true, false]) {
       const plan = buildPlan({ ...base, local, type: "expo" });

@@ -70,6 +70,18 @@ export interface BuildPlanInput {
  */
 const PACKAGE_MANAGERS = [
   { name: "bun", test: "[ -f bun.lock ] || [ -f bun.lockb ]", frozen: "bun install --frozen-lockfile", loose: "bun install" },
+  // yarn: `--frozen-lockfile`, NOT `--immutable`, and this is the one entry worth not
+  // "modernising". Measured against yarn 1.22.22 and yarn 4.18.0 with a lockfile
+  // deliberately out of sync (2026-08-01):
+  //
+  //                       yarn 1.22          yarn 4.18
+  //   --frozen-lockfile   exit 1, untouched  exit 1, untouched (deprecation warning only)
+  //   --immutable         EXIT 0, REWRITTEN  exit 1, untouched
+  //
+  // yarn 1 silently ignores flags it does not know, so `--immutable` there is not a
+  // stricter spelling — it is no flag at all, and the lockfile in a BORROWED checkout gets
+  // rewritten. `--frozen-lockfile` is deprecated on berry, not removed, and still enforces.
+  // One spelling is correct on both; the modern-looking one is correct on one.
   { name: "yarn", test: "[ -f yarn.lock ]", frozen: "yarn install --frozen-lockfile", loose: "yarn install" },
   { name: "pnpm", test: "[ -f pnpm-lock.yaml ]", frozen: "pnpm install --frozen-lockfile", loose: "pnpm install" },
   { name: "npm", test: "[ -f package-lock.json ]", frozen: "npm ci", loose: "npm install" },
