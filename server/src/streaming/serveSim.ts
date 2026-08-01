@@ -287,11 +287,27 @@ export class ServeSimBackend implements StreamingBackend {
    *
    * So sweep the range afterwards and SIGKILL whatever is still listening. Nothing else may
    * use this range (it is deckhand's, from config), which is what makes the sweep safe.
+   *
+   * `keep` spares helpers a live preview already holds. At boot it is empty and this sweeps
+   * everything, which is the point — but the sweep runs after the port is bound, so a
+   * start_preview can be mid-attach, and `serve-sim -k` with no udid kills every helper on the
+   * machine. Naming the survivors instead is what makes that window safe.
    */
-  async reapOrphans(): Promise<void> {
-    await this.killImpl(this.bin, ["-k"]);
+  async reapOrphans(keep: ReadonlySet<string> = new Set()): Promise<void> {
+    const spared = [...this.helpers].filter(([udid]) => keep.has(udid));
+    const sparedPorts = new Set(spared.map(([, h]) => h.port));
+    if (spared.length === 0) {
+      await this.killImpl(this.bin, ["-k"]);
+    } else {
+      // Per-udid, because the blanket `-k` would take the live ones with it. Helpers left
+      // by a previous process have udids we do not know; the port sweep below is what
+      // collects those, and SIGKILL is the stronger lever anyway.
+      for (const [udid] of this.helpers) if (!keep.has(udid)) await this.killImpl(this.bin, ["-k", udid]);
+    }
     this.helpers.clear();
+    for (const [udid, helper] of spared) this.helpers.set(udid, helper);
     for (let port = this.range[0]; port <= this.range[1]; port++) {
+      if (sparedPorts.has(port)) continue;
       for (const pid of await this.listenersImpl(port)) {
         try {
           this.killPidImpl(pid);

@@ -6,7 +6,7 @@ import { stringify as toYaml } from "yaml";
 import { loadConfig, loadApps, loadTokens, parseRepo, type Role } from "./config.ts";
 import { paths } from "./paths.ts";
 import { addTokenEntry, addAppEntry, parseEnvAssignment, writeTokens, writeApps, writeSecretEnv } from "./cli/configWrite.ts";
-import { runDoctor, formatChecks } from "./cli/doctor.ts";
+import { runDoctor, formatChecks, deviceGateExit } from "./cli/doctor.ts";
 
 // Minimal, dependency-free arg parsing: positionals + `--key value` / `--flag`.
 interface Args {
@@ -105,11 +105,10 @@ async function main(): Promise<void> {
         process.exit(ok ? 0 : 1);
         return;
       }
-      const gated = checks.filter((c) => /^(smoke|serve-sim|simctl|xcodebuild)/.test(c.name));
-      const failed = gated.filter((c) => !c.ok && !c.skipped && !c.warn);
-      for (const c of failed) console.error(`gate failed: ${c.name}${c.detail ? ` — ${c.detail}` : ""}`);
-      process.exit(failed.length ? 1 : 0);
-      return;
+      const gate = deviceGateExit(checks);
+      for (const c of gate.failed) console.error(`gate failed: ${c.name}${c.detail ? ` — ${c.detail}` : ""}`);
+      if (gate.reason) console.error(`gate did not run: ${gate.reason}`);
+      process.exit(gate.code);
     }
 
     case "init":

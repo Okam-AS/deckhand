@@ -34,8 +34,18 @@ export interface AttachedStream {
 export interface StreamingBackend {
   /** Attach to an already-booted device; resolves once the stream endpoint is up. */
   attach(device: StreamDeviceRef): Promise<AttachedStream>;
-  /** Kill any orphaned helpers this backend can find (crash recovery / janitor). */
-  reapOrphans(): Promise<void>;
+  /**
+   * Kill any orphaned helpers this backend can find (crash recovery / janitor).
+   *
+   * `keep` is the set of device ids (simulator UDID / AVD name / adb serial) a
+   * live preview already holds. The boot sweep runs *after* the port is bound —
+   * that ordering is deliberate, it is what makes a second `deckhand serve` die
+   * on EADDRINUSE before it deletes the running server's devices — so a
+   * `start_preview` can already be mid-attach when this fires. Without `keep`,
+   * sweeping "every helper in deckhand's range" kills the one it just spawned.
+   * Same window `liveDeviceHandles()` guards for devices.
+   */
+  reapOrphans(keep?: ReadonlySet<string>): Promise<void>;
 }
 
 /** Allocate the first free port in [lo, hi] not in `inUse`. */
