@@ -33,6 +33,37 @@ jobs:
       - name: CI (typecheck + tests + build)
         run: npm run ci
 
+  # Tag every commit that lands on main, so a human has something to say out loud —
+  # "v0.1.40" rather than "ab2362c". The update check itself compares SHAs (version.ts);
+  # this only makes `git describe --tags` return something readable, which a clone picks
+  # up for free.
+  #
+  # `needs: check` is the point: a red main must not be tagged, or the tag stops meaning
+  # "this is a version you can run". The number comes from ops/next-version-tag.sh rather
+  # than from an inline expression, so a test can execute the same logic CI does.
+  tag:
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # counting commits needs the whole history, not a shallow clone
+
+      - name: Tag this commit
+        run: |
+          tag=$(./ops/next-version-tag.sh)
+          # Idempotent: a re-run of the same commit must not fail the workflow.
+          if git rev-parse "$tag" >/dev/null 2>&1; then
+            echo "$tag already exists — nothing to do"
+            exit 0
+          fi
+          git tag "$tag"
+          git push origin "$tag"
+          echo "tagged $tag"
+
   # `test:device` is deliberately NOT here. It creates a simulator, boots it,
   # attaches a stream and waits for a first frame — the only check that catches
   # deadlines calibrated against an idle machine, which is the bug class that hit
