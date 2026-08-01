@@ -5,7 +5,7 @@ import { MobileChrome, type DockEntry } from "./MobileChrome.tsx";
 import { WebFrame } from "./WebFrame.tsx";
 import { PinGate } from "./PinGate.tsx";
 import { ProgressBar } from "./ProgressBar.tsx";
-import { computeStage, shortDeviceName, type StageGroup } from "./panes.ts";
+import { computeStage, shortDeviceName, type StageGroup, stillUnlocked } from "./panes.ts";
 import { fetchShareState, shareIdFromPath, type ShareState } from "./api.ts";
 import { useIsMobile } from "./useIsMobile.ts";
 
@@ -60,7 +60,13 @@ export function App() {
         setGone(true);
         return;
       }
-      if (s) setState(s);
+      if (s) {
+        setState(s);
+        // The server can go back to locked (a 12h cookie TTL, or a new PIN on a share
+        // somebody already has open). The latch must follow it down, or the pad never
+        // returns and the tab renders the content branch with no devices — blank, forever.
+        setUnlocked((was) => stillUnlocked(was, Boolean(s.locked)));
+      }
       // When locked the state is minimal (no devices) — poll calmly (5s).
       const settled = s != null && (s.locked || (s.devices ?? []).every((d) => d.phase === "ready" || d.phase === "failed"));
       timer = setTimeout(poll, settled ? 5000 : 1200);

@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import { AndroidAdbBackend } from "./androidAdb.ts";
 
 /**
@@ -132,5 +133,23 @@ describe("AndroidAdbBackend.waitForFirstFrame", () => {
     await withStream(b, async (s) =>
       assert.equal(await s.waitForFirstFrame(3_000), true, "a 6s capture must be given time, not declared a failure"),
     );
+  });
+});
+
+describe("AndroidAdbBackend.attach — a port it cannot bind", () => {
+  it("fails the device instead of hanging forever", async () => {
+    // Without an 'error' listener the http.Server throws on EADDRINUSE, the promise never
+    // settles, and attach() never returns. The engine awaits it, so the preview sits in
+    // "starting the stream" with no error and no timeout — and cli.ts's crash guard keeps the
+    // process alive on purpose, so nothing else surfaces it either. A hang is the one failure
+    // nobody can debug from the outside.
+    const blocker = createServer();
+    await new Promise<void>((r) => blocker.listen(3320, "127.0.0.1", r));
+    try {
+      const b = new AndroidAdbBackend({ portRange: [3320, 3320], adb: fakeAdb().adb }); // the only port is taken
+      await assert.rejects(() => b.attach(device), /could not bind 127\.0\.0\.1:3320/);
+    } finally {
+      await new Promise<void>((r) => blocker.close(() => r()));
+    }
   });
 });

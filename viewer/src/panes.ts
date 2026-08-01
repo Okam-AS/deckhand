@@ -179,3 +179,21 @@ function pickActive(panes: StagePane[], choice: string | undefined): string {
   const healthy = panes.filter((p) => p.device.phase !== "failed");
   return (healthy.length ? healthy : panes)[0]?.key ?? "";
 }
+
+/**
+ * Whether the viewer should still consider itself unlocked, given what the server just said.
+ *
+ * `unlocked` exists only to bridge the moment between a correct PIN and the refetched state
+ * arriving — without it the content branch renders once with no devices. It was a ONE-WAY
+ * latch, and the server can go back to locked: the unlock cookie has a 12h TTL, and an
+ * operator can set a new PIN on a share somebody already has open.
+ *
+ * When that happened the pad never came back, because `locked && !unlocked` stayed false. The
+ * locked state carries no panes and no devices, so the tab rendered the content branch with
+ * nothing in it: a permanently blank screen, no error, no way back except a manual reload.
+ *
+ * The server's answer is the truth; the latch may only ever bridge forward from it.
+ */
+export function stillUnlocked(previouslyUnlocked: boolean, serverSaysLocked: boolean): boolean {
+  return previouslyUnlocked && !serverSaysLocked;
+}

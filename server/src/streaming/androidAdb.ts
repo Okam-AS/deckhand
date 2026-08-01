@@ -242,7 +242,25 @@ export class AndroidAdbBackend implements StreamingBackend {
       }
     });
 
-    await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));
+    // Reject on 'error', not just resolve on success. Without a listener, an http.Server
+    // emitting 'error' — EADDRINUSE is the ordinary case, from a leaked helper on the same
+    // port — THROWS, the promise never settles, and attach() hangs forever. The engine is
+    // awaiting it, so the preview sits in "starting the stream" with no error and no timeout,
+    // and cli.ts's crash guard deliberately keeps the process alive, so nothing else surfaces
+    // it either. A port collision must fail the device, not wedge it.
+    await new Promise<void>((resolve, reject) => {
+      const onError = (err: Error): void => {
+        server.removeListener("listening", onListening);
+        reject(new Error(`android helper could not bind 127.0.0.1:${port} — ${err.message}`));
+      };
+      const onListening = (): void => {
+        server.removeListener("error", onError);
+        resolve();
+      };
+      server.once("error", onError);
+      server.once("listening", onListening);
+      server.listen(port, "127.0.0.1");
+    });
     const helper: Helper = {
       serial,
       port,
