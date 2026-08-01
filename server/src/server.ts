@@ -208,7 +208,12 @@ export function createServer(): DeckhandServer {
       watchApps(apps, {
         onReload: (_apps, { added, removed }) => {
           for (const id of added) console.log(`apps.yaml: registered "${id}"`);
-          for (const id of removed) console.log(`apps.yaml: removed "${id}"`);
+          for (const id of removed) {
+            console.log(`apps.yaml: removed "${id}"`);
+            // Its stable share id and PIN hash are unreachable now; keeping them would grow
+            // state.json forever and leave a credential hash on disk for nothing.
+            engine.forgetApp(id);
+          }
         },
         onError: (err) => console.error(`apps.yaml: keeping the previous list — ${(err as Error).message}`),
       });
