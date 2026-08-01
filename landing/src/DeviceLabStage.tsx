@@ -100,7 +100,7 @@ export function DeviceLabStage({ targets }: DeviceLabStageProps) {
           <LockIcon />
           <div>
             <small>One stable viewer URL</small>
-            <code>deckhand.sharghi.no/s/••••••</code>
+            <code>deckhand.your-domain.com/s/••••••</code>
           </div>
           <strong>
             <i aria-hidden="true" />
