@@ -249,6 +249,52 @@ describe("PLAN §11 — security model", () => {
   });
 });
 
+describe("one definition of the gate", () => {
+  it("has CI and the pre-commit hook both invoke `npm run ci`, not a copy of its steps", () => {
+    // The gate had THREE definitions: package.json's `ci` script, ci.yml's three steps, and
+    // the hook's three steps. They diverged exactly as you would expect — the hook was
+    // missing `npm run build`, so a build-only failure reached CI after a push, which is the
+    // one place a pre-commit gate is no use. Nothing failed, because each copy was internally
+    // consistent.
+    const ci = readFileSync(join(REPO, ".github", "workflows", "ci.yml"), "utf8");
+    const hook = readFileSync(join(REPO, "ops", "hooks", "pre-commit"), "utf8");
+    for (const [name, src] of [["ci.yml", ci], ["ops/hooks/pre-commit", hook]] as const) {
+      assert.match(src, /npm run ci\b/, `${name} must invoke \`npm run ci\`, so there is one definition of the gate`);
+      // Re-implementing the steps is the failure mode, not a style preference.
+      for (const step of ["npm run typecheck", "npm test", "npm run build"]) {
+        assert.ok(
+          !new RegExp(`(run:|^\\s*)\\s*${step.replace(/ /g, "\\s+")}\\b`, "m").test(src),
+          `${name} re-implements "${step}" instead of calling \`npm run ci\` — that is how the ` +
+            `hook silently lost the build step. Change package.json's ci script instead.`,
+        );
+      }
+    }
+  });
+
+  it("checks the index rather than the working tree", () => {
+    // A hook that tests the checkout as-is passes a broken commit whenever an unstaged fix
+    // is sitting next to it, and blocks a clean one whenever an unrelated experiment is.
+    // `git add -p` is the normal case that exposes both.
+    // Comments stripped first: the hook explains at length WHY stash/pop was rejected, and a
+    // check that reads the explanation as the code is the wrong-reason failure this file has
+    // now hit three times.
+    const hook = readFileSync(join(REPO, "ops", "hooks", "pre-commit"), "utf8")
+      .split("\n")
+      .filter((l) => !/^\s*#/.test(l))
+      .join("\n");
+    assert.match(
+      hook,
+      /git checkout-index/,
+      "the hook must materialise the staged tree (git checkout-index) rather than run against the working tree",
+    );
+    assert.doesNotMatch(
+      hook,
+      /git stash/,
+      "stash/pop was tried and wedges the tree when one file has both staged and unstaged edits",
+    );
+  });
+});
+
 describe("the detached-spawn rule", () => {
   it("marks every long-lived detached spawn so a later boot can collect it", () => {
     // Four resources are spawned detached and outlive the server that owns them;

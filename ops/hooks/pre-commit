@@ -1,19 +1,39 @@
 #!/bin/sh
 # Deckhand pre-commit gate.
 #
-# Runs exactly what CI runs (`npm run ci`), before the commit exists rather than
-# after the push. Installed by `npm run hooks:install` (git does not version
-# .git/hooks, so the file lives here and is symlinked in).
+# Runs `npm run ci` against WHAT IS BEING COMMITTED, before the commit exists
+# rather than after the push. Installed by `npm run hooks:install` (git does not
+# version .git/hooks, so the file lives here and is symlinked in).
 #
-# "Exactly" is the point: the hook used to skip `npm run build`, so a build-only
-# failure surfaced in CI after a push — which is the one place a gate is no use.
-# The build takes ~1.4s. If CI and the hook ever diverge again, the hook is the
-# one that is wrong.
+# Two properties, both of which this file got wrong at some point:
 #
-# Deliberately NOT the device gate: `npm run test:device` boots a simulator and
-# takes ~40s, which is too slow to sit in front of every commit and would train
-# people to pass --no-verify. Run it by hand after touching the streaming path —
-# AGENTS.md says when.
+# 1. It runs `npm run ci` — the command itself, not a copy of its steps. It used
+#    to re-implement typecheck/test/build inline, which made this a THIRD
+#    definition of the gate alongside package.json and ci.yml. A file whose
+#    header promises "exactly what CI runs" must not restate what that is.
+#    ci.yml calls the same script, so there is one definition.
+#
+# 2. It checks the INDEX, not the working tree. It used to run against the
+#    checkout as-is, which is wrong in both directions: a fix you did NOT stage
+#    made a broken commit pass, and a half-finished experiment elsewhere blocked
+#    a clean staged commit — training exactly the --no-verify reflex the escape
+#    hatch below exists to avoid. `git add -p` is the normal case that exposes it.
+#
+# HOW it checks the index matters as much as that it does. The obvious
+# implementation — `git stash push --keep-index`, run, `git stash pop` — was
+# tried and rejected: when one file has both staged and unstaged edits (again,
+# `git add -p`), the pop conflicts, and the hook has then wedged the developer's
+# tree in the name of protecting it. Measured, not theorised: the first version
+# of this file did exactly that on its first real test.
+#
+# So the working tree is never touched. `git checkout-index` materialises the
+# staged content into a temp directory, node_modules is symlinked in, and the
+# checks run there. Untracked files are absent by construction — they are not
+# being committed either.
+#
+# Deliberately NOT the device gate: `npm run test:device` boots a simulator AND
+# an emulator and takes minutes, which would train people to skip this. Run it by
+# hand after touching the device, streaming or control path — AGENTS.md says when.
 #
 # Escape hatch: `git commit --no-verify`. It exists because a hook that cannot be
 # skipped gets uninstalled instead.
@@ -22,32 +42,48 @@ set -e
 root=$(git rev-parse --show-toplevel)
 cd "$root"
 
-printf 'deckhand: typecheck… '
-if ! npm run typecheck >/tmp/deckhand-precommit.log 2>&1; then
-  printf 'FAILED\n\n'
-  tail -30 /tmp/deckhand-precommit.log
-  echo
-  echo "Commit blocked. Fix the above, or 'git commit --no-verify' if you know why it is wrong."
-  exit 1
+# Nothing staged: let git produce its own "nothing to commit" and stay out of it.
+if git diff --cached --quiet; then
+  exit 0
 fi
-printf 'ok\n'
 
-printf 'deckhand: tests… '
-if ! npm test >/tmp/deckhand-precommit.log 2>&1; then
-  printf 'FAILED\n\n'
-  grep -E '✖|not ok|AssertionError' /tmp/deckhand-precommit.log | head -20
-  echo
-  echo "Commit blocked. Full log: /tmp/deckhand-precommit.log"
-  exit 1
-fi
-printf 'ok\n'
+staging=$(mktemp -d "${TMPDIR:-/tmp}/deckhand-precommit.XXXXXX")
+log="$staging/ci.log"
+cleanup() {
+  # A build writes a few hundred MB into the copy; never leave it behind.
+  rm -rf "$staging"
+}
+trap cleanup EXIT INT TERM
 
-printf 'deckhand: build… '
-if ! npm run build >/tmp/deckhand-precommit.log 2>&1; then
+# The staged tree, and only the staged tree.
+git checkout-index --all --force --prefix="$staging/"
+
+# Dependencies are shared rather than reinstalled: `npm ci` in a scratch copy
+# would add minutes to every commit. npm workspaces hoist to the root, so one
+# symlink resolves for all three packages.
+ln -s "$root/node_modules" "$staging/node_modules"
+
+# And a .git, because CI has one: actions/checkout gives the runner a real
+# repository, and version.ts reads the running checkout's sha from it. A copy
+# without .git is not a faithful rehearsal — it fails checks that pass in CI,
+# which is the opposite of what this hook is for.
+# Symlinked, not copied: nothing here writes to git, and copying .git would cost
+# more than the checks. If a test ever needs to WRITE, this has to become a real
+# worktree instead.
+ln -s "$root/.git" "$staging/.git"
+
+printf 'deckhand: ci (typecheck + tests + build) on the staged tree… '
+if ! (cd "$staging" && npm run ci) >"$log" 2>&1; then
   printf 'FAILED\n\n'
-  tail -30 /tmp/deckhand-precommit.log
+  # The tail is usually the tsc or build error; the grep catches a test failure,
+  # which prints its detail far from the end.
+  grep -E 'not ok|AssertionError|error TS' "$log" | head -20 || true
   echo
-  echo "Commit blocked. CI builds too — this would have failed there instead."
+  tail -15 "$log"
+  echo
+  echo "Commit blocked. This is what CI would have said, and it is about the STAGED"
+  echo "content — your working tree was not touched and is exactly as you left it."
+  echo "Override with \'git commit --no-verify\' if you know why it is wrong."
   exit 1
 fi
 printf 'ok\n'
