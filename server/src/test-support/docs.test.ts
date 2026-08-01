@@ -152,6 +152,51 @@ describe("docs describe the code that exists", () => {
     );
   });
 
+  it("only tells people to run deckhand commands that exist", () => {
+    // Principle 1: an instruction that cannot be followed is worse than none, because the
+    // reader assumes the mistake is theirs. It happened three times in one day — `deckhand`
+    // was not a command while every document said to type it; `token list` was documented as
+    // showing the connector URL and did not; `init` demanded a hostname you could not have
+    // yet. Each was found by a person typing what we told them to.
+    //
+    // So the docs' own claims are checked against the CLI's switch: every `deckhand <verb>`
+    // in agent-facing prose must be a verb cli.ts actually handles.
+    const cli = readFileSync(join(SRC, "cli.ts"), "utf8");
+    const verbs = new Set([...cli.matchAll(/case "([a-z-]+)":/g)].map((m) => m[1]!));
+    const subs = new Set([...cli.matchAll(/sub === "([a-z-]+)"/g)].map((m) => m[1]!));
+    assert.ok(verbs.size > 4, `only ${verbs.size} cli verbs parsed — the switch changed, fix this check`);
+
+    const missing: string[] = [];
+    for (const [name, body] of [
+      ["AGENTS.md", AGENTS],
+      ["CONSTITUTION.md", readFileSync(join(REPO, "CONSTITUTION.md"), "utf8")],
+      ["README.md", readFileSync(join(REPO, "README.md"), "utf8")],
+    ] as const) {
+      // Only where the doc is telling someone to TYPE something: inside backticks or a
+      // fenced block. "deckhand can read repos" is English, not an instruction, and a check
+      // that cannot tell the difference gets deleted rather than obeyed.
+      const code = [
+        ...[...body.matchAll(/`([^`\n]+)`/g)].map((m) => m[1]!),
+        // Shell blocks only. A fenced block is not automatically a command: README's
+        // architecture diagram contains the words "deckhand server (loopback only)".
+        ...[...body.matchAll(/```(?:sh|bash|console)\n([\s\S]*?)```/g)].map((m) => m[1]!),
+      ].join("\n");
+      for (const m of code.matchAll(/\bdeckhand ([a-z-]+)(?: ([a-z-]+))?/g)) {
+        const verb = m[1]!;
+        if (verb === "setup" || verbs.has(verb)) {
+          // A second word is only a subcommand for the verbs that take one.
+          const sub = m[2];
+          if (sub && ["token", "app", "env"].includes(verb) && !subs.has(sub) && !/^</.test(sub)) {
+            missing.push(`${name}: "deckhand ${verb} ${sub}"`);
+          }
+          continue;
+        }
+        missing.push(`${name}: "deckhand ${verb}"`);
+      }
+    }
+    assert.deepEqual([...new Set(missing)], [], "the docs tell people to run commands that do not exist");
+  });
+
   it("names no source file that does not exist", () => {
     // PLAN §4 described a layout that had drifted from the tree: janitor.ts,
     // scrcpy.ts, server/test/, fixtures/, scripts/ — five paths a new agent
