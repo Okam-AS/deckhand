@@ -347,12 +347,44 @@ export class AndroidManager {
     return res.stdout;
   }
 
-  async describe(serial: string): Promise<string> {
+  /**
+   * The accessibility tree, or an actionable error — never an empty string.
+   *
+   * Both adb exit codes used to be discarded, so a failed dump and a genuinely empty screen
+   * produced the same value: `""`. That reaches an agent through the `describe` tool as "this
+   * screen has nothing on it", which is a confident wrong answer rather than a failure, and it
+   * is the shape of bug this repo has now paid for four times.
+   *
+   * And it fails routinely: `uiautomator dump` refuses while the window is still animating
+   * ("could not get idle state"), which is the normal condition for the first seconds after a
+   * boot, an app launch, or any navigation. So poll — same reasoning as the screencap deadline
+   * next door, where one attempt with a short timeout declared healthy devices dead.
+   *
+   * Found by the Android leg of `doctor --device-only` on its first run against real hardware.
+   */
+  async describe(serial: string, timeoutMs = 15_000): Promise<string> {
     // Dump to a temp file on device, then read it back (`/dev/tty` truncates).
     const path = "/sdcard/deckhand-ui.xml";
-    await this.adb(serial, ["shell", "uiautomator", "dump", path]);
-    const res = await this.adb(serial, ["shell", "cat", path]);
-    return compactUiAutomatorXml(res.stdout.toString());
+    const deadline = Date.now() + timeoutMs;
+    let last = "no attempt completed";
+    for (let attempt = 1; ; attempt++) {
+      const dump = await this.adb(serial, ["shell", "uiautomator", "dump", path]);
+      // uiautomator reports its failures on stdout as often as stderr, and exits 0 while doing
+      // it — so the text is load-bearing, not just the code.
+      const said = `${dump.stdout.toString()}${dump.stderr}`.trim();
+      if (dump.code === 0 && !/error|could not get idle/i.test(said)) {
+        const res = await this.adb(serial, ["shell", "cat", path]);
+        const tree = res.code === 0 ? compactUiAutomatorXml(res.stdout.toString()) : "";
+        if (tree) return tree;
+        last = res.code === 0 ? "dump succeeded but the file read back empty" : `cat exited ${res.code}`;
+      } else {
+        last = said.slice(0, 160) || `uiautomator dump exited ${dump.code}`;
+      }
+      if (Date.now() >= deadline) {
+        throw new AndroidError(`no accessibility tree from ${serial} after ${attempt} attempt(s): ${last}`);
+      }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
   }
 
   /** Locate the built debug APK in a worktree (for install-many), or null. */
