@@ -254,10 +254,8 @@ describe("a preview with no devices yet", () => {
     // start: worktree prep and the shared build both happen before `simctl create`. Someone
     // who has just typed a PIN saw a blank page for a minute with no sign anything had begun.
     const stage = computeStage([{ shareId: "s1", repo: "acme/app", ref: "main", self: true, devices: [] }], {
-      width: 1400,
       isMobile: false,
-      choices: {},
-      visible: new Set(),
+      viewportWidth: 1400,
     });
     assert.deepEqual(stage.groups, [], "nothing to render — so App.tsx has to say so itself");
   });
