@@ -97,9 +97,22 @@ const SAMPLE = 12;
  * Naming what IS in the tree settles it in one line: if the agent can see its target
  * on screen and this list does not contain it, the tree is the unreliable part.
  */
-export function selectorMissHint(tree: unknown): string {
+export function selectorMissHint(tree: unknown, searched?: string): string {
   const labels = treeLabels(tree);
   const ids = treeIds(tree);
+  // The string is right there and the selector still missed. Measured against a live
+  // daemon: `query {text:"Filter examples"}` MATCHES, while `assert` and `waitFor` on the
+  // identical selector fail — because that string is a TextField's `value`, and those two
+  // match `label` only. Same selector, three verbs, two answers. Without naming it, the
+  // agent reads "not found" next to a list containing exactly what it asked for and
+  // concludes the screen is broken.
+  if (searched && labels.some((l) => l === searched || l.includes(searched))) {
+    return (
+      `"${searched}" IS present on this screen — but \`assert\`/\`waitFor\` match an element's LABEL, ` +
+      "while text that lives in a field's value or placeholder only matches `query`. " +
+      "Either use `query` for this one, or select the element by its id instead."
+    );
+  }
   if (labels.length === 0 && ids.length === 0) {
     return "Nothing is readable in the accessibility tree for this screen — iOS degrades the capture on complex screens (maps especially). Selectors cannot work here: take a screenshot and read it.";
   }
