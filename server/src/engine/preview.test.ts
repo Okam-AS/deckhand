@@ -1615,6 +1615,39 @@ describe("PreviewEngine idle sweep", () => {
     );
   });
 
+  it("says so when an idempotent start could not add the devices asked for", async () => {
+    // findReusable matches app + source + ref and ignores the device list — right for the
+    // daily loop, wrong for a genuinely different request. Asking for iOS + Android while an
+    // iOS preview was live returned alreadyRunning:true and silently dropped Android. The
+    // caller saw success and no Android, and the only way anyone found to get it was
+    // stop_preview + start again, which reboots the simulators that were working.
+    const h = makeEngine();
+    h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+
+    const again = h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "ios" }, { platform: "android" }],
+      access: "public",
+    });
+    assert.equal(again.alreadyRunning, true, "still the same preview — we do not mint a second");
+    assert.deepEqual(again.notAdded, ["android"], "and it admits what it did not do");
+    assert.match(again.nextStep ?? "", /stop_preview/, "with the way to get it");
+    assert.match(again.nextStep ?? "", /reboots/, "and the cost, so the agent warns the user first");
+  });
+
+  it("stays quiet when the request is already satisfied", () => {
+    // The daily loop must not grow a warning it does not need.
+    const h = makeEngine();
+    h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    const again = h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    assert.equal(again.alreadyRunning, true);
+    assert.equal(again.notAdded, undefined);
+    assert.equal(again.nextStep, undefined);
+  });
+
   it("forgets an unregistered app's share id and PIN hash", () => {
     // Both are keyed by app id and were written on first preview but never removed, so
     // state.json grew an entry per app that ever existed — including the scrypt hash of a PIN
