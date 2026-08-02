@@ -324,14 +324,14 @@ describe("the viewer never stops asking", () => {
 });
 
 describe("what the info panel says a preview is built from", () => {
-  it("shows the branch for a local preview instead of throwing it away", () => {
+  it("shows the branch for a local preview, and nothing else", () => {
     // The bug as seen: the panel read "local working copy" while the share state behind it
-    // carried ref "feature/review". Deckhand had looked the branch up at start, persisted
-    // it and shipped it — the viewer just did not render it.
-    const l = sourceLabel("local", "feature/review");
-    assert.match(l.value, /feature\/review/, "the branch is the thing the user asked for");
-    assert.match(l.value, /working copy/, "and the qualifier still has to survive");
-    assert.equal(l.key, "Branch");
+    // carried ref "feature/review" — fetched, persisted, transmitted, then discarded.
+    //
+    // A first fix appended "· working copy", which was wrong for a quieter reason: every
+    // local preview IS a working copy, so the suffix was constant. A constant carries no
+    // information and costs a line's width on a phone.
+    assert.deepEqual(sourceLabel("local", "feature/review"), { key: "Branch", value: "feature/review" });
   });
 
   it("keeps the old label when there is genuinely no branch to report", () => {
@@ -349,9 +349,10 @@ describe("what the info panel says a preview is built from", () => {
     assert.deepEqual(sourceLabel("git", undefined), { key: "Branch", value: "—" });
   });
 
-  it("never claims a git ref is a working copy", () => {
-    // The distinction is the point: one is a pushed ref anyone can reproduce, the other is
-    // this machine's uncommitted state.
-    assert.ok(!/working copy/.test(sourceLabel("git", "feature/review").value));
+  it("says the same thing for a git ref and a local one, because the branch is the answer", () => {
+    // Both were "Branch: feature/review" the moment the constant suffix came off. Keeping
+    // this asserted rather than implied: if a qualifier comes back it has to be one that
+    // VARIES — a dirty-tree marker, say — and that will fail here and be looked at.
+    assert.deepEqual(sourceLabel("git", "feature/review"), sourceLabel("local", "feature/review"));
   });
 });
