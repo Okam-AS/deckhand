@@ -391,6 +391,21 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     if (isResult(resolved)) return resolved;
     const id = engine.previewIdForApp(resolved.id);
     if (!id) {
+      // A pane put on a page with `alongside` runs under a synthetic app id, so
+      // this lookup structurally misses it — and the old hint ("call start_preview")
+      // then sent the agent to boot a SECOND set of simulators under a second
+      // share link, invisible in the viewer, which streams the pane. Hand over the
+      // pane's previewId instead: panes ARE drivable (see previewOwnedByPrincipal).
+      const panes = engine.referencePanesFor(resolved);
+      if (panes.length) {
+        return fail(
+          "app_is_a_pane",
+          `app "${args.app}" has no preview of its own — it is running as an extra pane on another page`,
+          `Drive it by previewId, NOT by app id: ${panes
+            .map((p) => `"${p.previewId}"${p.onPreviewId ? ` (pane on page ${p.onPreviewId})` : ""}`)
+            .join(", ")}. Do NOT call start_preview for "${args.app}" to get a handle: that boots a SECOND set of devices on a second link, and the page keeps streaming the pane.`,
+        );
+      }
       return fail(
         "no_preview",
         `no running preview for app "${args.app}"`,
@@ -559,6 +574,14 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           refs.push(booted);
         }
 
+        // Read BEFORE the boot: this call may itself be the one creating a pane of
+        // this app, and warning about a pane the caller just asked for is noise.
+        // The case that matters is the opposite one — a plain start_preview for an
+        // app already on someone's page as a pane. That is the duplicate: two sets
+        // of simulators, two links, and the page still streams the pane, so the
+        // devices the agent then drives are not the ones anyone is watching.
+        const priorPanes = refs.length ? [] : engine.referencePanesFor(resolved);
+
         const priorPin = engine.pinRecordForApp(resolved.id);
         engine.setAppPin(resolved.id, access === "pin" ? args.share.pin! : null);
         let result;
@@ -601,8 +624,24 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             : "";
         return ok({
           ...result,
-          ...(refs.length ? { alongside: refs.map((r) => r.reference) } : {}),
+          // WITH the previewId. It used to be stripped ("engine-internal"), which
+          // left the agent holding a pane it could see and not address: every
+          // by-app-id lookup misses a pane's synthetic id, so the only apparent
+          // way to get a handle was start_preview on the source app — a second set
+          // of simulators on a second link, while the page went on streaming the
+          // pane. The pane's own previewId is the whole fix; panes are drivable.
+          ...(refs.length
+            ? { alongside: refs.map((r) => ({ ...r.reference, previewId: r.previewId })) }
+            : {}),
+          ...(priorPanes.length && !result.alreadyRunning ? { duplicatesPane: priorPanes } : {}),
           nextStep:
+            // A duplicate of a pane goes ahead of everything: the agent is about to
+            // drive devices nobody is watching, and every later line reads as success.
+            (priorPanes.length && !result.alreadyRunning
+              ? `⚠ "${resolved.id}" was ALREADY running as an extra pane (previewId ${priorPanes
+                  .map((p) => `"${p.previewId}"`)
+                  .join(", ")}${priorPanes[0]?.onPreviewId ? `, on page ${priorPanes[0].onPreviewId}` : ""}), and this call has now booted a SECOND set of devices on a SEPARATE link. The comparison page still streams the pane, not these devices — so anything you do here is invisible to whoever is watching it. Unless you deliberately wanted a standalone preview: stop_preview on "${result.previewId}" and drive the pane's previewId instead. `
+              : "") +
             // The mismatch goes FIRST, before the reassuring "already running" line. The
             // engine reports platforms it could not add (it cannot add a device to a live
             // preview); burying that under "same viewer link" is how a request for Android
@@ -620,7 +659,9 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
               ? `Give the user this link NOW: ${result.url} (stable for this app) — relay it before any other work; then poll preview_status for readiness. It's a live web dev server — saving files hot-reloads the page automatically, so after editing there is nothing to call. Use restart_preview only after dependency/config changes (new packages, vite.config edits) or if the server looks stuck. Deckhand runs this working copy in place and only reads/runs it — never commit or push any local changes deckhand caused (dev-server caches, a stray lockfile); its git state is not yours to write. ${linkFooter(result.url)}${webHostWarning}`
               : loopNextStep(source, result.url, args.ref ?? resolved.defaultBranch)) +
             (refs.length
-              ? ` It shows ${refs.length + 1} sources side by side under this one link. Drive any pane with describe/ui/screenshot, judge each item yourself, and record the verdict with parity_set (done / adjusted / regression). The checklist is local to this session — keep the project plan in your task tracker.`
+              ? ` It shows ${refs.length + 1} sources side by side under this one link. Drive a pane with describe/ui/screenshot using ITS OWN previewId from \`alongside\` — ${refs
+                  .map((r) => `"${r.previewId}"`)
+                  .join(", ")} — with the same deviceIds (ios-0, android-1). A pane is NOT reachable by the source app's id: preview_status/parity_status/ui by that app id will say it isn't running, because a pane runs under a synthetic id. Never call start_preview on the source app to get a handle — that boots a second set of devices on a second link and the page keeps streaming the pane; re-read the pane ids with parity_status on THIS previewId instead. Judge each item yourself and record the verdict with parity_set (done / adjusted / regression). The checklist is local to this session — keep the project plan in your task tracker.`
               : "") +
             protectionNote,
         });
