@@ -38,6 +38,12 @@ const DEV_MENU_COMPACT = {
         children: [
           { label: "Toggle element inspector", role: "Button" },
           { label: "Copy system info", role: "Button" },
+          // Captured from the device: in the compact format the row carries a sibling
+          // StaticText, while the switch itself is still an unlabelled checkbox.
+          { label: "Fast refresh", role: "StaticText", frame: { x: 60, y: 810, width: 120, height: 20 } },
+          { label: null, value: "1", role: "CheckBox", frame: { x: 250, y: 810, width: 50, height: 30 } },
+          { label: "Tools button", role: "StaticText", frame: { x: 60, y: 868, width: 120, height: 20 } },
+          { label: null, value: "1", role: "CheckBox", frame: { x: 250, y: 868, width: 50, height: 30 } },
         ],
       },
     ],
@@ -95,6 +101,42 @@ describe("spotting the dev menu", () => {
     }
   });
 
+  it("describes the format that is actually the default, not the one it was written against", () => {
+    // #57 said the toggle has "NO accessibility label". True of the verbose
+    // /accessibility-tree response it was written against — and false by the end of the same
+    // day, because the switch to the compact snapshot landed alongside it and that shape
+    // carries a sibling StaticText "Tools button". Two PRs from one session that were never
+    // read against each other.
+    //
+    // This test is the tie: the fixture is the compact shape, and the claim has to hold in it.
+    const compactLabels: string[] = [];
+    const walk = (n: unknown): void => {
+      if (Array.isArray(n)) return n.forEach(walk);
+      if (!n || typeof n !== "object") return;
+      const node = n as { label?: unknown; role?: unknown; children?: unknown };
+      if (typeof node.label === "string") compactLabels.push(node.label);
+      walk(node.children);
+    };
+    walk(DEV_MENU_COMPACT.snapshot.roots);
+    assert.ok(compactLabels.includes("Tools button"), "fixture must reflect the row being labelled here");
+
+    const hint = DEV_MENU_RECOVERY;
+    assert.ok(
+      !/It has NO accessibility label/.test(hint),
+      "the flat claim is false in the compact format — the ROW is labelled",
+    );
+    assert.match(hint, /UNLABELLED checkbox/, "what is unlabelled is the switch itself, and that is still true");
+    assert.match(hint, /hits the text, not the switch/, "so it must say why selecting by text fails anyway");
+    assert.match(hint, /x≈0\.67/, "and give the aim that works");
+  });
+
+  it("warns that a system alert sits above the dev menu", () => {
+    // Measured: with a location permission alert up, scrolling the dev menu did nothing at
+    // all. An agent that does not know this reads it as the menu being unresponsive — which
+    // is exactly the false "the dialog is broken" conclusion this whole area exists to stop.
+    assert.match(DEV_MENU_RECOVERY, /system permission alert sits ABOVE/i);
+  });
+
   it("hands over instructions the agent can actually follow", () => {
     const hint = devMenuHint(DEV_MENU_AX_TREE).devMenu ?? "";
     assert.equal(hint, DEV_MENU_RECOVERY);
@@ -103,7 +145,7 @@ describe("spotting the dev menu", () => {
     assert.match(hint, /Tools button/, "it must name the switch");
     assert.match(hint, /Fast refresh/, "and where to find it, since it has no label");
     assert.match(hint, /scroll DOWN/i, "the switch is below the fold");
-    assert.match(hint, /NO accessibility label/i, "why selecting it by text cannot work");
+    assert.match(hint, /hits the text, not the switch/i, "why selecting it by text cannot work");
     assert.match(hint, /not.*app bug/i, "and what NOT to conclude");
   });
 });

@@ -35,17 +35,28 @@ const MIN_MARKERS = 2;
  * The way out, written as steps rather than description because the agent that
  * needs it is mid-loop and will act on the first line it reads.
  *
- * The "no label" detail is the part no agent can discover: the toggle serializes
- * as an unlabelled AXCheckBox whose AXValue is "1" (on) or "0" (off), so it
- * cannot be selected by text at all — it has to be found by its position under
- * "Fast refresh". Verified on iOS 26.5 against Expo runtime 4.0.0.
+ * Every fact here was measured on the device, twice — and the second pass
+ * corrected the first. The original text said the toggle has "NO accessibility
+ * label", which was true of the verbose /accessibility-tree response this was
+ * written against. The switch to the compact describe snapshot landed the same
+ * day and changed it: the row now carries a sibling StaticText "Tools button".
+ *
+ * The CHECKBOX still has no label of its own, so `tapElement {text:"Tools
+ * button"}` hits the text and not the switch. What works is to read the row's y
+ * from that text and tap the checkbox beside it — measured at x≈0.67 with the
+ * text at x≈0.28. Its value is "1" when on and "0" when off, which is also the
+ * only way to tell whether the tap landed.
+ *
+ * Verified on iOS 26.5, Expo runtime 4.0.0.
  */
 export const DEV_MENU_RECOVERY =
   'The Expo dev menu is on screen — it is NOT part of the app, and its floating "Tools button" sits over the top-right corner where app controls usually live, swallowing taps meant for them. ' +
   "If a tap there did something unexpected, that is why, and the app is probably fine. " +
-  'Turn the button off so it stops intercepting: scroll DOWN inside the dev menu to the TOOLS section, find "Tools button" directly below "Fast refresh", and switch it off. ' +
-  'It has NO accessibility label — it is an unlabelled checkbox whose value is "1" when on and "0" when off, so you cannot select it by text; target it by its position under "Fast refresh". ' +
+  'Turn the button off so it stops intercepting: scroll DOWN inside the dev menu to the TOOLS section, to the row labelled "Tools button" just below "Fast refresh". ' +
+  'The switch itself is an UNLABELLED checkbox, so `tapElement {text:"Tools button"}` hits the text, not the switch — read that row\'s y from the tree and tap the checkbox to its right (measured at x≈0.67, with the label at x≈0.28). ' +
+  'Its value reads "1" when on and "0" when off, which is how you confirm the tap landed. ' +
   'Then close the menu with the "Close" button and retry the action that failed. ' +
+  'A system permission alert sits ABOVE the dev menu and blocks it, so dismiss that first if one is up. ' +
   "Report any dev-build overlay you had to dismiss, but do not report it as an app bug.";
 
 interface Node {
