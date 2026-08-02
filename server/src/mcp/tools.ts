@@ -962,7 +962,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Drive the device UI",
       description:
-        "Perform ONE UI action to drive the app end-to-end: tap {x,y} (0..1 normalized), tapElement {selector}, type {text}, key {name: enter|backspace|tab|escape|up|down|left|right}, button {name}, home, back, dismissKeyboard, sleep {ms}, swipe, gesture {preset: scroll-up|scroll-down|scroll-left|scroll-right}, scrollUntilVisible {selector}, toggleAppearance, openUrl {url}, and the verifiers waitFor/waitForNot/assert/assertNot/query {selector}. Prefer tapElement + waitFor/assert over raw coordinates: a coordinate read off a screenshot is the single most common way an agent taps the wrong thing. To reach something off-screen use scrollUntilVisible rather than a scroll-and-screenshot loop; to go back use `back` rather than guessing an edge-swipe; if the keyboard or a text-selection callout is covering what you need, dismissKeyboard. Note: iOS can't HID-type non-US characters — non-ASCII text is pasted via the clipboard (focus the field first). Needs the SimDeck testing backend.",
+        "Perform ONE UI action to drive the app end-to-end: tap {x,y} (0..1 normalized), tapElement {selector}, type {text}, key {name: enter|backspace|tab|escape|up|down|left|right}, button {name}, home, back, dismissKeyboard, sleep {ms}, swipe, gesture {preset: scroll-up|scroll-down|scroll-left|scroll-right}, scrollUntilVisible {selector}, toggleAppearance, openUrl {url}, and the verifiers waitFor/waitForNot/assert/assertNot/query {selector}. Selector semantics differ and it costs a timeout to learn: `text` matches an element's LABEL for waitFor/assert, while text living in a field's value or placeholder matches only `query` — prefer `id` when there is one. Prefer tapElement + waitFor/assert over raw coordinates: a coordinate read off a screenshot is the single most common way an agent taps the wrong thing. To reach something off-screen use scrollUntilVisible rather than a scroll-and-screenshot loop; to go back use `back` rather than guessing an edge-swipe; if the keyboard or a text-selection callout is covering what you need, dismissKeyboard. Note: iOS can't HID-type non-US characters — non-ASCII text is pasted via the clipboard (focus the field first). Needs the SimDeck testing backend.",
       inputSchema: {
         previewId: z.string(),
         deviceId: z.string(),
@@ -989,7 +989,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           // tree, so it can say which — and the miss has already cost the caller its timeout.
           let hint: string | undefined;
           try {
-            hint = selectorMissHint(await engine.describe(args.previewId, args.deviceId, {}));
+            const wanted = "selector" in action ? action.selector.text : undefined;
+            hint = selectorMissHint(await engine.describe(args.previewId, args.deviceId, {}), wanted);
           } catch {
             /* the diagnosis must never replace the real error */
           }

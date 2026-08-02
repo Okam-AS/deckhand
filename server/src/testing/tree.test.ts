@@ -82,6 +82,26 @@ describe("telling an agent why its selector missed", () => {
     assert.match(hint, /screenshot/i, "and name the way out");
   });
 
+  it("explains the selector-semantics trap when the string is right there", () => {
+    // Measured against a live daemon: `query {text:"Filter examples"}` MATCHES while
+    // `assert` and `waitFor` on the identical selector FAIL — that string is a TextField's
+    // value, and those two match `label` only. Same selector, three verbs, two answers, and
+    // 6.2s spent learning it. Without naming it, the agent reads "not found" beside a list
+    // that plainly contains what it asked for and concludes the screen is broken.
+    const tree = { roots: [{ children: [{ role: "TextField", value: "Filter examples" }, { label: "Examples" }] }] };
+    const hint = selectorMissHint(tree, "Filter examples");
+    assert.match(hint, /IS present/, "it must say the string is there");
+    assert.match(hint, /LABEL/, "and which field the verb actually matches");
+    assert.match(hint, /query/, "and which verb would have worked");
+  });
+
+  it("does not claim presence for a string that genuinely is not there", () => {
+    const tree = { roots: [{ children: [{ label: "Examples" }] }] };
+    const hint = selectorMissHint(tree, "Design system");
+    assert.ok(!/IS present/.test(hint), "a real miss must stay a real miss");
+    assert.match(hint, /Examples/, "and still name what the screen does hold");
+  });
+
   it("says something different when the capture is empty rather than merely missing one thing", () => {
     // iOS degrades to nothing on map-heavy screens. "0 labels" and "20 labels, none of them
     // yours" call for the same next move but for different reasons — say which it is.
