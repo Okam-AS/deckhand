@@ -26,8 +26,21 @@ const TTL_MS = 30 * 60_000;
 const GIT_TIMEOUT_MS = 10_000;
 
 export interface UpdateStatus {
-  /** Short sha of the running checkout. */
+  /**
+   * Short sha of the code THIS PROCESS is running — captured the first time the version is
+   * measured, which is at boot, before anyone can pull under it.
+   *
+   * Not the same as the checkout's HEAD, and conflating them made the notice useless in the
+   * one case that matters most. The server runs from source under tsx and loads its modules
+   * once; `git pull` then updates the working tree while the process keeps running the old
+   * code. Comparing the checkout to origin/main says "up to date" and the process is stale —
+   * silently, for as long as nobody restarts it.
+   */
   current: string;
+  /** Short sha the checkout is on NOW. Differs from `current` after a pull with no restart. */
+  checkout: string;
+  /** True when the working tree has moved since this process loaded its code. */
+  restartNeeded: boolean;
   /** `git describe` of the running checkout — a tag when there is one. */
   describe: string;
   /** Short sha of `origin/main`, or null when it could not be read. */
@@ -63,6 +76,8 @@ export function repoRoot(): string | null {
   return null;
 }
 
+/** The commit this process loaded its code from. Set once, at the first measurement. */
+let runningSha: string | null = null;
 let cached: UpdateStatus | null = null;
 let inFlight: Promise<UpdateStatus | null> | null = null;
 
@@ -92,21 +107,33 @@ async function measure(): Promise<UpdateStatus | null> {
   ]);
   if (!sha) return null;
 
+  // The sha this PROCESS is running: whatever HEAD was the first time we looked, which is at
+  // boot. Everything after that is the checkout moving, not the code moving.
+  runningSha ??= sha;
   const remote = await git(["ls-remote", "origin", "refs/heads/main"], root);
   const latest = remote ? (remote.split(/\s+/)[0] ?? "").slice(0, sha.length) || null : null;
   const onMain = branch === "main";
   const dirty = Boolean(status);
+  const restartNeeded = runningSha !== sha;
   // Only nag when this checkout is actually tracking main. A developer sitting on a feature
   // branch is not "out of date", and a tool that says so on every call gets tuned out —
   // which would cost us the one message that matters when it is real.
   const updateAvailable = onMain && !dirty && Boolean(latest) && latest !== sha;
 
   let note: string | undefined;
-  if (updateAvailable) {
+  // Restart first: it is the cheaper action, and the code is already on the machine. Telling
+  // someone to pull when the pull already happened is how they conclude the notice is noise.
+  if (restartNeeded) {
+    note =
+      `deckhand is RUNNING ${runningSha} but the checkout is on ${sha} — someone pulled and did not ` +
+      `restart, so none of the newer code is live. Ask the user: "deckhand has been updated on disk ` +
+      `but is still running the old code — restart it?" Restarting tears down every booted preview, ` +
+      `so it is their call. The command is \`launchctl kickstart -k gui/$(id -u)/no.deckhand.server\`.`;
+  } else if (updateAvailable) {
     note =
       `deckhand is not running the latest code (running ${sha}, origin/main is ${latest}). ` +
-      `Ask the user before updating: \`git pull\` then restarting deckhand tears down every booted ` +
-      `preview on the machine, so it is their call, not yours.`;
+      `Ask the user: "there is a newer deckhand — pull and restart?" Both steps are needed, and ` +
+      `restarting tears down every booted preview, so it is their call, not yours.`;
   } else if (onMain && dirty) {
     note = `deckhand is running main with uncommitted local changes (${sha} + edits), so its code is not any published commit.`;
   } else if (!onMain && branch) {
@@ -114,7 +141,9 @@ async function measure(): Promise<UpdateStatus | null> {
   }
 
   return {
-    current: sha,
+    current: runningSha,
+    checkout: sha,
+    restartNeeded,
     describe: described ?? sha,
     latest,
     branch: branch === "HEAD" ? null : branch,
@@ -157,4 +186,5 @@ export function refreshVersion(): Promise<UpdateStatus | null> {
 export function resetVersionCache(): void {
   cached = null;
   inFlight = null;
+  runningSha = null;
 }
