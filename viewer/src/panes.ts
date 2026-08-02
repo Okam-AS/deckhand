@@ -76,13 +76,6 @@ export interface StageOptions {
   choices?: Record<string, string>;
   /** Mobile shows exactly one device; this is the one. */
   focusKey?: string;
-  /**
-   * Devices the user has switched off. Only meaningful with a single source,
-   * where every device is on screen by default — with several sources each one
-   * already shows just one device, and `choices` is how you change which.
-   * Never empties the stage: the last visible device can't be switched off.
-   */
-  hiddenKeys?: readonly string[];
 }
 
 export function paneKey(shareId: string, deviceId: string): string {
@@ -134,28 +127,27 @@ export function computeStage(sharePanes: SharePane[], opts: StageOptions): Stage
   const all = groups.flatMap((g) => g.panes);
   const multiSource = groups.length > 1;
 
-  // One device on screen when the columns cannot all be a usable width. A phone
-  // is the extreme case of that, not a separate mode — and the picker switches
-  // between sources, so nothing becomes unreachable, it just takes a click.
+  // ONE rule, for every shape of page: show everything that fits at a usable
+  // width, otherwise show one and let the picker switch.
+  //
+  // It used to count GROUPS, so a single source "fit" no matter how many devices
+  // it had — and that page then needed its own controls (a Side-by-side/Focus
+  // toggle and a switch per device) that the multi-source page did not. Two
+  // layouts for the same question, and the one-repo case was the odd one out for
+  // no reason a user could see. Counting what will actually be on screen makes
+  // the difference disappear.
   const width = opts.viewportWidth ?? Infinity;
-  const columnsFit = groups.length * MIN_PANE_WIDTH <= width;
-  if (opts.isMobile || !columnsFit) {
+  // Several sources → one device each: the comparison is BETWEEN the sources, and
+  // two apps times two platforms is four phones too small to judge anything by.
+  const wanted = multiSource ? groups.length : all.length;
+  const fits = wanted * MIN_PANE_WIDTH <= width;
+
+  if (opts.isMobile || !fits) {
     const focused = opts.focusKey && all.some((p) => p.key === opts.focusKey) ? opts.focusKey : (groups[0]?.activeKey ?? "");
     return { groups, panes: all, visible: new Set(focused ? [focused] : []), multiSource };
   }
-
-  // Several sources → one device each, because the comparison is between the
-  // sources: two apps times two platforms is four phones on screen, each too
-  // small to judge anything by.
   if (multiSource) return { groups, panes: all, visible: new Set(groups.map((g) => g.activeKey)), multiSource };
-
-  // One source → spend the screen on its devices, so an app's iOS and Android
-  // sit side by side as they always have, minus any the user switched off.
-  const off = new Set(opts.hiddenKeys ?? []);
-  const visible = new Set(all.filter((p) => !off.has(p.key)).map((p) => p.key));
-  // Never leave an empty stage — switching the last device off is a no-op.
-  if (visible.size === 0 && all[0]) visible.add(all[0].key);
-  return { groups, panes: all, visible, multiSource };
+  return { groups, panes: all, visible: new Set(all.map((p) => p.key)), multiSource };
 }
 
 /**
