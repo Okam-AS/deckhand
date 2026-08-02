@@ -351,6 +351,13 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
    * (waitFor/assert/query). A bare `assert` moves nothing on screen, so it is not the thing
    * the user is left guessing about.
    */
+  /**
+   * The actions that make a claim about the screen. A step reported `passed` right after one
+   * of these FAILED is the shape of a verdict with no evidence behind it — see
+   * `unevidencedPass`. `query` is absent: it returns matches, it does not assert anything.
+   */
+  const VERIFIER_ACTIONS = new Set(["waitFor", "waitForNot", "assert", "assertNot"]);
+
   // `sleep` and the waitForNot/assertNot verifiers are absent on purpose: they move nothing
   // on screen, so they are not what the user is being left in the dark about.
   const DRIVING_UI_ACTIONS = new Set([
@@ -965,8 +972,20 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       audited("ui", args, async () => {
         const denied = previewOwnedByPrincipal(args.previewId);
         if (denied) return denied;
-        const result = await engine.ui(args.previewId, args.deviceId, args.action as UiAction);
-        return ok({ result, ...testRunNudge(args.previewId, (args.action as UiAction).type) });
+        const action = args.action as UiAction;
+        // A failed verifier throws, and `audited` turns it into an error result — so the
+        // failure has to be noted HERE or the fact is lost before update_test_run can use it.
+        try {
+          const result = await engine.ui(args.previewId, args.deviceId, action);
+          if (VERIFIER_ACTIONS.has(action.type)) engine.noteVerification(args.previewId, true, action.type);
+          return ok({ result, ...testRunNudge(args.previewId, action.type) });
+        } catch (e) {
+          if (VERIFIER_ACTIONS.has(action.type)) {
+            const sel = "selector" in action ? JSON.stringify(action.selector) : undefined;
+            engine.noteVerification(args.previewId, false, action.type, sel);
+          }
+          throw e;
+        }
       }),
   );
 
@@ -1134,6 +1153,22 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         const c = engine.testRunCounts(id);
         const left = c ? c.pending + c.running : 0;
         const notes: string[] = [];
+        // A pass claimed straight after a verifier that did NOT hold. Observed: an agent ran
+        // `waitFor {text:"Design system"}`, got a failure after 9.5s, and marked the step
+        // passed anyway. The text was plainly on screen — that screen's rows simply are not
+        // in the accessibility tree — so the CONCLUSION was right and the evidence was
+        // missing, which is the hardest version of this to notice.
+        //
+        // A warning, never a refusal: verifying by screenshot is legitimate and on some
+        // screens it is the only thing that works. What is not legitimate is doing neither.
+        if (args.step?.status === "passed") {
+          const failed = engine.failedVerification(id);
+          if (failed) {
+            notes.push(
+              `Your last check — \`${failed.action}\`${failed.selector ? ` ${failed.selector}` : ""} — FAILED, and you have marked a step passed since. If you confirmed it another way (a screenshot you actually looked at), say so in the detail. If you did not, this verdict has nothing behind it: mark it failed, or check again.`,
+            );
+          }
+        }
         if (left > 0) {
           notes.push(
             `${left} of ${c!.total} steps are still unmarked. Mark each one passed or failed as you check it — a step left pending renders in the viewer as never-run.` +

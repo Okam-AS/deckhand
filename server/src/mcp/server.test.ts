@@ -93,7 +93,13 @@ function fakeEngine(): PreviewEngine {
     secretsEnv: () => ({}),
     simdeck: {
       describe: async () => ({ source: "native-ax", nodes: [{ role: "Button", label: "Continue" }] }),
-      action: async () => ({ ok: true }),
+      // A verifier that could never fail meant no test could reach the failure path at all.
+      // SimDeck answers a selector it cannot match by throwing, so this does too.
+      action: async (_t: unknown, a: { type?: string; selector?: { text?: string } }) => {
+        const verifier = a?.type === "waitFor" || a?.type === "assert" || a?.type === "waitForNot" || a?.type === "assertNot";
+        if (verifier && a?.selector?.text === "nope") throw new Error("No accessibility element matched.");
+        return { ok: true };
+      },
     } as unknown as PreviewEngineDeps["simdeck"],
   };
   return new PreviewEngine(deps);
@@ -1052,6 +1058,44 @@ describe("agent-driven testing tools (describe/ui + test runs)", () => {
 
     const restarted = parse(await admin.callTool({ name: "restart_preview", arguments: { previewId } }));
     assert.ok(carriesFooter(restarted.nextStep), "restart_preview must carry it");
+    await admin.close();
+  });
+
+  it("questions a step marked passed right after a check that failed", async () => {
+    // Exactly what I did, driving this app: `waitFor {text:"Design system"}` failed after
+    // 9.5s, and I marked the step passed anyway. The text WAS on screen — that screen's rows
+    // are simply absent from the accessibility tree — so the conclusion held and the evidence
+    // did not, which is the hardest version of this to catch by reading the transcript.
+    const admin = await client(ADMIN);
+    const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
+    const previewId = started.previewId as string;
+    const deviceId = "ios-0";
+    await admin.callTool({ name: "start_test_run", arguments: { previewId, title: "Tabs", steps: ["One", "Two"] } });
+
+    // A verifier that holds leaves nothing to warn about.
+    await admin.callTool({ name: "ui", arguments: { previewId, deviceId, action: { type: "assert", selector: { text: "ok" } } } });
+    const clean = parse(await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 1, status: "passed" } } }));
+    assert.ok(!/FAILED/.test(String(clean.nextStep ?? "")), "a passing check must not be questioned");
+
+    // Now the real shape: a verifier that does not hold, then a pass.
+    const failing = parse(
+      await admin.callTool({ name: "ui", arguments: { previewId, deviceId, action: { type: "waitFor", selector: { text: "nope" } } } }),
+    );
+    assert.equal(failing.ok, false, "fixture must actually fail the verifier");
+    const warned = parse(await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 2, status: "passed" } } }));
+    assert.equal(warned.ok, true, "it warns — it does not refuse; verifying by screenshot is legitimate");
+    assert.match(String(warned.nextStep), /waitFor/, "the warning must name the check that failed");
+    assert.match(String(warned.nextStep), /nothing behind it|say so in the detail/i, "and say what to do about it");
+
+    // Marking something FAILED after a failed check is coherent — no warning.
+    await admin.callTool({ name: "ui", arguments: { previewId, deviceId, action: { type: "waitFor", selector: { text: "nope" } } } });
+    const honest = parse(await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 2, status: "failed" } } }));
+    assert.ok(!/FAILED, and you have marked/.test(String(honest.nextStep ?? "")), "a failed verdict needs no warning");
+
+    // And a later verifier that DOES hold clears it, so the warning is not sticky.
+    await admin.callTool({ name: "ui", arguments: { previewId, deviceId, action: { type: "assert", selector: { text: "ok" } } } });
+    const cleared = parse(await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 2, status: "passed" } } }));
+    assert.ok(!/FAILED/.test(String(cleared.nextStep ?? "")), "a passing check since must clear the warning");
     await admin.close();
   });
 
