@@ -504,7 +504,14 @@ export function createShareRouter(deps: ShareDeps): express.Router {
         const p = deps.pinGate.issue(paired);
         if (p) setUnlock(paired, p);
       }
-      res.json({ ok: true });
+      // The state rides along with the unlock.
+      //
+      // The viewer used to POST /unlock, wait, then GET /state, wait again, and only then
+      // show anything — two sequential round trips for one action. On the server both are
+      // sub-millisecond; through the tunnel each costs ~230ms, so the pad sat there with all
+      // four dots filled for half a second minimum, showing nothing. The second call asked
+      // for something this handler already has.
+      res.json({ ok: true, state: deps.engine.shareState(shareId) });
     } else if (r.lockedMs > 0) {
       res.status(429).json({ ok: false, lockedMs: r.lockedMs });
     } else {

@@ -1621,3 +1621,20 @@ figcaption {
   font-family: var(--mono);
 }
 
+
+/* The pad is waiting on the network. The last digit fills the final dot and then nothing
+   happens for as long as the round trip takes — silence there reads as "it did not
+   register", and people press the button again. */
+.pin-dots.checking .pin-dot {
+  animation: pin-checking 1s ease-in-out infinite;
+}
+.pin-dots.checking .pin-dot:nth-child(2) { animation-delay: 0.12s; }
+.pin-dots.checking .pin-dot:nth-child(3) { animation-delay: 0.24s; }
+.pin-dots.checking .pin-dot:nth-child(4) { animation-delay: 0.36s; }
+.pin-dots.checking .pin-dot:nth-child(5) { animation-delay: 0.48s; }
+.pin-dots.checking .pin-dot:nth-child(6) { animation-delay: 0.60s; }
+
+@keyframes pin-checking {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}

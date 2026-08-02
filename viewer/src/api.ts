@@ -89,8 +89,12 @@ export function shareIdFromPath(): string | null {
   return m ? decodeURIComponent(m[1]!) : null;
 }
 
-/** Result of a PIN attempt: unlocked, wrong (retry), or locked out for `lockedMs`. */
-export type UnlockResult = { ok: true } | { ok: false; lockedMs: number };
+/**
+ * Result of a PIN attempt. On success it carries the share state, because the server has it
+ * already — fetching it in a second call cost another full round trip through the tunnel
+ * (~230ms) while the pad showed nothing.
+ */
+export type UnlockResult = { ok: true; state?: ShareState } | { ok: false; lockedMs: number };
 
 /** Submit a PIN; on success the server sets the unlock cookie (sent automatically thereafter). */
 export async function verifyPin(shareId: string, pin: string): Promise<UnlockResult> {
@@ -100,7 +104,10 @@ export async function verifyPin(shareId: string, pin: string): Promise<UnlockRes
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ pin }),
     });
-    if (res.ok) return { ok: true };
+    if (res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { state?: ShareState };
+      return { ok: true, ...(body.state ? { state: body.state } : {}) };
+    }
     const body = (await res.json().catch(() => ({}))) as { lockedMs?: number };
     return { ok: false, lockedMs: res.status === 429 ? (body.lockedMs ?? 30000) : 0 };
   } catch {
