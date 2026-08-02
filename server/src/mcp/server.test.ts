@@ -1090,43 +1090,59 @@ describe("agent-driven testing tools (describe/ui + test runs)", () => {
     await admin.close();
   });
 
-  it("questions a step marked passed right after a check that failed", async () => {
-    // Exactly what I did, driving this app: `waitFor {text:"Design system"}` failed after
-    // 9.5s, and I marked the step passed anyway. The text WAS on screen — that screen's rows
-    // are simply absent from the accessibility tree — so the conclusion held and the evidence
-    // did not, which is the hardest version of this to catch by reading the transcript.
+  it("REFUSES a pass claimed after a failed check, rather than warning about it", async () => {
+    // This was a warning first, and the warning did not work: the agent who wrote it went on
+    // to do exactly this three more times in the same session, twice while batching calls
+    // with the response discarded. An advisory in a payload nobody reads is not a guardrail.
+    //
+    // The defect underneath is the shape: the agent was the ONLY source of truth for a step's
+    // status while deckhand independently held the evidence.
     const admin = await client(ADMIN);
     const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
     const previewId = started.previewId as string;
     const deviceId = "ios-0";
-    await admin.callTool({ name: "start_test_run", arguments: { previewId, title: "Tabs", steps: ["One", "Two"] } });
+    await admin.callTool({ name: "start_test_run", arguments: { previewId, title: "Tabs", steps: ["One", "Two", "Three"] } });
 
-    // A verifier that holds leaves nothing to warn about.
+    // A verifier that holds leaves nothing to refuse.
     await admin.callTool({ name: "ui", arguments: { previewId, deviceId, action: { type: "assert", selector: { text: "ok" } } } });
-    const clean = parse(await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 1, status: "passed" } } }));
-    assert.ok(!/FAILED/.test(String(clean.nextStep ?? "")), "a passing check must not be questioned");
+    assert.equal(parse(await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 1, status: "passed" } } })).ok, true);
 
-    // Now the real shape: a verifier that does not hold, then a pass.
-    const failing = parse(
-      await admin.callTool({ name: "ui", arguments: { previewId, deviceId, action: { type: "waitFor", selector: { text: "nope" } } } }),
-    );
-    assert.equal(failing.ok, false, "fixture must actually fail the verifier");
-    const warned = parse(await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 2, status: "passed" } } }));
-    assert.equal(warned.ok, true, "it warns — it does not refuse; verifying by screenshot is legitimate");
-    assert.match(String(warned.nextStep), /waitFor/, "the warning must name the check that failed");
-    assert.match(String(warned.nextStep), /nothing behind it|say so in the detail/i, "and say what to do about it");
-
-    // Marking something FAILED after a failed check is coherent — no warning.
+    // Now the real shape.
     await admin.callTool({ name: "ui", arguments: { previewId, deviceId, action: { type: "waitFor", selector: { text: "nope" } } } });
-    const honest = parse(await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 2, status: "failed" } } }));
-    assert.ok(!/FAILED, and you have marked/.test(String(honest.nextStep ?? "")), "a failed verdict needs no warning");
+    const refused = parse(await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 2, status: "passed" } } }));
+    assert.equal(refused.ok, false, "it must REFUSE, not warn — a warning was already tried and ignored");
+    assert.equal((refused.error as { code: string }).code, "unevidenced_pass");
+    assert.match(String((refused.error as { hint: string }).hint), /evidence/, "and name the way through");
 
-    // And a later verifier that DOES hold clears it, so the warning is not sticky.
-    await admin.callTool({ name: "ui", arguments: { previewId, deviceId, action: { type: "assert", selector: { text: "ok" } } } });
-    const cleared = parse(await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 2, status: "passed" } } }));
-    assert.ok(!/FAILED/.test(String(cleared.nextStep ?? "")), "a passing check since must clear the warning");
+    // The step must be untouched — a refusal that half-applies is worse than none.
+    const counts = parse(await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 3, status: "failed" } } }));
+    assert.equal((counts.steps as { passed: number }).passed, 1, "the refused pass must not have landed");
+
+    // "failed" after a failed check is coherent and must still go through.
+    assert.equal(parse(await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 2, status: "failed" } } })).ok, true);
+
+    // And the escape hatch: claiming evidence works, and the claim reaches the user.
+    await admin.callTool({ name: "ui", arguments: { previewId, deviceId, action: { type: "waitFor", selector: { text: "nope" } } } });
+    const claimed = parse(
+      await admin.callTool({
+        name: "update_test_run",
+        arguments: { previewId, step: { n: 2, status: "passed", evidence: "screenshot: the six rows are visible" } },
+      }),
+    );
+    assert.equal(claimed.ok, true, "an explicit claim is legitimate — some screens have no other proof");
+    // Asserted against the SHARE state, which is literally what the viewer fetches — not
+    // preview_status, which the user never sees.
+    const shared = (await (await fetch(`${base}/s/${started.shareId}/state`)).json()) as {
+      testRun?: { steps: { detail?: string }[] };
+    };
+    assert.match(
+      String(shared.testRun?.steps.map((x) => x.detail).join(" ")),
+      /six rows are visible/,
+      "the evidence must reach the VIEWER — a field the user cannot see is a password, not an account of what was done",
+    );
     await admin.close();
   });
+
 
   it("refuses an update that updates nothing, instead of answering ok", async () => {
     // Observed on a real run: the agent put the step fields beside `previewId` instead of inside

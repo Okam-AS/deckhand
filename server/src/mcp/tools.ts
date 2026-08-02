@@ -981,7 +981,11 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           if (VERIFIER_ACTIONS.has(action.type)) engine.noteVerification(args.previewId, true, action.type);
           return ok({ result, ...testRunNudge(args.previewId, action.type) });
         } catch (e) {
-          if (!VERIFIER_ACTIONS.has(action.type) && action.type !== "tapElement") throw e;
+          // Any action carrying a selector can miss for the same two reasons, so the
+          // diagnosis keys on the SELECTOR rather than on a list of action names. The list
+          // version shipped without scrollUntilVisible — the one action that scrolls a whole
+          // list before giving up, and therefore the one where the diagnosis is worth most.
+          if (!("selector" in action)) throw e;
           const sel = "selector" in action ? JSON.stringify(action.selector) : undefined;
           if (VERIFIER_ACTIONS.has(action.type)) engine.noteVerification(args.previewId, false, action.type, sel);
           // "Not found" is the same answer for two situations that call for opposite next
@@ -1133,6 +1137,12 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             label: z.string().optional(),
             status: z.enum(["pending", "running", "passed", "failed"]),
             detail: z.string().optional().describe("optional note (e.g. what failed)"),
+            evidence: z
+              .string()
+              .optional()
+              .describe(
+                "how you confirmed this WITHOUT a passing waitFor/assert — required to pass a step while your last check is failing. Shown to the user, so name what you actually did (\"screenshot: the six rows are visible\").",
+              ),
           })
           .optional(),
         runStatus: z.enum(["running", "passed", "failed"]).optional(),
@@ -1157,29 +1167,47 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             'The step fields go INSIDE `step`, not at the top level: {"previewId":"…","step":{"n":2,"status":"passed","detail":"…"}}. Anything you put beside `previewId` is dropped by the schema.',
           );
         }
-        engine.updateTestRun(id, { step: args.step, runStatus: args.runStatus });
+        // A pass claimed straight after a verifier that did NOT hold.
+        //
+        // This was a warning first, and the warning did not work. In one session the agent
+        // that wrote it went on to do exactly this three more times, each time reading past
+        // the sentence — twice while batching calls with the response discarded. An advisory
+        // in a payload nobody reads is not a guardrail, it is a note to the transcript.
+        //
+        // The shape underneath is the real defect: the agent was the ONLY source of truth for
+        // a step's status while deckhand independently held the evidence. Two sources for one
+        // fact, and the one with the evidence had no say. So it gets one: this is refused.
+        //
+        // Verifying by screenshot stays legitimate — on some screens it is the only thing that
+        // works — but it has to be CLAIMED, with `evidence`, which makes it visible in the
+        // viewer and in the audit log instead of indistinguishable from having checked nothing.
+        if (args.step?.status === "passed") {
+          const failed = engine.failedVerification(id);
+          if (failed && !args.step.evidence) {
+            return fail(
+              "unevidenced_pass",
+              `your last check — ${failed.action}${failed.selector ? ` ${failed.selector}` : ""} — failed, so this step has nothing behind it`,
+              'Either check again until something holds, mark it "failed", or — if you confirmed it another way — say how with `evidence`, e.g. {"step":{"n":2,"status":"passed","evidence":"screenshot: the six rows are visible"}}. The evidence is shown to the user, so it has to be something you actually did.',
+            );
+          }
+        }
+        // Fold the claim into the detail the viewer already renders. A field the user cannot
+        // see would make `evidence` a password rather than an account of what was done.
+        const step = args.step
+          ? {
+              ...args.step,
+              ...(args.step.evidence
+                ? { detail: args.step.detail ? `${args.step.detail} — ${args.step.evidence}` : args.step.evidence }
+                : {}),
+            }
+          : undefined;
+        engine.updateTestRun(id, { step, runStatus: args.runStatus });
         // `{updated: true}` told the agent nothing. This tool is called throughout the run, so
         // it is the natural place to show what is still unmarked — the state that later turns
         // into a step rendered as never-run next to a verdict that ignored it.
         const c = engine.testRunCounts(id);
         const left = c ? c.pending + c.running : 0;
         const notes: string[] = [];
-        // A pass claimed straight after a verifier that did NOT hold. Observed: an agent ran
-        // `waitFor {text:"Design system"}`, got a failure after 9.5s, and marked the step
-        // passed anyway. The text was plainly on screen — that screen's rows simply are not
-        // in the accessibility tree — so the CONCLUSION was right and the evidence was
-        // missing, which is the hardest version of this to notice.
-        //
-        // A warning, never a refusal: verifying by screenshot is legitimate and on some
-        // screens it is the only thing that works. What is not legitimate is doing neither.
-        if (args.step?.status === "passed") {
-          const failed = engine.failedVerification(id);
-          if (failed) {
-            notes.push(
-              `Your last check — \`${failed.action}\`${failed.selector ? ` ${failed.selector}` : ""} — FAILED, and you have marked a step passed since. If you confirmed it another way (a screenshot you actually looked at), say so in the detail. If you did not, this verdict has nothing behind it: mark it failed, or check again.`,
-            );
-          }
-        }
         if (left > 0) {
           notes.push(
             `${left} of ${c!.total} steps are still unmarked. Mark each one passed or failed as you check it — a step left pending renders in the viewer as never-run.` +

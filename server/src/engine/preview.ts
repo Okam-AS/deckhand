@@ -2522,6 +2522,7 @@ export class PreviewEngine {
     if (!p?.testRun) return false;
     p.testRun = undefined;
     p.testRunNudged = false;
+    p.lastVerification = undefined;
     return true;
   }
 
@@ -2541,6 +2542,10 @@ export class PreviewEngine {
     // with no run open is a fresh lapse and deserves to be caught. Without this the nudge fires
     // at most once per preview, and everything after the first run goes unreported in silence.
     p.testRunNudged = false;
+    // Evidence belongs to the run it was gathered in. Carrying a failed verifier across
+    // would block the next run's first honest pass for something that happened before it
+    // existed — a guard that fires on the wrong run teaches agents to route around it.
+    p.lastVerification = undefined;
     return { runId: id };
   }
 
