@@ -77,7 +77,7 @@ describe("docs describe the code that exists", () => {
     // the `*_test_run` family had shapes the old pattern could never see, so a dead name in
     // any of them was unpoliced. The allow-list below is for the handful of snake_case terms
     // in these docs that are genuinely not tools.
-    const NOT_TOOLS = new Set(["deck_unlock", "github_auth_missing", "needs_access_choice", "node_modules", "web_needs_pin"]);
+    const NOT_TOOLS = new Set(["app_is_a_pane", "deck_unlock", "github_auth_missing", "needs_access_choice", "node_modules", "web_needs_pin"]);
     const ghosts = [PLAN, AGENTS]
       .flatMap((doc) => [...doc.matchAll(/`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`/g)])
       .map((m) => m[1]!)
