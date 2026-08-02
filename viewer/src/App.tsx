@@ -5,7 +5,7 @@ import { MobileChrome, type DockEntry } from "./MobileChrome.tsx";
 import { WebFrame } from "./WebFrame.tsx";
 import { PinGate } from "./PinGate.tsx";
 import { ProgressBar } from "./ProgressBar.tsx";
-import { computeStage, shortDeviceName, type StageGroup, stillUnlocked } from "./panes.ts";
+import { computeStage, pollDecision, shortDeviceName, type StageGroup, stillUnlocked } from "./panes.ts";
 import { fetchShareState, shareIdFromPath, type ShareState } from "./api.ts";
 import { useIsMobile } from "./useIsMobile.ts";
 
@@ -13,6 +13,7 @@ export function App() {
   const shareId = shareIdFromPath();
   const [state, setState] = useState<ShareState | null>(null);
   const [gone, setGone] = useState(false);
+  const [reconnecting, setReconnecting] = useState(false);
   const [unlocked, setUnlocked] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   // Stage controls. Each is a small, independent choice the stage folds into a
@@ -51,23 +52,37 @@ export function App() {
     if (!shareId) return;
     let stop = false;
     let timer: ReturnType<typeof setTimeout>;
+    let failures = 0;
+    let hadState = false;
     const poll = async () => {
       const s = await fetchShareState(shareId);
       if (stop) return;
-      if (s === "gone") {
-        setGone(true);
-        return;
-      }
-      if (s) {
+      if (s && s !== "gone") {
+        failures = 0;
+        hadState = true;
         setState(s);
+        // A share that answers again is not gone, whatever it was a moment ago. Without
+        // clearing this the paused screen outlives the thing it describes.
+        setGone(false);
         // The server can go back to locked (a 12h cookie TTL, or a new PIN on a share
         // somebody already has open). The latch must follow it down, or the pad never
         // returns and the tab renders the content branch with no devices — blank, forever.
         setUnlocked((was) => stillUnlocked(was, Boolean(s.locked)));
+      } else {
+        failures += 1;
+        setGone(s === "gone");
       }
       // When locked the state is minimal (no devices) — poll calmly (5s).
-      const settled = s != null && (s.locked || (s.devices ?? []).every((d) => d.phase === "ready" || d.phase === "failed"));
-      timer = setTimeout(poll, settled ? 5000 : 1200);
+      const settled =
+        s != null && s !== "gone" && (s.locked || (s.devices ?? []).every((d) => d.phase === "ready" || d.phase === "failed"));
+      const decision = pollDecision(s === "gone" ? "gone" : s ? "state" : "error", {
+        consecutiveFailures: failures,
+        settled,
+        hadStateBefore: hadState,
+      });
+      setReconnecting(decision.view === "reconnecting");
+      // Unconditional: there is no answer from the server that means "stop asking".
+      timer = setTimeout(poll, decision.delayMs);
     };
     void poll();
     return () => {
@@ -130,7 +145,7 @@ export function App() {
           <p className="ended-title">This preview is paused</p>
           <p className="ended-body">
             Deckhand pauses a preview after a while with no one watching, to free the simulator. Ask your agent to start
-            it again — this same link will come right back.
+            it again — this page is still watching, and will pick it up on its own.
           </p>
         </div>
       </Centered>
@@ -139,7 +154,7 @@ export function App() {
   if (!state) {
     return (
       <Centered>
-        <span className="spinner" aria-hidden /> Loading preview…
+        <span className="spinner" aria-hidden /> {reconnecting ? "Reconnecting…" : "Loading preview…"}
       </Centered>
     );
   }

@@ -189,3 +189,49 @@ function pickActive(panes: StagePane[], choice: string | undefined): string {
 export function stillUnlocked(previouslyUnlocked: boolean, serverSaysLocked: boolean): boolean {
   return previouslyUnlocked && !serverSaysLocked;
 }
+
+/**
+ * What the page should show while it has no usable state, and when to ask again.
+ *
+ * Both no-state paths used to be dead ends. `"gone"` (a 404 on /state) set a flag
+ * and returned WITHOUT scheduling another poll, so the viewer never noticed the
+ * share coming back — while the screen it showed said, in as many words, "this
+ * same link will come right back". A promise the code made unobservable.
+ *
+ * `null` (any other failure) kept polling but left the page on "Loading preview…"
+ * forever, which is what a user actually hit: a preview was swapped behind a
+ * stable share URL, /state answered non-OK for a few seconds, and the spinner
+ * never stopped or explained itself. Server-side the new preview was ready with a
+ * first frame in 1.5s.
+ *
+ * So: never stop, and after a short streak say what is happening. A share that is
+ * genuinely paused is polled calmly rather than not at all — the cost is one
+ * request every few seconds against a promise the UI already makes.
+ */
+export type PollView = "loading" | "reconnecting" | "paused" | "state";
+
+/** Consecutive failures before the spinner admits it is retrying rather than starting. */
+export const RECONNECT_AFTER_FAILURES = 4;
+
+export interface PollDecision {
+  view: PollView;
+  /** Always a number. There is no input for which the viewer stops asking. */
+  delayMs: number;
+}
+
+export function pollDecision(
+  result: "gone" | "error" | "state",
+  opts: { consecutiveFailures: number; settled: boolean; hadStateBefore: boolean },
+): PollDecision {
+  if (result === "state") return { view: "state", delayMs: opts.settled ? 5000 : 1200 };
+  if (result === "gone") return { view: "paused", delayMs: 5000 };
+  // Back off once a failure looks persistent rather than hammering through a tunnel
+  // that is already unhappy, but keep it well inside a human's patience.
+  const persistent = opts.consecutiveFailures >= RECONNECT_AFTER_FAILURES;
+  return {
+    // "Loading" is only honest the first time. Once we have shown content, or have
+    // failed repeatedly, the user is owed the word "reconnecting".
+    view: persistent || opts.hadStateBefore ? "reconnecting" : "loading",
+    delayMs: persistent ? 3000 : 1200,
+  };
+}

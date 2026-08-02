@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { computeStage, stillUnlocked, paneKey, shortDeviceName, MIN_PANE_WIDTH } from "./panes.ts";
+import { computeStage, stillUnlocked, paneKey, pollDecision, RECONNECT_AFTER_FAILURES, shortDeviceName, MIN_PANE_WIDTH } from "./panes.ts";
 import type { SharePane } from "./api.ts";
 
 const dev = (deviceId: string, platform: string, label = deviceId) => ({ deviceId, platform, label, phase: "ready" });
@@ -267,5 +267,58 @@ describe("a preview with no devices yet", () => {
       viewportWidth: 1400,
     });
     assert.deepEqual(stage.groups, [], "nothing to render — so App.tsx has to say so itself");
+  });
+});
+
+describe("the viewer never stops asking", () => {
+  const base = { consecutiveFailures: 0, settled: false, hadStateBefore: false };
+
+  it("keeps polling after the share 404s, so a restarted preview comes back on its own", () => {
+    // The shipped bug: "gone" set a flag and returned WITHOUT rescheduling. The screen it
+    // showed promised "this same link will come right back" — which the code then made
+    // impossible to observe. Anyone whose preview was restarted had to reload by hand.
+    const d = pollDecision("gone", base);
+    assert.equal(d.view, "paused");
+    assert.ok(Number.isFinite(d.delayMs) && d.delayMs > 0, "a paused share must still be polled");
+  });
+
+  it("has no answer at all that means stop asking", () => {
+    for (const result of ["gone", "error", "state"] as const) {
+      for (const failures of [0, 1, 5, 50]) {
+        for (const settled of [true, false]) {
+          const d = pollDecision(result, { consecutiveFailures: failures, settled, hadStateBefore: true });
+          assert.ok(Number.isFinite(d.delayMs) && d.delayMs > 0, `${result}/${failures}/${settled} stopped polling`);
+        }
+      }
+    }
+  });
+
+  it("says 'loading' only the first time, and 'reconnecting' once it is really retrying", () => {
+    // What the user actually saw: a preview swapped behind a stable share URL, /state
+    // answered non-OK for a few seconds, and the spinner said "Loading preview…"
+    // indefinitely while the server had the new preview ready with a first frame in 1.5s.
+    assert.equal(pollDecision("error", base).view, "loading", "the very first failure may still read as loading");
+    assert.equal(
+      pollDecision("error", { ...base, consecutiveFailures: RECONNECT_AFTER_FAILURES }).view,
+      "reconnecting",
+      "a streak must admit it is retrying",
+    );
+    assert.equal(
+      pollDecision("error", { ...base, hadStateBefore: true }).view,
+      "reconnecting",
+      "once content has been shown, a failure is never 'loading'",
+    );
+  });
+
+  it("backs off when failing but stays inside a human's patience", () => {
+    const fresh = pollDecision("error", base).delayMs;
+    const persistent = pollDecision("error", { ...base, consecutiveFailures: 10 }).delayMs;
+    assert.ok(persistent > fresh, "a persistent failure must not hammer the tunnel");
+    assert.ok(persistent <= 5000, "but the user must not wait long once it recovers");
+  });
+
+  it("still polls a healthy preview fast, and a settled one calmly", () => {
+    assert.equal(pollDecision("state", { ...base, settled: false }).delayMs, 1200);
+    assert.equal(pollDecision("state", { ...base, settled: true }).delayMs, 5000);
   });
 });
