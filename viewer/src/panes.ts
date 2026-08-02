@@ -235,3 +235,26 @@ export function pollDecision(
     delayMs: persistent ? 3000 : 1200,
   };
 }
+
+/**
+ * What to show for a preview's source: the branch, and whether it is a working copy.
+ *
+ * The viewer used to render the literal "local working copy" for every local preview and
+ * drop `ref` on the floor. The branch was never missing — deckhand looks it up when the
+ * preview starts (`localBranch`), persists it, and ships it in the share state. A user
+ * looking at the panel saw "local working copy" while the payload behind it said
+ * "feature/review".
+ *
+ * Both facts matter and neither replaces the other. The branch answers "what am I looking
+ * at"; "working copy" answers "is this the pushed ref, or this machine's uncommitted
+ * state" — which is the difference between a preview you can share the meaning of and one
+ * only this checkout can reproduce. So: show the branch, keep the qualifier.
+ *
+ * A checkout with no branch to report (detached HEAD, or not a git repo at all) keeps
+ * `ref` as the sentinel "local", and there the old label is the whole truth.
+ */
+export function sourceLabel(source: string | undefined, refName: string | undefined): { key: string; value: string } {
+  if (source !== "local") return { key: "Branch", value: refName || "—" };
+  if (!refName || refName === "local") return { key: "Source", value: "local working copy" };
+  return { key: "Branch", value: `${refName} · working copy` };
+}

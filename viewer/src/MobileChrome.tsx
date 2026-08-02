@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { SpecialKey } from "./stream/input.ts";
+import { sourceLabel } from "./panes.ts";
 import { CheckIcon, HomeIcon, InfoIcon, KeyboardIcon, RotateIcon, SwitchDeviceIcon, XIcon } from "./icons.tsx";
 
 /** One switchable device in the dock's picker. */
@@ -143,8 +144,8 @@ export function MobileChrome(props: Props) {
                 <span className="info-val">{repo || "—"}</span>
               </div>
               <div className="info-row">
-                <span className="info-key">{source === "local" ? "Source" : "Branch"}</span>
-                <span className="info-val">{source === "local" ? "local working copy" : refName || "—"}</span>
+                <span className="info-key">{sourceLabel(source, refName).key}</span>
+                <span className="info-val">{sourceLabel(source, refName).value}</span>
               </div>
               <div className="info-row">
                 <span className="info-key">Device</span>

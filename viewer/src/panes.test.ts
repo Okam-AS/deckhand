@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { computeStage, stillUnlocked, paneKey, pollDecision, RECONNECT_AFTER_FAILURES, shortDeviceName, MIN_PANE_WIDTH } from "./panes.ts";
+import { computeStage, stillUnlocked, paneKey, pollDecision, RECONNECT_AFTER_FAILURES, sourceLabel, shortDeviceName, MIN_PANE_WIDTH } from "./panes.ts";
 import type { SharePane } from "./api.ts";
 
 const dev = (deviceId: string, platform: string, label = deviceId) => ({ deviceId, platform, label, phase: "ready" });
@@ -320,5 +320,38 @@ describe("the viewer never stops asking", () => {
   it("still polls a healthy preview fast, and a settled one calmly", () => {
     assert.equal(pollDecision("state", { ...base, settled: false }).delayMs, 1200);
     assert.equal(pollDecision("state", { ...base, settled: true }).delayMs, 5000);
+  });
+});
+
+describe("what the info panel says a preview is built from", () => {
+  it("shows the branch for a local preview instead of throwing it away", () => {
+    // The bug as seen: the panel read "local working copy" while the share state behind it
+    // carried ref "feature/review". Deckhand had looked the branch up at start, persisted
+    // it and shipped it — the viewer just did not render it.
+    const l = sourceLabel("local", "feature/review");
+    assert.match(l.value, /feature\/review/, "the branch is the thing the user asked for");
+    assert.match(l.value, /working copy/, "and the qualifier still has to survive");
+    assert.equal(l.key, "Branch");
+  });
+
+  it("keeps the old label when there is genuinely no branch to report", () => {
+    // Detached HEAD, or not a git checkout at all: the engine leaves ref as the sentinel
+    // "local", and there the old wording is the whole truth rather than a shrug.
+    for (const ref of ["local", undefined, ""]) {
+      const l = sourceLabel("local", ref);
+      assert.equal(l.value, "local working copy");
+      assert.equal(l.key, "Source");
+    }
+  });
+
+  it("is unchanged for a git preview", () => {
+    assert.deepEqual(sourceLabel("git", "main"), { key: "Branch", value: "main" });
+    assert.deepEqual(sourceLabel("git", undefined), { key: "Branch", value: "—" });
+  });
+
+  it("never claims a git ref is a working copy", () => {
+    // The distinction is the point: one is a pushed ref anyone can reproduce, the other is
+    // this machine's uncommitted state.
+    assert.ok(!/working copy/.test(sourceLabel("git", "feature/review").value));
   });
 });
