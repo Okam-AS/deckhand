@@ -2523,6 +2523,49 @@ export class PreviewEngine {
     return this.livePreviewForApp(appId)?.record.previewId ?? null;
   }
 
+  /**
+   * Live reference panes built from the same source as `app`, and the page each
+   * one is shown on.
+   *
+   * A pane runs under a SYNTHETIC app id keyed by CONTENT (`app:<id>`,
+   * `repo:<r>@<ref>`, …), never by the app it came from — so `previewIdForApp`
+   * structurally cannot find one. An agent that put the old app on the page with
+   * `alongside`, then asked "is that app running?", was told no while its pane
+   * was on screen; the documented next step was `start_preview`, which booted a
+   * SECOND set of simulators on a second share link. The duplicate then looked
+   * right to drive and was invisible in the viewer, because the page streams the
+   * pane. Answering the question truthfully is what stops that.
+   *
+   * Matched on the build source rather than the synthetic id, so it covers every
+   * `alongside` kind: `{app}` and `{worktree}` panes carry the path, `{repo,ref}`
+   * panes carry the repo.
+   */
+  referencePanesFor(app: App): { previewId: string; shareId: string; ref: string; onPreviewId: string | null }[] {
+    const panes: { previewId: string; shareId: string; ref: string; onPreviewId: string | null }[] = [];
+    for (const p of this.previews.values()) {
+      const ph = p.record.phase;
+      if (p.record.reference !== true || ph === "stopped" || ph === "failed" || ph === "stopping") continue;
+      const sameSource = app.path ? p.app.path === app.path : Boolean(app.repo) && p.app.repo === app.repo;
+      if (!sameSource) continue;
+      panes.push({
+        previewId: p.record.previewId,
+        shareId: p.record.shareId,
+        ref: p.record.ref,
+        onPreviewId: this.pageShowingPane(p.record.previewId),
+      });
+    }
+    return panes;
+  }
+
+  /** The working preview whose compare session shows this pane, if any. */
+  private pageShowingPane(paneId: string): string | null {
+    for (const p of this.previews.values()) {
+      if (p.record.phase === "stopped") continue;
+      if (p.compare?.references.some((r) => r.previewId === paneId)) return p.record.previewId;
+    }
+    return null;
+  }
+
   /** The live (non-terminal) preview carrying a given shareId, if any. */
   private liveByShareId(shareId: string): LivePreview | null {
     for (const p of this.previews.values()) {

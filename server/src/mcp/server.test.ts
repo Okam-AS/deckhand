@@ -262,6 +262,47 @@ describe("MCP server (end-to-end over HTTP)", () => {
     await admin.close();
   });
 
+  it("hands over a pane's previewId rather than letting the agent boot a duplicate", async () => {
+    // The pane-duplication trap, end to end. A pane runs under a synthetic app id
+    // keyed by content, so every by-app-id lookup misses it. An agent that put the
+    // old app on the page with `alongside` was then told the app "has no running
+    // preview", with a hint pointing at start_preview — which booted a SECOND set
+    // of simulators on a SECOND share link, while the page went on streaming the
+    // pane. The agent drove devices nobody was watching and had no way to tell.
+    const admin = await client(ADMIN);
+    const page = parse(
+      await admin.callTool({
+        name: "start_preview",
+        arguments: { app: "app-b", alongside: [{ app: "app-local" }], share: { access: "public" } },
+      }),
+    );
+    assert.equal(page.ok, true);
+
+    // 1. The handle is IN the response — that alone is what the agent was missing.
+    const pane = (page.alongside as { shareId: string; previewId?: string }[])[0]!;
+    assert.ok(pane.previewId, "the pane's previewId must reach the caller");
+    assert.equal(engine.isReference(pane.previewId!), true);
+
+    // 2. Asking by app id no longer dead-ends into "boot one".
+    const byApp = parse(await admin.callTool({ name: "preview_status", arguments: { app: "app-local" } }));
+    assert.equal(byApp.ok, false);
+    const err = byApp.error as { code: string; hint?: string };
+    assert.equal(err.code, "app_is_a_pane");
+    assert.match(String(err.hint), new RegExp(pane.previewId!), "the hint carries the pane's previewId");
+    assert.doesNotMatch(String(err.hint), /call start_preview to boot one/);
+
+    // 3. And if it boots one anyway, the response says so before anything reassuring.
+    const dupe = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
+    assert.equal(dupe.ok, true);
+    assert.notEqual(dupe.previewId, pane.previewId, "a second, separate preview — the duplicate");
+    assert.match(String(dupe.nextStep), /^⚠ "app-local" was ALREADY running as an extra pane/);
+    assert.match(String(dupe.nextStep), new RegExp(pane.previewId!));
+
+    await admin.callTool({ name: "stop_preview", arguments: { previewId: dupe.previewId as string } });
+    await admin.callTool({ name: "stop_preview", arguments: { previewId: page.previewId as string } });
+    await admin.close();
+  });
+
   it("gives an extra pane the page's PIN instead of publishing it", async () => {
     // Panes used to boot public unconditionally: a PIN-protected page published
     // half of itself on a second URL, because there was no cross-share unlock and
