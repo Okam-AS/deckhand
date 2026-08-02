@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DevicePlayer, type PlayerStatus } from "./stream/player.ts";
 import { DeviceInput, ORIENTATION_CYCLE, type SpecialKey } from "./stream/input.ts";
 import { deviceBase, deviceWsUrl, phaseBadge, phaseLabel, repoName, type ShareDevice } from "./api.ts";
-import { CollapseIcon, ExpandIcon, HomeIcon, KeyboardIcon, RotateIcon } from "./icons.tsx";
+import { BranchIcon, CollapseIcon, ExpandIcon, HomeIcon, KeyboardIcon, PlatformGlyph, RepoGlyph, RotateIcon } from "./icons.tsx";
 import { TypeBar } from "./TypeBar.tsx";
 
 export type DeviceVariant = "grid" | "focus" | "thumb";
@@ -260,56 +260,6 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
       {/* Controls sit BELOW the sim, centred — the same place the phone dock puts
           them, so the two chromes do not disagree about where the buttons live.
           Hidden on thumbnails. Home · Rotate · Keyboard · Fullscreen. */}
-      {typing && (
-        <TypeBar
-          onText={(text) => inputRef.current?.sendText(text) ?? [...text]}
-          onKey={(name) => inputRef.current?.sendKey(name)}
-          onClose={() => setTyping(false)}
-        />
-      )}
-      <div
-        className={`device-screen ${kbLive ? "kb-live" : ""}`}
-        style={
-          { "--device-aspect": aspect, "--device-radius": radius, "--dev-w": aw, "--dev-h": ah } as React.CSSProperties
-        }
-      >
-        <canvas
-          ref={canvasRef}
-          className={ready ? "canvas ready" : "canvas hidden"}
-          tabIndex={ready && !isThumb ? 0 : -1}
-          onKeyDown={onKeyDown}
-          onFocus={() => setKbLive(true)}
-          onBlur={() => setKbLive(false)}
-        />
-        {!ready && (
-          <div className={`overlay ${device.phase === "failed" ? "overlay-failed" : ""}`}>
-            {device.phase !== "failed" && <span className="spinner" aria-hidden />}
-            {/* Only "failed" keeps a centred headline — every other phase is
-                named by the pill at the top of the frame, so the middle carries
-                just the spinner and the live sub-step. */}
-            {!isThumb && device.phase === "failed" && <p>{phaseLabel(device.phase, device.detail)}</p>}
-            {/* Keyed by its text so React remounts it on change and the fade-in
-                replays — the caption changes every few seconds and a hard swap
-                reads as a flicker. */}
-            {!isThumb && device.phase !== "failed" && device.step && (
-              <p className="overlay-step" key={device.step}>
-                {device.step}
-              </p>
-            )}
-            {!isThumb && device.phase === "failed" && device.detail && (
-              // The reason, not just the verdict — so the viewer can say what
-              // broke (build error vs. a simulator that never booted) instead of
-              // sending everyone to the logs to find out.
-              <p className="overlay-reason">{device.detail}</p>
-            )}
-          </div>
-        )}
-        {/* One pill, two sources: the boot/build phase before the stream exists,
-            then the streaming state once it does. Same chip either way, so the
-            frame's status never jumps between two different affordances. */}
-        {showBadge && <div className="badge">{status === "fallback" ? "Reduced quality" : "Connecting…"}</div>}
-        {!ready && !isThumb && device.phase !== "failed" && <div className="badge">{phaseBadge(device.phase)}</div>}
-      </div>
       {!isThumb && (
         <div className="device-controls" style={{ "--icon-rot": `${rotationDeg}deg` } as React.CSSProperties}>
           {kbLive && (
@@ -377,20 +327,86 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
           )}
         </div>
       )}
+      {typing && (
+        <TypeBar
+          onText={(text) => inputRef.current?.sendText(text) ?? [...text]}
+          onKey={(name) => inputRef.current?.sendKey(name)}
+          onClose={() => setTyping(false)}
+        />
+      )}
+      <div
+        className={`device-screen ${kbLive ? "kb-live" : ""}`}
+        style={
+          { "--device-aspect": aspect, "--device-radius": radius, "--dev-w": aw, "--dev-h": ah } as React.CSSProperties
+        }
+      >
+        <canvas
+          ref={canvasRef}
+          className={ready ? "canvas ready" : "canvas hidden"}
+          tabIndex={ready && !isThumb ? 0 : -1}
+          onKeyDown={onKeyDown}
+          onFocus={() => setKbLive(true)}
+          onBlur={() => setKbLive(false)}
+        />
+        {!ready && (
+          <div className={`overlay ${device.phase === "failed" ? "overlay-failed" : ""}`}>
+            {device.phase !== "failed" && <span className="spinner" aria-hidden />}
+            {/* Only "failed" keeps a centred headline — every other phase is
+                named by the pill at the top of the frame, so the middle carries
+                just the spinner and the live sub-step. */}
+            {!isThumb && device.phase === "failed" && <p>{phaseLabel(device.phase, device.detail)}</p>}
+            {/* Keyed by its text so React remounts it on change and the fade-in
+                replays — the caption changes every few seconds and a hard swap
+                reads as a flicker. */}
+            {!isThumb && device.phase !== "failed" && device.step && (
+              <p className="overlay-step" key={device.step}>
+                {device.step}
+              </p>
+            )}
+            {!isThumb && device.phase === "failed" && device.detail && (
+              // The reason, not just the verdict — so the viewer can say what
+              // broke (build error vs. a simulator that never booted) instead of
+              // sending everyone to the logs to find out.
+              <p className="overlay-reason">{device.detail}</p>
+            )}
+          </div>
+        )}
+        {/* One pill, two sources: the boot/build phase before the stream exists,
+            then the streaming state once it does. Same chip either way, so the
+            frame's status never jumps between two different affordances. */}
+        {showBadge && <div className="badge">{status === "fallback" ? "Reduced quality" : "Connecting…"}</div>}
+        {!ready && !isThumb && device.phase !== "failed" && <div className="badge">{phaseBadge(device.phase)}</div>}
+      </div>
       {!isThumb && ready && (
         <dl className="device-facts">
           <div className="fact">
-            <dt>Repo</dt>
+            {/* First, and marked with the platform's own glyph rather than the word
+                "Device". It is the fact that DIFFERS between two frames, so it leads;
+                repo and branch are the same under both and read as background. The
+                label was generic scaffolding — the glyph says more in less space and
+                separates the captions at a glance rather than on a read. The word
+                survives for screen readers, which cannot see the difference. */}
+            <dt className="fact-glyph">
+              <span className="sr-only">Device</span>
+              <PlatformGlyph platform={device.platform} />
+            </dt>
+            <dd>{device.label}</dd>
+          </div>
+          <div className="fact">
+            <dt className="fact-glyph">
+              <span className="sr-only">Repo</span>
+              <RepoGlyph repo={repo} />
+            </dt>
             <dd>{repoName(repo) || "—"}</dd>
           </div>
           <div className="fact">
-            <dt>Branch</dt>
+            <dt className="fact-glyph">
+              <span className="sr-only">Branch</span>
+              <BranchIcon size={13} />
+            </dt>
             <dd>{branch || "—"}</dd>
           </div>
-          <div className="fact">
-            <dt>Device</dt>
-            <dd>{device.label}</dd>
-          </div>
+
         </dl>
       )}
       {isThumb ? (

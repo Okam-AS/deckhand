@@ -3,11 +3,14 @@ import type { SpecialKey } from "./stream/input.ts";
 import { sourceLabel } from "./panes.ts";
 import { CheckIcon, HomeIcon, InfoIcon, KeyboardIcon, RotateIcon, SwitchDeviceIcon } from "./icons.tsx";
 import { TypeBar } from "./TypeBar.tsx";
+import { BranchIcon, PlatformGlyph, RepoGlyph } from "./icons.tsx";
 
 /** One switchable device in the dock's picker. */
 export interface DockEntry {
   key: string;
   label: string;
+  /** Drives the platform glyph in the info popover; absent for web panes. */
+  platform?: string;
   /**
    * Which source it belongs to. Set only when the page shows several, because a
    * list of four rows all reading "iPhone 16 Pro" is unusable without it.
@@ -140,17 +143,30 @@ export function MobileChrome(props: Props) {
               <InfoIcon size={19} />
             </button>
             <div className={`mmenu mmenu--up ${infoOpen ? "open" : ""}`} role="dialog" aria-label="Preview info">
+              {/* Same order and the same glyph as the desktop caption: the device
+                  leads because it is the fact that changes as you switch panes, and
+                  the two chromes must not disagree about how a preview describes
+                  itself. */}
               <div className="info-row">
-                <span className="info-key">Repo</span>
+                <span className="info-key info-key--glyph">
+                  <span className="sr-only">Device</span>
+                  <PlatformGlyph platform={current?.platform} />
+                </span>
+                <span className="info-val">{current?.label ?? "—"}</span>
+              </div>
+              <div className="info-row">
+                <span className="info-key info-key--glyph">
+                  <span className="sr-only">Repo</span>
+                  <RepoGlyph repo={repo} />
+                </span>
                 <span className="info-val">{repo || "—"}</span>
               </div>
               <div className="info-row">
-                <span className="info-key">{sourceLabel(source, refName).key}</span>
+                <span className="info-key info-key--glyph">
+                  <span className="sr-only">{sourceLabel(source, refName).key}</span>
+                  <BranchIcon size={13} />
+                </span>
                 <span className="info-val">{sourceLabel(source, refName).value}</span>
-              </div>
-              <div className="info-row">
-                <span className="info-key">Device</span>
-                <span className="info-val">{current?.label ?? "—"}</span>
               </div>
             </div>
           </div>
