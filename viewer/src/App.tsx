@@ -240,6 +240,7 @@ export function App() {
   const dockEntries: DockEntry[] = panes.map((p) => ({
     key: p.key,
     label: p.device.label,
+    platform: p.device.platform,
     ...(multiSource ? { group: groups.find((g) => g.shareId === p.shareId)?.label } : {}),
   }));
   const focusedGroup = groups.find((g) => g.panes.some((p) => p.key === mobileFocus));
