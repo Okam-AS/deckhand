@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { devMenuOpen, devMenuHint, DEV_MENU_RECOVERY } from "./devMenu.ts";
+import { devMenuOpen, devMenuHint, DEV_MENU_RECOVERY, DEV_MENU_PREFLIGHT } from "./devMenu.ts";
 
 /**
  * Trimmed from real captures on iOS 26.5 / Expo runtime 4.0.0, taken during the
@@ -147,5 +147,26 @@ describe("spotting the dev menu", () => {
     assert.match(hint, /scroll DOWN/i, "the switch is below the fold");
     assert.match(hint, /hits the text, not the switch/i, "why selecting it by text cannot work");
     assert.match(hint, /not.*app bug/i, "and what NOT to conclude");
+  });
+});
+
+describe("saying it before the first tap, not after the first surprise", () => {
+  it("names both overlays and the order they have to be cleared in", () => {
+    // Principle 10: a working answer that lives only in an agent's head is not finished
+    // work. This one was rediscovered three times in a single session, twice reported as
+    // an app bug, before it was written anywhere a fresh agent would read it.
+    assert.match(DEV_MENU_PREFLIGHT, /permission alert/i, "the alert is first — it sits above the dev menu itself");
+    assert.match(DEV_MENU_PREFLIGHT, /Tools button/, "and the floating button is second");
+    assert.ok(
+      DEV_MENU_PREFLIGHT.indexOf("permission alert") < DEV_MENU_PREFLIGHT.indexOf("Tools button"),
+      "order matters: with an alert up, scrolling the dev menu does nothing at all",
+    );
+  });
+
+  it("stays short enough to survive being read", () => {
+    // It rides preview_status beside the drive contract and the link footer. A paragraph
+    // here competes for the same attention and loses — the full recovery is one describe away.
+    assert.ok(DEV_MENU_PREFLIGHT.length < 600, `preflight must stay short, was ${DEV_MENU_PREFLIGHT.length}`);
+    assert.ok(DEV_MENU_PREFLIGHT.length < DEV_MENU_RECOVERY.length, "and shorter than the full recovery");
   });
 });

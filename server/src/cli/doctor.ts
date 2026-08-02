@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import { createPrivateKey } from "node:crypto";
 import { join, dirname } from "node:path";
-import { loadConfig, loadApps, loadTokens, githubPatPath, githubPrivateKeyPath, type App, type Config } from "../config.ts";
+import { loadConfig, loadApps, loadTokens, githubPatPath, githubPrivateKeyPath, publicBaseUrl, type App, type Config } from "../config.ts";
 import { GitHubAppAuth } from "../github/appAuth.ts";
 import { ghCliToken } from "../github/credentials.ts";
 import { Simctl, selectRuntime, selectDeviceType } from "../devices/ios.ts";
@@ -158,6 +158,49 @@ async function checkServices(): Promise<Check> {
   if (server && tunnel) return { name, ok: true, detail: "server + tunnel agents loaded" };
   const missing = [!server && "server", !tunnel && "tunnel"].filter(Boolean).join(" + ");
   return { name, ok: false, warn: true, detail: `${missing} not loaded — run \`./ops/install-services.sh\` so it survives sleep/reboot` };
+}
+
+/**
+ * Does the PUBLIC hostname actually answer?
+ *
+ * Every other check here looks at loopback, so doctor could report a completely healthy
+ * install while the only address a user has was serving a Cloudflare error page. That
+ * happened: a user sat on Error 1033 while doctor printed ticks all the way down.
+ *
+ * 1033 is worth naming separately from any other failure. It means cloudflared has no
+ * registered edge connection — the PROCESS is fine, launchd sees nothing wrong, and
+ * KeepAlive has nothing to restart. Told apart from a 5xx, it points at the tunnel; lumped
+ * in with one, it points at the server, which is where the time gets wasted.
+ */
+export async function checkPublicUrl(config: Config, fetchImpl: typeof fetch = fetch): Promise<Check> {
+  const name = "public URL answers";
+  const url = publicBaseUrl(config);
+  try {
+    const res = await fetchImpl(url, { signal: AbortSignal.timeout(12_000), redirect: "manual" });
+    const body = res.ok ? "" : await res.text().catch(() => "");
+    if (/error 1033|argo tunnel error|cloudflare tunnel error/i.test(body)) {
+      return {
+        name,
+        ok: false,
+        detail:
+          `${url} → Cloudflare 1033: the tunnel has no edge connection, though cloudflared is probably still running. ` +
+          `Check \`tail ~/.deckhand/logs/tunnel.log\` for "Registered tunnel connection". It usually self-heals in under a minute; if it keeps happening, the agent should be running with \`--protocol http2\` (re-run ./ops/install-services.sh).`,
+      };
+    }
+    if (res.status >= 500) {
+      return { name, ok: false, detail: `${url} → HTTP ${res.status} — the tunnel reached deckhand and deckhand failed` };
+    }
+    // The root has no route, so 404 is the healthy answer — say so, or a reader sees
+    // "✓ … 404" and stops trusting the tick.
+    const reached = res.status === 404 ? "the tunnel reached deckhand" : `HTTP ${res.status}`;
+    return { name, ok: true, detail: `${url} → ${reached}` };
+  } catch (e) {
+    return {
+      name,
+      ok: false,
+      detail: `${url} is unreachable from this machine (${e instanceof Error ? e.message : String(e)}) — DNS, the tunnel, or the network`,
+    };
+  }
 }
 
 async function checkGitHub(config: Config): Promise<Check> {
@@ -453,6 +496,7 @@ export async function runDoctor(opts: { smoke?: boolean } = {}): Promise<{ check
     checks.push(await checkGitHub(config));
     checks.push(checkWebHost(config, apps));
     checks.push(await checkServerFreshness(config));
+    checks.push(await checkPublicUrl(config));
     if (opts.smoke) {
       // Sequential, not parallel: both legs create and boot a device, and an emulator booting
       // beside a simulator on the same machine is exactly the CPU contention that made the

@@ -101,3 +101,17 @@ export function devMenuOpen(tree: unknown): boolean {
 export function devMenuHint(tree: unknown): { devMenu?: string } {
   return devMenuOpen(tree) ? { devMenu: DEV_MENU_RECOVERY } : {};
 }
+
+/**
+ * The same knowledge, said BEFORE the first tap rather than after the first surprise.
+ *
+ * `DEV_MENU_RECOVERY` fires when the menu is already in the tree — good, but by then an
+ * agent has often already tapped the top-right corner, got the overlay, and formed a
+ * theory about the app. This rides `preview_status` once the device is ready, which is
+ * the last thing an agent reads before it starts driving.
+ *
+ * Deliberately short. The full recovery is one `describe` away, and a paragraph here
+ * competes with the drive contract for the same attention.
+ */
+export const DEV_MENU_PREFLIGHT =
+  'Before your first tap on a dev build, clear its two overlays: the system permission alert (it sits above everything, including the dev menu), then Expo\'s floating "Tools button" in the top-right — it covers where app controls live and swallows taps meant for them. Open the dev menu, scroll DOWN to TOOLS, switch off "Tools button", Close. `describe` will spell out how if the menu is on screen. Skipping this is how three separate runs reported a working app as having "critical UI bugs".';

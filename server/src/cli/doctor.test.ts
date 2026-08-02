@@ -1,6 +1,8 @@
 import { describe, it } from "node:test";
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
-import { deviceGateExit, freshnessVerdict, type Check } from "./doctor.ts";
+import { checkPublicUrl, deviceGateExit, freshnessVerdict, type Check } from "./doctor.ts";
+import type { Config } from "../config.ts";
 
 /**
  * The `--device-only` exit code (`npm run test:device`).
@@ -115,5 +117,70 @@ describe("freshnessVerdict", () => {
     const v = freshnessVerdict("abc1234", { commit: "abc1234", describe: "v0.1.61" });
     assert.equal(v.ok, true);
     assert.equal(v.detail, "v0.1.61");
+  });
+});
+
+describe("checkPublicUrl", () => {
+  // Every other check in doctor looks at loopback, so it could report a completely healthy
+  // install while the only address a user has was serving a Cloudflare error page. That is
+  // not hypothetical — a user sat on Error 1033 while doctor printed ticks all the way down.
+  const config = { hostname: "deckhand.example.com", port: 4300 } as unknown as Config;
+  const answering = (status: number, body = "") =>
+    (async () => new Response(body, { status })) as unknown as typeof fetch;
+
+  it("catches a 1033, and names the tunnel rather than the server", async () => {
+    // 1033 means cloudflared has NO registered edge connection while the process is fine —
+    // launchd sees nothing wrong and KeepAlive has nothing to restart. Told apart from a
+    // 5xx it points at the tunnel; lumped in with one it points at the server, which is
+    // where the time gets wasted.
+    const c = await checkPublicUrl(config, answering(530, "<h1>Error 1033</h1> Cloudflare Tunnel error"));
+    assert.equal(c.ok, false);
+    assert.match(String(c.detail), /1033/);
+    assert.match(String(c.detail), /tunnel\.log/, "it must point at the log that answers it");
+    assert.match(String(c.detail), /http2/, "and at the setting that prevents it");
+  });
+
+  it("blames deckhand, not the tunnel, on a 5xx", async () => {
+    const c = await checkPublicUrl(config, answering(502));
+    assert.equal(c.ok, false);
+    assert.match(String(c.detail), /the tunnel reached deckhand and deckhand failed/);
+    assert.ok(!/1033/.test(String(c.detail)), "a plain 5xx must not be reported as a tunnel fault");
+  });
+
+  it("treats a 404 from the root as healthy, and says why", async () => {
+    // The root has no route. Without the wording a reader sees "✓ … 404" and stops
+    // trusting the tick.
+    const c = await checkPublicUrl(config, answering(404));
+    assert.equal(c.ok, true);
+    assert.match(String(c.detail), /the tunnel reached deckhand/);
+  });
+
+  it("reports an unreachable host as a failure rather than throwing", async () => {
+    const boom = (async () => {
+      throw new Error("getaddrinfo ENOTFOUND");
+    }) as unknown as typeof fetch;
+    const c = await checkPublicUrl(config, boom);
+    assert.equal(c.ok, false);
+    assert.match(String(c.detail), /unreachable/);
+    assert.match(String(c.detail), /ENOTFOUND/, "the real cause must survive");
+  });
+});
+
+describe("the tunnel agent forces http2", () => {
+  it("keeps --protocol http2 in the LaunchAgent template", () => {
+    // Captured from tunnel.log while a user was staring at an Error 1033 page: all four
+    // QUIC edge connections died together on "timeout: no recent network activity" and
+    // took 38 seconds to re-register, backing off 4→8→16s. The process never exited, so
+    // KeepAlive had nothing to restart and every other doctor check stayed green.
+    //
+    // cloudflared defaults to QUIC over UDP; http2 rides TCP/443, which is the thing that
+    // survives hostile networks. Without this check a future edit drops the flag in
+    // silence and the 1033s come back with nothing to point at.
+    const tpl = readFileSync(new URL("../../../ops/launchd/no.deckhand.tunnel.plist.template", import.meta.url), "utf8");
+    const args = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(tpl)?.[1] ?? "";
+    assert.match(args, /<string>--protocol<\/string>/, "the flag itself must be in ProgramArguments, not only in a comment");
+    assert.match(args, /<string>http2<\/string>/, "and its value");
+    // Order matters to cloudflared: global flags come before the subcommand.
+    assert.ok(args.indexOf("--protocol") < args.indexOf("run"), "--protocol must precede `run` or cloudflared rejects it");
   });
 });
