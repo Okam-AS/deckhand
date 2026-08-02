@@ -1144,6 +1144,29 @@ describe("agent-driven testing tools (describe/ui + test runs)", () => {
   });
 
 
+  it("stops a preview by app id, the way its sibling tools accept one", async () => {
+    // stop_preview took previewId ONLY, while start_preview, preview_status and logs all
+    // accept `app` — and the message that told callers to use it did not mention that. An
+    // instruction that cannot be followed with what the reader has is worse than none.
+    const admin = await client(ADMIN);
+    const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
+    assert.ok(started.previewId);
+    const stopped = parse(await admin.callTool({ name: "stop_preview", arguments: { app: "app-local" } }));
+    assert.equal(stopped.ok, true, "app id must be enough");
+    assert.equal(stopped.stopped, true);
+
+    // And the old form still works — this widened the door, it did not move it.
+    const again = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
+    assert.equal(parse(await admin.callTool({ name: "stop_preview", arguments: { previewId: again.previewId as string } })).ok, true);
+
+    // Neither: the same bad_request every sibling gives, rather than a schema rejection
+    // that names a field the caller was never told about.
+    const neither = parse(await admin.callTool({ name: "stop_preview", arguments: {} }));
+    assert.equal(neither.ok, false);
+    assert.equal((neither.error as { code: string }).code, "bad_request");
+    await admin.close();
+  });
+
   it("refuses an update that updates nothing, instead of answering ok", async () => {
     // Observed on a real run: the agent put the step fields beside `previewId` instead of inside
     // `step`, where the schema silently drops them. Five calls, five `ok`s, and the viewer sat at

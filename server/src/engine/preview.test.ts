@@ -1618,15 +1618,17 @@ describe("PreviewEngine idle sweep", () => {
     );
   });
 
-  it("says so when an idempotent start could not add the devices asked for", async () => {
+  it("adds the missing device to a live preview instead of refusing", async () => {
     // findReusable matches app + source + ref and ignores the device list — right for the
     // daily loop, wrong for a genuinely different request. Asking for iOS + Android while an
-    // iOS preview was live returned alreadyRunning:true and silently dropped Android. The
-    // caller saw success and no Android, and the only way anyone found to get it was
-    // stop_preview + start again, which reboots the simulators that were working.
+    // iOS preview was live used to return alreadyRunning:true with Android silently dropped,
+    // and the only way to get it was stop_preview + start again, which reboots the
+    // simulators that were working and pays for their build a second time.
     const h = makeEngine();
     h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
     assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+    const before = h.engine.getStatus("pv1")!.devices.map((d) => d.deviceId);
+    assert.deepEqual(before, ["ios-0"]);
 
     const again = h.engine.startPreview({
       app: rnApp,
@@ -1636,9 +1638,47 @@ describe("PreviewEngine idle sweep", () => {
       access: "public",
     });
     assert.equal(again.alreadyRunning, true, "still the same preview — we do not mint a second");
-    assert.deepEqual(again.notAdded, ["android"], "and it admits what it did not do");
-    assert.match(again.nextStep ?? "", /stop_preview/, "with the way to get it");
-    assert.match(again.nextStep ?? "", /reboots/, "and the cost, so the agent warns the user first");
+    assert.equal(again.notAdded, undefined, "and nothing was left undone");
+
+    await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
+    const after = h.engine.getStatus("pv1")!.devices;
+    assert.deepEqual(after.map((d) => d.deviceId), ["ios-0", "android-1"], "the android device joined");
+    // The point of the whole change: the device that was already running was not disturbed.
+    assert.equal(after.find((d) => d.deviceId === "ios-0")?.phase, "ready", "ios-0 must never have gone back to pending");
+  });
+
+  it("keeps device ids unique and ordered when one is added later", async () => {
+    // Ids are how a viewer pane addresses a stream, so a repeat would point a pane at the
+    // wrong device with both ends agreeing on the name. Safe today only because a device is
+    // never removed from a live preview; see the note in addDevices if that changes.
+    const h = makeEngine({ config: { ...config, limits: { ...config.limits, maxTotalDevices: 6 } } });
+    h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }, { platform: "ios" }], access: "public" });
+    await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
+    h.engine.addDevices("pv1", [{ platform: "android" }]);
+    const ids = h.engine.getStatus("pv1")!.devices.map((d) => d.deviceId);
+    assert.deepEqual(ids, ["ios-0", "ios-1", "android-2"]);
+    assert.equal(new Set(ids).size, ids.length, "no id may repeat");
+  });
+
+  it("refuses to add beyond the machine's device budget, and says which limit", async () => {
+    // Capacity is re-checked at ADD time rather than inherited: the budget is shared, and a
+    // preview admitted an hour ago says nothing about what is free now. The link still comes
+    // back — the failure is attached to it, not raised in its place.
+    const h = makeEngine({ config: { ...config, limits: { ...config.limits, maxDevicesPerPreview: 1 } } });
+    h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
+
+    const again = h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "ios" }, { platform: "android" }],
+      access: "public",
+    });
+    assert.deepEqual(again.notAdded, ["android"], "it admits what it did not do");
+    assert.match(again.nextStep ?? "", /maxDevicesPerPreview/, "and names the limit that stopped it");
+    assert.match(again.nextStep ?? "", /untouched/, "and reassures that the running ones are fine");
+    assert.deepEqual(h.engine.getStatus("pv1")!.devices.map((d) => d.deviceId), ["ios-0"], "nothing half-added");
   });
 
   it("stays quiet when the request is already satisfied", () => {
