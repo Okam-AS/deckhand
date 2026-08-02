@@ -165,6 +165,23 @@ export function App() {
     );
   }
 
+  // Unlocked, ready — and no devices yet. This is the first minute of a cold preview:
+  // the worktree is being prepared and `simctl create` has not run, so shareState carries a
+  // preview with zero devices. computeStage drops device-less panes, so the layout rendered
+  // with nothing in it: a BLANK PAGE, for as long as the prep takes, immediately after
+  // someone typed a PIN. Nothing on screen said the build had even started.
+  //
+  // Before the web branch, because a web preview has its pseudo-device from the start and
+  // never lands here.
+  if ((state.devices ?? []).length === 0 && (state.panes ?? []).every((p) => (p.devices ?? []).length === 0)) {
+    return (
+      <Centered>
+        <span className="spinner" aria-hidden />
+        {state.detail ?? "Preparing the preview — fetching the branch and starting the build."}
+      </Centered>
+    );
+  }
+
   // Web preview: a single iframe of the running dev server, no device chrome.
   const devices = state.devices ?? [];
   if (devices.some((d) => d.platform === "web")) {

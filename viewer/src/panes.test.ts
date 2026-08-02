@@ -246,3 +246,17 @@ describe("stillUnlocked", () => {
     assert.equal(stillUnlocked(false, true), false);
   });
 });
+
+describe("a preview with no devices yet", () => {
+  it("produces no groups, which is why the viewer must render its own message", () => {
+    // computeStage drops device-less panes — correct, there is nothing to lay out. But it
+    // means the app's main branch renders an EMPTY layout during the first minute of a cold
+    // start: worktree prep and the shared build both happen before `simctl create`. Someone
+    // who has just typed a PIN saw a blank page for a minute with no sign anything had begun.
+    const stage = computeStage([{ shareId: "s1", repo: "acme/app", ref: "main", self: true, devices: [] }], {
+      isMobile: false,
+      viewportWidth: 1400,
+    });
+    assert.deepEqual(stage.groups, [], "nothing to render — so App.tsx has to say so itself");
+  });
+});
