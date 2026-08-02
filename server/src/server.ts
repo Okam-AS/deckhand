@@ -17,7 +17,7 @@ import { AndroidManager } from "./devices/android.ts";
 import { ServeSimBackend, vendoredServeSimBin } from "./streaming/serveSim.ts";
 import { AndroidAdbBackend } from "./streaming/androidAdb.ts";
 import { WebBackend } from "./streaming/web.ts";
-import { refreshVersion } from "./version.ts";
+import { refreshVersion, versionStatus } from "./version.ts";
 import { StreamingRouter } from "./streaming/router.ts";
 import { buildTokenResolver } from "./github/credentials.ts";
 import { createMcpRouter } from "./mcp/index.ts";
@@ -59,7 +59,23 @@ export function createApp(deps: AppDeps): express.Application {
   // is considered. Non-matching hosts (the apex) fall straight through.
   app.use(createHostWebProxyMiddleware(deps.engine, deps.pinGate));
 
-  app.get("/healthz", (_req, res) => res.json({ ok: true, ...serverInfo() }));
+  /**
+   * Liveness, plus — on loopback only — which commit this process is actually running.
+   *
+   * The commit is NOT public. This endpoint answers from the internet through the tunnel, and
+   * telling a passer-by exactly which build is live is a targeting aid for whatever is fixed
+   * in the next one. `doctor` runs on the machine, so loopback is all it needs.
+   *
+   * It exists because a server too old to report its own staleness cannot warn about itself:
+   * the check that says "you pulled, now restart" only runs once you have restarted. doctor
+   * is a FRESH process every time, so it always has the newest logic — it can catch a stale
+   * server that cannot catch itself.
+   */
+  app.get("/healthz", (req, res) => {
+    const local = req.ip === "127.0.0.1" || req.ip === "::1" || req.ip === "::ffff:127.0.0.1";
+    const version = local ? versionStatus() : null;
+    res.json({ ok: true, ...serverInfo(), ...(version ? { commit: version.current, describe: version.describe } : {}) });
+  });
 
   // Viewer static assets (Vite emits absolute /assets/... URLs).
   if (deps.viewerDist) app.use(express.static(deps.viewerDist, { index: false }));
