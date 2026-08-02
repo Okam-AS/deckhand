@@ -237,24 +237,24 @@ export function pollDecision(
 }
 
 /**
- * What to show for a preview's source: the branch, and whether it is a working copy.
+ * What to show for a preview's source: the branch it was built from.
  *
- * The viewer used to render the literal "local working copy" for every local preview and
- * drop `ref` on the floor. The branch was never missing — deckhand looks it up when the
- * preview starts (`localBranch`), persists it, and ships it in the share state. A user
- * looking at the panel saw "local working copy" while the payload behind it said
- * "feature/review".
+ * This briefly read `feature/review · working copy`, on the reasoning that the qualifier
+ * separated "the pushed ref" from "this machine's uncommitted state". It does not. Every
+ * local preview is a working copy — that is what `source: "local"` means — so the suffix
+ * was constant, and a constant carries no information while costing a line's width on a
+ * phone.
  *
- * Both facts matter and neither replaces the other. The branch answers "what am I looking
- * at"; "working copy" answers "is this the pushed ref, or this machine's uncommitted
- * state" — which is the difference between a preview you can share the meaning of and one
- * only this checkout can reproduce. So: show the branch, keep the qualifier.
+ * The thing that would actually change a reader's conclusion is whether the tree is DIRTY:
+ * `feature/review` clean and `feature/review` with uncommitted edits are different answers
+ * to "can I reproduce what you are looking at". That is a real signal and this is not it,
+ * so it is left for a marker that varies rather than a word that does not.
  *
- * A checkout with no branch to report (detached HEAD, or not a git repo at all) keeps
- * `ref` as the sentinel "local", and there the old label is the whole truth.
+ * A checkout with no branch to report (detached HEAD, or not a git repo) keeps `ref` as the
+ * sentinel "local", and there "local working copy" is the whole truth rather than filler.
  */
 export function sourceLabel(source: string | undefined, refName: string | undefined): { key: string; value: string } {
   if (source !== "local") return { key: "Branch", value: refName || "—" };
   if (!refName || refName === "local") return { key: "Source", value: "local working copy" };
-  return { key: "Branch", value: `${refName} · working copy` };
+  return { key: "Branch", value: refName };
 }
