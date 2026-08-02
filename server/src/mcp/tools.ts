@@ -346,8 +346,11 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
    * The once-per-stretch bookkeeping lives on the engine — this layer is rebuilt per request and
    * cannot remember anything (see `shouldNudgeTestRun`).
    */
-  const testRunNudge = (previewId: string, actionType: string): { hint?: string } => {
+  const testRunNudge = (previewId: string, actionType: string): { hint?: string; modelHint?: string } => {
     if (!DRIVING_UI_ACTIONS.has(actionType)) return {};
+    // With a run open there is nothing to nudge about, but this IS the first tap of the loop
+    // that should have been delegated — so the two reminders are complements, never both.
+    if (engine.shouldHintDelegation(previewId)) return { modelHint: DELEGATION_HINT };
     if (!engine.shouldNudgeTestRun(previewId)) return {};
     // Deliberately does NOT append TEST_RUN_CONTRACT: this fires in the middle of a flow, where
     // the agent has already met the full contract at start_preview. Restating it here says the
@@ -1075,7 +1078,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Update the test run",
       description:
-        "Report progress on the current run so the viewer's step popover animates. Set a step running before you drive it, then passed/✓ or failed/✗ after you verify (with `ui` waitFor/assert). Reference a step by its number `n` or `label`; an unknown label appends a new step. Optionally set runStatus. Pass previewId or app id.",
+        "Report progress on the current run so the viewer's step popover animates. Set a step running before you drive it, then passed/✓ or failed/✗ after you verify (with `ui` waitFor/assert). The step fields go INSIDE `step` — {\"previewId\":\"…\",\"step\":{\"n\":2,\"status\":\"passed\"}} — anything placed beside previewId is dropped by the schema and the call is rejected. Reference a step by its number `n` or `label`; an unknown label appends a new step. Optionally set runStatus. Pass previewId or app id.",
       inputSchema: {
         previewId: z.string().optional(),
         app: z.string().optional(),
@@ -1096,24 +1099,43 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         if (typeof id !== "string") return id;
         const denied = previewOwnedByPrincipal(id);
         if (denied) return denied;
+        // An update that updates nothing used to answer `ok: {updated: true}` — the exact shape
+        // of a success. That is principle 3: an empty result and a failed lookup must not be the
+        // same value. Observed on a real run: an agent sent `{previewId, n, status, detail}` with
+        // the step fields at the top level, where the schema ignores them. Five calls, five `ok`s,
+        // and the viewer sat at 0/3 while the agent reported a pass it had no basis for. The
+        // message names that specific mistake, because it is the one the shape invites.
+        if (!args.step && !args.runStatus) {
+          return fail(
+            "nothing_to_update",
+            "no step and no runStatus — nothing was updated",
+            'The step fields go INSIDE `step`, not at the top level: {"previewId":"…","step":{"n":2,"status":"passed","detail":"…"}}. Anything you put beside `previewId` is dropped by the schema.',
+          );
+        }
         engine.updateTestRun(id, { step: args.step, runStatus: args.runStatus });
         // `{updated: true}` told the agent nothing. This tool is called throughout the run, so
         // it is the natural place to show what is still unmarked — the state that later turns
         // into a step rendered as never-run next to a verdict that ignored it.
         const c = engine.testRunCounts(id);
         const left = c ? c.pending + c.running : 0;
+        const notes: string[] = [];
+        if (left > 0) {
+          notes.push(
+            `${left} of ${c!.total} steps are still unmarked. Mark each one passed or failed as you check it — a step left pending renders in the viewer as never-run.` +
+              (c!.failed > 0 ? ` ${c!.failed} step(s) have failed, so this run must finish as "failed".` : ""),
+          );
+        } else if (c && c.failed > 0) {
+          notes.push(`All steps are marked and ${c.failed} failed, so finish this run as "failed".`);
+        }
+        // This is the tool called most often across a long run, which makes it where the link
+        // quietly decays: relayed once at start_preview, then buried under everything written
+        // since. Repeating it here keeps it within reach at the bottom of the conversation.
+        const url = engine.getStatus(id, { touch: false })?.url;
+        if (url) notes.push(linkFooter(url));
         return ok({
           updated: true,
           ...(c ? { steps: c } : {}),
-          ...(left > 0
-            ? {
-                nextStep:
-                  `${left} of ${c!.total} steps are still unmarked. Mark each one passed or failed as you check it — a step left pending renders in the viewer as never-run.` +
-                  (c!.failed > 0 ? ` ${c!.failed} step(s) have failed, so this run must finish as "failed".` : ""),
-              }
-            : c && c.failed > 0
-              ? { nextStep: `All steps are marked and ${c.failed} failed, so finish this run as "failed".` }
-              : {}),
+          ...(notes.length ? { nextStep: notes.join(" ") } : {}),
         });
       }),
   );
@@ -1171,6 +1193,19 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         // the dock button with a red ✗ inside it — the viewer faithfully showing a contradiction
         // the agent introduced. Record the honest verdict and say why, rather than refusing the
         // call and leaving the run open.
+        // A run whose steps never moved proves nothing, so it cannot be a pass (principle 5).
+        // Unlike the failed-step case below there is no information here to record honestly —
+        // settling it either way invents a result — so this one refuses and leaves the run open.
+        // From a real run: three steps, zero marked, finished "passed". The viewer showed
+        // `0/3` beside a green tick, which is the user watching the agent grade its own
+        // unattempted homework. A run started with no steps at all is not this case.
+        if (args.status === "passed" && counts && counts.total > 0 && counts.passed === 0 && counts.failed === 0) {
+          return fail(
+            "no_steps_marked",
+            `cannot pass a run where none of its ${counts.total} steps were ever marked`,
+            "The run is still open. Mark what you actually checked with update_test_run (passed or failed, one call per step), then finish. If you did not check them, finish as \"failed\" or clear_test_run — do not record a verdict the steps do not support.",
+          );
+        }
         const contradicted = args.status === "passed" && !!counts && counts.failed > 0;
         const effective = contradicted ? "failed" : args.status;
         engine.finishTestRun(id, effective, args.summary);
