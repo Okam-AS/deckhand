@@ -26,7 +26,14 @@ function fakeFetch(): { impl: typeof fetch; calls: Recorded[] } {
       return new Response(JSON.stringify({ source: "native-ax", nodes: [] }), { status: 200 });
     }
     if (url.endsWith("/screenshot.png")) return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
-    if (url.endsWith("/action")) return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    if (url.endsWith("/action")) {
+      // The `describe` action answers with the compact snapshot nested under `snapshot`;
+      // every other action just echoes ok.
+      if ((body as { action?: string })?.action === "describe") {
+        return new Response(JSON.stringify({ action: "describe", ok: true, snapshot: { roots: [{ id: "compact-root" }] } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
     if (url.endsWith("/pasteboard")) return new Response("{}", { status: 200 });
     return new Response("not found", { status: 404 });
   }) as unknown as typeof fetch;
@@ -37,6 +44,47 @@ const iosTarget = { platform: "ios" as const, udid: "UDID-1" };
 const lastAction = (calls: Recorded[]) => [...calls].reverse().find((c) => c.url.endsWith("/action"))!;
 
 describe("SimDeckControl.describe", () => {
+  it("uses the compact describe action by default, unwrapped to the endpoint's shape", async () => {
+    // Measured on one app screen: the action returns the same 76 elements in 10,157 bytes
+    // that the full tree spends 29,918 on, and the interactiveOnly tree 26,501 for 70. The
+    // saving is encoding, not content — so this is the default and nothing is lost.
+    const { impl, calls } = fakeFetch();
+    const control = new SimDeckControl({ fetchImpl: impl, autostart: false });
+    const tree = await control.describe(iosTarget, { interactiveOnly: true });
+    // Unwrapped: callers must not have to know which backend answered.
+    assert.deepEqual(tree, { roots: [{ id: "compact-root" }] });
+    assert.deepEqual(lastAction(calls).body, { action: "describe" });
+    assert.ok(!calls.some((c) => c.url.includes("/accessibility-tree")), "the expensive endpoint must not be touched");
+  });
+
+  it("still uses the endpoint when the caller asks for a source or a depth", async () => {
+    // The action ignores every option — verified against the daemon. `source` is a real
+    // lever (framework inspector vs the native-AX fallback, which degrades to unlabelled
+    // nodes on map-heavy screens), so asking for one must not be silently dropped.
+    for (const opts of [{ source: "react-native" }, { maxDepth: 3 }]) {
+      const { impl, calls } = fakeFetch();
+      const control = new SimDeckControl({ fetchImpl: impl, autostart: false });
+      await control.describe(iosTarget, opts);
+      assert.ok(calls.some((c) => c.url.includes("/accessibility-tree")), `${JSON.stringify(opts)} must reach the endpoint`);
+    }
+  });
+
+  it("falls back to the endpoint when the compact snapshot comes back empty", async () => {
+    // iOS AX capture degrades to nothing on some screens. Answering "empty" is never true.
+    const seen: string[] = [];
+    const fetchImpl = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/health")) return new Response("{}", { status: 200 });
+      seen.push(url);
+      if (url.endsWith("/action")) return new Response(JSON.stringify({ snapshot: { roots: [] } }), { status: 200 });
+      return new Response(JSON.stringify({ roots: [{ AXLabel: "Uno-X" }] }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const control = new SimDeckControl({ fetchImpl, autostart: false });
+    const tree = (await control.describe(iosTarget, {})) as { roots: unknown[] };
+    assert.equal(tree.roots.length, 1, "must return the endpoint's tree, not the empty snapshot");
+    assert.ok(seen.some((u) => u.includes("/accessibility-tree")), "must have fallen through");
+  });
+
   it("GETs the accessibility-tree with source + options and returns the parsed body", async () => {
     const { impl, calls } = fakeFetch();
     const control = new SimDeckControl({ fetchImpl: impl, port: 4310, autostart: false });
@@ -63,7 +111,8 @@ describe("SimDeckControl.describe", () => {
       return new Response(JSON.stringify({ roots: [{ AXLabel: "Okam Admin" }], source: "native-ax" }), { status: 200 });
     }) as unknown as typeof fetch;
     const control = new SimDeckControl({ fetchImpl, autostart: false });
-    const tree = (await control.describe(iosTarget, { interactiveOnly: true })) as { roots: unknown[] };
+    // maxDepth forces the endpoint path, which is the one this fallback belongs to.
+    const tree = (await control.describe(iosTarget, { interactiveOnly: true, maxDepth: 9 })) as { roots: unknown[] };
     assert.equal(tree.roots.length, 1, "should return the non-empty raw tree");
     assert.equal(calls.length, 2, "should retry once without interactiveOnly");
     assert.ok(calls[1] && !calls[1].includes("interactiveOnly=true"), "retry must drop interactiveOnly");
@@ -72,7 +121,7 @@ describe("SimDeckControl.describe", () => {
   it("URL-encodes an android:<avd> target", async () => {
     const { impl, calls } = fakeFetch();
     const control = new SimDeckControl({ fetchImpl: impl, autostart: false });
-    await control.describe({ platform: "android", udid: "android:pixel_7" }, {});
+    await control.describe({ platform: "android", udid: "android:pixel_7" }, { maxDepth: 4 });
     const call = calls.find((c) => c.url.includes("/accessibility-tree"))!;
     assert.match(call.url, /\/api\/simulators\/android%3Apixel_7\/accessibility-tree/);
   });

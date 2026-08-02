@@ -81,9 +81,33 @@ export class SimDeckControl {
     this.fetchImpl = opts.fetchImpl ?? fetch;
   }
 
-  /** Accessibility tree for a device (token-efficient; independent of the video stream). */
+  /**
+   * Accessibility tree for a device (token-efficient; independent of the video stream).
+   *
+   * Two backends answer this, and the cheap one is the default. SimDeck's `describe`
+   * ACTION returns the same screen as the `/accessibility-tree` endpoint in a third of
+   * the bytes — measured on one app screen: 10,157 bytes for 76 elements, against 29,918
+   * for the same 76 from the full tree and 26,501 for 70 from `interactiveOnly`. It is
+   * both smaller AND more complete: the ids and labels are a superset of what
+   * `interactiveOnly` returned. The saving is pure encoding — no `AXFrame` strings
+   * duplicating the `frame` object, no null-valued keys, no `pid`/`hidden`/`enabled`
+   * noise on every node.
+   *
+   * The action takes no options — passing `source`, `interactiveOnly` or `maxDepth` to it
+   * changes nothing, verified against the daemon. So a caller that asks for `source` or
+   * `maxDepth` still gets the endpoint, because those are real levers: `source` picks the
+   * framework inspector over the native-AX fallback, which is the difference between a
+   * usable tree and 150 unlabelled nodes on a map-heavy screen. `interactiveOnly` alone
+   * does NOT force the endpoint — the action is strictly better on that axis.
+   */
   async describe(target: SimDeckTarget, opts: DescribeOptions = {}): Promise<unknown> {
     const origin = await this.daemon.ensureRunning();
+    if (opts.source == null && opts.maxDepth == null) {
+      const compact = await this.describeCompact(origin, target);
+      // Same degradation as below: iOS can hand back an empty capture. Fall through to
+      // the endpoint rather than answering "nothing on screen", which is never true.
+      if (!isEmptyTree(compact)) return compact;
+    }
     const body = await this.fetchTree(origin, target, opts);
     // iOS "regular/interactive" AX capture can degrade to an EMPTY tree on some
     // screens (a private-AX serialization limit — the response carries
@@ -94,6 +118,17 @@ export class SimDeckControl {
       return this.fetchTree(origin, target, { ...opts, interactiveOnly: false });
     }
     return body;
+  }
+
+  /**
+   * The compact snapshot, unwrapped to the same `{roots}` shape the endpoint returns so
+   * callers never have to know which backend answered. SimDeck nests it under `snapshot`
+   * alongside its own `action`/`ok` echo, which is bookkeeping the agent has no use for.
+   */
+  private async describeCompact(origin: string, target: SimDeckTarget): Promise<unknown> {
+    const res = await this.post(origin, target, { action: "describe" });
+    const snapshot = (res as { snapshot?: unknown })?.snapshot;
+    return snapshot ?? res;
   }
 
   private async fetchTree(origin: string, target: SimDeckTarget, opts: DescribeOptions): Promise<unknown> {
