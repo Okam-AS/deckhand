@@ -1310,6 +1310,60 @@ export class PreviewEngine {
     return added;
   }
 
+  /**
+   * Remove devices from a live preview, leaving the rest running.
+   *
+   * The mirror of `addDevices`, and it was missing for the same reason: getting from
+   * two devices back to one meant stopping the whole preview and rebuilding the device
+   * you wanted to keep. Adding was fixed first; this is the other half of the same gap.
+   *
+   * Refuses to remove the last device. A preview with no devices is not a smaller
+   * preview, it is a stopped one wearing a running preview's URL — and the caller that
+   * wanted that has `stop_preview`, which also frees the worktree and the share.
+   */
+  async removeDevices(previewId: string, deviceIds: string[]): Promise<string[]> {
+    const p = this.active(previewId);
+    if (!p) throw new PreviewError(`no active preview "${previewId}"`);
+    const doomed = p.devices.filter((d) => deviceIds.includes(d.record.deviceId));
+    const unknown = deviceIds.filter((id) => !p.devices.some((d) => d.record.deviceId === id));
+    if (unknown.length) {
+      throw new PreviewError(
+        `no such device on this preview: ${unknown.join(", ")}`,
+        `it has ${p.devices.map((d) => d.record.deviceId).join(", ")}`,
+      );
+    }
+    if (doomed.length === p.devices.length) {
+      throw new PreviewError(
+        "that would remove every device",
+        "call stop_preview instead — it also releases the worktree and the share",
+      );
+    }
+
+    for (const dev of doomed) dev.abort.abort();
+
+    // The livesync process is keyed by app+PLATFORM, not by device — so removing a
+    // device only ends it if that platform is leaving with it. Unconditional here ONLY
+    // because startPreview enforces one device per platform on local previews, which is
+    // the only source that has a livesync process at all: a removed device is always the
+    // last of its platform. If that rule is ever relaxed, this must check for a surviving
+    // sibling first, or it kills livesync for a device nobody asked to touch. Written as
+    // a note rather than a guard, because with the rule in force no input can tell the
+    // two apart, and a branch no test can reach is not protection.
+    if (p.record.source === "local") {
+      for (const platform of new Set(doomed.map((d) => d.record.platform))) {
+        this.d.devProcs?.stop(devKey(p.app.id, platform));
+      }
+    }
+
+    await this.teardownDevices(p, undefined, doomed);
+    p.devices = p.devices.filter((d) => !doomed.includes(d));
+    p.record.devices = p.devices.map((d) => d.record);
+    this.recomputePreviewPhase(p);
+    this.persist();
+    this.markActive(p);
+    return doomed.map((d) => d.record.deviceId);
+  }
+
   private missingPlatforms(p: LivePreview, req: StartPreviewRequest): Platform[] {
     const live = new Set(p.devices.map((d) => d.record.platform));
     return [...new Set(req.devices.map((d) => d.platform))].filter((pl) => !live.has(pl));
@@ -3102,8 +3156,15 @@ export class PreviewEngine {
    * delete the simulator/AVD deckhand created for it. Idempotent — the handles
    * are cleared, so a second call (stop after an idle sweep) is a no-op.
    */
-  private async teardownDevices(p: LivePreview, onReleased?: () => void): Promise<void> {
-    for (const dev of p.devices) {
+  /**
+   * Tear down SOME of a preview's devices. Defaults to all of them, which is what
+   * stopPreview wants; `removeDevices` passes a subset. Parameterised rather than
+   * copied — every simulator/emulator/pool release in this method is a place a second
+   * version would drift, and a leaked pool lease or an un-freed adb port is invisible
+   * until the machine runs out of them.
+   */
+  private async teardownDevices(p: LivePreview, onReleased?: () => void, only?: LiveDevice[]): Promise<void> {
+    for (const dev of only ?? p.devices) {
       const stream = p.attached.get(dev.record.deviceId);
       if (stream) await stream.detach().catch(() => {});
       p.attached.delete(dev.record.deviceId);

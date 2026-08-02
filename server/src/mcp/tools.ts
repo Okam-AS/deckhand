@@ -923,6 +923,34 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   );
 
   server.registerTool(
+    "stop_device",
+    {
+      title: "Stop one device",
+      description:
+        "Tear down ONE device of a running preview and leave the rest going — the way back from `start_preview` with an extra platform. The preview keeps its URL, and the devices you are not removing are never touched. Cannot remove the last device: a preview with none is a stopped preview wearing a running one's URL, and `stop_preview` is what does that properly (it also frees the worktree and the share). Pass previewId or app id.",
+      inputSchema: {
+        previewId: z.string().optional().describe("from start_preview; or pass app instead"),
+        app: z.string().optional().describe("app id — targets its running preview"),
+        deviceId: z.string().describe("e.g. android-1 — see preview_status for the ids"),
+      },
+    },
+    (args) =>
+      audited("stop_device", args, async () => {
+        const id = resolvePreviewId(args);
+        if (typeof id !== "string") return id;
+        const denied = previewOwnedByPrincipal(id);
+        if (denied) return denied;
+        const removed = await engine.removeDevices(id, [args.deviceId]);
+        const left = engine.getStatus(id, { touch: false })?.devices ?? [];
+        return ok({
+          removed,
+          devices: left.map((d) => ({ deviceId: d.deviceId, label: d.label, phase: d.phase })),
+          nextStep: `${removed.join(", ")} is gone; ${left.map((d) => d.deviceId).join(", ")} kept running throughout. The viewer link is unchanged.`,
+        });
+      }),
+  );
+
+  server.registerTool(
     "screenshot",
     {
       title: "Screenshot a device",

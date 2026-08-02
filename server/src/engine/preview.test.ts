@@ -1618,6 +1618,47 @@ describe("PreviewEngine idle sweep", () => {
     );
   });
 
+  it("removes one device and leaves the rest running", async () => {
+    // The mirror of addDevices, missing for the same reason: getting from two devices
+    // back to one meant stopping the whole preview and rebuilding the one you wanted to
+    // keep. Adding was fixed first; this is the other half of the same gap.
+    const h = makeEngine({ config: { ...config, limits: { ...config.limits, maxTotalDevices: 6 } } });
+    h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }, { platform: "android" }], access: "public" });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+
+    // Watch the simulator calls from here: the survivor must generate none.
+    const before = h.simctlCalls.length;
+    const removed = await h.engine.removeDevices("pv1", ["android-1"]);
+    assert.deepEqual(removed, ["android-1"]);
+    const left = h.engine.getStatus("pv1")!.devices;
+    assert.deepEqual(left.map((d) => d.deviceId), ["ios-0"]);
+    assert.equal(left[0]!.phase, "ready", "the survivor must never have been disturbed");
+    assert.equal(h.engine.getStatus("pv1")!.phase, "ready", "and the preview is still ready, not stuck mid-teardown");
+    // The claim the whole feature rests on, and it needs asserting rather than implying:
+    // tearing down "the doomed" must not quietly mean "all of them".
+    const during = h.simctlCalls.slice(before);
+    assert.deepEqual(during.filter((c) => c.startsWith("shutdown")), [], "the iOS simulator must not be shut down");
+    assert.deepEqual(during.filter((c) => c.startsWith("delete")), [], "nor deleted");
+  });
+
+  it("will not remove the last device", async () => {
+    // A preview with no devices is not a smaller preview, it is a stopped one wearing a
+    // running preview's URL — and the caller who wanted that has stop_preview, which
+    // also frees the worktree and the share.
+    const h = makeEngine();
+    h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
+    await assert.rejects(() => h.engine.removeDevices("pv1", ["ios-0"]), /every device/);
+    assert.deepEqual(h.engine.getStatus("pv1")!.devices.map((d) => d.deviceId), ["ios-0"], "and nothing was torn down on the way to refusing");
+  });
+
+  it("names the ids it does have when asked for one it does not", async () => {
+    const h = makeEngine();
+    h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
+    await assert.rejects(() => h.engine.removeDevices("pv1", ["android-9"]), /no such device/);
+  });
+
   it("adds the missing device to a live preview instead of refusing", async () => {
     // findReusable matches app + source + ref and ignores the device list — right for the
     // daily loop, wrong for a genuinely different request. Asking for iOS + Android while an
