@@ -622,6 +622,9 @@ describe("local (dev-mode) previews", () => {
         start: () => {},
         isAlive: () => false,
         exitCode: () => 1,
+        // The engine reads exitReason now, not exitCode — "(code ?)" hid whether the process
+        // had been killed, which is the one fact worth having.
+        exitReason: () => "exit code 1",
         restart: () => false,
         stop: () => {},
         stopAll: () => {},
@@ -630,7 +633,8 @@ describe("local (dev-mode) previews", () => {
     startLocal(h);
     const phase = await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
     assert.equal(phase, "failed");
-    assert.match(h.engine.getStatus("pv1")!.devices[0]!.error ?? "", /livesync process exited/);
+    // The message now names HOW it died — "(code ?)" hid the one fact worth having.
+    assert.match(h.engine.getStatus("pv1")!.devices[0]!.error ?? "", /livesync process exit code 1/);
   });
 });
 
