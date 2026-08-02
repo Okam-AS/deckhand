@@ -147,8 +147,15 @@ const uiActionSchema = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("gesture"), preset: z.enum(["scroll-up", "scroll-down", "scroll-left", "scroll-right"]) }),
   z.object({ type: z.literal("openUrl"), url: z.string() }),
+  z.object({ type: z.literal("back") }).describe("the platform back gesture — use this instead of guessing an edge-swipe"),
+  z.object({ type: z.literal("dismissKeyboard") }),
+  z.object({ type: z.literal("sleep"), ms: z.number().int().positive() }),
+  z.object({ type: z.literal("scrollUntilVisible"), selector: selectorSchema }),
+  z.object({ type: z.literal("toggleAppearance") }).describe("flip the device between light and dark"),
   z.object({ type: z.literal("waitFor"), selector: selectorSchema, timeoutMs: z.number().int().positive().optional() }),
+  z.object({ type: z.literal("waitForNot"), selector: selectorSchema, timeoutMs: z.number().int().positive().optional() }),
   z.object({ type: z.literal("assert"), selector: selectorSchema }),
+  z.object({ type: z.literal("assertNot"), selector: selectorSchema }),
   z.object({ type: z.literal("query"), selector: selectorSchema }),
 ]);
 
@@ -344,7 +351,12 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
    * (waitFor/assert/query). A bare `assert` moves nothing on screen, so it is not the thing
    * the user is left guessing about.
    */
-  const DRIVING_UI_ACTIONS = new Set(["tap", "tapElement", "type", "key", "button", "home", "swipe", "gesture", "openUrl"]);
+  // `sleep` and the waitForNot/assertNot verifiers are absent on purpose: they move nothing
+  // on screen, so they are not what the user is being left in the dark about.
+  const DRIVING_UI_ACTIONS = new Set([
+    "tap", "tapElement", "type", "key", "button", "home", "swipe", "gesture", "openUrl",
+    "back", "dismissKeyboard", "scrollUntilVisible", "toggleAppearance",
+  ]);
 
   /**
    * The reminder attached to a driving `ui` action when nothing is being reported to the viewer.
@@ -942,7 +954,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Drive the device UI",
       description:
-        "Perform ONE UI action to drive the app end-to-end: tap {x,y} (0..1 normalized), tapElement {selector}, type {text}, key {name: enter|backspace|tab|escape|up|down|left|right}, button {name}, home, swipe, gesture {preset: scroll-up|scroll-down|scroll-left|scroll-right}, openUrl {url}, and the verifiers waitFor/assert/query {selector}. Prefer tapElement + waitFor/assert over raw coordinates. Note: iOS can't HID-type non-US characters — non-ASCII text is pasted via the clipboard (focus the field first). Needs the SimDeck testing backend.",
+        "Perform ONE UI action to drive the app end-to-end: tap {x,y} (0..1 normalized), tapElement {selector}, type {text}, key {name: enter|backspace|tab|escape|up|down|left|right}, button {name}, home, back, dismissKeyboard, sleep {ms}, swipe, gesture {preset: scroll-up|scroll-down|scroll-left|scroll-right}, scrollUntilVisible {selector}, toggleAppearance, openUrl {url}, and the verifiers waitFor/waitForNot/assert/assertNot/query {selector}. Prefer tapElement + waitFor/assert over raw coordinates: a coordinate read off a screenshot is the single most common way an agent taps the wrong thing. To reach something off-screen use scrollUntilVisible rather than a scroll-and-screenshot loop; to go back use `back` rather than guessing an edge-swipe; if the keyboard or a text-selection callout is covering what you need, dismissKeyboard. Note: iOS can't HID-type non-US characters — non-ASCII text is pasted via the clipboard (focus the field first). Needs the SimDeck testing backend.",
       inputSchema: {
         previewId: z.string(),
         deviceId: z.string(),
