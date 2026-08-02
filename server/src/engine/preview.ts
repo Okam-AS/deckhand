@@ -260,6 +260,35 @@ export interface DeviceRequest {
   model?: string;
 }
 
+/**
+ * One live device record. Extracted so a cold start and a later add produce IDENTICAL
+ * devices — the add path grew from a copy of this, and a copy is where the two quietly
+ * drift into "why does the added one have no label".
+ *
+ * `index` is the device's position in the preview, which is what deviceId is built from.
+ * It must stay unique for the life of the preview: ids are how the viewer addresses a
+ * stream, so reusing one after a device is removed would point a pane at the wrong device.
+ */
+export function newLiveDevice(dev: DeviceRequest, index: number): LiveDevice {
+  return {
+    record: {
+      deviceId: `${dev.platform}-${index}`,
+      platform: dev.platform,
+      label:
+        dev.platform === "web"
+          ? "Web app"
+          : dev.model && dev.runtime
+            ? `${dev.model} · ${dev.runtime}`
+            : `${dev.platform} device ${index}`,
+      runtime: dev.runtime,
+      model: dev.model,
+      phase: "pending",
+    },
+    logs: { build: [], metro: [], app: [], stream: [] },
+    abort: new AbortController(),
+  };
+}
+
 export interface StartPreviewRequest {
   app: App;
   source: PreviewSource;
@@ -1090,7 +1119,27 @@ export class PreviewEngine {
     // (same shareId, same URL) instead of minting a second simulator.
     const stillReleasing = this.reapTerminalForApp(req.app.id);
     const existing = this.findReusable(req);
-    if (existing) return this.resultFor(existing, true, this.missingPlatforms(existing, req));
+    if (existing) {
+      // Asking for a platform this preview does not have is a DIFFERENT request, and it used
+      // to come back as `alreadyRunning` with the extra device silently dropped. Now it is
+      // satisfied: the missing devices are added to the live preview and the running ones are
+      // left alone. If adding fails (capacity, a web preview) the reason is reported rather
+      // than swallowed — the caller still gets its link, with the failure attached.
+      const missing = this.missingPlatforms(existing, req);
+      if (missing.length) {
+        const specs = req.devices.filter((d) => missing.includes(d.platform));
+        try {
+          this.addDevices(existing.record.previewId, specs);
+          return this.resultFor(existing, true);
+        } catch (e) {
+          // The hint is the actionable half — dropping it leaves a reason with no way out.
+          const why =
+            e instanceof PreviewError && e.hint ? `${e.message} (${e.hint})` : e instanceof Error ? e.message : String(e);
+          return this.resultFor(existing, true, missing, why);
+        }
+      }
+      return this.resultFor(existing, true);
+    }
 
     if (req.devices.length > this.d.config.limits.maxDevicesPerPreview) {
       throw new PreviewError(
@@ -1116,23 +1165,7 @@ export class PreviewEngine {
     // Web: detect the framework so orchestration/URL know whether it hosts
     // path-based (Vite) or at the root of a per-share subdomain (Nuxt/Next/…).
     const webFramework = req.app.type === "web" && req.app.path ? detectWebFrameworkFromDir(req.app.path) : null;
-    const devices: LiveDevice[] = req.devices.map((dev, i) => ({
-      record: {
-        deviceId: `${dev.platform}-${i}`,
-        platform: dev.platform,
-        label:
-          dev.platform === "web"
-            ? "Web app"
-            : dev.model && dev.runtime
-              ? `${dev.model} · ${dev.runtime}`
-              : `${dev.platform} device ${i}`,
-        runtime: dev.runtime,
-        model: dev.model,
-        phase: "pending",
-      },
-      logs: { build: [], metro: [], app: [], stream: [] },
-      abort: new AbortController(),
-    }));
+    const devices: LiveDevice[] = req.devices.map((dev, i) => newLiveDevice(dev, i));
 
     const record: PersistedPreview = {
       previewId,
@@ -1210,12 +1243,79 @@ export class PreviewEngine {
    *
    * An empty result and a satisfied request must not look the same (CONSTITUTION §3).
    */
+  /**
+   * Add devices to a LIVE preview, without touching the ones already running.
+   *
+   * This was refused outright, and the advice was "stop_preview, then start again with the
+   * full list" — which reboots working simulators and pays for their build a second time,
+   * for the crime of wanting one more device.
+   *
+   * Nothing structural was in the way. `orchestrateGroup` is already self-contained per
+   * group: it boots that group's devices, awaits the source, and builds. Devices in other
+   * groups are never referenced. And `prepareSource` is memoised on `p.prep`, so a second
+   * call on a live preview returns the directory the first one resolved rather than
+   * re-checking out anything.
+   *
+   * So each new device is orchestrated as its own group. That is deliberate rather than
+   * clever: a device joining a platform that is already live pays for its own build instead
+   * of reusing the neighbour's artifact. Slower, and correct — locating and copying a built
+   * product means reasoning about whether that artifact is still the one on the running
+   * device, which is exactly the kind of assumption that turns into "why is this build
+   * stale". The cost is a build; the alternative was a reboot of everything.
+   *
+   * Capacity is re-checked here, not inherited from the original request: the machine's
+   * budget is shared, and a preview that was admitted an hour ago says nothing about now.
+   *
+   * Synchronous, like `startPreview`, and for the same reason: the caller gets its link back
+   * immediately and polls for readiness. Booting and building happen behind it.
+   */
+  addDevices(previewId: string, specs: DeviceRequest[]): LiveDevice[] {
+    const p = this.active(previewId);
+    if (!p) throw new PreviewError(`no active preview "${previewId}"`);
+    if (p.devices.some((d) => d.record.platform === "web") || specs.some((sp) => sp.platform === "web")) {
+      throw new PreviewError("a web preview has no devices to add", "start a device preview instead");
+    }
+    if (p.devices.length + specs.length > this.d.config.limits.maxDevicesPerPreview) {
+      throw new PreviewError(
+        `too many devices (${p.devices.length + specs.length} > ${this.d.config.limits.maxDevicesPerPreview})`,
+        "stop a device or raise limits.maxDevicesPerPreview",
+      );
+    }
+    if (this.devicesInUse() + specs.length > this.d.config.limits.maxTotalDevices) {
+      throw new PreviewError(
+        `device capacity reached (${this.devicesInUse()}/${this.d.config.limits.maxTotalDevices} in use)`,
+        "stop another preview or raise limits.maxTotalDevices",
+      );
+    }
+
+    // Index off the current length, which is safe ONLY because a device is never removed
+    // from a live preview — they go away with the whole preview or not at all. If per-device
+    // removal is ever added, this silently starts reusing ids, and a device id is how a viewer
+    // pane addresses a stream: both ends would agree on the name and disagree about the
+    // device. Indexing off the highest id instead is one line, and it is deliberately NOT
+    // here, because with no removal there is no input that tells the two apart and a guard no
+    // test can fail is not a guard.
+    const added = specs.map((spec, i) => newLiveDevice(spec, p.devices.length + i));
+    p.devices.push(...added);
+    this.persist();
+    this.markActive(p);
+
+    // Each on its own, so one device failing to boot cannot fail the others — and so a
+    // caller gets its link back immediately, exactly as a cold start does.
+    for (const dev of added) {
+      void this.orchestrateGroup(p, [dev]).catch(() => {
+        /* per-device errors land on the device record via failDevice */
+      });
+    }
+    return added;
+  }
+
   private missingPlatforms(p: LivePreview, req: StartPreviewRequest): Platform[] {
     const live = new Set(p.devices.map((d) => d.record.platform));
     return [...new Set(req.devices.map((d) => d.platform))].filter((pl) => !live.has(pl));
   }
 
-  private resultFor(p: LivePreview, alreadyRunning: boolean, missing: Platform[] = []): StartPreviewResult {
+  private resultFor(p: LivePreview, alreadyRunning: boolean, missing: Platform[] = [], why?: string): StartPreviewResult {
     this.markActive(p); // an idempotent start_preview is someone using it
     return {
       previewId: p.record.previewId,
@@ -1228,10 +1328,9 @@ export class PreviewEngine {
         ? {
             notAdded: missing,
             nextStep:
-              `This preview is already running with ${[...new Set(p.devices.map((d) => d.record.platform))].join(" + ")}, ` +
-              `and deckhand cannot add a device to a live preview — so ${missing.join(" + ")} was NOT started. ` +
-              `To get it: call stop_preview, then start_preview with the full device list. Tell the user first: ` +
-              `that reboots the devices already running and rebuilds them, which costs minutes.`,
+              `${missing.join(" + ")} could NOT be added to this running preview: ${why ?? "unknown reason"}. ` +
+              `The devices already running are untouched. Free capacity (stop_preview on another preview) and ask again, ` +
+              `or stop this one and start it with the full device list.`,
           }
         : {}),
     };

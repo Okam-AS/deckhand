@@ -902,15 +902,23 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Stop a preview",
       description:
-        "Tear down a preview's simulators (and its git worktree; a local app's source folder is never touched). In the daily loop you normally leave the preview running so its URL stays live — stop only to free capacity or end a session for good.",
-      inputSchema: { previewId: z.string() },
+        "Tear down a preview's simulators (and its git worktree; a local app's source folder is never touched). In the daily loop you normally leave the preview running so its URL stays live — stop only to free capacity or end a session for good. Pass previewId or app id.",
+      inputSchema: {
+        previewId: z.string().optional().describe("from start_preview; or pass app instead"),
+        app: z.string().optional().describe("app id — stops its running preview"),
+      },
     },
     (args) =>
       audited("stop_preview", args, async () => {
-        const denied = previewOwnedByPrincipal(args.previewId);
+        // Took previewId ONLY, while start_preview, preview_status and logs all accept `app`
+        // — and the message that sent callers here did not mention it. An instruction that
+        // cannot be followed with what the reader has is worse than none (CONSTITUTION §1).
+        const id = resolvePreviewId(args);
+        if (typeof id !== "string") return id;
+        const denied = previewOwnedByPrincipal(id);
         if (denied) return denied;
-        const stopped = await engine.stopPreview(args.previewId);
-        return stopped ? ok({ stopped: true }) : fail("unknown_preview", `no active preview "${args.previewId}"`);
+        const stopped = await engine.stopPreview(id);
+        return stopped ? ok({ stopped: true }) : fail("unknown_preview", `no active preview "${id}"`);
       }),
   );
 
