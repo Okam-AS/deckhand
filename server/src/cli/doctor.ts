@@ -10,6 +10,7 @@ import { ServeSimBackend, vendoredServeSimBin } from "../streaming/serveSim.ts";
 import { AndroidAdbBackend } from "../streaming/androidAdb.ts";
 import { AndroidManager, selectSystemImage, serialForPort } from "../devices/android.ts";
 import { detectWebFrameworkFromDir, webHostingMode } from "../engine/detect.ts";
+import { repoRoot } from "../version.ts";
 
 /** Helper ports for the Android smoke leg — outside the configured preview range, so a gate run cannot evict a live preview's helper. */
 const ANDROID_SMOKE_PORTS: [number, number] = [3290, 3299];
@@ -363,6 +364,73 @@ async function smokeAndroid(): Promise<Check[]> {
   return checks;
 }
 
+/**
+ * Is the SERVER running the code in this checkout?
+ *
+ * The in-process version check cannot answer this when it matters most: a server too old to
+ * know about the check cannot report that it is stale. doctor is a fresh process every time,
+ * so it always has the newest logic — this is the one place a stale server gets caught by
+ * something that is not itself.
+ *
+ * Loopback, because that is where the commit is disclosed (it is not public — telling the
+ * internet which build is live is a targeting aid).
+ */
+async function checkServerFreshness(config: Config): Promise<Check> {
+  const name = "server is running this checkout";
+  const root = repoRoot();
+  const head = root ? await gitHead(root) : null;
+  if (!head) return { name, ok: true, skipped: true, detail: "not a git checkout" };
+
+  let body: { commit?: string; describe?: string } | null = null;
+  try {
+    const res = await fetch(`http://127.0.0.1:${config.port}/healthz`, { signal: AbortSignal.timeout(3000) });
+    body = (await res.json()) as { commit?: string };
+  } catch {
+    return { name, ok: true, skipped: true, detail: "server not running" };
+  }
+  return { name, ...freshnessVerdict(head, body) };
+}
+
+const RESTART_CMD = "launchctl kickstart -k gui/$(id -u)/no.deckhand.server";
+
+/**
+ * The decision, separated from the fetching so it can be tested.
+ *
+ * A WARNING rather than a failure: a stale server is still a working server, and failing
+ * doctor over it would train people to ignore a red doctor — the thing this check exists to
+ * be believed about.
+ */
+export function freshnessVerdict(
+  head: string,
+  body: { commit?: string; describe?: string } | null,
+): { ok: boolean; warn?: boolean; detail: string } {
+  if (!body?.commit) {
+    // Older than the healthz that reports it — which is itself the answer.
+    return {
+      ok: false,
+      warn: true,
+      detail: `the running server is too old to report its version, so it predates this checkout — restart it: \`${RESTART_CMD}\``,
+    };
+  }
+  if (body.commit !== head) {
+    return {
+      ok: false,
+      warn: true,
+      detail: `running ${body.commit}, checkout is ${head} — someone pulled without restarting. \`${RESTART_CMD}\` (it tears down every booted preview)`,
+    };
+  }
+  return { ok: true, detail: body.describe ?? body.commit };
+}
+
+/** Short HEAD of a checkout, or null. */
+function gitHead(cwd: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile("git", ["rev-parse", "--short", "HEAD"], { cwd, timeout: 5_000 }, (err, stdout) =>
+      resolve(err ? null : stdout.toString().trim()),
+    );
+  });
+}
+
 export async function runDoctor(opts: { smoke?: boolean } = {}): Promise<{ checks: Check[]; ok: boolean }> {
   const checks: Check[] = [];
 
@@ -384,6 +452,7 @@ export async function runDoctor(opts: { smoke?: boolean } = {}): Promise<{ check
     checks.push(await checkServices());
     checks.push(await checkGitHub(config));
     checks.push(checkWebHost(config, apps));
+    checks.push(await checkServerFreshness(config));
     if (opts.smoke) {
       // Sequential, not parallel: both legs create and boot a device, and an emulator booting
       // beside a simulator on the same machine is exactly the CPU contention that made the

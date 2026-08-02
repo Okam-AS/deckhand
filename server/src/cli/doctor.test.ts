@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { deviceGateExit, type Check } from "./doctor.ts";
+import { deviceGateExit, freshnessVerdict, type Check } from "./doctor.ts";
 
 /**
  * The `--device-only` exit code (`npm run test:device`).
@@ -88,5 +88,32 @@ describe("deviceGateExit", () => {
     // boots a device would have silently dropped it from the gate and kept exiting 0.
     const renamed: Check = { name: "first frame (real device)", ok: false, gate: true, smoke: "ios" };
     assert.equal(deviceGateExit([renamed, smoke("android")]).code, 1, "the flag travels with the check, the name does not");
+  });
+});
+
+describe("freshnessVerdict", () => {
+  it("catches a server too old to report its own version", () => {
+    // The situation that prompted this: the running server predated the check that says
+    // "you pulled, now restart", so it could not say it about itself. doctor is a fresh
+    // process every time and always has the newest logic — this is where a stale server gets
+    // caught by something that is not itself.
+    const v = freshnessVerdict("abc1234", { });
+    assert.equal(v.ok, false);
+    assert.equal(v.warn, true, "a stale server still works — failing doctor over it teaches people to ignore doctor");
+    assert.match(v.detail, /too old to report/);
+    assert.match(v.detail, /launchctl kickstart/, "and the exact command");
+  });
+
+  it("catches a pull without a restart", () => {
+    const v = freshnessVerdict("newsha1", { commit: "oldsha0" });
+    assert.equal(v.ok, false);
+    assert.match(v.detail, /running oldsha0, checkout is newsha1/);
+    assert.match(v.detail, /tears down every booted preview/, "so the operator knows what it costs");
+  });
+
+  it("is quiet when the server is on this checkout", () => {
+    const v = freshnessVerdict("abc1234", { commit: "abc1234", describe: "v0.1.61" });
+    assert.equal(v.ok, true);
+    assert.equal(v.detail, "v0.1.61");
   });
 });
