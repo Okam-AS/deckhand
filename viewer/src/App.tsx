@@ -150,9 +150,19 @@ export function App() {
       <PinGate
         shareId={shareId}
         pinLength={state.pinLength ?? 4}
-        onUnlocked={() => {
-          // Cookie is set — fetch the full state FIRST, then flip unlocked in the
-          // same update so we never render the content branch without devices.
+        onUnlocked={(fresh) => {
+          // The unlock response carries the state, so there is nothing to ask for. It used to
+          // POST /unlock, wait, then GET /state and wait again — two sequential round trips
+          // for one action, ~230ms each through the tunnel, with the pad showing nothing in
+          // between. Still set state BEFORE flipping unlocked, so the content branch never
+          // renders without devices.
+          if (fresh) {
+            setState(fresh);
+            setUnlocked(true);
+            return;
+          }
+          // Older server, or a response without it: fall back to the second call rather than
+          // rendering an empty stage.
           void fetchShareState(shareId).then((s) => {
             if (s && s !== "gone") setState(s);
             setUnlocked(true);

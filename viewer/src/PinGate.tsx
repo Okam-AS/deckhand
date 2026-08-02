@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { ShareState } from "./api.ts";
 import { verifyPin } from "./api.ts";
 import { BackspaceIcon } from "./icons.tsx";
 
 interface Props {
   shareId: string;
   pinLength: number;
-  onUnlocked: () => void;
+  onUnlocked: (state?: ShareState) => void;
 }
 
 /**
@@ -20,6 +21,9 @@ export function PinGate({ shareId, pinLength, onUnlocked }: Props) {
   const [shake, setShake] = useState(false);
   const [lockedUntil, setLockedUntil] = useState(0);
   const busy = useRef(false);
+  // Rendered, not just tracked: the last digit fills the final dot and then nothing happens
+  // for as long as the round trip takes. Silence there reads as "it did not register".
+  const [checking, setChecking] = useState(false);
 
   const fail = useCallback((text: string) => {
     setMsg(text);
@@ -32,10 +36,12 @@ export function PinGate({ shareId, pinLength, onUnlocked }: Props) {
   const submit = useCallback(
     async (pin: string) => {
       busy.current = true;
+      setChecking(true);
       const r = await verifyPin(shareId, pin);
       busy.current = false;
+      setChecking(false);
       if (r.ok) {
-        onUnlocked();
+        onUnlocked(r.state);
       } else if (r.lockedMs > 0) {
         setLockedUntil(Date.now() + r.lockedMs);
         fail(`Too many attempts — wait ${Math.ceil(r.lockedMs / 1000)}s`);
@@ -95,8 +101,8 @@ export function PinGate({ shareId, pinLength, onUnlocked }: Props) {
   return (
     <main className="centered">
       <div className="pinpad">
-        <p className="pin-title">Enter PIN to view</p>
-        <div className={`pin-dots ${shake ? "err" : ""}`}>
+        <p className="pin-title">{checking ? "Checking…" : "Enter PIN to view"}</p>
+        <div className={`pin-dots ${shake ? "err" : ""} ${checking ? "checking" : ""}`}>
           {Array.from({ length: len }).map((_, i) => (
             <span key={i} className={`pin-dot ${i < entered.length ? "on" : ""}`} />
           ))}

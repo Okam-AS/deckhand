@@ -629,3 +629,41 @@ describe("the PIN gate resolves the same shareId the handlers do", () => {
     assert.ok(res.status === 400 || res.status === 401, `expected a refusal, got ${res.status}`);
   });
 });
+
+describe("unlock answers with the state", () => {
+  before(() => {
+    pinState.current = { shareId: "web-share", length: 4, pin: "1234" };
+  });
+  after(() => {
+    pinState.current = null;
+  });
+
+  it("returns the share state, so the viewer needs no second round trip", async () => {
+    // It used to POST /unlock, wait, then GET /state and wait again — two sequential trips
+    // for one action. On the server both are sub-millisecond; through the tunnel each is
+    // ~230ms, so the pad sat with every dot filled for half a second showing nothing. The
+    // second call asked for something this handler already had.
+    const res = await fetch(`${proxyBase}/s/web-share/unlock`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pin: "1234" }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { ok: boolean; state?: { devices?: unknown[] } };
+    assert.equal(body.ok, true);
+    assert.ok(body.state, "the state rides along with the unlock");
+    assert.ok(Array.isArray(body.state!.devices), "and it is the real state, not a stub");
+  });
+
+  it("says nothing about the state when the PIN is wrong", async () => {
+    // A failed attempt must not leak what is behind the gate.
+    const res = await fetch(`${proxyBase}/s/web-share/unlock`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pin: "9999" }),
+    });
+    assert.equal(res.status, 401);
+    const body = (await res.json()) as Record<string, unknown>;
+    assert.equal(body.state, undefined, "no state for a wrong PIN");
+  });
+});
