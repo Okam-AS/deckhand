@@ -410,8 +410,9 @@ describe("MCP server (end-to-end over HTTP)", () => {
     assert.ok(Array.isArray(res.ios.runtimes));
     // Phase 0 wire contract: the physical section is always present, and with no
     // scanner configured (this fake engine — and every pre-feature deployment's
-    // behaviour) it is exactly empty. Agents may key on the field existing.
-    assert.deepEqual(res.physical, { ios: [], android: [] });
+    // behaviour) it is exactly empty, with `targetable` saying start_preview
+    // cannot build to physical hardware yet. Agents may key on both.
+    assert.deepEqual(res.physical, { ios: [], android: [], targetable: false });
     await admin.close();
   });
 });

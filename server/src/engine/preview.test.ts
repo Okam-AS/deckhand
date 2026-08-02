@@ -2495,7 +2495,7 @@ describe("listDevices physical section", () => {
   it("answers empty physical lists when no scanner is configured — every existing deployment's shape", async () => {
     const h = makeEngine();
     const out = await h.engine.listDevices();
-    assert.deepEqual(out.physical, { ios: [], android: [] });
+    assert.deepEqual(out.physical, { ios: [], android: [], targetable: false });
     // The pre-existing sections are untouched by the feature.
     assert.deepEqual(out.ios.models, ["iPhone 16 Pro"]);
     assert.equal(out.ios.runtimes[0]!.name, "iOS 26.0");
@@ -2515,12 +2515,35 @@ describe("listDevices physical section", () => {
     };
     const galaxy = { serial: "R58M12ABCDE", state: "device" as const, model: "SM_G973F" };
     const h = makeEngine({
-      physical: { list: async () => ({ ios: [ipad], android: [galaxy] }) } as PreviewEngineDeps["physical"],
+      physical: { list: async () => ({ ios: [ipad], android: [galaxy] }) },
     });
     const out = await h.engine.listDevices();
     assert.deepEqual(out.physical.ios, [ipad]);
     assert.deepEqual(out.physical.android, [galaxy]);
+    // Phase 0: nothing can target physical hardware; the wire says so, so the
+    // agent-facing claim lives in the response rather than in a tool description
+    // that can go stale.
+    assert.equal(out.physical.targetable, false);
     // Physical hardware is NOT deckhand capacity — it must never count as in use.
     assert.equal(out.capacity.inUse, 0);
+  });
+
+  it("survives a rejecting scanner: the simulator sections still answer, and the failure is reported as an error", async () => {
+    const h = makeEngine({
+      physical: {
+        list: async () => {
+          throw new Error("scanner exploded");
+        },
+      },
+    });
+    const out = await h.engine.listDevices();
+    // The additive contract: a broken physical scan must never take down the
+    // enumeration a machine's simulators depend on.
+    assert.deepEqual(out.ios.models, ["iPhone 16 Pro"]);
+    assert.equal(out.ios.runtimes[0]!.name, "iOS 26.0");
+    assert.deepEqual(out.physical.ios, []);
+    assert.deepEqual(out.physical.android, []);
+    assert.match(out.physical.errors!.ios!, /scanner exploded/);
+    assert.match(out.physical.errors!.android!, /scanner exploded/);
   });
 });

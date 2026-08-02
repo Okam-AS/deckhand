@@ -1,7 +1,7 @@
 import { readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type Exec, defaultExec } from "./ios.ts";
+import { type Exec, makeDefaultExec } from "./android.ts";
 
 // ---------------------------------------------------------------------------
 // Physical-device DETECTION (read-only). Phase 0 of physical-device support:
@@ -29,8 +29,13 @@ export interface PhysicalIosDevice {
   /** "iPhone" | "iPad" | … (hardwareProperties.deviceType). */
   deviceType: string;
   osVersion: string;
-  /** "usb" when cabled, "network" for Wi-Fi pairing. */
-  transport: "usb" | "network";
+  /**
+   * "usb" when cabled, "network" for Wi-Fi pairing, "unknown" for any
+   * transportType devicectl reports that this code has not seen — later phases
+   * branch on transport (network pairing needs tunnel setup), so an unfamiliar
+   * value must not be asserted as either.
+   */
+  transport: "usb" | "network" | "unknown";
   /** Building to the device requires Developer Mode on it; surface it here. */
   developerMode: boolean;
 }
@@ -50,6 +55,13 @@ export interface PhysicalAndroidDevice {
 export interface PhysicalDevices {
   ios: PhysicalIosDevice[];
   android: PhysicalAndroidDevice[];
+  /**
+   * Present only when a platform's SCAN failed (tool missing, hung devicectl,
+   * unparseable output) — engine.md: an empty result and a failed lookup must
+   * not be the same value. An agent seeing `errors` must say "could not scan"
+   * (and suggest `deckhand doctor`), never "no devices connected".
+   */
+  errors?: { ios?: string; android?: string };
 }
 
 // --- pure parsing ----------------------------------------------------------
@@ -91,7 +103,7 @@ export function parseDevicectlDevices(json: unknown): PhysicalIosDevice[] {
       model: String(hw.marketingName ?? ""),
       deviceType: String(hw.deviceType ?? ""),
       osVersion: String(props.osVersionNumber ?? ""),
-      transport: conn.transportType === "wired" ? "usb" : "network",
+      transport: conn.transportType === "wired" ? "usb" : conn.transportType === "localNetwork" ? "network" : "unknown",
       developerMode: props.developerModeStatus === "enabled",
     });
   }
@@ -128,12 +140,16 @@ export interface PhysicalDeviceScannerOptions {
   rmImpl?: (path: string) => void;
 }
 
+function scanError(prefix: string, e: unknown): string {
+  return `${prefix}: ${e instanceof Error ? e.message : String(e)}`;
+}
+
 /**
  * Best-effort by construction: `list()` NEVER throws. A machine without Xcode,
- * without adb, or with a hung devicectl answers with empty lists, because this
- * feeds `list_devices` — an enumeration tool whose existing simulator answer
- * must keep working exactly as before on every machine, including ones with no
- * physical-device tooling at all.
+ * without adb, or with a hung devicectl answers with empty lists — but a FAILED
+ * scan is reported in `errors`, never conflated with a genuine zero-device
+ * answer, because this feeds `list_devices` and an agent reading a silent `[]`
+ * would tell a user their plugged-in iPhone does not exist.
  */
 export class PhysicalDeviceScanner {
   private readonly exec: Exec;
@@ -142,47 +158,55 @@ export class PhysicalDeviceScanner {
   private seq = 0;
 
   constructor(opts: PhysicalDeviceScannerOptions = {}) {
-    this.exec = opts.exec ?? defaultExec;
+    // android.ts's exec, not ios.ts's: adb lives under the SDK root, so the
+    // spawn env must carry the resolved ANDROID_HOME/PATH (toolEnv.ts) or a
+    // non-default SDK location gets ENOENT while AndroidManager sees devices
+    // fine. xcrun is on the base PATH regardless, so sharing the env is safe.
+    this.exec = opts.exec ?? makeDefaultExec();
     this.readFileImpl = opts.readFileImpl ?? readFileSync;
     this.rmImpl = opts.rmImpl ?? ((p) => rmSync(p, { force: true }));
   }
 
   async list(): Promise<PhysicalDevices> {
     const [ios, android] = await Promise.all([this.listIos(), this.listAndroid()]);
-    return { ios, android };
+    const errors = { ...(ios.error ? { ios: ios.error } : {}), ...(android.error ? { android: android.error } : {}) };
+    return { ios: ios.devices, android: android.devices, ...(Object.keys(errors).length ? { errors } : {}) };
   }
 
   /**
    * devicectl only speaks JSON via `--json-output <file>` ("the ONLY supported
    * interface for scripts", per its own help) — stdout is a human table. Same
-   * tmp-file dance as Simctl.screenshotPng, for the same reason.
+   * tmp-file dance as Simctl.screenshotPng, for the same reason. Its own
+   * `--timeout` bounds the wait on remembered-but-unreachable Wi-Fi devices,
+   * so an enumeration call cannot hang for the full exec ceiling.
    */
-  async listIos(): Promise<PhysicalIosDevice[]> {
-    const file = join(tmpdir(), `deckhand-devicectl-${process.pid}-${this.seq++}.json`);
+  async listIos(): Promise<{ devices: PhysicalIosDevice[]; error?: string }> {
+    let file: string | null = null;
     try {
-      const res = await this.exec("xcrun", ["devicectl", "list", "devices", "--quiet", "--json-output", file], {
-        timeoutMs: 10_000,
+      file = join(tmpdir(), `deckhand-devicectl-${process.pid}-${this.seq++}.json`);
+      const res = await this.exec("xcrun", ["devicectl", "list", "devices", "--quiet", "--timeout", "5", "--json-output", file], {
+        timeoutMs: 8_000,
       });
-      if (res.code !== 0) return [];
-      return parseDevicectlDevices(JSON.parse(this.readFileImpl(file).toString()));
-    } catch {
-      return [];
+      if (res.code !== 0) return { devices: [], error: `devicectl scan failed (exit ${res.code}): ${res.stderr.trim().slice(0, 200)}` };
+      return { devices: parseDevicectlDevices(JSON.parse(this.readFileImpl(file).toString())) };
+    } catch (e) {
+      return { devices: [], error: scanError("devicectl scan failed", e) };
     } finally {
       try {
-        this.rmImpl(file);
+        if (file) this.rmImpl(file);
       } catch {
         // Best-effort cleanup of a tmp file — nothing to do about it.
       }
     }
   }
 
-  async listAndroid(): Promise<PhysicalAndroidDevice[]> {
+  async listAndroid(): Promise<{ devices: PhysicalAndroidDevice[]; error?: string }> {
     try {
-      const res = await this.exec("adb", ["devices", "-l"], { timeoutMs: 10_000 });
-      if (res.code !== 0) return [];
-      return parseAdbPhysicalDevices(res.stdout.toString());
-    } catch {
-      return [];
+      const res = await this.exec("adb", ["devices", "-l"], { timeoutMs: 5_000 });
+      if (res.code !== 0) return { devices: [], error: `adb scan failed (exit ${res.code}): ${res.stderr.trim().slice(0, 200)}` };
+      return { devices: parseAdbPhysicalDevices(res.stdout.toString()) };
+    } catch (e) {
+      return { devices: [], error: scanError("adb scan failed", e) };
     }
   }
 }

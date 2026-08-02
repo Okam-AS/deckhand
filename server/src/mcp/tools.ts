@@ -297,7 +297,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "List devices",
       description:
-        "List available iOS simulator runtimes and models, plus current capacity. Also reports PHYSICAL devices this machine can see (`physical`: paired iPhones/iPads via devicectl, adb-connected Android hardware) — detection only for now: start_preview cannot target them yet, so if the user asks to run on their real device, say deckhand sees it but physical-device previews are not supported yet and offer a matching simulator instead.",
+        "List available iOS simulator runtimes and models, plus current capacity. Also reports PHYSICAL devices this machine can see (`physical`: paired iPhones/iPads via devicectl, adb-connected Android hardware). Read two fields there before answering about real devices: `physical.targetable` says whether start_preview can build to that hardware — while it is false, say deckhand sees the device but physical-device previews are not supported yet, and offer a matching simulator. And if `physical.errors` is present, the scan FAILED (tooling missing or hung) — say the scan failed and suggest `deckhand doctor`; never report a failed scan as 'no devices connected'.",
       inputSchema: {},
     },
     () => audited("list_devices", {}, async () => ok(await engine.listDevices())),

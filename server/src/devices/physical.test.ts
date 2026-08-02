@@ -5,7 +5,7 @@ import {
   parseAdbPhysicalDevices,
   parseDevicectlDevices,
 } from "./physical.ts";
-import type { Exec, ExecResult } from "./ios.ts";
+import type { Exec, ExecResult } from "./android.ts";
 
 // ---------------------------------------------------------------------------
 // Fixture shaped from REAL `devicectl list devices --json-output` (devicectl
@@ -98,11 +98,15 @@ describe("parseDevicectlDevices", () => {
     assert.equal(out[1]!.udid, "00008030-00122D3C26BA202E");
   });
 
-  it("maps wired transport to usb and anything else to network", () => {
+  it("maps wired to usb, localNetwork to network, and any other transport to unknown", () => {
     const usb = parseDevicectlDevices(devicectlJson(devicectlDevice({ transportType: "wired" })));
     assert.equal(usb[0]!.transport, "usb");
     const wifi = parseDevicectlDevices(devicectlJson(devicectlDevice({ transportType: "localNetwork" })));
     assert.equal(wifi[0]!.transport, "network");
+    // A missing or re-spelled transportType must not be reported as a positive
+    // "network-paired" claim — later phases branch on transport.
+    const missing = parseDevicectlDevices(devicectlJson(devicectlDevice({ transportType: "" })));
+    assert.equal(missing[0]!.transport, "unknown");
   });
 
   it("drops unpaired devices — devicectl remembers hardware it can no longer use", () => {
@@ -218,19 +222,25 @@ describe("PhysicalDeviceScanner", () => {
     assert.deepEqual(out.android, []);
     const devicectlCall = calls.find((c) => c[0] === "xcrun")!;
     assert.deepEqual(devicectlCall.slice(0, 5), ["xcrun", "devicectl", "list", "devices", "--quiet"]);
-    assert.equal(devicectlCall[5], "--json-output");
+    assert.equal(devicectlCall[devicectlCall.length - 2], "--json-output");
     assert.equal(removed, jsonPath, "the tmp file must be deleted even on success");
   });
 
-  it("answers empty lists when the tools are missing entirely (no Xcode, no adb)", async () => {
+  it("reports missing tools (no Xcode, no adb) as scan ERRORS, not as zero devices", async () => {
     const exec: Exec = async () => {
       throw new Error("spawn ENOENT");
     };
     const out = await new PhysicalDeviceScanner({ exec }).list();
-    assert.deepEqual(out, { ios: [], android: [] });
+    assert.deepEqual(out.ios, []);
+    assert.deepEqual(out.android, []);
+    // engine.md: an empty result and a failed lookup must not be the same value.
+    // An agent reading `{ios: [], android: []}` with no error tells a user their
+    // plugged-in iPhone does not exist.
+    assert.match(out.errors!.ios!, /ENOENT/);
+    assert.match(out.errors!.android!, /ENOENT/);
   });
 
-  it("answers empty lists on nonzero exits without reading the output file", async () => {
+  it("reports nonzero exits as errors carrying stderr, without reading the output file", async () => {
     let read = false;
     const exec: Exec = async () => execResult({ code: 1, stderr: "boom" });
     const out = await new PhysicalDeviceScanner({
@@ -241,11 +251,14 @@ describe("PhysicalDeviceScanner", () => {
       },
       rmImpl: () => {},
     }).list();
-    assert.deepEqual(out, { ios: [], android: [] });
+    assert.deepEqual(out.ios, []);
+    assert.deepEqual(out.android, []);
+    assert.match(out.errors!.ios!, /boom/);
+    assert.match(out.errors!.android!, /boom/);
     assert.equal(read, false);
   });
 
-  it("answers [] for iOS when devicectl writes unparseable JSON, still cleaning up", async () => {
+  it("reports unparseable devicectl JSON as an iOS error, still cleaning up", async () => {
     let removed = false;
     const exec: Exec = async (cmd) => (cmd === "xcrun" ? execResult() : execResult({ code: 1 }));
     const out = await new PhysicalDeviceScanner({
@@ -256,10 +269,11 @@ describe("PhysicalDeviceScanner", () => {
       },
     }).list();
     assert.deepEqual(out.ios, []);
+    assert.ok(out.errors?.ios);
     assert.equal(removed, true);
   });
 
-  it("keeps one side's answer when only the other side fails", async () => {
+  it("keeps one side's answer when only the other side fails, with the error scoped to the failed side", async () => {
     const exec: Exec = async (cmd) => {
       if (cmd === "xcrun") throw new Error("no xcode");
       return execResult({
@@ -270,9 +284,11 @@ describe("PhysicalDeviceScanner", () => {
     assert.deepEqual(out.ios, []);
     assert.equal(out.android.length, 1);
     assert.equal(out.android[0]!.serial, "R58M12ABCDE");
+    assert.match(out.errors!.ios!, /no xcode/);
+    assert.equal(out.errors!.android, undefined);
   });
 
-  it("never throws even when cleanup itself throws", async () => {
+  it("never throws even when cleanup itself throws, and a clean empty scan carries no errors", async () => {
     const exec: Exec = async (cmd) => (cmd === "xcrun" ? execResult() : execResult({ stdout: Buffer.from("") }));
     const out = await new PhysicalDeviceScanner({
       exec,
@@ -281,6 +297,19 @@ describe("PhysicalDeviceScanner", () => {
         throw new Error("EPERM");
       },
     }).list();
+    // A genuine zero-device answer: no errors key at all, so the wire shape is
+    // distinguishable from every failure above.
     assert.deepEqual(out, { ios: [], android: [] });
+  });
+
+  it("bounds the scan: devicectl gets its own --timeout so an unreachable paired device cannot hang the call", async () => {
+    const calls: string[][] = [];
+    const exec: Exec = async (cmd, args) => {
+      calls.push([cmd, ...args]);
+      return cmd === "xcrun" ? execResult() : execResult({ stdout: Buffer.from("") });
+    };
+    await new PhysicalDeviceScanner({ exec, readFileImpl: () => Buffer.from(JSON.stringify(devicectlJson())), rmImpl: () => {} }).list();
+    const devicectlCall = calls.find((c) => c[0] === "xcrun")!;
+    assert.ok(devicectlCall.includes("--timeout"), "devicectl must carry its own --timeout flag");
   });
 });

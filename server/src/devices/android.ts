@@ -20,7 +20,7 @@ export interface ExecResult {
 }
 export type Exec = (cmd: string, args: string[], opts?: { timeoutMs?: number; env?: NodeJS.ProcessEnv; signal?: AbortSignal }) => Promise<ExecResult>;
 
-function makeDefaultExec(): Exec {
+export function makeDefaultExec(): Exec {
   const env = safeAndroidEnv();
   return (cmd, args, opts) =>
     new Promise((resolve) => {
