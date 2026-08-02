@@ -55,6 +55,8 @@ export interface ShareState {
   source?: "git" | "local";
   /** Whether the rebuild button applies right now (local + settled). */
   canRestart?: boolean;
+  /** What the preview is doing while it has no devices yet — see shareState on the server. */
+  detail?: string;
   /** True when the share is PIN-protected and not yet unlocked (state is then minimal). */
   locked?: boolean;
   /** Number of PIN digits (when locked) — drives the pad's dot count + auto-submit. */

@@ -602,6 +602,22 @@ export class PreviewEngine {
     };
   }
 
+  /**
+   * One honest line for a preview that has no devices yet.
+   *
+   * Prefers the newest build output over a phase name: "building" sits still for minutes on a
+   * cold pod or gradle build, and a caption that never changes is indistinguishable from a
+   * hang — which is exactly what the blank page felt like.
+   */
+  private preparingDetail(p: LivePreview): string {
+    const tail = [...p.devices.flatMap((d) => d.logs.build)].slice(-1)[0];
+    const step = tail ? buildStepDetail(tail) : null;
+    if (step) return step;
+    return p.record.phase === "pending"
+      ? "Starting — fetching the branch."
+      : "Preparing — fetching the branch and running the shared build.";
+  }
+
   /** Sanitized public state for the viewer (no udids, no logs). */
   shareState(shareId: string): {
     ready: boolean;
@@ -610,6 +626,15 @@ export class PreviewEngine {
     source: PreviewSource;
     /** Local previews can be rebuilt from the viewer's refresh button. */
     canRestart: boolean;
+    /**
+     * What the preview is doing RIGHT NOW, when it has no devices to say it for itself.
+     *
+     * A cold start spends its first minute on the worktree and the shared build, before
+     * `simctl create` has produced anything — so `devices` is empty and the viewer had
+     * nothing at all to render. Someone who has just typed a PIN sat looking at a blank page
+     * for a minute with no sign the build had even begun.
+     */
+    detail?: string;
     devices: { deviceId: string; platform: Platform; label: string; phase: string; detail?: string; step?: string }[];
     /** The agent's live test run (calm spinner + step popover in the viewer), if any. */
     testRun?: {
@@ -746,6 +771,7 @@ export class PreviewEngine {
           source: p.record.source,
           canRestart: p.record.source === "local" && (p.record.phase === "ready" || p.record.phase === "failed"),
           devices: sanitizeDevices(p),
+          ...(p.devices.length === 0 ? { detail: this.preparingDetail(p) } : {}),
           panes,
           ...(p.testRun
             ? {
