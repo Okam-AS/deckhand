@@ -44,8 +44,15 @@ export type UiAction =
   | { type: "swipe"; startX: number; startY: number; endX: number; endY: number; durationMs?: number }
   | { type: "gesture"; preset: "scroll-up" | "scroll-down" | "scroll-left" | "scroll-right" }
   | { type: "openUrl"; url: string }
+  | { type: "back" }
+  | { type: "dismissKeyboard" }
+  | { type: "sleep"; ms: number }
+  | { type: "scrollUntilVisible"; selector: Selector }
+  | { type: "toggleAppearance" }
   | { type: "waitFor"; selector: Selector; timeoutMs?: number }
+  | { type: "waitForNot"; selector: Selector; timeoutMs?: number }
   | { type: "assert"; selector: Selector }
+  | { type: "assertNot"; selector: Selector }
   | { type: "query"; selector: Selector };
 
 /** Thrown when a SimDeck action/inspection request fails (bad selector, element not found, …). */
@@ -194,10 +201,26 @@ export class SimDeckControl {
         return { action: "gesture", preset: a.preset };
       case "openUrl":
         return { action: "openUrl", url: a.url };
+      case "back":
+        return { action: "back" };
+      case "dismissKeyboard":
+        return { action: "dismissKeyboard" };
+      case "sleep":
+        // SimDeck reads `ms` and echoes it back as `durationMs`; sending `durationMs`
+        // is accepted and silently slept for 0.
+        return { action: "sleep", ms: a.ms };
+      case "scrollUntilVisible":
+        return { action: "scrollUntilVisible", selector: a.selector };
+      case "toggleAppearance":
+        return { action: "toggleAppearance" };
       case "waitFor":
         return { action: "waitFor", selector: a.selector, ...(a.timeoutMs != null ? { timeoutMs: a.timeoutMs } : {}) };
+      case "waitForNot":
+        return { action: "waitForNot", selector: a.selector, ...(a.timeoutMs != null ? { timeoutMs: a.timeoutMs } : {}) };
       case "assert":
         return { action: "assert", selector: a.selector };
+      case "assertNot":
+        return { action: "assertNot", selector: a.selector };
       case "query":
         return { action: "query", selector: a.selector };
     }

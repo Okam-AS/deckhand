@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { SimDeckControl, SimDeckActionError } from "./control.ts";
+import { SimDeckControl, SimDeckActionError, type UiAction } from "./control.ts";
 import { SimDeckDaemon, SimDeckUnavailableError } from "./simdeck.ts";
 
 interface Recorded {
@@ -163,6 +163,34 @@ describe("SimDeckControl.action", () => {
 
     await control.action(iosTarget, { type: "assert", selector: { label: "Done" } });
     assert.deepEqual(lastAction(calls).body, { action: "assert", selector: { label: "Done" } });
+  });
+
+  it("translates the actions SimDeck had that deckhand was not exposing", async () => {
+    // Every payload below was probed against a live daemon before it was written down --
+    // these are the shapes it accepts, not shapes inferred from a doc. The seven exist
+    // because a real run burned round trips faking them: an agent that cannot say "go
+    // back" guesses an edge-swipe, and one that cannot scroll to an element runs a
+    // screenshot/scroll loop instead.
+    const cases: Array<[UiAction, Record<string, unknown>]> = [
+      [{ type: "back" }, { action: "back" }],
+      [{ type: "dismissKeyboard" }, { action: "dismissKeyboard" }],
+      // SimDeck reads `ms`. It echoes `durationMs`, and accepts that key while sleeping 0.
+      [{ type: "sleep", ms: 250 }, { action: "sleep", ms: 250 }],
+      [{ type: "scrollUntilVisible", selector: { id: "row-9" } }, { action: "scrollUntilVisible", selector: { id: "row-9" } }],
+      [{ type: "toggleAppearance" }, { action: "toggleAppearance" }],
+      [{ type: "assertNot", selector: { text: "Spinner" } }, { action: "assertNot", selector: { text: "Spinner" } }],
+      [{ type: "waitForNot", selector: { text: "Spinner" } }, { action: "waitForNot", selector: { text: "Spinner" } }],
+      [
+        { type: "waitForNot", selector: { text: "Spinner" }, timeoutMs: 5000 },
+        { action: "waitForNot", selector: { text: "Spinner" }, timeoutMs: 5000 },
+      ],
+    ];
+    for (const [action, expected] of cases) {
+      const { impl, calls } = fakeFetch();
+      const control = new SimDeckControl({ fetchImpl: impl, autostart: false });
+      await control.action(iosTarget, action);
+      assert.deepEqual(lastAction(calls).body, expected, `${action.type} must post exactly this`);
+    }
   });
 
   it("routes non-US iOS text through the pasteboard + Cmd-V (HID can't type it)", async () => {
