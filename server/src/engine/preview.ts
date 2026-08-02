@@ -276,6 +276,13 @@ export interface StartPreviewResult {
   source: PreviewSource;
   /** True when an equivalent preview was already live and was returned as-is. */
   alreadyRunning: boolean;
+  /**
+   * Platforms the request asked for that the returned preview does not have.
+   * Present only when they differ — a silent mismatch is a confidently wrong answer.
+   */
+  notAdded?: Platform[];
+  /** What to do about `notAdded`, written for the agent to relay. */
+  nextStep?: string;
   devices: { deviceId: string; label: string; phase: string }[];
 }
 
@@ -1081,7 +1088,7 @@ export class PreviewEngine {
     // (same shareId, same URL) instead of minting a second simulator.
     const stillReleasing = this.reapTerminalForApp(req.app.id);
     const existing = this.findReusable(req);
-    if (existing) return this.resultFor(existing, true);
+    if (existing) return this.resultFor(existing, true, this.missingPlatforms(existing, req));
 
     if (req.devices.length > this.d.config.limits.maxDevicesPerPreview) {
       throw new PreviewError(
@@ -1188,7 +1195,25 @@ export class PreviewEngine {
     return this.resultFor(preview, false);
   }
 
-  private resultFor(p: LivePreview, alreadyRunning: boolean): StartPreviewResult {
+  /**
+   * Platforms the caller asked for that this live preview does not have.
+   *
+   * `findReusable` matches on app + source + ref and IGNORES the device list, which is right
+   * for the daily loop — asking again for what is already running should return it, not mint a
+   * second simulator. But it made a genuinely different request look satisfied: asking for
+   * iOS + Android while an iOS preview was live returned `alreadyRunning: true` and silently
+   * dropped Android. The caller saw success and no Android, and the only way anyone found to
+   * get it was `stop_preview` + start again — which reboots the iOS simulators that were
+   * working and pays for their build a second time.
+   *
+   * An empty result and a satisfied request must not look the same (CONSTITUTION §3).
+   */
+  private missingPlatforms(p: LivePreview, req: StartPreviewRequest): Platform[] {
+    const live = new Set(p.devices.map((d) => d.record.platform));
+    return [...new Set(req.devices.map((d) => d.platform))].filter((pl) => !live.has(pl));
+  }
+
+  private resultFor(p: LivePreview, alreadyRunning: boolean, missing: Platform[] = []): StartPreviewResult {
     this.markActive(p); // an idempotent start_preview is someone using it
     return {
       previewId: p.record.previewId,
@@ -1197,6 +1222,16 @@ export class PreviewEngine {
       source: p.record.source,
       alreadyRunning,
       devices: p.devices.map((d) => ({ deviceId: d.record.deviceId, label: d.record.label, phase: d.record.phase })),
+      ...(missing.length
+        ? {
+            notAdded: missing,
+            nextStep:
+              `This preview is already running with ${[...new Set(p.devices.map((d) => d.record.platform))].join(" + ")}, ` +
+              `and deckhand cannot add a device to a live preview — so ${missing.join(" + ")} was NOT started. ` +
+              `To get it: call stop_preview, then start_preview with the full device list. Tell the user first: ` +
+              `that reboots the devices already running and rebuilds them, which costs minutes.`,
+          }
+        : {}),
     };
   }
 

@@ -563,6 +563,11 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           ...result,
           ...(refs.length ? { alongside: refs.map((r) => r.reference) } : {}),
           nextStep:
+            // The mismatch goes FIRST, before the reassuring "already running" line. The
+            // engine reports platforms it could not add (it cannot add a device to a live
+            // preview); burying that under "same viewer link" is how a request for Android
+            // came back looking satisfied with no Android on the page.
+            (result.notAdded?.length ? `⚠ ${result.nextStep} ` : "") +
             (result.alreadyRunning
             ? `An equivalent preview is already running — same viewer link: ${result.url}. ` +
               (isWeb
