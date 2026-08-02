@@ -92,11 +92,13 @@ function fakeEngine(): PreviewEngine {
     runStep: async () => ({ code: 0, timedOut: false, aborted: false }),
     secretsEnv: () => ({}),
     simdeck: {
-      describe: async () => ({ source: "native-ax", nodes: [{ role: "Button", label: "Continue" }] }),
+      // SimDeck answers with `roots`/`children` — verified against a live daemon.
+      describe: async () => ({ source: "native-ax", roots: [{ children: [{ role: "Button", label: "Continue" }] }] }),
       // A verifier that could never fail meant no test could reach the failure path at all.
       // SimDeck answers a selector it cannot match by throwing, so this does too.
       action: async (_t: unknown, a: { type?: string; selector?: { text?: string } }) => {
-        const verifier = a?.type === "waitFor" || a?.type === "assert" || a?.type === "waitForNot" || a?.type === "assertNot";
+        const verifier =
+          a?.type === "waitFor" || a?.type === "assert" || a?.type === "waitForNot" || a?.type === "assertNot" || a?.type === "tapElement";
         if (verifier && a?.selector?.text === "nope") throw new Error("No accessibility element matched.");
         return { ok: true };
       },
@@ -1058,6 +1060,33 @@ describe("agent-driven testing tools (describe/ui + test runs)", () => {
 
     const restarted = parse(await admin.callTool({ name: "restart_preview", arguments: { previewId } }));
     assert.ok(carriesFooter(restarted.nextStep), "restart_preview must carry it");
+    await admin.close();
+  });
+
+  it("says what IS on screen when a selector misses, not just that it missed", async () => {
+    // "Not found" is the same answer for two situations with opposite next moves: not
+    // rendered yet, or on screen but absent from the tree. The second cost me 9.5s of
+    // waiting for something no selector could ever have matched.
+    const admin = await client(ADMIN);
+    const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
+    const previewId = started.previewId as string;
+    const miss = parse(
+      await admin.callTool({ name: "ui", arguments: { previewId, deviceId: "ios-0", action: { type: "waitFor", selector: { text: "nope" } } } }),
+    );
+    assert.equal(miss.ok, false, "a miss is still an error");
+    const err = miss.error as { code: string; message: string; screen?: string };
+    assert.equal(err.code, "ui_error");
+    assert.match(err.message, /No accessibility element matched/, "the real error must survive the diagnosis");
+    assert.match(String(err.screen), /Continue/, "and the diagnosis names what the tree actually holds");
+    assert.match(String(err.screen), /screenshot/i, "with the way out");
+
+    // A tapElement that misses is the same trap — the agent's next move is a coordinate,
+    // which is how two runs in one session filed false app bugs.
+    const tapMiss = parse(
+      await admin.callTool({ name: "ui", arguments: { previewId, deviceId: "ios-0", action: { type: "tapElement", selector: { text: "nope" } } } }),
+    );
+    assert.equal(tapMiss.ok, false);
+    assert.ok((tapMiss.error as { screen?: string }).screen, "tapElement must be diagnosed too");
     await admin.close();
   });
 
