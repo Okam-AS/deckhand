@@ -159,6 +159,45 @@ paid for in one session:
 If two changes really are entangled, put them in one PR, or land the first and
 wait. `main` is protected and requires green CI, so waiting costs one CI run.
 
+**Branching from `main` is necessary but not sufficient — `main` is `strict`.**
+Protection requires a PR to be *up to date* with `main`, not merely conflict-free.
+So the second and every later branch cut from the same `main` goes `BEHIND` the
+moment the first one lands, and `gh pr merge` refuses with a message that names a
+status check rather than the real reason:
+
+```
+GraphQL: Required status check "check" is expected. (mergePullRequest)
+```
+
+That message is misleading — the check had already passed. Ask what is actually
+wrong before believing it:
+
+```sh
+gh pr view <n> --json mergeable,mergeStateStatus   # BEHIND is the answer, not the check
+git switch <branch> && git rebase origin/main      # then force-with-lease, then wait for CI
+```
+
+Four PRs opened together cost three rebases and three serialized CI runs. **Open
+one, land it, open the next** — the cost of parallel PRs is paid at merge time,
+which is exactly when you have stopped thinking about it.
+
+**After a force-push, `gh pr checks` reports the PREVIOUS run.** There is a window
+where the old conclusion is still attached to the PR, so a poll for `pass` returns
+immediately, the merge is attempted against a head with no finished check, and it
+is rejected. Poll the check runs for the *current head SHA* instead:
+
+```sh
+SHA=$(git rev-parse origin/<branch>)
+gh api "repos/Okam-AS/deckhand/commits/$SHA/check-runs" \
+  --jq '[.check_runs[]|select(.name=="check")|{status,conclusion}]|.[0]'
+```
+
+**Leaving the branches tidy is the agent's job, not the user's.** Finish the
+session with no open PRs you meant to land, no local branch that is not `main`,
+and no branch on the remote whose PR is closed. `gh pr list --state open` and
+`git branch` take a second each; a user who has to ask "is this merged?" has been
+handed your bookkeeping.
+
 **Watch out for `--delete-branch`**: it switches you to `main` without saying so.
 Chaining `gh pr merge ... --delete-branch && git switch <next>` silently skips
 the switch, and the next command runs against `main`.

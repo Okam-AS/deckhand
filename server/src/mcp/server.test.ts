@@ -972,18 +972,52 @@ describe("agent-driven testing tools (describe/ui + test runs)", () => {
     await admin.close();
   });
 
-  it("gives the agent no model advice at all", () => {
+  it("gives the agent no model advice in any output it reads", async () => {
     // Deckhand used to ask for the drive loop to be handed to a cheap fast model. Measured:
     // deckhand answers in well under a second (ui 0.43-0.69s, describe 0.03-0.59s), so it was
-    // never the slow part -- and a delegated five-step run took 583s over 66 tool calls, then
+    // never the slow part — and a delegated five-step run took 583s over 66 tool calls, then
     // returned two confident WRONG root causes that were nearly filed as app bugs.
     //
-    // This test is the removal's guardrail: reinstating any of it makes it fail.
-    const src = readFileSync(new URL("./tools.ts", import.meta.url), "utf8");
-    const stripped = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
-    for (const banned of ["DELEGATION_HINT", "modelHint", "cheapest fast model", "subagent", "haiku"]) {
-      assert.ok(!stripped.toLowerCase().includes(banned.toLowerCase()), `tools.ts must not steer the caller's model (found "${banned}")`);
+    // The property that matters is what the agent READS, so this drives the tools it reads
+    // orders from and inspects the actual payloads. An earlier version of this guardrail
+    // scanned tools.ts as text, which is a proxy for the requirement and would have banned
+    // the word "subagent" from the file forever, including from some future unrelated use.
+    const forbidden = /haiku|cheapest fast|subagent|model hint|modelHint|delegate .*(loop|model)|cheaper model/i;
+    const admin = await client(ADMIN);
+    const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
+    const previewId = started.previewId as string;
+    const deviceId = "ios-0";
+    const tap = { type: "tap", x: 0.5, y: 0.5 };
+
+    const payloads: Array<[string, unknown]> = [["start_preview", started]];
+    await waitReadyByApp(admin, "app-local");
+    payloads.push(["preview_status", parse(await admin.callTool({ name: "preview_status", arguments: { previewId } }))]);
+    // Driving with no run open — the nudge path, which used to carry the ask too.
+    payloads.push(["ui (untracked)", parse(await admin.callTool({ name: "ui", arguments: { previewId, deviceId, action: tap } }))]);
+    payloads.push([
+      "start_test_run",
+      parse(await admin.callTool({ name: "start_test_run", arguments: { previewId, title: "Smoke", steps: ["Tap"] } })),
+    ]);
+    // The first driving action of an OPEN run — where the point-of-use hint used to fire.
+    payloads.push(["ui (first of run)", parse(await admin.callTool({ name: "ui", arguments: { previewId, deviceId, action: tap } }))]);
+    payloads.push([
+      "update_test_run",
+      parse(await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 1, status: "passed" } } })),
+    ]);
+    payloads.push(["finish_test_run", parse(await admin.callTool({ name: "finish_test_run", arguments: { previewId, status: "passed" } }))]);
+    payloads.push(["restart_preview", parse(await admin.callTool({ name: "restart_preview", arguments: { previewId } }))]);
+
+    for (const [name, payload] of payloads) {
+      const text = JSON.stringify(payload);
+      assert.ok(!forbidden.test(text), `${name} must not steer the caller's model — matched ${forbidden.exec(text)?.[0]}`);
     }
+
+    // And the tool descriptions, which the agent reads before it calls anything.
+    const listed = (await admin.listTools()).tools;
+    for (const t of listed) {
+      assert.ok(!forbidden.test(`${t.description ?? ""}`), `the ${t.name} description must not steer the caller's model`);
+    }
+    await admin.close();
   });
 
 
