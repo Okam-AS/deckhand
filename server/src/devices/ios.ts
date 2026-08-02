@@ -16,7 +16,7 @@ export interface ExecResult {
 }
 export type Exec = (cmd: string, args: string[], opts?: { timeoutMs?: number; signal?: AbortSignal }) => Promise<ExecResult>;
 
-const defaultExec: Exec = (cmd, args, opts) =>
+export const defaultExec: Exec = (cmd, args, opts) =>
   new Promise((resolve) => {
     execFile(
       cmd,
