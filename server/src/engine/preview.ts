@@ -1806,9 +1806,11 @@ export class PreviewEngine {
         await this.verifyInstalled(platform, builderHandle, bundleId, DEV_INSTALL_TIMEOUT_MS, () =>
           this.devProcessDead(p.app.id, platform),
         );
+        await this.silenceDevOverlays(platform, builderHandle, bundleId);
       } else {
         this.setPhase(p, builder, "installing-app", "verifying install");
         await this.verifyInstalled(platform, builderHandle, bundleId);
+        await this.silenceDevOverlays(platform, builderHandle, bundleId);
         this.setPhase(p, builder, "launching", "launching app");
         await this.launch(p, builder, builderHandle, bundleId, sourceDir, appEnv, slug);
       }
@@ -1841,9 +1843,8 @@ export class PreviewEngine {
           this.setPhase(p, dev, "installing-app", "installing");
           await this.installProduct(platform, handle, appPath);
           await this.verifyInstalled(platform, handle, bundleId);
+          await this.silenceDevOverlays(platform, handle, bundleId);
           this.setPhase(p, dev, "launching", "launching app");
-          // Before the app runs, not after it has already drawn its dev overlays.
-          if (platform === "ios") await this.d.simctl.silenceDevOverlays(handle, bundleId).catch(() => {});
           await this.launch(p, dev, handle, bundleId, sourceDir, appEnv, slug);
           await this.attachAndReady(p, dev, platform, handle);
         } catch (e) {
@@ -2032,6 +2033,23 @@ export class PreviewEngine {
         );
       }
     }
+  }
+
+  /**
+   * Write Expo's launch-overlay preferences off, wherever the app just landed.
+   *
+   * There are three install paths (builder + dev process, builder + plain install, and the
+   * copy to the group's other devices) and the first version of this patched exactly one of
+   * them — the one an Expo preview does NOT take. It shipped green, and the overlays were
+   * still there on the next fresh simulator. Hence one helper, called from all three, right
+   * after the app is verified installed: that is the moment its preference domain exists.
+   *
+   * Best-effort by design; see Simctl.silenceDevOverlays for what is written and why a
+   * permission alert is deliberately not on the list.
+   */
+  private async silenceDevOverlays(platform: Platform, handle: string, bundleId: string): Promise<void> {
+    if (platform !== "ios") return;
+    await this.d.simctl.silenceDevOverlays(handle, bundleId).catch(() => {});
   }
 
   private async attachAndReady(p: LivePreview, dev: LiveDevice, platform: Platform, handle: string): Promise<void> {
