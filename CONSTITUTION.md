@@ -26,7 +26,7 @@ that other people exist.
 
 ---
 
-## The nine
+## The ten
 
 Each of these was paid for. The parenthetical is what it cost.
 
@@ -118,6 +118,27 @@ things a user found by typing what we had told them to.)*
 
 **So:** the `shipping-a-change` skill runs before every PR, and step 5 of it is that
 conversion. Skipping it is how the docs went stale four times in a day.
+
+### 10. What you worked out belongs in deckhand, not in your memory
+
+An agent's session ends. The next one starts with nothing, and re-learns the same
+thing at the same cost — or worse, does not, and gets it wrong the way the last one
+did before it figured it out.
+
+So a working answer is not finished when it works. It is finished when it is
+somewhere the next agent reads without being told to look: a tool's output at the
+moment it is needed, `AGENTS.md`, a check that fails. "I know to do X" is a note in
+a transcript nobody will open.
+
+The test is simple and unkind: **if this session's transcript were deleted, would a
+fresh agent still do the right thing?** If the answer is no, the work is not done.
+
+*(Every recurring cost in this repo was once something an agent knew and did not
+write down. The dev menu covering the app's top-right corner was rediscovered three
+times — twice reported as an app bug — before it became something `describe` says.)*
+
+**So:** when you find the way through something, the PR is not the fix alone. It is
+the fix plus the place the next agent will meet it.
 
 ---
 

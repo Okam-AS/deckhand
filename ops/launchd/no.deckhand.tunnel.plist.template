@@ -6,6 +6,26 @@
   KeepAlive alone won't catch that, but RunAtLoad + KeepAlive at least survive
   sleep/reboot/crash, which a hand-started `cloudflared tunnel run` does not.
   Generated from this template by ops/install-services.sh.
+
+  `--protocol http2` is the answer to the 1033 above, and it was earned. Captured
+  from tunnel.log while a user was staring at an Error 1033 page:
+
+    11:47:40Z ERR Failed to dial a quic connection — "timeout: no recent network activity"
+    11:47:49Z INF Retrying connection in up to 8s
+    11:48:08Z ERR failed to serve tunnel connection … Retrying in up to 16s
+    11:48:18Z INF Registered tunnel connection connIndex=0
+    11:48:31Z INF Registered tunnel connection connIndex=1,2,3
+
+  All four edge connections died together on a UDP timeout and took 38 seconds
+  to come back, backing off 4→8→16s. The process never exited, so KeepAlive had
+  nothing to restart and doctor reported everything healthy. For that whole
+  window the hostname simply does not resolve, which is exactly Error 1033.
+
+  cloudflared defaults to QUIC (UDP). "no recent network activity" is what a
+  path that drops or NAT-times-out UDP looks like from the inside. http2 rides
+  TCP/443, which is the thing that survives hostile networks — the same reason
+  deckhand tunnels HTTP rather than using WebRTC for video. QUIC's lower latency
+  is not worth a link that vanishes for half a minute at a time.
 -->
 <plist version="1.0">
 <dict>
@@ -15,6 +35,8 @@
   <array>
     <string>__CLOUDFLARED__</string>
     <string>tunnel</string>
+    <string>--protocol</string>
+    <string>http2</string>
     <string>run</string>
     <string>__TUNNEL_ID__</string>
   </array>

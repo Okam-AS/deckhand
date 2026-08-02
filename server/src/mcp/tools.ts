@@ -8,7 +8,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { App, AppType, Config } from "../config.ts";
 import { appSchema, ConfigError, parseRepo, publicBaseUrl } from "../config.ts";
 import { versionStatus } from "../version.ts";
-import { devMenuHint } from "../testing/devMenu.ts";
+import { DEV_MENU_PREFLIGHT, devMenuHint } from "../testing/devMenu.ts";
 import { selectorMissHint } from "../testing/tree.ts";
 import type { Principal } from "../auth.ts";
 import { canAccessApp, isAdmin, visibleApps } from "../auth.ts";
@@ -886,6 +886,11 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             ? {
                 testingHint:
                   `The preview is ready to drive: read the diff to pick the flows, then use \`describe\`+\`ui\`, and write the full report in chat when you are done. ${TEST_RUN_CONTRACT}${status.url ? ` ${linkFooter(status.url)}` : ""}`,
+                // The last thing read before driving starts, which is the only moment this
+                // is preventive rather than consoling. devMenuHint fires once the menu is
+                // already in the tree — by then the corner has usually been tapped and a
+                // theory about the app has already formed.
+                devMenuPreflight: DEV_MENU_PREFLIGHT,
               }
             : {}),
         });
