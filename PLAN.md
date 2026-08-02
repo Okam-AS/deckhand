@@ -167,10 +167,6 @@ githubApp:                        # EITHER a GitHub App (multi-org)…
 githubAmbient: true               # no PAT/App → fall back to the deckhand user's gh CLI session (§11.4 note)
 allowPublicRepos: false           # public repos from owners without an app installation; also
                                   # gates anonymous git for credential-less installs
-modelHints:                       # per-harness recipes for delegating the drive loop to a cheap
-                                  # fast model (§6); model names live here, not in code, because
-                                  # they churn faster than a deckhand install is updated
-  claude: 'spawn a subagent (Task/Agent tool, or a standing .claude/agents driver) with model "haiku" and hand it the drive loop plus the preview id'
 limits:
   maxDevicesPerPreview: 4
   maxTotalDevices: 6
@@ -305,16 +301,16 @@ iOS HID can't type non-US text — non-ASCII `type` routes through the clipboard
 **Amended (2026-08-01): the drive loop is steered to a cheaper model.** Driving
 (`screenshot`→`describe`→`ui`→`update_test_run`) is mechanical and high-volume — it does
 not need the agent's primary model, only a fast cheap one. An MCP server cannot choose
-the caller's model and no harness lets an agent switch its own session's model, so the
-one lever that exists is delegation: the drive contract (which rides `start_preview`,
-`restart_preview` and `preview_status`-ready) and a `modelHint` field on the
-`start_test_run` response instruct the agent to hand the loop to a subagent on its
-harness's cheapest fast model, keeping the primary model for planning, judging and
-reporting. Per-harness recipes come from `modelHints` in config.yaml (default: Claude →
-a `haiku` subagent) — names of other vendors' models belong in an installer's config,
-not in code. The router is stateless, so there is no `clientInfo` to tailor by: every
-caller gets the whole list and picks its own line. This is steering, not enforcement —
-an agent that ignores it just runs expensively.
+the caller's model, and deckhand no longer tries to influence it. It used to: the drive
+contract asked the agent to hand the loop to a subagent on its cheapest fast model.
+That was removed (2026-08-02) because measurement contradicted it. Deckhand is not the
+slow part — `ui` answers in 0.43–0.69s, `describe` in 0.03–0.59s, `screenshot` in 0.15s
+— while a delegated five-step run took 583s across 66 tool calls, about 5% of it
+deckhand. A weaker model makes that worse, not cheaper: every mis-aimed tap costs three
+more round trips. And the real cost was not tokens but two confident, wrong root causes
+("the permission dialog is unresponsive"; "critical UI bugs, button ID mapping broken"),
+both nearly filed as app bugs. The agent that calls the tool does the work; a test in
+`server.test.ts` fails if any model advice comes back.
 
 **Migration features (added 2026-07-18).** Deckhand can host a **NativeScript → React
 Native** (or any app→app) migration as a *parity harness*, never a migration engine. Most

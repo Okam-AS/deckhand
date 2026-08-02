@@ -20,7 +20,6 @@ const config: Config = {
   githubApp: { appId: 1, privateKeyPath: "k.pem" },
   githubAmbient: true,
   allowPublicRepos: false,
-  modelHints: {},
   limits: {
     maxDevicesPerPreview: 4,
     maxTotalDevices: 2,

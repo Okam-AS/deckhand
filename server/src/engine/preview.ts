@@ -179,8 +179,6 @@ interface LivePreview {
   testRun?: TestRun;
   /** Set once the agent has been reminded to open a test run; cleared when it opens one. */
   testRunNudged?: boolean;
-  /** Set once the delegation ask has ridden a drive action in this run; cleared when a run opens. */
-  delegationHinted?: boolean;
   /** Ephemeral: pairing + parity checklist for a compare session, surfaced to the viewer. */
   compare?: CompareSession;
   /** Epoch ms of the last viewer/agent touch — the idle sweep's clock. */
@@ -2479,21 +2477,6 @@ export class PreviewEngine {
     return true;
   }
 
-  /**
-   * True on the FIRST driving action of an open run, once per run.
-   *
-   * The delegation ask already rides start_preview and start_test_run, and an agent still drove
-   * a whole session on its primary model — because at start_test_run it is planning, not yet
-   * looping, and the ask is one field among several it skims. This fires at the moment the
-   * choice is live: the first tap of the mechanical stretch it should have handed off.
-   */
-  shouldHintDelegation(previewId: string): boolean {
-    const p = this.previews.get(previewId);
-    if (!p || p.testRun?.status !== "running") return false;
-    if (p.delegationHinted) return false;
-    p.delegationHinted = true;
-    return true;
-  }
 
   /**
    * Step tallies for the current run, or null if there is none. The MCP layer reports these
@@ -2520,7 +2503,6 @@ export class PreviewEngine {
     if (!p?.testRun) return false;
     p.testRun = undefined;
     p.testRunNudged = false;
-    p.delegationHinted = false;
     return true;
   }
 
@@ -2540,9 +2522,6 @@ export class PreviewEngine {
     // with no run open is a fresh lapse and deserves to be caught. Without this the nudge fires
     // at most once per preview, and everything after the first run goes unreported in silence.
     p.testRunNudged = false;
-    // Each run gets its own chance to be handed off — a second run in the same session is a
-    // second mechanical stretch, and the agent that kept the first one has to be asked again.
-    p.delegationHinted = false;
     return { runId: id };
   }
 

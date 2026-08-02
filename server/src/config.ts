@@ -55,12 +55,6 @@ export const configSchema = z.object({
   // read-only guarantee is behavioral, not capability-bounded.
   githubAmbient: z.boolean().default(true),
   allowPublicRepos: z.boolean().default(false),
-  // Per-harness recipes for delegating the drive loop to a cheap fast model,
-  // rendered into the MCP drive contract (PLAN §6). Model names live in config
-  // because they churn faster than a deckhand install is updated.
-  modelHints: z
-    .record(z.string(), z.string().min(1))
-    .default({ claude: 'spawn a subagent (Task/Agent tool, or a standing .claude/agents driver) with model "haiku" and hand it the drive loop plus the preview id' }),
   // HMAC key for signing share unlock cookies (PIN gate). Omit and deckhand
   // auto-generates + persists one under ~/.deckhand/share-secret on first boot.
   shareSecret: z.string().min(1).optional(),

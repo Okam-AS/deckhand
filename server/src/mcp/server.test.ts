@@ -25,8 +25,6 @@ const config: Config = {
   githubApp: { appId: 1, privateKeyPath: "k.pem" },
   githubAmbient: true,
   allowPublicRepos: false,
-  // Sentinel: asserted verbatim below, proving the recipe is config-driven.
-  modelHints: { claude: "haiku-recipe-from-config" },
   limits: { maxDevicesPerPreview: 4, maxTotalDevices: 6, idleMinutes: 45, failedGraceMinutes: 15, stuckMinutes: 90, reuseDevices: false, disk: { watch: 50, pressure: 35, critical: 20 } },
 };
 
@@ -974,36 +972,20 @@ describe("agent-driven testing tools (describe/ui + test runs)", () => {
     await admin.close();
   });
 
-  it("steers the drive loop onto a cheaper model, with the recipe taken from config", async () => {
-    // Deckhand cannot pick the caller's model — delegating the mechanical drive loop to a
-    // subagent is the only lever the AGENT controls, so the ask has to ride where the agent
-    // already reads its orders: the drive contract on start_preview, and the response of
-    // start_test_run (the last call before driving begins).
-    const admin = await client(ADMIN);
-    const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
-    assert.equal(started.ok, true);
-    assert.match(String(started.nextStep), /cheapest fast model/, "the delegation ask must ride the drive contract");
-    assert.match(String(started.nextStep), /haiku-recipe-from-config/, "the per-harness recipe comes from config.modelHints, not code");
-
-    const run = parse(
-      await admin.callTool({ name: "start_test_run", arguments: { previewId: started.previewId as string, title: "Model hint", steps: ["Tap"] } }),
-    );
-    assert.equal(run.ok, true);
-    assert.match(String(run.modelHint), /haiku-recipe-from-config/, "start_test_run repeats the recipe as a structured field");
-
-    // And again where the choice is actually live: the first tap of the mechanical stretch.
-    // At start_test_run the agent is still planning; this is the moment it starts looping.
-    const previewId = started.previewId as string;
-    const tap = { type: "tap", x: 0.5, y: 0.5 };
-    const firstTap = parse(await admin.callTool({ name: "ui", arguments: { previewId, deviceId: "ios-0", action: tap } }));
-    assert.match(String(firstTap.modelHint), /cheapest fast model/, "the first drive action of a run must carry the delegation ask");
-    const secondTap = parse(await admin.callTool({ name: "ui", arguments: { previewId, deviceId: "ios-0", action: tap } }));
-    assert.equal(secondTap.modelHint, undefined, "but only once per run — a hint on every tap is one the model learns to skip");
-
-    await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 1, status: "passed" } } });
-    assert.equal(parse(await admin.callTool({ name: "finish_test_run", arguments: { previewId, status: "passed" } })).ok, true);
-    await admin.close();
+  it("gives the agent no model advice at all", () => {
+    // Deckhand used to ask for the drive loop to be handed to a cheap fast model. Measured:
+    // deckhand answers in well under a second (ui 0.43-0.69s, describe 0.03-0.59s), so it was
+    // never the slow part -- and a delegated five-step run took 583s over 66 tool calls, then
+    // returned two confident WRONG root causes that were nearly filed as app bugs.
+    //
+    // This test is the removal's guardrail: reinstating any of it makes it fail.
+    const src = readFileSync(new URL("./tools.ts", import.meta.url), "utf8");
+    const stripped = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    for (const banned of ["DELEGATION_HINT", "modelHint", "cheapest fast model", "subagent", "haiku"]) {
+      assert.ok(!stripped.toLowerCase().includes(banned.toLowerCase()), `tools.ts must not steer the caller's model (found "${banned}")`);
+    }
   });
+
 
   it("tells the agent to close every message with the viewer link", async () => {
     // Relaying the link once, at the top of a long session, buries it: the user ends up
