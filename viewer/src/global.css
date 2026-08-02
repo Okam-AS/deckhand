@@ -1303,10 +1303,16 @@ figcaption {
   inset: -1px;
   border-radius: inherit;
   padding: 1px;
+  /* Discreet on purpose. This runs for the whole length of a test run, in the corner of the
+     eye of someone trying to WATCH the app — at full amber it read as a warning and pulsed
+     hard enough to pull attention away from the thing being tested. A hint that something is
+     in progress, not a beacon: a third of the opacity, a softer and wider falloff so the
+     leading edge no longer snaps past, and slower, so it drifts instead of flashing. */
   background: conic-gradient(
     from var(--trun-sweep),
-    transparent 0 62%,
-    var(--tr-run) 88%,
+    transparent 0 55%,
+    color-mix(in srgb, var(--tr-run) 32%, transparent) 82%,
+    color-mix(in srgb, var(--tr-run) 38%, transparent) 90%,
     transparent
   );
   -webkit-mask:
@@ -1314,12 +1320,20 @@ figcaption {
     linear-gradient(#000 0 0);
   -webkit-mask-composite: xor;
   mask-composite: exclude;
-  animation: trun-sweep 0.85s linear infinite;
+  animation: trun-sweep 2.4s linear infinite;
   pointer-events: none;
 }
 @keyframes trun-sweep {
   to {
     --trun-sweep: 360deg;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* A border that never stops moving is precisely what this preference is about. Keep the
+     tint so "a run is active" is still visible, drop the motion. */
+  .pbar--running::before {
+    animation: none;
+    background: color-mix(in srgb, var(--tr-run) 26%, transparent);
   }
 }
 .spinner--tr {
