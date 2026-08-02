@@ -201,9 +201,6 @@ export function App() {
             <WebFrame shareId={shareId} device={dev} repo={state.repo} branch={state.ref} />
           </section>
         </main>
-        <aside className="brand" aria-label="Deckhand">
-          <span className="brand-name">Deckhand</span>
-        </aside>
       </>
     );
   }
