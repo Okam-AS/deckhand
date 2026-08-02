@@ -12,6 +12,15 @@ import { createInterface } from "node:readline";
 export interface DevRunSpec {
   /** One process per app+platform: `${appId}:${platform}`. */
   key: string;
+  /**
+   * Who started it — the previewId. The key is per app+platform, NOT per preview, so a
+   * restart of the same app reuses it: `stop_preview` then `start_preview` (the only way to
+   * add a device today) has the OLD preview's asynchronous teardown reach
+   * `stop(devKey(app, platform))` after the NEW preview has already started a livesync under
+   * that key. Without an owner it kills the new one, and the viewer says "livesync process
+   * exited" on a preview that had just started. Observed in the field.
+   */
+  owner?: string;
   command: string;
   args: string[];
   cwd: string;
@@ -22,6 +31,8 @@ export interface DevRunSpec {
 interface RunningDev {
   spec: DevRunSpec;
   child: ChildProcess;
+  /** Set when the process was killed by a signal, in which case exitCode is null. */
+  signal?: NodeJS.Signals | null;
   exited: boolean;
   exitCode: number | null;
 }
@@ -84,9 +95,13 @@ export class DevProcessManager {
       rec.exitCode = 127;
       spec.onLog?.(`spawn error: ${err.message}`);
     });
-    child.on("close", (code) => {
+    child.on("close", (code, sig) => {
       rec.exited = true;
       rec.exitCode = code;
+      // A process killed by a signal reports code=null, so recording only the code threw away
+      // the single most diagnostic fact — that it was KILLED, and by what. The viewer showed
+      // "livesync process exited (code ?)", which reads like a mystery rather than a SIGTERM.
+      rec.signal = sig;
     });
     this.procs.set(spec.key, rec);
   }
@@ -100,6 +115,15 @@ export class DevProcessManager {
     return this.procs.get(key)?.exitCode ?? null;
   }
 
+  /** How it died, in words: an exit code, or the signal that killed it. */
+  exitReason(key: string): string {
+    const rec = this.procs.get(key);
+    if (!rec) return "the process is no longer tracked";
+    if (rec.signal) return `killed by ${rec.signal}`;
+    if (rec.exitCode !== null) return `exit code ${rec.exitCode}`;
+    return "exited without a code or a signal";
+  }
+
   /** Kill and re-spawn with the remembered spec. False when the key is unknown. */
   restart(key: string): boolean {
     const rec = this.procs.get(key);
@@ -109,8 +133,16 @@ export class DevProcessManager {
   }
 
   /** Kill the process tree for a key (no-op when unknown/already gone). */
-  stop(key: string): void {
+  /**
+   * Stop the process under `key` — but only if `owner` still matches, when given.
+   *
+   * The guard is the fix for a real collision: the key is per app+platform, so a teardown
+   * running asynchronously can arrive after a NEW preview has taken the same key, and kill a
+   * livesync that had just started.
+   */
+  stop(key: string, owner?: string): void {
     const rec = this.procs.get(key);
+    if (rec && owner !== undefined && rec.spec.owner !== undefined && rec.spec.owner !== owner) return;
     this.procs.delete(key);
     if (!rec || rec.exited || !rec.child.pid) return;
     const pid = rec.child.pid;

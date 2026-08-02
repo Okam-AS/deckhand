@@ -1318,7 +1318,9 @@ export class PreviewEngine {
         for (const dev of p.devices) dev.abort.abort();
         if (p.record.source === "local") {
           for (const platform of new Set(p.devices.map((d) => d.record.platform))) {
-            this.d.devProcs?.stop(devKey(p.app.id, platform));
+            // Owner-guarded: this teardown runs asynchronously, and the key is per
+            // app+platform, so a newer preview may already own it.
+            this.d.devProcs?.stop(devKey(p.app.id, platform), p.record.previewId);
           }
         }
         await this.teardownDevices(p, releaseOne);
@@ -1859,6 +1861,7 @@ export class PreviewEngine {
     const { command, args } = nativescriptDevRun(platform === "android" ? "android" : "ios", handle);
     this.devProcs().start({
       key: devKey(p.app.id, platform),
+      owner: p.record.previewId,
       command,
       args,
       cwd,
@@ -1876,7 +1879,7 @@ export class PreviewEngine {
   private devProcessDead(appId: string, platform: Platform): string | null {
     const key = devKey(appId, platform);
     if (this.devProcs().isAlive(key)) return null;
-    return `livesync process exited (code ${this.devProcs().exitCode(key) ?? "?"})`;
+    return `livesync process ${this.devProcs().exitReason(key)}`;
   }
 
   // --- web preview pipeline (device-less; a long-lived dev server) -------------
@@ -1929,6 +1932,7 @@ export class PreviewEngine {
       : webDevRun(devScript, `${this.webBase(p.record.shareId)}/`, port);
     this.devProcs().start({
       key: devKey(p.app.id, "web"),
+      owner: p.record.previewId,
       command,
       args,
       cwd,

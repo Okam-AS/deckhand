@@ -75,6 +75,7 @@ export function fakeDevProcs(over: Partial<DevProcessManager> = {}, log: string[
     },
     isAlive: () => true,
     exitCode: () => null,
+    exitReason: () => "not started",
     restart: () => true,
     stop: (key: string) => {
       log.push(`dev stop ${key}`);
