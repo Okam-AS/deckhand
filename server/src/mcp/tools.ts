@@ -8,6 +8,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { App, AppType, Config } from "../config.ts";
 import { appSchema, ConfigError, parseRepo, publicBaseUrl } from "../config.ts";
 import { versionStatus } from "../version.ts";
+import { devMenuHint } from "../testing/devMenu.ts";
 import type { Principal } from "../auth.ts";
 import { canAccessApp, isAdmin, visibleApps } from "../auth.ts";
 import type { PreviewEngine, CompareReference } from "../engine/preview.ts";
@@ -929,7 +930,9 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           interactiveOnly: args.interactiveOnly,
           maxDepth: args.maxDepth,
         });
-        return ok({ describe: tree });
+        // The dev menu is the one thing on screen that is not the app. An agent that
+        // does not know that files the overlay's behaviour as an app bug — observed.
+        return ok({ describe: tree, ...devMenuHint(tree) });
       }),
   );
 
