@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { DeviceFrame, type DeviceControls } from "./DeviceFrame.tsx";
-import { DevicePicker, type ViewMode } from "./DevicePicker.tsx";
+import { DevicePicker } from "./DevicePicker.tsx";
 import { MobileChrome, type DockEntry } from "./MobileChrome.tsx";
 import { WebFrame } from "./WebFrame.tsx";
 import { PinGate } from "./PinGate.tsx";
@@ -17,9 +17,7 @@ export function App() {
   const [menuOpen, setMenuOpen] = useState(false);
   // Stage controls. Each is a small, independent choice the stage folds into a
   // layout (see computeStage) — no branch here decides what the page "is".
-  const [mode, setMode] = useState<ViewMode>("grid");
   const [choices, setChoices] = useState<Record<string, string>>({});
-  const [hiddenKeys, setHiddenKeys] = useState<string[]>([]);
   const [focusKey, setFocusKey] = useState<string | null>(null);
   // Width decides how many sources fit side by side (see MIN_PANE_WIDTH). Read
   // from the window rather than a media query: the threshold depends on how many
@@ -86,10 +84,9 @@ export function App() {
         isMobile,
         viewportWidth,
         choices,
-        hiddenKeys,
         focusKey: focusKey ?? undefined,
       }),
-    [state?.panes, isMobile, viewportWidth, choices, hiddenKeys, focusKey],
+    [state?.panes, isMobile, viewportWidth, choices, focusKey],
   );
 
   // FLIP: after each layout change, slide/zoom every device figure from its old
@@ -206,7 +203,10 @@ export function App() {
   // With one source and one device on screen the two layout modes are identical —
   // render at the normal size, never the enlarged focus size. Grouped columns are
   // sized by the column, so the modes don't apply there at all.
-  const effectiveMode: ViewMode = !multiSource && shownCount > 1 ? mode : "grid";
+  // Always the grid. "Focus" was the other half of a layout choice that no longer exists:
+  // computeStage shows everything that fits and exactly one device when it does not, so
+  // there is nothing left for a mode to decide.
+  const effectiveMode = "grid";
   // The enlarged pane in focus mode: the one the user clicked, when it is still
   // on screen. Taking the first visible pane instead meant clicking a thumbnail
   // set focusKey and changed nothing — focusKey only reached computeStage on
@@ -221,9 +221,6 @@ export function App() {
     ...(multiSource ? { group: groups.find((g) => g.shareId === p.shareId)?.label } : {}),
   }));
   const focusedGroup = groups.find((g) => g.panes.some((p) => p.key === mobileFocus));
-
-  const toggleHidden = (key: string) =>
-    setHiddenKeys((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
 
   // Each column chooses on its own. Making the others follow spent a click every
   // time the guess was wrong, and which two things to compare is the user's call.
@@ -255,7 +252,7 @@ export function App() {
                     repo={g.repo}
                     branch={g.ref}
                     variant={effectiveMode === "grid" ? "grid" : p.key === focused ? "focus" : "thumb"}
-                    onSelect={effectiveMode === "focus" && p.key !== focused ? () => setFocusKey(p.key) : undefined}
+                    onSelect={undefined}
                     hidden={!visible.has(p.key)}
                     registerControls={registerControls}
                     onRotationChange={handleRotation}
@@ -293,24 +290,14 @@ export function App() {
         />
       ) : (
         <>
-          {/* One source with several devices keeps the stage-level picker: which
-              of them are on screen, and the grid/focus layout. Grouped columns
-              pick per column instead (topbarLead above). */}
-          {!multiSource && panes.length > 1 && (
-            <DevicePicker
-              options={panes.map((p) => ({ key: p.key, label: p.device.label }))}
-              visible={visible}
-              shownCount={shownCount}
-              mode={mode}
-              onMode={setMode}
-              onToggle={toggleHidden}
-              open={menuOpen}
-              onOpenChange={setMenuOpen}
-            />
+          {/* One source with several devices uses the SAME picker two sources use —
+              compact, single-select, next to the frame. There is no separate
+              layout mode any more: computeStage shows everything that fits and
+              one device when it does not, so there was nothing left for a
+              Side-by-side/Focus toggle to decide. */}
+          {!multiSource && panes.length > 1 && shownCount === 1 && groups[0] && (
+            <GroupDevicePicker group={groups[0]} onPick={(key) => setFocusKey(key)} />
           )}
-          <aside className="brand" aria-label="Deckhand">
-            <span className="brand-name">Deckhand</span>
-          </aside>
         </>
       )}
     </>

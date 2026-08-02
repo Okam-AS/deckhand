@@ -66,17 +66,26 @@ describe("computeStage — how many devices are on screen", () => {
     }
   });
 
-  it("lets a single source switch devices off, but never down to an empty stage", () => {
-    const one = computeStage(solo, { isMobile: false, hiddenKeys: [paneKey("s1", "android-1")] });
-    assert.deepEqual([...one.visible], [paneKey("s1", "ios-0")]);
+  it("applies ONE width rule, whether the devices come from one source or two", () => {
+    // The rule used to count GROUPS, so a single source "fit" no matter how many devices it
+    // had — and that page then grew its own controls (a Side-by-side/Focus toggle and a
+    // switch per device) that the two-source page did not have. Two layouts for the same
+    // question, and the one-repo case was the odd one out for no reason a user could see.
+    const twoWide = MIN_PANE_WIDTH * 2;
 
-    const none = computeStage(solo, { isMobile: false, hiddenKeys: [paneKey("s1", "ios-0"), paneKey("s1", "android-1")] });
-    assert.equal(none.visible.size, 1, "switching the last device off is a no-op, not a blank page");
+    // Two devices, one source: side by side when they fit…
+    assert.equal(computeStage(solo, { isMobile: false, viewportWidth: twoWide }).visible.size, 2);
+    // …and exactly one when they do not, same as two sources in the same width.
+    assert.equal(computeStage(solo, { isMobile: false, viewportWidth: twoWide - 1 }).visible.size, 1);
+    assert.equal(computeStage(twoSources, { isMobile: false, viewportWidth: twoWide - 1 }).visible.size, 1);
   });
 
-  it("ignores hiddenKeys with several sources, where each already shows one device", () => {
-    const s = computeStage(twoSources, { isMobile: false, hiddenKeys: [paneKey("old", "ios-0")] });
-    assert.equal(s.visible.size, 2);
+  it("picks the healthy device when it has to show only one", () => {
+    // Falling back to one device must not put a "This device didn't start" frame on screen
+    // while a working one sits behind the picker.
+    const s = computeStage(solo, { isMobile: false, viewportWidth: 100 });
+    assert.equal(s.visible.size, 1);
+    assert.ok([...s.visible][0], "something is on screen");
   });
 
   it("keeps every device mounted even when hidden, so switching back is instant", () => {
