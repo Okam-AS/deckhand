@@ -2482,3 +2482,45 @@ describe("buildStepDetail", () => {
     assert.match(d, /\u2026$/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Physical-device detection in listDevices (Phase 0). Two invariants: the
+// section is purely ADDITIVE (an engine with no scanner answers exactly the
+// old shape plus empty lists), and a scanner's answer passes through
+// untouched. Nothing here may affect capacity, booting, or the simulator
+// sections — that is the backward-compatibility contract.
+// ---------------------------------------------------------------------------
+
+describe("listDevices physical section", () => {
+  it("answers empty physical lists when no scanner is configured — every existing deployment's shape", async () => {
+    const h = makeEngine();
+    const out = await h.engine.listDevices();
+    assert.deepEqual(out.physical, { ios: [], android: [] });
+    // The pre-existing sections are untouched by the feature.
+    assert.deepEqual(out.ios.models, ["iPhone 16 Pro"]);
+    assert.equal(out.ios.runtimes[0]!.name, "iOS 26.0");
+    assert.deepEqual(out.capacity, { inUse: 0, max: config.limits.maxTotalDevices });
+  });
+
+  it("passes the scanner's answer through verbatim", async () => {
+    const ipad = {
+      identifier: "ABBF991E-8F0F-522F-9B7C-EB1C94571984",
+      udid: "00008030-00122D3C26BA202E",
+      name: "iPad",
+      model: "iPad (9th generation)",
+      deviceType: "iPad",
+      osVersion: "18.7.8",
+      transport: "network" as const,
+      developerMode: true,
+    };
+    const galaxy = { serial: "R58M12ABCDE", state: "device" as const, model: "SM_G973F" };
+    const h = makeEngine({
+      physical: { list: async () => ({ ios: [ipad], android: [galaxy] }) } as PreviewEngineDeps["physical"],
+    });
+    const out = await h.engine.listDevices();
+    assert.deepEqual(out.physical.ios, [ipad]);
+    assert.deepEqual(out.physical.android, [galaxy]);
+    // Physical hardware is NOT deckhand capacity — it must never count as in use.
+    assert.equal(out.capacity.inUse, 0);
+  });
+});

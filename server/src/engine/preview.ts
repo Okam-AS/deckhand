@@ -17,6 +17,7 @@ import { WorktreeManager, worktreeKey, type RefSpec, refDescription } from "./wo
 import { pruneDerivedData } from "./derivedData.ts";
 import { Simctl, selectRuntime, selectDeviceType, deviceLabel, type SimDevice } from "../devices/ios.ts";
 import { AndroidManager, selectSystemImage, portForSerial, serialForPort } from "../devices/android.ts";
+import type { PhysicalDeviceScanner, PhysicalDevices } from "../devices/physical.ts";
 import { resolveAndroidEnv } from "../devices/toolEnv.ts";
 import { Reaper, POOL_SIM_PREFIX, POOL_AVD_PREFIX } from "./reaper.ts";
 import { METRO_MARKER_ENV } from "./metro.ts";
@@ -338,6 +339,13 @@ export interface PreviewEngineDeps {
   worktrees: WorktreeManager;
   simctl: Simctl;
   android?: AndroidManager;
+  /**
+   * Physical-device detection (read-only, Phase 0). Optional: absent means the
+   * enumeration answers empty lists — every existing caller and fake keeps
+   * working unchanged, which is the backward-compatibility line this feature
+   * must never cross.
+   */
+  physical?: PhysicalDeviceScanner;
   streaming: StreamingBackend;
   metro: MetroManager;
   store: StateStore;
@@ -2523,13 +2531,24 @@ export class PreviewEngine {
     return null;
   }
 
-  /** Enumerate available iOS runtimes/models, Android API levels, and current capacity. */
+  /**
+   * Enumerate available iOS runtimes/models, Android API levels, connected
+   * PHYSICAL devices, and current capacity. The physical section is
+   * detection-only (Phase 0): the devices listed there cannot be targeted by
+   * start_preview yet.
+   */
   async listDevices(): Promise<{
     ios: { runtimes: { version: string; name: string }[]; models: string[] };
     android: { apiLevels: number[] };
+    physical: PhysicalDevices;
     capacity: { inUse: number; max: number };
   }> {
-    const [runtimes, deviceTypes] = await Promise.all([this.d.simctl.listRuntimes(), this.d.simctl.listDeviceTypes()]);
+    const [runtimes, deviceTypes, physical] = await Promise.all([
+      this.d.simctl.listRuntimes(),
+      this.d.simctl.listDeviceTypes(),
+      // The scanner never throws (best-effort by construction); absent dep = empty answer.
+      this.d.physical?.list() ?? Promise.resolve({ ios: [], android: [] } satisfies PhysicalDevices),
+    ]);
     let apiLevels: number[] = [];
     try {
       apiLevels = [...new Set((await this.android().listSystemImages()).map((i) => i.api))].sort((a, b) => b - a);
@@ -2543,6 +2562,7 @@ export class PreviewEngine {
         models: deviceTypes.map((d) => d.name),
       },
       android: { apiLevels },
+      physical,
       capacity: { inUse, max: this.d.config.limits.maxTotalDevices },
     };
   }
