@@ -9,6 +9,7 @@ import type { App, AppType, Config } from "../config.ts";
 import { appSchema, ConfigError, parseRepo, publicBaseUrl } from "../config.ts";
 import { versionStatus } from "../version.ts";
 import { devMenuHint } from "../testing/devMenu.ts";
+import { selectorMissHint } from "../testing/tree.ts";
 import type { Principal } from "../auth.ts";
 import { canAccessApp, isAdmin, visibleApps } from "../auth.ts";
 import type { PreviewEngine, CompareReference } from "../engine/preview.ts";
@@ -980,11 +981,20 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           if (VERIFIER_ACTIONS.has(action.type)) engine.noteVerification(args.previewId, true, action.type);
           return ok({ result, ...testRunNudge(args.previewId, action.type) });
         } catch (e) {
-          if (VERIFIER_ACTIONS.has(action.type)) {
-            const sel = "selector" in action ? JSON.stringify(action.selector) : undefined;
-            engine.noteVerification(args.previewId, false, action.type, sel);
+          if (!VERIFIER_ACTIONS.has(action.type) && action.type !== "tapElement") throw e;
+          const sel = "selector" in action ? JSON.stringify(action.selector) : undefined;
+          if (VERIFIER_ACTIONS.has(action.type)) engine.noteVerification(args.previewId, false, action.type, sel);
+          // "Not found" is the same answer for two situations that call for opposite next
+          // moves: not rendered YET, or on screen but absent from the tree. Deckhand holds the
+          // tree, so it can say which — and the miss has already cost the caller its timeout.
+          let hint: string | undefined;
+          try {
+            hint = selectorMissHint(await engine.describe(args.previewId, args.deviceId, {}));
+          } catch {
+            /* the diagnosis must never replace the real error */
           }
-          throw e;
+          const msg = e instanceof Error ? e.message : String(e);
+          return failWith("ui_error", msg, hint ? { screen: hint } : {});
         }
       }),
   );
