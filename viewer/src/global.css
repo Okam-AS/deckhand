@@ -478,14 +478,49 @@ body::before {
 }
 
 /* ---- Control row above the sim (never over its screen) ---- */
-.device-topbar {
+/* Below the sim and centred — the same place the phone dock puts its buttons, so
+   the desktop and mobile chromes stop disagreeing about where controls live. The
+   fixed height still reserves the row when empty, so sims in a row line up. */
+.device-controls {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: center;
   gap: 8px;
-  height: 34px; /* reserve the row even when empty, so sims line up */
-  margin-bottom: 10px;
+  height: 34px;
+  margin-top: 10px;
   padding: 0 2px;
+}
+/* What this pane IS, stated rather than hidden behind a button. It used to be a
+   popover holding exactly these three rows; on desktop there is room to just say
+   them, and a button that opens a panel duplicating what is already on screen is
+   a click that buys nothing. */
+.device-facts {
+  display: grid;
+  grid-template-columns: auto auto;
+  justify-content: center;
+  gap: 2px 12px;
+  margin: 10px 0 0;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+.device-facts .fact {
+  display: contents;
+}
+.device-facts dt {
+  color: var(--ink-faint, var(--ink-soft));
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 0.68rem;
+  text-align: right;
+  align-self: center;
+}
+.device-facts dd {
+  margin: 0;
+  color: var(--ink-soft);
+  /* A long branch name wraps instead of widening the column and pushing the
+     device frames apart. */
+  overflow-wrap: anywhere;
+  max-width: 18rem;
 }
 .ctrl-btn {
   display: inline-flex;
@@ -533,8 +568,12 @@ body::before {
   gap: 8px;
   padding: 14px;
 }
-.device:fullscreen .device-topbar {
-  margin-bottom: 0;
+.device:fullscreen .device-controls {
+  margin-top: 0;
+}
+/* Fullscreen is for looking at the device, not reading about it. */
+.device:fullscreen .device-facts {
+  display: none;
 }
 .device:fullscreen .device-screen {
   flex: 1 1 auto;
@@ -970,8 +1009,11 @@ figcaption {
     max-height: 100cqh;
     margin: 0;
   }
-  .device-topbar {
+  .device-controls {
     display: none; /* home/rotate live in the dock on mobile */
+  }
+  .device-facts {
+    display: none; /* the dock's info popover names the pane instead */
   }
   figcaption {
     display: none; /* the info popover names the device instead */
@@ -1115,7 +1157,7 @@ figcaption {
 }
 
 /* ---- Control icons rotate in sync with the device orientation ---- */
-.device-topbar .ctrl-btn svg,
+.device-controls .ctrl-btn svg,
 .mdock .dock-btn svg {
   transform: rotate(var(--icon-rot, 0deg));
   transition: transform 0.45s cubic-bezier(0.16, 0.84, 0.34, 1);
@@ -1421,45 +1463,6 @@ figcaption {
    height — so borrowing it anchored this to the middle of the VIEWPORT and let
    it run off the right edge. A popover hanging off a button belongs to the
    button. */
-.frame-info {
-  position: relative;
-  display: inline-flex;
-}
-.frame-info-menu {
-  position: absolute;
-  top: calc(100% + 0.45rem);
-  right: 0;
-  left: auto;
-  min-width: 15rem;
-  /* Never wider than the column it hangs in, so a long branch name wraps
-     instead of pushing the panel off screen. */
-  max-width: min(22rem, 80vw);
-  padding: 0.45rem;
-  z-index: 40;
-  background: var(--card-grad);
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  box-shadow: var(--shadow-lg);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(-6px) scale(0.97);
-  transform-origin: top right;
-  transition:
-    opacity 0.18s var(--ease-settle, ease),
-    transform 0.2s var(--ease-settle, ease);
-}
-.frame-info-menu.open {
-  opacity: 1;
-  pointer-events: auto;
-  transform: translateY(0) scale(1);
-}
-/* Long values (a branch like feature/some-long-name) wrap rather than widen. */
-.frame-info-menu .info-val {
-  overflow-wrap: anywhere;
-  text-align: right;
-}
 
 .stage--grouped .pane-group {
   /* Equal columns that shrink together, rather than each demanding its natural

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DevicePlayer, type PlayerStatus } from "./stream/player.ts";
 import { DeviceInput, ORIENTATION_CYCLE, type SpecialKey } from "./stream/input.ts";
 import { deviceBase, deviceWsUrl, phaseBadge, phaseLabel, repoName, type ShareDevice } from "./api.ts";
-import { CollapseIcon, ExpandIcon, HomeIcon, InfoIcon, KeyboardIcon, RotateIcon } from "./icons.tsx";
+import { CollapseIcon, ExpandIcon, HomeIcon, KeyboardIcon, RotateIcon } from "./icons.tsx";
 import { TypeBar } from "./TypeBar.tsx";
 
 export type DeviceVariant = "grid" | "focus" | "thumb";
@@ -89,7 +89,6 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
   const [kbLive, setKbLive] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [typing, setTyping] = useState(false);
-  const [infoOpen, setInfoOpen] = useState(false);
   // The frame auto-fits each device: default shape from the model name, then the
   // exact aspect from the first real frame (so an iPad never sits in a phone frame).
   const isTablet = /ipad|tablet/i.test(device.label);
@@ -105,24 +104,6 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
   // Keep the corner subtle: a big radius clips real screen content (the status-bar
   // clock sits in the very corner). Small enough to soften, not eat content.
   const radius = aw && ah && aw / ah > 0.62 ? "14px" : "18px";
-
-  // Close the info popover on an outside click or Escape — the same contract the
-  // pickers use, so no popover behaves differently from its neighbours.
-  useEffect(() => {
-    if (!infoOpen) return;
-    const onDoc = (e: PointerEvent) => {
-      if (!(e.target instanceof Node) || !frameRef.current?.contains(e.target)) setInfoOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setInfoOpen(false);
-    };
-    document.addEventListener("pointerdown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("pointerdown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [infoOpen]);
 
   // Track fullscreen for this device (Escape/native exit included).
   useEffect(() => {
@@ -276,102 +257,9 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
         ? { onClick: onSelect, role: "button", tabIndex: 0, title: `Focus ${device.label}`, "aria-label": `Focus ${device.label}` }
         : {})}
     >
-      {/* Control row sits just above the sim — never over its screen. Hidden on
-          thumbnails. Icon-only buttons: Home · Rotate · Fullscreen. */}
-      {!isThumb && (
-        <div className="device-topbar" style={{ "--icon-rot": `${rotationDeg}deg` } as React.CSSProperties}>
-          {kbLive && (
-            <span className="kb-chip" title="Keystrokes go to this device">
-              <KeyboardIcon size={15} />
-            </span>
-          )}
-          {topbarLead}
-          {ready && (
-            <>
-              <button
-                type="button"
-                className="ctrl-btn"
-                onClick={pressHome}
-                title="Home"
-                aria-label="Press the device home button"
-              >
-                <HomeIcon />
-              </button>
-              <button
-                type="button"
-                className="ctrl-btn"
-                onClick={rotate}
-                title="Rotate"
-                aria-label="Rotate the device 90 degrees"
-              >
-                <RotateIcon />
-              </button>
-              {/* Always offered. Typing into the focused canvas works with a real
-                  keyboard, but it is invisible — the button is the only affordance
-                  that says typing is possible at all, and it is also the path for
-                  text a raw keydown cannot send. */}
-              <button
-                type="button"
-                className="ctrl-btn"
-                onClick={() => setTyping(true)}
-                title="Keyboard"
-                aria-label="Type with your keyboard"
-              >
-                <KeyboardIcon />
-              </button>
-              {/* What this pane IS lives here rather than in a caption under the
-                  sim: the caption repeated the same three facts beneath every
-                  device and pushed the frames apart, and on a page with several
-                  sources it read as three near-identical labels. Same control the
-                  phone dock already has, so there is one place to look. */}
-              <div className="frame-info">
-                <button
-                  type="button"
-                  className="ctrl-btn"
-                  onClick={() => setInfoOpen((o) => !o)}
-                  aria-expanded={infoOpen}
-                  aria-haspopup="dialog"
-                  title="What this pane shows"
-                  aria-label="What this pane shows"
-                >
-                  <InfoIcon />
-                </button>
-                <div className={`frame-info-menu ${infoOpen ? "open" : ""}`} role="dialog" aria-label="Pane info">
-                  <div className="info-row">
-                    <span className="info-key">Repo</span>
-                    <span className="info-val">{repoName(repo) || "—"}</span>
-                  </div>
-                  <div className="info-row">
-                    <span className="info-key">Branch</span>
-                    <span className="info-val">{branch || "—"}</span>
-                  </div>
-                  <div className="info-row">
-                    <span className="info-key">Device</span>
-                    <span className="info-val">{device.label}</span>
-                  </div>
-                </div>
-              </div>
-              {/* Last on the row on purpose: it is the one control that changes the
-                  whole layout rather than the device, so it sits at the edge and out
-                  of the way of the ones used mid-flow. It never appears on mobile —
-                  the whole topbar is display:none under 700px, the same breakpoint
-                  useIsMobile uses — and it is absent on iPhone Safari regardless,
-                  which has no element fullscreen. */}
-              {fullscreenSupported && (
-                <button
-                  type="button"
-                  className="ctrl-btn"
-                  onClick={toggleFullscreen}
-                  title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
-                  aria-label={isFullscreen ? "Exit fullscreen" : "Show this device fullscreen"}
-                >
-                  {isFullscreen ? <CollapseIcon /> : <ExpandIcon />}
-                </button>
-              )}
-            </>
-          )}
-        </div>
-      )}
+      {/* Controls sit BELOW the sim, centred — the same place the phone dock puts
+          them, so the two chromes do not disagree about where the buttons live.
+          Hidden on thumbnails. Home · Rotate · Keyboard · Fullscreen. */}
       {typing && (
         <TypeBar
           onText={(text) => inputRef.current?.sendText(text) ?? [...text]}
@@ -422,6 +310,89 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
         {showBadge && <div className="badge">{status === "fallback" ? "Reduced quality" : "Connecting…"}</div>}
         {!ready && !isThumb && device.phase !== "failed" && <div className="badge">{phaseBadge(device.phase)}</div>}
       </div>
+      {!isThumb && (
+        <div className="device-controls" style={{ "--icon-rot": `${rotationDeg}deg` } as React.CSSProperties}>
+          {kbLive && (
+            <span className="kb-chip" title="Keystrokes go to this device">
+              <KeyboardIcon size={15} />
+            </span>
+          )}
+          {topbarLead}
+          {ready && (
+            <>
+              <button
+                type="button"
+                className="ctrl-btn"
+                onClick={pressHome}
+                title="Home"
+                aria-label="Press the device home button"
+              >
+                <HomeIcon />
+              </button>
+              <button
+                type="button"
+                className="ctrl-btn"
+                onClick={rotate}
+                title="Rotate"
+                aria-label="Rotate the device 90 degrees"
+              >
+                <RotateIcon />
+              </button>
+              {/* Always offered. Typing into the focused canvas works with a real
+                  keyboard, but it is invisible — the button is the only affordance
+                  that says typing is possible at all, and it is also the path for
+                  text a raw keydown cannot send. */}
+              <button
+                type="button"
+                className="ctrl-btn"
+                onClick={() => setTyping(true)}
+                title="Keyboard"
+                aria-label="Type with your keyboard"
+              >
+                <KeyboardIcon />
+              </button>
+              {/* What this pane IS lives here rather than in a caption under the
+                  sim: the caption repeated the same three facts beneath every
+                  device and pushed the frames apart, and on a page with several
+                  sources it read as three near-identical labels. Same control the
+                  phone dock already has, so there is one place to look. */}
+              {/* Last on the row on purpose: it is the one control that changes the
+                  whole layout rather than the device, so it sits at the edge and out
+                  of the way of the ones used mid-flow. It never appears on mobile —
+                  the whole topbar is display:none under 700px, the same breakpoint
+                  useIsMobile uses — and it is absent on iPhone Safari regardless,
+                  which has no element fullscreen. */}
+              {fullscreenSupported && (
+                <button
+                  type="button"
+                  className="ctrl-btn"
+                  onClick={toggleFullscreen}
+                  title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
+                  aria-label={isFullscreen ? "Exit fullscreen" : "Show this device fullscreen"}
+                >
+                  {isFullscreen ? <CollapseIcon /> : <ExpandIcon />}
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      )}
+      {!isThumb && ready && (
+        <dl className="device-facts">
+          <div className="fact">
+            <dt>Repo</dt>
+            <dd>{repoName(repo) || "—"}</dd>
+          </div>
+          <div className="fact">
+            <dt>Branch</dt>
+            <dd>{branch || "—"}</dd>
+          </div>
+          <div className="fact">
+            <dt>Device</dt>
+            <dd>{device.label}</dd>
+          </div>
+        </dl>
+      )}
       {isThumb ? (
         <figcaption className="thumb-cap">{device.label.split(" · ")[0]}</figcaption>
       ) : (
