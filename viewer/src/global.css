@@ -1,23 +1,45 @@
 :root {
-  /* auto-mate "Warm Dusk Lounge" tokens (dark-only, warm). */
-  --bg: #241b20;
-  --bg-2: #2a1f23;
-  --bg-3: #31242a;
-  --panel: #33262c;
-  --panel-2: #2c2025;
-  --line: rgba(242, 232, 220, 0.07);
-  --line-strong: rgba(242, 232, 220, 0.12);
-  --ink: #f2e8dc;
-  --ink-soft: #c9baae;
-  --ink-faint: #9a8b82;
-  --amber: #e0a971;
-  --coral: #d98873;
-  --sage: #9fb7a6;
-  --gold: #e8b86d;
-  --accent: var(--amber);
-  --card-grad: linear-gradient(165deg, #33262c, #2c2025);
-  --shadow: 0 16px 38px rgba(0, 0, 0, 0.32);
-  --shadow-lg: 0 28px 60px rgba(0, 0, 0, 0.42);
+  /*
+   * Neutral dark, sampled from the reference rather than eyeballed: the two greys cover 96%
+   * of the surface, and there is no warm cast anywhere except the off-white.
+   *
+   *   #1e1e1e  outer background      #121212  panel (INSET, not raised)
+   *   #3b3b3b  hairline              #fcfcf6  off-white     #c6c7c1  icon grey
+   *
+   * The panel is DARKER than the page — a well, not a card — which is why there are no
+   * lifted gradients here and the only separation is a hairline.
+   *
+   * `--ink-rgb` exists so alpha variants stop being hand-written hex: every translucent
+   * ink in this file used to spell out the old warm colour, so a palette change missed
+   * them and left a warm haze over a cold theme.
+   */
+  --bg: #1e1e1e;
+  --bg-2: #1a1a1a;
+  --bg-3: #202020;
+  --panel: #121212;
+  --panel-2: #151515;
+  --ink-rgb: 252, 252, 246;
+  --ink: rgb(var(--ink-rgb));
+  --ink-soft: #c6c7c1;
+  --ink-faint: #8a8a86;
+  --line: rgba(var(--ink-rgb), 0.06);
+  --line-strong: rgba(var(--ink-rgb), 0.12);
+  --hairline: #3b3b3b;
+
+  /*
+   * States. The reference is monochrome — its only accent is a white button — so the
+   * palette is too: "active" is the off-white, and hue is reserved for the one thing a
+   * neutral UI genuinely cannot express, which is that something FAILED.
+   */
+  --accent: var(--ink);
+  --amber: #d8d8d2;   /* in-progress: a light tone, not a colour */
+  --gold: #d8d8d2;
+  --sage: #9db29f;    /* passed — desaturated, barely a hue */
+  --coral: #c98b7f;   /* failed — the only place colour earns its keep */
+
+  --card-grad: linear-gradient(180deg, #141414, #111111);
+  --shadow: 0 16px 38px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 28px 60px rgba(0, 0, 0, 0.55);
   --serif: "New York", "Iowan Old Style", Georgia, ui-serif, serif;
   --mono: ui-monospace, "SF Mono", Menlo, monospace;
   color-scheme: dark;
@@ -46,16 +68,18 @@ body {
   -webkit-tap-highlight-color: transparent;
 }
 
-/* Fixed warm glow underlay (auto-mate body::before). */
+/*
+ * Flat. The reference has no gradient at all — two greys and a hairline — and the corner
+ * glows this inherited were the warm-lounge look, not this one. A device frame reads more
+ * honestly against a flat field: any gradient behind it competes with the screen it is
+ * framing, which is the one thing on the page anybody is looking at.
+ */
 body::before {
   content: "";
   position: fixed;
   inset: 0;
   z-index: -1;
-  background:
-    radial-gradient(62% 55% at 12% -5%, rgba(224, 169, 113, 0.12), transparent 60%),
-    radial-gradient(55% 50% at 105% 105%, rgba(217, 136, 115, 0.1), transparent 62%),
-    linear-gradient(165deg, var(--bg-3), var(--bg));
+  background: var(--bg);
 }
 
 .app {
@@ -67,38 +91,6 @@ body::before {
 }
 .app.has-picker {
   padding-top: clamp(4.6rem, 8vw, 6rem); /* clear the top-center layout control */
-}
-
-/* ---- Brand: the Deckhand wordmark, always the same lockup, pinned bottom-right ---- */
-.brand {
-  position: fixed;
-  z-index: 20;
-  pointer-events: none; /* purely a label — never blocks the devices */
-  bottom: clamp(0.9rem, 2.4vw, 1.7rem);
-  right: clamp(1rem, 2.4vw, 1.9rem);
-  animation: fade 0.8s ease both;
-}
-.brand-name {
-  position: relative;
-  display: inline-block;
-  font-family: var(--serif);
-  font-weight: 650;
-  font-size: clamp(1.1rem, 2.2vw, 1.55rem);
-  line-height: 0.95;
-  letter-spacing: -0.01em;
-  color: var(--ink);
-  padding-bottom: 7px;
-  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.55); /* legible over a device — no chip */
-}
-.brand-name::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 2px;
-  border-radius: 999px;
-  background: linear-gradient(90deg, transparent, var(--gold), transparent);
 }
 
 /* ---- Rebuild button (local dev previews): pill pinned bottom-left ---- */
@@ -277,8 +269,10 @@ body::before {
     color 0.15s ease;
 }
 .seg-btn.on {
-  color: #2a1c16;
-  background: linear-gradient(150deg, var(--amber), var(--coral));
+  /* The off-white is the accent here; a gradient fill would be the only saturated thing on
+     the page. Selection reads as contrast, not as colour. */
+  color: #141414;
+  background: var(--ink);
 }
 .picker-row {
   display: flex;
@@ -322,7 +316,7 @@ body::before {
     border-color 0.2s ease;
 }
 .switch.on {
-  background: linear-gradient(150deg, var(--amber), var(--coral));
+  background: var(--ink);
   border-color: transparent;
 }
 .switch .knob {
@@ -440,8 +434,8 @@ body::before {
   aspect-ratio: var(--device-aspect, 9 / 19.5);
   border-radius: var(--device-radius, 18px);
   overflow: hidden;
-  background: linear-gradient(180deg, #1a1218, #22181d);
-  border: 2.5px solid rgba(242, 232, 220, 0.14);
+  background: linear-gradient(180deg, #101010, #171717);
+  border: 2.5px solid rgba(var(--ink-rgb), 0.14);
   box-shadow:
     var(--shadow-lg),
     0 0 0 1px rgba(0, 0, 0, 0.4),
@@ -1006,8 +1000,8 @@ figcaption {
   aspect-ratio: 16 / 10;
   border-radius: 16px;
   overflow: hidden;
-  background: linear-gradient(180deg, #1a1218, #22181d);
-  border: 2.5px solid rgba(242, 232, 220, 0.14);
+  background: linear-gradient(180deg, #101010, #171717);
+  border: 2.5px solid rgba(var(--ink-rgb), 0.14);
   box-shadow:
     var(--shadow-lg),
     0 0 0 1px rgba(0, 0, 0, 0.4),
@@ -1036,9 +1030,9 @@ figcaption {
   gap: 22px;
   padding: clamp(26px, 5vw, 38px) clamp(24px, 5vw, 34px);
   border-radius: 22px;
-  background: var(--card-grad, linear-gradient(165deg, #33262c, #2c2025));
+  background: var(--card-grad);
   box-shadow: var(--shadow-lg), inset 0 1px 0 rgba(255, 255, 255, 0.05);
-  border: 1px solid var(--line, rgba(242, 232, 220, 0.08));
+  border: 1px solid var(--line);
   animation: rise 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both;
 }
 .pin-title {
@@ -1046,7 +1040,7 @@ figcaption {
   font-size: 14px;
   font-weight: 500;
   letter-spacing: 0.02em;
-  color: var(--ink-soft, #c9bcae);
+  color: var(--ink-soft);
 }
 .pin-dots {
   display: flex;
@@ -1057,11 +1051,13 @@ figcaption {
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  border: 1.5px solid var(--line-strong, rgba(242, 232, 220, 0.28));
+  border: 1.5px solid var(--line-strong);
   transition: background 0.18s, border-color 0.18s, transform 0.18s;
 }
 .pin-dot.on {
-  background: linear-gradient(150deg, var(--amber), var(--coral));
+  /* The reference's one bright element is a white square. A filled dot is the same idea:
+     presence shown by contrast, not by hue. */
+  background: var(--ink);
   border-color: transparent;
   transform: scale(1.05);
 }
@@ -1079,7 +1075,7 @@ figcaption {
   height: 60px;
   border: 0;
   border-radius: 16px;
-  background: rgba(242, 232, 220, 0.06);
+  background: rgba(var(--ink-rgb), 0.06);
   color: var(--ink);
   font: 300 25px system-ui, -apple-system, sans-serif;
   cursor: pointer;
@@ -1088,7 +1084,7 @@ figcaption {
   backdrop-filter: blur(6px);
 }
 .pin-key:hover {
-  background: rgba(242, 232, 220, 0.11);
+  background: rgba(var(--ink-rgb), 0.11);
 }
 .pin-key:active {
   transform: scale(0.94);
