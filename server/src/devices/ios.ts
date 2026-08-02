@@ -220,6 +220,40 @@ export class Simctl {
     if (res.code !== 0) throw new SimctlError(`simctl install failed: ${res.stderr.trim().slice(0, 200)}`);
   }
 
+  /**
+   * Turn off the dev-build overlays before the app is ever launched.
+   *
+   * Expo registers three launch-time overlays as UserDefaults *defaults*, so a written
+   * value wins (verified in expo-dev-menu 57.0.8, DevMenuPreferences.swift):
+   *
+   *   EXDevMenuShowsAtLaunch            ?? true   — the dev menu opens over the app
+   *   EXDevMenuIsOnboardingFinished     ?? false  — "This is the developer menu" sheet
+   *   EXDevMenuShowFloatingActionButton ?? true   — the floating Tools button
+   *
+   * The alternative was telling every agent to go and clear these, which costs round
+   * trips, has to guess whether the app is even Expo, and is wrong the moment they are
+   * already off. Writing the keys needs none of that: on a non-Expo app they are unread
+   * preferences in its own domain, and writing them twice is the same as writing them
+   * once. There is nothing to detect.
+   *
+   * The line this stays on: deckhand may switch off what the DEV BUILD added, and must
+   * never touch what the APP does. A location permission alert is not on this list on
+   * purpose — a user meets that too, and granting it silently would have every agent
+   * testing a flow nobody ships.
+   *
+   * Best-effort: a preview must not fail because a preference did not write.
+   */
+  async silenceDevOverlays(udid: string, bundleId: string): Promise<void> {
+    const prefs: [string, string][] = [
+      ["EXDevMenuShowsAtLaunch", "NO"],
+      ["EXDevMenuIsOnboardingFinished", "YES"],
+      ["EXDevMenuShowFloatingActionButton", "NO"],
+    ];
+    for (const [key, value] of prefs) {
+      await this.run(["spawn", udid, "defaults", "write", bundleId, key, "-bool", value]).catch(() => undefined);
+    }
+  }
+
   async launch(udid: string, bundleId: string): Promise<void> {
     const res = await this.run(["launch", udid, bundleId]);
     if (res.code !== 0) throw new SimctlError(`simctl launch failed: ${res.stderr.trim().slice(0, 200)}`);

@@ -1842,6 +1842,8 @@ export class PreviewEngine {
           await this.installProduct(platform, handle, appPath);
           await this.verifyInstalled(platform, handle, bundleId);
           this.setPhase(p, dev, "launching", "launching app");
+          // Before the app runs, not after it has already drawn its dev overlays.
+          if (platform === "ios") await this.d.simctl.silenceDevOverlays(handle, bundleId).catch(() => {});
           await this.launch(p, dev, handle, bundleId, sourceDir, appEnv, slug);
           await this.attachAndReady(p, dev, platform, handle);
         } catch (e) {

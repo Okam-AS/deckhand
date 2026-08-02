@@ -142,8 +142,8 @@ describe("spotting the dev menu", () => {
     assert.equal(hint, DEV_MENU_RECOVERY);
     // Each of these is a fact an agent cannot discover for itself, and every one
     // was verified on the device before it was written down.
-    assert.match(hint, /Tools button/, "it must name the switch");
-    assert.match(hint, /Fast refresh/, "and where to find it, since it has no label");
+    assert.match(hint, /not an app bug/i, "the conclusion to avoid comes first");
+    assert.match(hint, /Tools button/, "and it still names the switch for the manual path");
     assert.match(hint, /scroll DOWN/i, "the switch is below the fold");
     assert.match(hint, /hits the text, not the switch/i, "why selecting it by text cannot work");
     assert.match(hint, /not.*app bug/i, "and what NOT to conclude");
@@ -155,12 +155,12 @@ describe("saying it before the first tap, not after the first surprise", () => {
     // Principle 10: a working answer that lives only in an agent's head is not finished
     // work. This one was rediscovered three times in a single session, twice reported as
     // an app bug, before it was written anywhere a fresh agent would read it.
-    assert.match(DEV_MENU_PREFLIGHT, /permission alert/i, "the alert is first — it sits above the dev menu itself");
-    assert.match(DEV_MENU_PREFLIGHT, /Tools button/, "and the floating button is second");
-    assert.ok(
-      DEV_MENU_PREFLIGHT.indexOf("permission alert") < DEV_MENU_PREFLIGHT.indexOf("Tools button"),
-      "order matters: with an alert up, scrolling the dev menu does nothing at all",
-    );
+    // Corrected: deckhand switches these off itself now, so the preflight says what to
+    // EXPECT rather than handing out chores. And it draws the line that matters — a
+    // permission alert is the app's own behaviour, not deckhand's packaging.
+    assert.match(DEV_MENU_PREFLIGHT, /EXDevMenuShowsAtLaunch/, "it must name what deckhand actually did");
+    assert.match(DEV_MENU_PREFLIGHT, /permission alert is different|dismiss it the way a user would/i);
+    assert.ok(!/scroll DOWN to TOOLS, switch off/.test(DEV_MENU_PREFLIGHT), "it must not hand out steps deckhand already took");
   });
 
   it("stays short enough to survive being read", () => {

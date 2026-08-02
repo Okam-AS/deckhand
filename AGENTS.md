@@ -240,31 +240,27 @@ emulators, so a green run there would mean "half the devices" while reading as
 "all of them"). It boots a real simulator AND a real emulator, so it takes
 several minutes. Run it by hand.
 
-### Before you drive a fresh dev build: clear its two overlays
+### Dev-build overlays: deckhand switches them off, you do not
 
-An Expo/React Native dev build boots with two things in front of the app, and both
-are routinely mistaken for app bugs. Do this once, first, rather than rediscovering
-it mid-run:
+An Expo dev build registers three launch overlays as UserDefaults *defaults*
+(`EXDevMenuShowsAtLaunch`, `EXDevMenuIsOnboardingFinished`,
+`EXDevMenuShowFloatingActionButton` — see `expo-dev-menu`'s
+`DevMenuPreferences.swift`). Deckhand writes all three off before it launches the
+app, so a preview comes up straight into the app's own UI.
 
-1. **The system permission alert** (location, notifications). It sits ABOVE
-   everything, including the dev menu — with one up, scrolling the dev menu does
-   nothing at all. Dismiss it first.
-2. **Expo's floating "Tools button"**, top-right. It sits exactly where app controls
-   usually live and swallows taps meant for them. Open the dev menu, scroll DOWN to
-   the TOOLS section, and turn off the row labelled **"Tools button"** — the switch
-   itself is an unlabelled checkbox, so `tapElement {text:"Tools button"}` hits the
-   label and not the switch. Read that row's `y` from the tree and tap the checkbox
-   to its right (measured at x≈0.67, label at x≈0.28). Its value reads `"1"` on and
-   `"0"` off, which is the only way to confirm the tap landed. Then `Close`.
+Writing them needs no detection: on a non-Expo app they are unread keys in its own
+preference domain, and writing them twice is the same as writing them once. That is
+why this is not "check whether the app is Expo, and whether the button is already
+off" — there is nothing to check.
 
-`describe` says all of this back to you the moment the dev menu is in the tree, so
-you do not have to remember it — see `server/src/testing/devMenu.ts`. It is written
-here as well because the cheapest place to learn it is before the first tap, and
-because principle 10 says a working answer that lives only in an agent's head is
-not finished work.
+**The line, and it matters:** deckhand may switch off what the DEV BUILD added, and
+must never touch what the APP does. A location permission alert is not on that list
+on purpose — a user meets it too, so an agent should dismiss it the way a user
+would. Granting it silently would have every agent testing a flow nobody ships.
 
-Cost of not doing it: three separate runs in one session tapped the app's top-right
-button, hit the dev overlay, and reported the app as having "critical UI bugs".
+If a dev menu still appears, `describe` says so and how to close it. Treat that as
+deckhand's packaging, never as an app bug: three separate runs in one session hit a
+dev overlay and reported a working app as having "critical UI bugs".
 
 ### Nothing is "tested" until this is green
 
