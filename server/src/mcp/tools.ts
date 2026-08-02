@@ -305,21 +305,25 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
    * which it is.
    */
   /**
-   * Steering, not enforcement: an MCP server cannot choose the caller's model, and no
-   * harness lets an agent switch its own session's model — a subagent is the only lever
-   * the agent controls, so the text asks for exactly that. The router is stateless, so
-   * there is no clientInfo to tailor by; every caller gets the whole list.
+   * Deckhand used to ask the agent to hand the drive loop to a subagent on its cheapest
+   * fast model. That is gone, and the measurements are why.
+   *
+   * Deckhand is not the slow part: `ui` answers in 0.43–0.69s, `describe` in 0.03–0.59s,
+   * `screenshot` in 0.15s. A delegated run spent 583s over 66 tool calls on a five-step
+   * test — roughly 5% deckhand, the rest model inference. A weaker model does not make
+   * that cheaper, it makes it WORSE, because every mis-aimed tap costs three more round
+   * trips, and the task needed about fifteen calls.
+   *
+   * The cost that actually mattered was not tokens. Two of those runs came back with
+   * confident, wrong root causes — "the permission dialog is unresponsive" (one tap at
+   * the right coordinate dismissed it) and "critical UI bugs, button ID mapping broken"
+   * (the dev-menu overlay was eating the tap). Both were nearly reported to the user as
+   * app bugs. Steering toward a cheaper model bought slower runs and false findings.
+   *
+   * So: no model advice at all. The agent that called the tool does the work.
    */
-  const DELEGATION_HINT =
-    "The drive loop itself (screenshot → describe → ui → update_test_run) is mechanical and high-volume, so don't run it on your primary model: delegate it to a subagent on your harness's cheapest fast model — do that yourself, don't ask the user — and keep your primary model for choosing what to test, judging the results, and writing the report. How, per harness (pick yours; unlisted → your closest equivalent): " +
-    Object.entries(config.modelHints)
-      .map(([harness, how]) => `${harness}: ${how}`)
-      .join("; ") +
-    ".";
-
   const TEST_RUN_CONTRACT =
-    "ALWAYS open a run before you drive the app — not just for tests: start_test_run with a title saying what you are about to do (\"Verify the new tab bar\", \"Reproduce the crash\", \"Look at the wash flow\") and the steps you plan, mark each one running→passed/failed with update_test_run as you go, and close it with finish_test_run. That is what puts a live spinner and step list in the viewer; without it the user sees a cursor moving over a silent app and cannot tell what you are doing. " +
-    DELEGATION_HINT;
+    "ALWAYS open a run before you drive the app — not just for tests: start_test_run with a title saying what you are about to do (\"Verify the new tab bar\", \"Reproduce the crash\", \"Look at the wash flow\") and the steps you plan, mark each one running→passed/failed with update_test_run as you go, and close it with finish_test_run. That is what puts a live spinner and step list in the viewer; without it the user sees a cursor moving over a silent app and cannot tell what you are doing.";
 
   /**
    * Keep the link within reach. Relaying it once, at the top of a long session, means the user
@@ -347,11 +351,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
    * The once-per-stretch bookkeeping lives on the engine — this layer is rebuilt per request and
    * cannot remember anything (see `shouldNudgeTestRun`).
    */
-  const testRunNudge = (previewId: string, actionType: string): { hint?: string; modelHint?: string } => {
+  const testRunNudge = (previewId: string, actionType: string): { hint?: string } => {
     if (!DRIVING_UI_ACTIONS.has(actionType)) return {};
-    // With a run open there is nothing to nudge about, but this IS the first tap of the loop
-    // that should have been delegated — so the two reminders are complements, never both.
-    if (engine.shouldHintDelegation(previewId)) return { modelHint: DELEGATION_HINT };
     if (!engine.shouldNudgeTestRun(previewId)) return {};
     // Deliberately does NOT append TEST_RUN_CONTRACT: this fires in the middle of a flow, where
     // the agent has already met the full contract at start_preview. Restating it here says the
@@ -1067,7 +1068,6 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         const { runId } = engine.startTestRun(id, args.title, args.steps ?? []);
         return ok({
           runId,
-          modelHint: DELEGATION_HINT,
           nextStep:
             "Drive the app with `describe`/`ui`. Mark each step running→passed/failed with update_test_run as you get to it, then finish_test_run + report in chat. " +
             "Two rules the viewer holds you to: every step you actually check must end as passed or failed — one left pending renders as never-run, so if you skipped it, say why in the summary rather than leaving it ambiguous. " +

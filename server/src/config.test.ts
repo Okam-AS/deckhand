@@ -51,7 +51,6 @@ describe("loadConfig", () => {
     assert.equal(c.allowPublicRepos, false);
     assert.equal(c.limits.maxDevicesPerPreview, 4);
     assert.equal(c.limits.disk.critical, 20);
-    assert.match(String(c.modelHints.claude), /haiku/i);
   });
 
   it("resolves the private key path under the home dir", () => {
