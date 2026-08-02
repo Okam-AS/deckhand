@@ -237,13 +237,21 @@ before trusting the preview phase, because a preview with one failed device and
 one ready device reports `ready` (`preview.ts:952`). The how-to, including a
 ready-to-paste poller, is the `waiting-for-a-preview` skill in `.claude/skills/`.
 
-## If a tool response says an update is available
+## If a tool response carries `deckhandUpdate`
 
-Every successful tool response carries `updateAvailable` when the deckhand
-checkout is on `main` and `main` has moved. **Relay the `nextStep` to the user
-and stop there.** Do not pull, and do not restart: a restart tears down every
-booted simulator on the machine, so someone may be mid-test on a preview you
-cannot see. It is their call.
+Every successful tool response carries `deckhandUpdate` when the code the server
+is RUNNING is not the newest — in one of two states, which need different words:
+
+- `action: "restart"` — the checkout was already pulled and the process is still
+  on the old code. Ask: **"deckhand has been updated on disk but is still running
+  the old code — restart it?"**
+- `action: "pull-and-restart"` — there is newer code on `main`. Ask: **"there is a
+  newer deckhand — pull and restart?"**
+
+**Ask, then stop.** Do not pull and do not restart on your own: a restart tears
+down every booted simulator on the machine, so someone may be mid-test on a
+preview you cannot see. Offer it in one sentence, at the top of your reply — not
+buried under a status list.
 
 The version is the commit (`version.ts`) — nothing to bump, so nothing to forget.
 It only speaks when the checkout is a clean `main`; a feature branch or a dirty

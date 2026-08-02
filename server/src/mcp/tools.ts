@@ -54,7 +54,21 @@ export interface ToolContext {
  */
 function ok(data: Record<string, unknown>): CallToolResult {
   const version = versionStatus();
-  const notice = version?.updateAvailable ? { updateAvailable: true, version: version.current, latest: version.latest, nextStep: version.note } : {};
+  // Two different "you are behind" states, and the one that was missing is the common one:
+  // the checkout was pulled and the process still runs the old code. Comparing the CHECKOUT
+  // to origin/main reports "up to date" while the running server is hours stale.
+  const notice =
+    version?.restartNeeded || version?.updateAvailable
+      ? {
+          deckhandUpdate: {
+            running: version.current,
+            checkout: version.checkout,
+            latest: version.latest,
+            action: version.restartNeeded ? "restart" : "pull-and-restart",
+          },
+          nextStep: version.note,
+        }
+      : {};
   return { content: [{ type: "text", text: JSON.stringify({ ok: true, ...data, ...notice }) }] };
 }
 

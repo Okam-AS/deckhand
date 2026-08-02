@@ -116,3 +116,27 @@ describe("the update check is actually wired in", () => {
     assert.match(okBody, /updateAvailable/, "and must be gated on updateAvailable, so the normal case is unchanged");
   });
 });
+
+describe("a checkout that moved under a running process", () => {
+  it("distinguishes the running code from the checkout", async () => {
+    // The gap this closes: version.ts compared the CHECKOUT to origin/main and assumed the
+    // process was the same. The server runs from source under tsx and loads its modules once,
+    // so `git pull` updates the tree while the process keeps running old code — and the check
+    // reported "up to date" for hours. Which is exactly what happened on a real machine after
+    // ten merges: the notice could never fire in the case that matters most.
+    resetVersionCache();
+    const v = await refreshVersion();
+    assert.ok(v);
+    assert.equal(v.current, v.checkout, "same, until someone pulls");
+    assert.equal(v.restartNeeded, false);
+  });
+
+  it("keeps reporting the sha the process started on, not the one on disk", async () => {
+    // `current` is pinned at the first measurement — which is boot — so a later pull moves
+    // `checkout` and leaves `current` where it was. That difference IS the signal.
+    resetVersionCache();
+    const first = await refreshVersion();
+    const second = await refreshVersion();
+    assert.equal(second?.current, first?.current, "the running code cannot change without a restart");
+  });
+});
