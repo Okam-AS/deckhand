@@ -112,6 +112,7 @@ export function fakeSimctl(over: Partial<Simctl> = {}, log: string[] = []): Simc
     listDevices: async () => [],
     isBooted: async () => true,
     install: async (udid: string) => void log.push(`simctl install ${udid}`),
+    silenceDevOverlays: async () => {},
     launch: async (udid: string, bundleId: string) => void log.push(`simctl launch ${udid} ${bundleId}`),
     openUrl: async (udid: string, url: string) => void log.push(`simctl openUrl ${udid} ${url}`),
     appContainer: async () => "/tmp/container",

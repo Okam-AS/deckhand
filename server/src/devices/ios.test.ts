@@ -118,3 +118,41 @@ describe("Simctl.delete", () => {
     await simctlExiting(0).delete("UDID-1");
   });
 });
+
+describe("silencing the dev-build overlays", () => {
+  it("writes the three keys Expo registers as defaults, before launch", async () => {
+    // Verified against expo-dev-menu 57.0.8, DevMenuPreferences.swift — all three are
+    // register(defaults:) entries, so a written value wins:
+    //   EXDevMenuShowsAtLaunch            ?? true
+    //   EXDevMenuIsOnboardingFinished     ?? false
+    //   EXDevMenuShowFloatingActionButton ?? true
+    const calls: string[][] = [];
+    const simctl = new Simctl(async (_cmd: string, args: string[]) => {
+      calls.push(args);
+      return { code: 0, stdout: Buffer.from(""), stderr: "" };
+    });
+    await simctl.silenceDevOverlays("UDID-1", "com.acme.app");
+
+    // run() prefixes "simctl", so the recorded argv starts there.
+    const writes = calls.filter((c) => c[1] === "spawn" && c[3] === "defaults");
+    assert.equal(writes.length, 3, "all three overlays, or one of them still shows");
+    const expected: [string, string][] = [
+      ["EXDevMenuShowsAtLaunch", "NO"],
+      ["EXDevMenuIsOnboardingFinished", "YES"],
+      ["EXDevMenuShowFloatingActionButton", "NO"],
+    ];
+    for (const [key, value] of expected) {
+      const w = writes.find((c) => c.includes(key));
+      assert.ok(w, `missing ${key}`);
+      assert.deepEqual(w, ["simctl", "spawn", "UDID-1", "defaults", "write", "com.acme.app", key, "-bool", value]);
+    }
+  });
+
+  it("never lets a failed preference take the preview down with it", async () => {
+    // A tidy-up is not worth a boot. Every write swallows its own error.
+    const simctl = new Simctl(async () => {
+      throw new Error("simctl spawn exploded");
+    });
+    await simctl.silenceDevOverlays("UDID-1", "com.acme.app");
+  });
+});

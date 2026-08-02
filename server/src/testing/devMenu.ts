@@ -50,8 +50,8 @@ const MIN_MARKERS = 2;
  * Verified on iOS 26.5, Expo runtime 4.0.0.
  */
 export const DEV_MENU_RECOVERY =
-  'The Expo dev menu is on screen — it is NOT part of the app, and its floating "Tools button" sits over the top-right corner where app controls usually live, swallowing taps meant for them. ' +
-  "If a tap there did something unexpected, that is why, and the app is probably fine. " +
+  'The Expo dev menu is on screen — it is NOT part of the app. Whatever it does is not an app bug. ' +
+  'Deckhand normally switches these overlays off before launch (EXDevMenuShowsAtLaunch and friends), so seeing one means that did not take — an older simulator image, a non-Expo dev build, or a preference that did not write. ' +
   'Turn the button off so it stops intercepting: scroll DOWN inside the dev menu to the TOOLS section, to the row labelled "Tools button" just below "Fast refresh". ' +
   'The switch itself is an UNLABELLED checkbox, so `tapElement {text:"Tools button"}` hits the text, not the switch — read that row\'s y from the tree and tap the checkbox to its right (measured at x≈0.67, with the label at x≈0.28). ' +
   'Its value reads "1" when on and "0" when off, which is how you confirm the tap landed. ' +
@@ -114,4 +114,4 @@ export function devMenuHint(tree: unknown): { devMenu?: string } {
  * competes with the drive contract for the same attention.
  */
 export const DEV_MENU_PREFLIGHT =
-  'Before your first tap on a dev build, clear its two overlays: the system permission alert (it sits above everything, including the dev menu), then Expo\'s floating "Tools button" in the top-right — it covers where app controls live and swallows taps meant for them. Open the dev menu, scroll DOWN to TOOLS, switch off "Tools button", Close. `describe` will spell out how if the menu is on screen. Skipping this is how three separate runs reported a working app as having "critical UI bugs".';
+  'Deckhand switches Expo\'s launch overlays off before the app starts (EXDevMenuShowsAtLaunch, EXDevMenuIsOnboardingFinished, EXDevMenuShowFloatingActionButton), so you should come up straight into the app. If a dev menu IS on screen, `describe` will say so and how to close it — treat it as deckhand packaging, never as an app bug. A permission alert is different: that is the app\'s own behaviour and a user meets it too, so dismiss it the way a user would.';
