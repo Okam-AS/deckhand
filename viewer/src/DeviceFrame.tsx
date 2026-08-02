@@ -3,6 +3,7 @@ import { DevicePlayer, type PlayerStatus } from "./stream/player.ts";
 import { DeviceInput, ORIENTATION_CYCLE, type SpecialKey } from "./stream/input.ts";
 import { deviceBase, deviceWsUrl, phaseBadge, phaseLabel, repoName, type ShareDevice } from "./api.ts";
 import { CollapseIcon, ExpandIcon, HomeIcon, InfoIcon, KeyboardIcon, RotateIcon } from "./icons.tsx";
+import { TypeBar } from "./TypeBar.tsx";
 
 export type DeviceVariant = "grid" | "focus" | "thumb";
 
@@ -87,6 +88,7 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
   // Click-to-type: while the canvas has keyboard focus, keystrokes go to the sim.
   const [kbLive, setKbLive] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [typing, setTyping] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
   // The frame auto-fits each device: default shape from the model name, then the
   // exact aspect from the first real frame (so an iPad never sits in a phone frame).
@@ -304,17 +306,19 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
               >
                 <RotateIcon />
               </button>
-              {fullscreenSupported && (
-                <button
-                  type="button"
-                  className="ctrl-btn"
-                  onClick={toggleFullscreen}
-                  title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
-                  aria-label={isFullscreen ? "Exit fullscreen" : "Show this device fullscreen"}
-                >
-                  {isFullscreen ? <CollapseIcon /> : <ExpandIcon />}
-                </button>
-              )}
+              {/* Always offered. Typing into the focused canvas works with a real
+                  keyboard, but it is invisible — the button is the only affordance
+                  that says typing is possible at all, and it is also the path for
+                  text a raw keydown cannot send. */}
+              <button
+                type="button"
+                className="ctrl-btn"
+                onClick={() => setTyping(true)}
+                title="Keyboard"
+                aria-label="Type with your keyboard"
+              >
+                <KeyboardIcon />
+              </button>
               {/* What this pane IS lives here rather than in a caption under the
                   sim: the caption repeated the same three facts beneath every
                   device and pushed the frames apart, and on a page with several
@@ -347,9 +351,33 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
                   </div>
                 </div>
               </div>
+              {/* Last on the row on purpose: it is the one control that changes the
+                  whole layout rather than the device, so it sits at the edge and out
+                  of the way of the ones used mid-flow. It never appears on mobile —
+                  the whole topbar is display:none under 700px, the same breakpoint
+                  useIsMobile uses — and it is absent on iPhone Safari regardless,
+                  which has no element fullscreen. */}
+              {fullscreenSupported && (
+                <button
+                  type="button"
+                  className="ctrl-btn"
+                  onClick={toggleFullscreen}
+                  title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
+                  aria-label={isFullscreen ? "Exit fullscreen" : "Show this device fullscreen"}
+                >
+                  {isFullscreen ? <CollapseIcon /> : <ExpandIcon />}
+                </button>
+              )}
             </>
           )}
         </div>
+      )}
+      {typing && (
+        <TypeBar
+          onText={(text) => inputRef.current?.sendText(text) ?? [...text]}
+          onKey={(name) => inputRef.current?.sendKey(name)}
+          onClose={() => setTyping(false)}
+        />
       )}
       <div
         className={`device-screen ${kbLive ? "kb-live" : ""}`}
