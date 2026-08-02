@@ -179,6 +179,8 @@ interface LivePreview {
   testRun?: TestRun;
   /** Set once the agent has been reminded to open a test run; cleared when it opens one. */
   testRunNudged?: boolean;
+  /** The most recent waitFor/assert on this preview, and whether it held. */
+  lastVerification?: { ok: boolean; action: string; selector?: string };
   /** Ephemeral: pairing + parity checklist for a compare session, surfaced to the viewer. */
   compare?: CompareSession;
   /** Epoch ms of the last viewer/agent touch — the idle sweep's clock. */
@@ -2477,6 +2479,23 @@ export class PreviewEngine {
     return true;
   }
 
+
+  /**
+   * Remember how the last verifier went, so a step marked `passed` right after a failed
+   * one can be questioned. Recorded per preview rather than per device: the agent reports
+   * one step for what it just did, whichever device it drove.
+   */
+  noteVerification(previewId: string, ok: boolean, action: string, selector?: string): void {
+    const p = this.previews.get(previewId);
+    if (!p) return;
+    p.lastVerification = { ok, action, ...(selector ? { selector } : {}) };
+  }
+
+  /** The failed verifier still standing, or null once something has verified since. */
+  failedVerification(previewId: string): { action: string; selector?: string } | null {
+    const v = this.previews.get(previewId)?.lastVerification;
+    return v && !v.ok ? { action: v.action, ...(v.selector ? { selector: v.selector } : {}) } : null;
+  }
 
   /**
    * Step tallies for the current run, or null if there is none. The MCP layer reports these
