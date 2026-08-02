@@ -959,12 +959,15 @@ describe("agent-driven testing tools (describe/ui + test runs)", () => {
     assert.equal(tracked.hint, undefined, "an open run silences the nudge");
 
     // ...and it re-arms after the run closes, so the next untracked stretch is caught too.
+    // (Marking the step first is not decoration: a run may no longer pass with none marked.)
+    await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 1, status: "passed" } } });
     assert.equal(parse(await admin.callTool({ name: "finish_test_run", arguments: { previewId, status: "passed" } })).ok, true);
     const afterFinish = parse(await admin.callTool({ name: "ui", arguments: { previewId, deviceId, action: tap } }));
     assert.match(String(afterFinish.hint), /start_test_run/, "the nudge must re-arm once the run is closed");
 
     // A read-only verifier is not what the user is missing — it must stay quiet.
     assert.equal(parse(await admin.callTool({ name: "start_test_run", arguments: { previewId, title: "Second", steps: ["Tap"] } })).ok, true);
+    await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 1, status: "passed" } } });
     assert.equal(parse(await admin.callTool({ name: "finish_test_run", arguments: { previewId, status: "passed" } })).ok, true);
     const asserted = parse(await admin.callTool({ name: "ui", arguments: { previewId, deviceId, action: { type: "assert", selector: { text: "x" } } } }));
     assert.equal(asserted.hint, undefined, "verifiers must not nudge");
@@ -987,7 +990,18 @@ describe("agent-driven testing tools (describe/ui + test runs)", () => {
     );
     assert.equal(run.ok, true);
     assert.match(String(run.modelHint), /haiku-recipe-from-config/, "start_test_run repeats the recipe as a structured field");
-    assert.equal(parse(await admin.callTool({ name: "finish_test_run", arguments: { previewId: started.previewId as string, status: "passed" } })).ok, true);
+
+    // And again where the choice is actually live: the first tap of the mechanical stretch.
+    // At start_test_run the agent is still planning; this is the moment it starts looping.
+    const previewId = started.previewId as string;
+    const tap = { type: "tap", x: 0.5, y: 0.5 };
+    const firstTap = parse(await admin.callTool({ name: "ui", arguments: { previewId, deviceId: "ios-0", action: tap } }));
+    assert.match(String(firstTap.modelHint), /cheapest fast model/, "the first drive action of a run must carry the delegation ask");
+    const secondTap = parse(await admin.callTool({ name: "ui", arguments: { previewId, deviceId: "ios-0", action: tap } }));
+    assert.equal(secondTap.modelHint, undefined, "but only once per run — a hint on every tap is one the model learns to skip");
+
+    await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 1, status: "passed" } } });
+    assert.equal(parse(await admin.callTool({ name: "finish_test_run", arguments: { previewId, status: "passed" } })).ok, true);
     await admin.close();
   });
 
@@ -1013,11 +1027,67 @@ describe("agent-driven testing tools (describe/ui + test runs)", () => {
 
     // finish_test_run is the one moment the agent is certain to be writing a long message.
     await admin.callTool({ name: "start_test_run", arguments: { previewId, title: "Smoke", steps: ["Tap"] } });
+    // update_test_run is the most-called tool of a long run, which makes it where the link
+    // decays out of reach — so it carries the footer too, not just the bookends.
+    const upd = parse(await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 1, status: "passed" } } }));
+    assert.ok(carriesFooter(upd.nextStep), "update_test_run must carry it");
     const fin = parse(await admin.callTool({ name: "finish_test_run", arguments: { previewId, status: "passed" } }));
     assert.ok(carriesFooter(fin.nextStep), "finish_test_run must carry it");
 
     const restarted = parse(await admin.callTool({ name: "restart_preview", arguments: { previewId } }));
     assert.ok(carriesFooter(restarted.nextStep), "restart_preview must carry it");
+    await admin.close();
+  });
+
+  it("refuses an update that updates nothing, instead of answering ok", async () => {
+    // Observed on a real run: the agent put the step fields beside `previewId` instead of inside
+    // `step`, where the schema silently drops them. Five calls, five `ok`s, and the viewer sat at
+    // 0/3 while the agent believed it was reporting progress. An empty result and a failed lookup
+    // must not be the same value — so the no-op is an error that names the mistake it invites.
+    const admin = await client(ADMIN);
+    const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
+    const previewId = started.previewId as string;
+    await admin.callTool({ name: "start_test_run", arguments: { previewId, title: "Tabs", steps: ["One", "Two"] } });
+
+    // Exactly the call that was made: step fields at the top level, stripped before the handler.
+    const noop = parse(await admin.callTool({ name: "update_test_run", arguments: { previewId, n: 2, status: "passed", detail: "looked fine" } }));
+    assert.equal(noop.ok, false, "an update that changed nothing must not report success");
+    assert.equal((noop.error as { code: string }).code, "nothing_to_update");
+    assert.match(String((noop.error as { hint: string }).hint), /inside `step`/i, "and it must show the shape that works");
+
+    // The tallies must be untouched — the point is that nothing happened.
+    const counts = parse(await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 1, status: "passed" } } }));
+    assert.deepEqual((counts.steps as { passed: number; pending: number }).passed, 1);
+    assert.deepEqual((counts.steps as { passed: number; pending: number }).pending, 1);
+    await admin.close();
+  });
+
+  it("will not let a run whose steps were never marked be recorded as passed", async () => {
+    // The other half of the same real failure: having reported nothing, the agent closed the run
+    // green. The viewer showed `0/3` beside a tick — the user watching an agent grade homework it
+    // never attempted. There is no honest verdict to record here, so this one refuses outright.
+    const admin = await client(ADMIN);
+    const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
+    const previewId = started.previewId as string;
+    await admin.callTool({ name: "start_test_run", arguments: { previewId, title: "Tabs", steps: ["One", "Two", "Three"] } });
+
+    const bogus = parse(await admin.callTool({ name: "finish_test_run", arguments: { previewId, status: "passed", summary: "all three tabs work" } }));
+    assert.equal(bogus.ok, false, "zero marked steps cannot add up to a pass");
+    assert.equal((bogus.error as { code: string }).code, "no_steps_marked");
+
+    // Refusing has to leave the run OPEN, or the agent is stuck with no way to put it right.
+    const recovered = parse(await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 1, status: "passed" } } }));
+    assert.equal(recovered.ok, true, "the run must still be open after the refusal");
+    assert.equal(parse(await admin.callTool({ name: "finish_test_run", arguments: { previewId, status: "passed" } })).ok, true);
+
+    // "failed" stays available with nothing marked: an agent that got nowhere must be able to
+    // say so, and blocking that would leave the run open forever.
+    await admin.callTool({ name: "start_test_run", arguments: { previewId, title: "Blocked", steps: ["One"] } });
+    assert.equal(parse(await admin.callTool({ name: "finish_test_run", arguments: { previewId, status: "failed", summary: "app would not boot" } })).ok, true);
+
+    // A run opened with no steps at all has nothing to mark — it must not be caught by this.
+    await admin.callTool({ name: "start_test_run", arguments: { previewId, title: "Exploring" } });
+    assert.equal(parse(await admin.callTool({ name: "finish_test_run", arguments: { previewId, status: "passed" } })).ok, true);
     await admin.close();
   });
 
