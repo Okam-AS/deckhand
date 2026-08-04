@@ -4,65 +4,59 @@
 ## Read this first
 
 [`CONSTITUTION.md`](./CONSTITUTION.md) — what deckhand is, who it is for, and the
-seven principles that settle an argument PLAN and this file do not. It is one page.
+ten principles that settle an argument PLAN and this file do not. It is one page.
 Every principle in it was paid for by a bug in this repo.
 
-## Current state: Phases 1, 2 & 2.5 implemented (iOS + Android, multi-device, local dev mode)
+## What deckhand is today (iOS + Android, multi-device, local dev mode)
 
-Phases 0–2.5 are done, and most of Phase 3 (CI green). The server has config/auth/state/audit,
-GitHub App auth + git worktrees, build recipes + detection (Expo/RN/NativeScript, iOS +
-Android), iOS simctl control, Android device layer (avdmanager/emulator/adb, uiautomator
-describe, toolEnv), the streaming router (serve-sim for iOS, H.264/screencap backend for
-Android), the preview engine (**platform-grouped, build-once-install-many, parallel
-boots/installs**), the MCP server (token auth) + scoped share proxy, and the CLI.
-The viewer is the calm WebCodecs page (reused for Android via multipart-PNG).
+*(What exists, not how it got here — git holds the history. When you change what the
+system is, change this section and PLAN in the same PR; a dated "Validated:" log is
+exactly the kind of line that rots, so do not add one back.)*
 
-Phase 2.5 (PLAN §2 amendment 2026-07-15) added the **daily dev loop**: apps can have a
-local `path` (built in place — no worktree, no push; NativeScript runs as a long-lived
-livesync process, HMR off), `start_preview` is idempotent, share URLs are **stable per
-app** (persisted in state.json), `restart_preview` rebuilds in place (git: fetch+reset;
-local: re-run) on the same booted devices, named refs always fetch (stale-branch fix),
-and the viewer has a Rebuild button for local shares. A local app's source dir is
-borrowed, never owned: never `npm ci`-wiped, never removed on teardown — **and its git
-state is deckhand's to read/run, never to write.** Deckhand must not modify tracked files
-in a borrowed checkout; anything it must generate to host the app (dev-server caches, a
-generated/override config for a non-Vite framework, a stray lockfile) has to stay
-**untracked** — write it outside the tree, or append it to the checkout's
+The server has config/auth/state/audit, GitHub App auth + git worktrees, build recipes +
+detection (Expo/RN/NativeScript, iOS + Android), iOS simctl control, Android device layer
+(avdmanager/emulator/adb, uiautomator describe, toolEnv), the streaming router (serve-sim
+for iOS, H.264/screencap backend for Android), the preview engine (**platform-grouped,
+build-once-install-many, parallel boots/installs**), the MCP server (token auth) + scoped
+share proxy, and the CLI. The viewer is the calm WebCodecs page (reused for Android via
+multipart-PNG).
+
+**The daily dev loop:** apps can have a local `path` (built in place — no worktree, no
+push; NativeScript runs as a long-lived livesync process, HMR off), `start_preview` is
+idempotent, share URLs are **stable per app** (persisted in state.json), `restart_preview`
+rebuilds in place (git: fetch+reset; local: re-run) on the same booted devices, named refs
+always fetch, and the viewer has a Rebuild button for local shares. A local app's source
+dir is borrowed, never owned: never `npm ci`-wiped, never removed on teardown — **and its
+git state is deckhand's to read/run, never to write.** Deckhand must not modify tracked
+files in a borrowed checkout; anything it must generate to host the app (dev-server
+caches, a generated/override config for a non-Vite framework, a stray lockfile) has to
+stay **untracked** — write it outside the tree, or append it to the checkout's
 `.git/info/exclude` (a repo-local, never-pushed ignore) so `git add -A` can't stage it.
 Any agent driving deckhand must **never commit or push local changes deckhand caused** in
 a user's repo. (This is why the `web` type injects Vite's base/host/port as runtime CLI
 flags — zero source edits; frameworks that can't be configured at runtime are hosted via
 the wildcard-hostname model, see PLAN §2/§8, not by editing their config.)
 
-2026-07-15 also added the **GitHub access ladder** (PLAN §2/§6/§11.4): credentials
-resolve PAT → GitHub App → ambient `gh` CLI session (`githubAmbient`, default on) →
-anonymous git for public repos (gated on `allowPublicRepos`) → one-time PAT setup URL
-as last resort. Onboarding responses (`list_apps` empty state, `github_auth_missing`)
-carry `host: {hostname, user}` and steer a co-located agent to register an existing
-local checkout (`deckhand app add <id> --path <dir>`) before any credential flow.
+**The GitHub access ladder** (PLAN §2/§6/§11.4): credentials resolve PAT → GitHub App →
+ambient `gh` CLI session (`githubAmbient`, default on) → anonymous git for public repos
+(gated on `allowPublicRepos`) → one-time PAT setup URL as last resort. Onboarding
+responses (`list_apps` empty state, `github_auth_missing`) carry `host: {hostname, user}`
+and steer a co-located agent to register an existing local checkout
+(`deckhand app add <id> --path <dir>`) before any credential flow.
 
-**Validated:** iOS + Android orchestration logic (faked unit tests), MCP over HTTP e2e,
-the **Cloudflare named tunnel** (2026-07-15: a named tunnel → loopback :4300, healthz
-answers publicly, tokenless paths 404). **2026-07-15: first full real previews ran
-end-to-end** on a dev Mac with a private NativeScript app, cloned via the ambient
-gh credential: iOS (iPhone 17 Pro + iPad Pro 13" M5, one shared build, parallel install)
-and **Android (pixel_7 · API 29 emulator, first real NativeScript Android build+stream)**.
-Verified live over the tunnel share proxy on **both** platforms: touch/navigation, typing
-(iOS via HID usage, Android via `input text`), and backspace (iOS delete, Android
-KEYCODE_DEL). **Not yet validated on-device:** the local (`path`) livesync build path.
 **Android streaming's primary path is H.264** (`adb exec-out screenrecord` repackaged to
-AVCC, `streaming/androidH264.ts`); the adb-screencap MJPEG backend is now only the fallback
-for system images with no working AVC encoder (notably the API 29 emulator). Both sit behind
-the same `StreamingBackend` seam (PLAN §8).
+AVCC, `streaming/androidH264.ts`); the adb-screencap MJPEG backend is only the fallback
+for system images with no working AVC encoder (notably the API 29 emulator). Both sit
+behind the same `StreamingBackend` seam (PLAN §8). **Known gap, so do not imply
+otherwise:** the local (`path`) livesync build path has not been validated on-device.
 
-**Migration features (2026-07-18, generalised 2026-07-31):** deckhand can host an app→app
-migration (e.g. NativeScript → React Native) as a *parity harness*. A target app declares
-`migratesFrom` (the source app id), and a parity checklist comes either from `items` on
-`start_preview` or from `deckhand.migration.yaml` in the target repo. Deckhand runs/shows
-the apps and reads the ledger; the agent translates code, judges parity, and writes the
-ledger. No mechanical diff tool, no golden snapshots, no persisted migration session —
-deliberately not built (agent is the comparator; keeps the no-DB / no-repo-writes
-invariants clean).
+**Migration is a parity harness, not a diff tool:** deckhand can host an app→app
+migration (e.g. NativeScript → React Native). A target app declares `migratesFrom` (the
+source app id), and a parity checklist comes either from `items` on `start_preview` or
+from `deckhand.migration.yaml` in the target repo. Deckhand runs/shows the apps and reads
+the ledger; the agent translates code, judges parity, and writes the ledger. No mechanical
+diff tool, no golden snapshots, no persisted migration session — deliberately not built
+(agent is the comparator; keeps the no-DB / no-repo-writes invariants clean).
 
 **A page is a set of panes, not a pair.** There is no compare view and no compare tool.
 `start_preview`'s `alongside` puts extra sources on the same page — another app, this app
@@ -77,9 +71,9 @@ unlock minting fanning out from a single partner to the set. The viewer has ONE 
 tested code in `viewer/` — keep new layout rules there, not in `App.tsx`.
 See PLAN §6 "One page, several sources" and the accepted-risk note beside it.
 
-Next phases: 3 (password shares + describe/ui/logs + add_app + **the agent-led
-onboarding contract**, PLAN §6 — empty-state `nextStep`s, relayable errors, PAT auth,
-one-time setup URL for secrets), 4 (ops + AI runbook).
+What remains to build is PLAN's, not this file's, to enumerate — see PLAN §6 (the
+agent-led onboarding contract: password shares, describe/ui/logs, add_app, relayable
+errors) and the ops runbook work that follows it.
 
 If you are here to **implement further**, your instructions are:
 
@@ -92,12 +86,10 @@ If you are here to **implement further**, your instructions are:
    (14 concrete pitfalls that cost the predecessor project weeks).
    `docs/reference/simdeck-notes.md` is historical — do not implement against it.
 3. Deckhand is built. PLAN describes what it IS — architecture, the MCP surface, the
-   streaming seam, the security model — not a build order. The phase list and the
-   pre-build risk register were deleted once they started naming modules nobody had built
-   and decisions long since made. Add to PLAN when you change what the system is; git
-   holds how it got here.
-   **Every bug fixed gets a regression test in the closest layer** — the one rule from the
-   old §13 that is not covered by `npm run ci` or the guardrails.
+   streaming seam, the security model — not a build order; do not add a phase list or a
+   risk register back. Add to PLAN when you change what the system is; git holds how it
+   got here. **Every bug fixed gets a regression test in the closest layer** — the one
+   rule not covered by `npm run ci` or the guardrails.
 4. The streaming layer is **decided** (PLAN.md §2/§8): iOS via **serve-sim**
    (H.264-over-WebSocket + WebCodecs, MJPEG fallback), Android via **adb** — `screencap`
    for MJPEG and on-device `screenrecord` for H.264, NOT scrcpy, which was evaluated and
@@ -118,13 +110,10 @@ Non-negotiables while implementing:
 - Structured, actionable MCP errors: the model relaying the error to a human must be able
   to say exactly what to do next.
 - Comment sparsely. Much of this codebase carries heavy comment blocks; do not match that
-  density. Most code is self-explanatory — write a comment only when it states something
-  the code cannot (a precondition, a decided tradeoff, a why), and remember: a comment
-  that states a precondition needs a test that fails when the precondition breaks (see
-  the three rules below). Never narrate what the next line does. And when a file you are
-  already editing carries bloat comments — narration of the next line, restatements of
-  the code, before/after changelog notes — delete them as you pass. Preconditions, whys
-  and tradeoffs stay.
+  density. Write a comment only when it states something the code cannot — a precondition,
+  a decided tradeoff, a why — and a precondition comment needs a test that fails when the
+  precondition breaks (see the three rules below). When a file you are already editing
+  carries narration, restatements or before/after changelog notes, delete them as you pass.
 
 ## How work lands here
 
@@ -145,19 +134,12 @@ gh pr create --base main               # PR, with the reasoning in the body
 gh pr merge <n> --squash --delete-branch
 ```
 
-**Branch from `main`, never from another PR's branch.** Stacking looks efficient
-when two changes touch the same files. It is not, and both failure modes were
-paid for in one session:
-
-- Squash-merging the bottom PR rewrites its commits, so the PR above it still
-  carries the originals and its diff double-counts. It has to be rebased before
-  it means anything.
-- Deleting the bottom branch on merge **auto-closes** every PR based on it —
-  and a closed PR whose base branch is gone can be neither reopened nor
-  retargeted. The work survives on `refs/pull/<n>/head`; the PR does not.
-
-If two changes really are entangled, put them in one PR, or land the first and
-wait. `main` is protected and requires green CI, so waiting costs one CI run.
+**Branch from `main`, never from another PR's branch.** Stacking cost a session
+twice: squash-merging the bottom PR rewrites its commits, so the one above it
+double-counts its diff until rebased — and `--delete-branch` on the bottom
+**auto-closes** every PR based on it, which can then be neither reopened nor
+retargeted (the work survives on `refs/pull/<n>/head`; the PR does not). If two
+changes are entangled, put them in one PR or land the first and wait.
 
 **Branching from `main` is necessary but not sufficient — `main` is `strict`.**
 Protection requires a PR to be *up to date* with `main`, not merely conflict-free.
@@ -178,8 +160,7 @@ git switch <branch> && git rebase origin/main      # then force-with-lease, then
 ```
 
 Four PRs opened together cost three rebases and three serialized CI runs. **Open
-one, land it, open the next** — the cost of parallel PRs is paid at merge time,
-which is exactly when you have stopped thinking about it.
+one, land it, open the next.**
 
 **After a force-push, `gh pr checks` reports the PREVIOUS run.** There is a window
 where the old conclusion is still attached to the PR, so a poll for `pass` returns
@@ -194,28 +175,20 @@ gh api "repos/Okam-AS/deckhand/commits/$SHA/check-runs" \
 
 **Leaving the branches tidy is the agent's job, not the user's.** Finish the
 session with no open PRs you meant to land, no local branch that is not `main`,
-and no branch on the remote whose PR is closed. `gh pr list --state open` and
-`git branch` take a second each; a user who has to ask "is this merged?" has been
-handed your bookkeeping.
+and no branch on the remote whose PR is closed.
 
 **Watch out for `--delete-branch`**: it switches you to `main` without saying so.
 Chaining `gh pr merge ... --delete-branch && git switch <next>` silently skips
 the switch, and the next command runs against `main`.
 
-Why a PR for a one-liner. It is not ceremony — it is the only point where a
-reader who has not seen the change looks at it. A fifty-bug audit of one session
-marked three defect classes NOTHING PRACTICAL for automation, and they included
-the worst bug in the set: a cross-page authentication bypass, found by cold
-readers, two of them independently. There is no tool that replaces that step, so
-the workflow has to create it.
+Why a PR for a one-liner: it is the only point where a reader who has not seen
+the change looks at it. A fifty-bug audit marked three defect classes NOTHING
+PRACTICAL for automation, and they included the worst bug in the set — a
+cross-page authentication bypass, found by two cold readers independently.
 
-The PR body carries the reasoning, not a changelog. What was wrong, why this is
-the fix, and what you verified — a reviewer's questions, answered before they
-ask. If you fixed a bug, say what you did to prove the test fails without the
-fix.
-
-**Delete the branch on merge.** `--delete-branch` does it; a stale branch is a
-second version of the truth waiting to be mistaken for the current one.
+The PR body carries the reasoning, not a changelog: what was wrong, why this is
+the fix, and what you verified. If you fixed a bug, say what you did to prove the
+test fails without the fix.
 
 **Deploy after merging, not before.** `launchctl kickstart -k
 gui/$(id -u)/no.deckhand.server` tears down every booted simulator on the
@@ -230,10 +203,9 @@ npm run hooks:install   # once: makes the above run before every commit
 npm run test:device     # real simulator, real helper, real first frame
 ```
 
-`npm run ci` exists so "will CI pass?" is answerable in fifteen seconds instead
-of after a push. The pre-commit hook runs the same command — if the two ever
-diverge, the hook is the one that is wrong. `--no-verify` deliberately still
-works: a hook that cannot be skipped gets uninstalled instead of respected.
+The pre-commit hook runs the same command as CI — if the two ever diverge, the
+hook is the one that is wrong. `--no-verify` deliberately still works: a hook
+that cannot be skipped gets uninstalled instead of respected.
 
 `test:device` is not in the hook and not in CI (GitHub runners cannot do Android
 emulators, so a green run there would mean "half the devices" while reading as
@@ -249,9 +221,8 @@ An Expo dev build registers three launch overlays as UserDefaults *defaults*
 app, so a preview comes up straight into the app's own UI.
 
 Writing them needs no detection: on a non-Expo app they are unread keys in its own
-preference domain, and writing them twice is the same as writing them once. That is
-why this is not "check whether the app is Expo, and whether the button is already
-off" — there is nothing to check.
+preference domain, and writing them twice is the same as writing them once — so do
+not add an "is it Expo, is it already off" check.
 
 **The line, and it matters:** deckhand may switch off what the DEV BUILD added, and
 must never touch what the APP does. A location permission alert is not on that list
@@ -387,11 +358,8 @@ Local is the default when they are working in a project. See the `nextStep` that
 **When something is wrong:** `deckhand doctor` first, always. It names the missing
 piece and the command that fixes it. `deckhand doctor --device-only` boots a real
 simulator and emulator; it takes minutes and is the only check that touches
-hardware.
-
-**Never** run `launchctl kickstart` on the server without saying so first: it tears
-down every booted simulator on the machine, and somebody may be watching a preview
-you cannot see.
+hardware. Restarting the server to unstick one is subject to the same rule as
+deploying — say so first (see "Deploy after merging, not before").
 
 ## Before you change an area, read its rule
 
@@ -412,9 +380,8 @@ from under a citation fails `docs.test.ts`.
 ## The guardrails — read this before you change anything
 
 `server/src/test-support/` holds checks that fail the build when a decision this
-project already made gets broken. They exist because prose did not work: PLAN §2
-and §11 say they are "acceptance criteria, not suggestions", and they were
-broken repeatedly anyway by agents who had not read 885 lines.
+project already made gets broken. They exist because prose did not work — PLAN §2
+and §11 were broken repeatedly by agents who had not read 885 lines.
 
 If one of these fails, it is telling you about a decision — not asking you to
 make the check pass.
@@ -437,9 +404,7 @@ make the check pass.
    step turned out to assert nothing — including one that passed because a POSIX
    character class means something else in JavaScript.
 2. **Fakes are complete or they lie.** Use `test-support/fakes.ts`, never
-   `as unknown as X` on a literal. `fakes.ts` currently covers two of the twelve
-   injected dependencies, so most fakes in the tree still take the banned form —
-   convert the one you touch rather than copying it. That form disables missing-property checking,
+   `as unknown as X` on a literal — that form disables missing-property checking,
    so a new method on a real class leaves every fake silently behind. It cost
    four bugs in one day, and once made the orphan sweep a no-op that reported
    success.
@@ -457,10 +422,3 @@ diff invalidated, bookkeeping written before the effect it records, an assumptio
 of "one" surviving a move to N, permissive defaults on ambiguous failures, and
 tests that assert less than they appear to. Those are the classes a fifty-bug
 audit marked NOTHING PRACTICAL, and they include the worst bug in the set.
-
-## Later: setup runbook
-
-When Phase 4 lands, this file will be rewritten as the **setup runbook** for an agent
-installing deckhand on a Mac mini over SSH (preflight checks, ordered steps, the three
-human questions, and `deckhand doctor` as the definition of done). Until then, setup
-instructions live in PLAN.md §10.
