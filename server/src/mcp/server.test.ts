@@ -41,13 +41,11 @@ const apps: App[] = [
 ];
 
 const ADMIN = "a".repeat(64);
-const MEMBER = "b".repeat(64);
-/** A member with no `owners` — the common shape, and the one the repo gate used to wave through. */
-const UNSCOPED = "c".repeat(64);
+/** A second credential for the SAME operator — a second client, not a second person. */
+const SECOND = "b".repeat(64);
 const tokens: TokenEntry[] = [
-  { name: "admin", role: "admin", token: ADMIN },
-  { name: "kari", role: "member", owners: ["ainfrastructure"], token: MEMBER },
-  { name: "ola", role: "member", token: UNSCOPED },
+  { name: "audun", token: ADMIN },
+  { name: "audun-laptop", token: SECOND },
 ];
 
 function fakeEngine(): PreviewEngine {
@@ -164,24 +162,15 @@ describe("MCP server (end-to-end over HTTP)", () => {
     assert.equal(res.status, 405);
   });
 
-  it("admin sees all apps; member sees only its owner-scoped apps", async () => {
-    const admin = await client(ADMIN);
-    const adminApps = parse(await admin.callTool({ name: "list_apps", arguments: {} })) as { apps: { id: string }[] };
-    assert.deepEqual(adminApps.apps.map((a) => a.id).sort(), ["app-a", "app-b", "app-local", "app-web", "app-web-nuxt"]);
-    await admin.close();
-
-    const member = await client(MEMBER);
-    const memberApps = parse(await member.callTool({ name: "list_apps", arguments: {} })) as { apps: { id: string }[] };
-    assert.deepEqual(memberApps.apps.map((a) => a.id), ["app-a"]);
-    await member.close();
-  });
-
-  it("member cannot start a preview of an app outside its scope", async () => {
-    const member = await client(MEMBER);
-    const res = parse(await member.callTool({ name: "start_preview", arguments: { app: "app-b", devices: [{ platform: "ios" }] } }));
-    assert.equal(res.ok, false);
-    assert.equal((res.error as { code: string }).code, "forbidden");
-    await member.close();
+  it("every token sees every registered app", async () => {
+    // There is no owner scoping to filter by: one Mac, one operator, and a
+    // second token is that operator's second client, not a second person.
+    for (const token of [ADMIN, SECOND]) {
+      const c = await client(token);
+      const listed = parse(await c.callTool({ name: "list_apps", arguments: {} })) as { apps: { id: string }[] };
+      assert.deepEqual(listed.apps.map((a) => a.id).sort(), ["app-a", "app-b", "app-local", "app-web", "app-web-nuxt"]);
+      await c.close();
+    }
   });
 
   it("an extra pane with nothing named and no migratesFrom asks for a source (no devices booted)", async () => {
@@ -201,54 +190,43 @@ describe("MCP server (end-to-end over HTTP)", () => {
     await admin.close();
   });
 
-  it("an extra pane does not let a scoped member escape owner scoping or the admin gate", async () => {
-    // start_preview is a member-role tool, and the worktree/repo branches used
-    // to skip resolveApp() entirely — so a token scoped to one org could clone
-    // any repo deckhand can read, run its install scripts, and publish a
-    // PIN-less share of the live simulator. That is the exact capability
-    // requireAdmin() guards on add_app. Folding compare_start into start_preview
-    // moved these branches onto a tool every member can already call, so the
-    // gates matter more here, not less.
-    const member = await client(MEMBER);
-
-    const worktree = parse(
-      await member.callTool({
-        name: "start_preview",
-        arguments: { app: "app-a", alongside: [{ worktree: "/tmp/anything" }], share: { access: "public" } },
-      }),
-    );
-    assert.equal(worktree.ok, false);
-    assert.equal((worktree.error as { code: string }).code, "forbidden");
-
-    const repo = parse(
-      await member.callTool({
-        name: "start_preview",
-        arguments: { app: "app-a", alongside: [{ repo: "acme/proj", ref: "main" }], share: { access: "public" } },
-      }),
-    );
-    assert.equal(repo.ok, false, "acme is outside this token's owners");
-    assert.equal((repo.error as { code: string }).code, "forbidden");
-
-    await member.close();
-  });
-
-  it("an UNSCOPED member cannot build an arbitrary repo either", async () => {
-    // canAccessApp returns true for a principal with no `owners` — right for
-    // registered apps, wrong here, where the whole point is reaching past the
-    // registered set. Cloning an arbitrary repo runs its install and build
-    // scripts as the deckhand user, which is the capability requireAdmin()
-    // guards on the worktree branch. Leaving `owners` unset must not buy it.
-    const member = await client(UNSCOPED);
+  it("an extra pane from a bad worktree path is rejected on the path, not on who asked", async () => {
+    // The worktree branch used to be admin-gated. With one operator there is no
+    // lesser caller to hold back, so what remains is the shape check — and it
+    // must still fire, or a relative path reaches the build engine.
+    const c = await client(SECOND);
     const res = parse(
-      await member.callTool({
+      await c.callTool({
         name: "start_preview",
-        arguments: { app: "app-a", alongside: [{ repo: "acme/proj", ref: "main" }], share: { access: "public" } },
+        arguments: { app: "app-a", alongside: [{ worktree: "relative/path" }], share: { access: "public" } },
       }),
     );
     assert.equal(res.ok, false);
-    assert.equal((res.error as { code: string }).code, "forbidden");
+    assert.equal((res.error as { code: string }).code, "bad_request");
     assert.deepEqual(engine.list().map((p) => p.previewId), [], "and nothing was booted");
-    await member.close();
+    await c.close();
+  });
+
+  it("an extra pane naming a foreign host is refused before any credential is resolved", async () => {
+    // The whole attack is the clone attempt: git answers evil.example's 401 with
+    // deckhand's PAT / gh session in Basic auth, so nothing has to build and
+    // nothing appears on screen. `alongside[].repo` is model-chosen input, which
+    // is why the host — not the caller — is what bounds it.
+    const c = await client(SECOND);
+    const res = parse(
+      await c.callTool({
+        name: "start_preview",
+        arguments: {
+          app: "app-a",
+          alongside: [{ repo: "evil.example/acme/app", ref: "main" }],
+          share: { access: "public" },
+        },
+      }),
+    );
+    assert.equal(res.ok, false);
+    assert.match(JSON.stringify(res.error), /evil\.example/, "and it names the host it refused");
+    assert.deepEqual(engine.list().map((p) => p.previewId), [], "and nothing was booted");
+    await c.close();
   });
 
   it("an extra pane of the same app boots on a distinct shareId (no self-pair)", async () => {
@@ -394,14 +372,13 @@ describe("MCP server (end-to-end over HTTP)", () => {
     await admin.close();
   });
 
-  it("denies a preview whose app is no longer registered, and still allows an extra pane", async () => {
-    // previewOwnedByPrincipal used to SKIP the scope check when apps.find()
-    // missed, so any valid token could drive `logs` / `ui` / `stop_preview` on
-    // an orphaned preview. It now denies by default — and a compare reference
-    // (synthetic app id, never in apps.yaml, public by construction) stays
-    // reachable only because it is marked as a reference on the record.
+  it("keeps a preview drivable after its app is unregistered, and still allows an extra pane", async () => {
+    // The devices are booted and count against maxTotalDevices; if unregistering
+    // the app made its live preview unreachable over MCP, the only way to get
+    // them back would be a server restart. Existence is the check — so `logs`
+    // and `stop_preview` keep working on an orphan, deliberately.
     const admin = await client(ADMIN);
-    const member = await client(MEMBER);
+    const second = await client(SECOND);
 
     // An extra pane: allowed, and marked as such on the record rather than inferred.
     const cmp = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-a", alongside: [{ app: "app-a" }], share: { access: "public" } } }));
@@ -420,14 +397,13 @@ describe("MCP server (end-to-end over HTTP)", () => {
     const idx = apps.findIndex((a) => a.id === "app-a");
     const [removed] = apps.splice(idx, 1);
     try {
-      const orphan = parse(await member.callTool({ name: "logs", arguments: { previewId: own.previewId as string } }));
-      assert.equal(orphan.ok, false, "an orphaned preview must not be driveable");
-      assert.equal((orphan.error as { code: string }).code, "forbidden");
+      const orphan = parse(await second.callTool({ name: "logs", arguments: { previewId: own.previewId as string } }));
+      assert.equal(orphan.ok, true, "an orphaned preview must stay reclaimable");
     } finally {
       apps.splice(idx, 0, removed!);
     }
 
-    await member.close();
+    await second.close();
     await admin.callTool({ name: "stop_preview", arguments: { previewId: cmp.previewId as string } });
     await admin.callTool({ name: "stop_preview", arguments: { previewId: own.previewId as string } });
     await admin.close();
@@ -649,18 +625,17 @@ describe("MCP onboarding contract (add_app / empty state / setup URL)", () => {
     await admin.close();
   });
 
-  it("a member token cannot add_app or remove_app", async () => {
-    const member = await oclient(MEMBER);
-    const add = parse(await member.callTool({ name: "add_app", arguments: { repo: "github.com/ainfrastructure/x" } })) as {
+  it("remove_app on an unknown id fails on the id, not on the caller", async () => {
+    // add_app/remove_app were admin-only. Nothing about WHO asks gates them now,
+    // so the remaining failure mode is the one that was always real: a bad id.
+    const c = await oclient(SECOND);
+    const rm = parse(await c.callTool({ name: "remove_app", arguments: { id: "no-such-app" } })) as {
       ok: boolean;
       error?: { code: string };
     };
-    assert.equal(add.error?.code, "forbidden");
-    const rm = parse(await member.callTool({ name: "remove_app", arguments: { id: "admin-app" } })) as {
-      error?: { code: string };
-    };
-    assert.equal(rm.error?.code, "forbidden");
-    await member.close();
+    assert.equal(rm.ok, false);
+    assert.equal(rm.error?.code, "unknown_app");
+    await c.close();
   });
 
   it("leaves the live registry untouched when the write fails", async () => {
@@ -1321,21 +1296,20 @@ describe("agent-driven testing tools (describe/ui + test runs)", () => {
     await admin.close();
   });
 
-  it("rejects ui/test-run tools for a member without access to the preview's app", async () => {
-    const admin = await client(ADMIN);
-    const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-b", ref: "main", devices: [{ platform: "ios" }], share: { access: "public" } } }));
-    const previewId = started.previewId as string;
-    await admin.close();
-
-    const member = await client(MEMBER); // scoped to "ainfrastructure"; app-b is "other-org"
-    const desc = parse(await member.callTool({ name: "describe", arguments: { previewId, deviceId: "ios-0" } }));
+  it("rejects ui/test-run tools for a previewId that is not live", async () => {
+    // What these tools gate on is existence. A stale previewId — from an earlier
+    // session, or a hallucinated one — must come back as unknown_preview rather
+    // than reaching the engine.
+    const c = await client(SECOND);
+    const stale = "preview-that-never-was";
+    const desc = parse(await c.callTool({ name: "describe", arguments: { previewId: stale, deviceId: "ios-0" } }));
     assert.equal(desc.ok, false);
-    assert.equal((desc.error as { code: string }).code, "forbidden");
-    const run = parse(await member.callTool({ name: "start_test_run", arguments: { previewId, title: "x" } }));
+    assert.equal((desc.error as { code: string }).code, "unknown_preview");
+    const run = parse(await c.callTool({ name: "start_test_run", arguments: { previewId: stale, title: "x" } }));
     assert.equal(run.ok, false);
-    const logs = parse(await member.callTool({ name: "logs", arguments: { previewId, deviceId: "ios-0" } }));
+    const logs = parse(await c.callTool({ name: "logs", arguments: { previewId: stale, deviceId: "ios-0" } }));
     assert.equal(logs.ok, false);
-    assert.equal((logs.error as { code: string }).code, "forbidden");
-    await member.close();
+    assert.equal((logs.error as { code: string }).code, "unknown_preview");
+    await c.close();
   });
 });

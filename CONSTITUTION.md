@@ -20,9 +20,19 @@ true, or more reliable, it needs a reason.
 One developer, on their own Mac, who wants to see their branch running on a phone
 without building it themselves — and an agent that can drive it for them.
 
-Teams are a real case and the code supports them (token roles, owner scoping). They
-are **never the default**. A person setting deckhand up alone must not have to learn
-that other people exist.
+**One operator per install. There is no team model, and adding one back is a
+constitutional change, not a feature.** One Mac holds one person's devices — the
+default cap is six in total, and two concurrent builds are felt — so a shared install
+does not reach a team however the permissions are written; a second person gets their
+own deckhand. What DOES cross people is the share link: that is how a colleague
+watches, and it needs no token. So authenticating IS authorizing. Every token is the
+operator's; a second one is a second CLIENT (the desktop app, another machine).
+
+*(Roles and `owners` scoping existed until 2026-08-05. `owners` returned "allowed"
+whenever it was unset — which is how every token the CLI ever minted looked — so the
+scope read as a protection while granting everything, and the gates built on it read
+as a permission system that was not there. Same lesson as `allowForkPRs`: a
+protection that only reads as one is worse than none.)*
 
 ---
 
@@ -94,7 +104,7 @@ Ceremony a solo user cannot skip is a bug. Hide the general case behind the obvi
 one — do not remove it.
 
 *(`deckhand token` prints your URL. `token list` and `token url <name>` still exist,
-for the team that needs them.)*
+for the install that runs more than one client.)*
 
 ### 8. Lead with the action, not the report
 

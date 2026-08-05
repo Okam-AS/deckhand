@@ -32,6 +32,13 @@ const write = (...names: string[]): void => {
   writeFileSync(tmp, body);
   renameSync(tmp, file);
 };
+/** Write entries with explicit token VALUES, so a rotation under an unchanged name is expressible. */
+const writeValues = (entries: [name: string, value: string][]): void => {
+  const body = `tokens:\n${entries.map(([n, v]) => `  - name: ${n}\n    token: ${v}\n`).join("")}`;
+  const tmp = `${file}.tmp`;
+  writeFileSync(tmp, body);
+  renameSync(tmp, file);
+};
 const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 400));
 
 before(() => {
@@ -70,6 +77,25 @@ describe("watchTokens", () => {
     await settle();
     assert.equal(auth.authenticate(tokenOf("bob")), null, "revoked means revoked");
     assert.ok(auth.authenticate(tokenOf("alice")), "and the others still work");
+  });
+
+  it("applies a rotation that keeps the name and changes the value", async () => {
+    // THE case a leak is fixed by: `deckhand token` refuses a duplicate name, so rotating a
+    // credential means writing a new value under the same name. The reload used to compare
+    // NAMES and return early — so the file changed, the operator believed the old URL was
+    // dead, and it kept opening the door until the next restart.
+    const oldValue = tokenOf("rotate-old");
+    const newValue = tokenOf("rotate-new");
+    writeValues([["asharghi", oldValue]]);
+    const auth = new TokenAuthenticator([]);
+    stops.push(watchTokens(auth, { file, debounceMs: 20, pollMs: 100 }));
+    await settle();
+    assert.ok(auth.authenticate(oldValue), "the old credential works to begin with");
+
+    writeValues([["asharghi", newValue]]);
+    await settle();
+    assert.equal(auth.authenticate(oldValue), null, "the rotated-away value must stop working");
+    assert.equal(auth.authenticate(newValue)?.name, "asharghi", "and the new one must work");
   });
 
   it("keeps the current tokens when the file is unreadable", async () => {

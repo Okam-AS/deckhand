@@ -188,22 +188,44 @@ describe("loadApps", () => {
 describe("loadTokens", () => {
   it("parses tokens and enforces 64-hex format", () => {
     const good = "a".repeat(64);
-    const f = write(
-      "tokens.yaml",
-      ["tokens:", `  - name: audun`, "    role: admin", `    token: ${good}`].join("\n"),
-    );
+    const f = write("tokens.yaml", ["tokens:", `  - name: audun`, `    token: ${good}`].join("\n"));
     const tokens = loadTokens(f);
     assert.equal(tokens[0]!.name, "audun");
-    assert.equal(tokens[0]!.role, "admin");
 
-    const bad = write("tokens-bad.yaml", "tokens:\n  - name: x\n    role: member\n    token: short");
+    const bad = write("tokens-bad.yaml", "tokens:\n  - name: x\n    token: short");
     assert.throws(() => loadTokens(bad), (e) => e instanceof ConfigError);
   });
 
-  it("rejects an unknown role", () => {
+  it("keeps loading a tokens.yaml written when roles and owner scoping existed", () => {
+    // Every install on disk carries `role:` in this file. A strict parse that
+    // rejected it would lock the operator out of their own server on upgrade,
+    // and the file is theirs — not ours to rewrite (principle 2).
     const f = write(
-      "tokens-role.yaml",
-      ["tokens:", "  - name: x", "    role: superuser", `    token: ${"b".repeat(64)}`].join("\n"),
+      "tokens-legacy.yaml",
+      [
+        "tokens:",
+        "  - name: audun",
+        "    role: admin",
+        `    token: ${"a".repeat(64)}`,
+        "  - name: kari",
+        "    role: member",
+        "    owners:",
+        "      - ainfrastructure",
+        `    token: ${"b".repeat(64)}`,
+      ].join("\n"),
+    );
+    const tokens = loadTokens(f);
+    assert.deepEqual(
+      tokens.map((t) => t.name),
+      ["audun", "kari"],
+    );
+    for (const t of tokens) assert.deepEqual(Object.keys(t).sort(), ["name", "token"]);
+  });
+
+  it("still rejects a key that is not one of the legacy two", () => {
+    const f = write(
+      "tokens-unknown.yaml",
+      ["tokens:", "  - name: x", "    scope: everything", `    token: ${"b".repeat(64)}`].join("\n"),
     );
     assert.throws(() => loadTokens(f), (e) => e instanceof ConfigError);
   });
@@ -242,6 +264,29 @@ describe("parseRepo / repoOwner", () => {
 
   it("throws on an unparseable repo", () => {
     assert.throws(() => parseRepo("justaname"), (e) => e instanceof ConfigError);
+  });
+
+  it("refuses a host that is not on the allow-list — that host would RECEIVE the credential", () => {
+    // `alongside: [{repo, ref}]` takes a repo string straight from an MCP argument, i.e. from
+    // the model, i.e. potentially from attacker-authored content the agent just read. The
+    // host in that string is what GIT_ASKPASS gets pinned to (engine/worktree.ts), while the
+    // credential resolver keys on the OWNER alone and never sees a host — so an unlisted host
+    // means answering its 401 with deckhand's PAT or gh session in Basic auth. No build, no
+    // simulator, nothing on screen. The parse is the chokepoint every path shares.
+    for (const evil of [
+      "evil.example/acme/app",
+      "https://evil.example/acme/app.git",
+      "git@evil.example:acme/app.git",
+      "github.com.evil.example/acme/app",
+      "https://user:tok@evil.example/acme/app",
+    ]) {
+      assert.throws(() => parseRepo(evil), (e) => e instanceof ConfigError, `must reject ${evil}`);
+    }
+  });
+
+  it("accepts the allow-listed host in any case", () => {
+    assert.equal(parseRepo("GitHub.com/acme/app").host, "GitHub.com", "host is preserved verbatim");
+    assert.equal(parseRepo("https://GITHUB.COM/acme/app").owner, "acme");
   });
 });
 

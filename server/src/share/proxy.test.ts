@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createServer, request as httpRequest, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import express from "express";
-import { createShareRouter, createHostWebProxyMiddleware, createPinGate } from "./proxy.ts";
+import { createShareRouter, createHostWebProxyMiddleware, createPinGate, type PinGate } from "./proxy.ts";
 import { PreviewError, type PreviewEngine } from "../engine/preview.ts";
 import { hashPassword, type PasswordHash } from "./shares.ts";
 
@@ -665,5 +665,80 @@ describe("unlock answers with the state", () => {
     assert.equal(res.status, 401);
     const body = (await res.json()) as Record<string, unknown>;
     assert.equal(body.state, undefined, "no state for a wrong PIN");
+  });
+});
+
+/**
+ * The PIN throttle is the only thing standing between a 4-digit share PIN and
+ * whoever has the URL — and a share grants device INPUT, not just video.
+ *
+ * The bug these pin down: on lockout the gate set `lockedUntil` AND reset
+ * `fails` to 0, so waiting out one 30-second lock handed back a full fresh
+ * budget. That is a self-renewing ~600 guesses an hour against a 10,000-key
+ * space, i.e. the whole space inside a day, with nothing to see in any log.
+ */
+describe("pin gate throttle", () => {
+  const SHARE = "throttled-share";
+  const gateEngine = {
+    pinInfoForShare: (id: string) => (id === SHARE ? { required: true, length: 4 } : { required: false, length: 0 }),
+    pinRecordForShare: (id: string) => (id === SHARE ? { ...hashPassword("1234"), length: 4 } : null),
+    verifyPin: (id: string, pin: string) => id === SHARE && pin === "1234",
+  } as unknown as PreviewEngine;
+
+  /** A gate whose clock the test drives. maxFails/lockMs are the production defaults. */
+  const gate = (clock: { t: number }) => createPinGate(gateEngine, "test-secret", { now: () => clock.t });
+
+  /** A successful attempt carries no lock; narrowing it here keeps the assertions readable. */
+  const lockOf = (r: ReturnType<PinGate["attempt"]>): number => (r.ok ? 0 : r.lockedMs);
+
+  const failUntilLocked = (g: ReturnType<typeof createPinGate>): number => {
+    for (let i = 0; i < 5; i++) {
+      const locked = lockOf(g.attempt(SHARE, "0000"));
+      if (locked > 0) return locked;
+    }
+    throw new Error("never locked");
+  };
+
+  it("does not restore the attempt budget when a lock expires", () => {
+    const clock = { t: 1_000_000 };
+    const g = gate(clock);
+    const firstLock = failUntilLocked(g);
+    assert.ok(firstLock > 0, "five wrong PINs lock the share");
+
+    clock.t += firstLock + 1; // wait it out
+    assert.ok(lockOf(g.attempt(SHARE, "0000")) > 0, "one further wrong PIN re-locks immediately — no fresh five-guess budget");
+  });
+
+  it("escalates the lock, so guessing gets slower rather than staying free", () => {
+    const clock = { t: 2_000_000 };
+    const g = gate(clock);
+    const first = failUntilLocked(g);
+
+    clock.t += first + 1;
+    const second = lockOf(g.attempt(SHARE, "0000"));
+    assert.ok(second > first, `second lock (${second}ms) must exceed the first (${first}ms)`);
+
+    clock.t += second + 1;
+    const third = lockOf(g.attempt(SHARE, "0000"));
+    assert.ok(third > second, `third lock (${third}ms) must exceed the second (${second}ms)`);
+  });
+
+  it("still lets the right PIN through, and clears the record when it does", () => {
+    const clock = { t: 3_000_000 };
+    const g = gate(clock);
+    g.attempt(SHARE, "0000");
+    g.attempt(SHARE, "0000");
+    const ok = g.attempt(SHARE, "1234");
+    assert.equal(ok.ok, true);
+    assert.ok(ok.cookie, "and hands back the unlock cookie");
+    // A correct PIN wipes the counter: the next wrong guess starts a fresh budget.
+    for (let i = 0; i < 4; i++) assert.equal(lockOf(g.attempt(SHARE, "0000")), 0);
+  });
+
+  it("keeps ignoring a share that has no PIN", () => {
+    const g = gate({ t: 4_000_000 });
+    const r = g.attempt("no-such-share", "0000");
+    assert.equal(r.ok, false);
+    assert.equal(lockOf(r), 0, "an unknown share must not mint a throttle entry");
   });
 });

@@ -36,7 +36,7 @@ the machine.
                             │
 ┌───────────────────────────▼── deckhand server (loopback only) ──┐
 │                                                                 │
-│  /mcp/<token>            MCP tools, per-person token, role-gated│
+│  /mcp/<token>            MCP tools, the operator's token        │
 │  /s/<shareId>            viewer page (device grid + controls)   │
 │  /s/<shareId>/dev/<id>/* scoped proxy → that device's stream    │
 │                                                                 │
@@ -78,7 +78,7 @@ viewer page, a ruthlessly short dependency list.
 ## Security model
 
 - Everything binds **loopback**; the only way in is the Cloudflare named tunnel.
-- No tokenless paths: per-person MCP tokens, per-app share links (optionally PIN-gated).
+- No tokenless paths: the operator's MCP token, per-app share links (optionally PIN-gated).
 - The MCP surface is capability-bounded — no arbitrary commands, only pre-registered
   apps and their repos' refs. Every call lands in an append-only audit log.
 - Secrets never travel through MCP; tokens never appear in argv, URLs, or logs.
@@ -135,7 +135,7 @@ npx tsx server/src/cli.ts setup \
 
 `setup` creates the Cloudflare tunnel and DNS route, merges your cloudflared
 config (it never overwrites rules for other services), links `deckhand` onto your
-PATH, writes deckhand's config, prints your admin **connector URL**, installs the
+PATH, writes deckhand's config, prints your **connector URL**, installs the
 LaunchAgents so it survives sleep and reboot, and runs `doctor`.
 
 Re-run it any time: every step reports what it found and changes only what is
@@ -155,6 +155,7 @@ Then paste your connector URL into claude.ai → Settings → Connectors:
 deckhand token          # prints your URL (creates one the first time)
 ```
 
-It is a credential — treat it like a password. `deckhand token list` shows who
-else has access, with the URLs masked; `deckhand token url <name>` prints one in
+It is a credential — treat it like a password. If it leaks, `deckhand token rm <name>`
+kills it on the running server. `deckhand token list` shows which credentials exist,
+with the URLs masked; `deckhand token url <name>` prints one in
 full.

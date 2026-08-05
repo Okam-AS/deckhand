@@ -3,10 +3,11 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { stringify as toYaml } from "yaml";
-import { loadConfig, loadApps, loadTokens, parseRepo, type Role } from "./config.ts";
+import { loadConfig, loadApps, loadTokens, parseRepo } from "./config.ts";
 import { paths } from "./paths.ts";
 import {
   addTokenEntry,
+  removeTokenEntry,
   addAppEntry,
   buildInitConfig,
   parseEnvAssignment,
@@ -50,7 +51,7 @@ New here? One command does the whole install:
   deckhand setup --hostname deckhand.example.com [--web-host previews.example.com]
 
   It creates the Cloudflare tunnel and DNS route, writes the config, mints your
-  admin connector URL, installs the LaunchAgents, and runs doctor. Re-runnable:
+  connector URL, installs the LaunchAgents, and runs doctor. Re-runnable:
   every step reports what it found and changes only what is missing.
 
 Everything else, for when you already know what you want:
@@ -59,9 +60,10 @@ Everything else, for when you already know what you want:
   deckhand init --hostname H [--github-app-id N --github-app-pem P] [--port 4300]
                                                    the App is optional: without it
                                                    deckhand uses your gh CLI session
-  deckhand token add <name> [--role admin|member] [--owners a,b]
+  deckhand token add <name>                        another credential for yourself (a second client)
   deckhand token                                   your connector URL (creates one if needed)
-  deckhand token list                              who has access (URLs masked)
+  deckhand token list                              the credentials that exist (URLs masked)
+  deckhand token rm <name>                         revoke one, effective immediately
   deckhand token url <name>                        print one connector URL in full
   deckhand app add <id> <repo> --type expo|react-native|nativescript [--branch main] [--bundle-id ID]
   deckhand app add <id> --path /abs/dir [--repo owner/name] [--type ...]   local dev mode (type auto-detected)
@@ -148,12 +150,13 @@ async function main(): Promise<void> {
       return cmdInit(flags);
 
     case "token":
-      // Bare `deckhand token` is the answer to "what do I paste into claude.ai". Tokens are a
-      // TEAM concept — one per person or client, which is what `list` shows — and a solo user
-      // should not have to learn that to get their own URL. So the no-argument form does the
-      // obvious thing: print yours, creating one if there is none.
+      // Bare `deckhand token` is the answer to "what do I paste into claude.ai". More than one
+      // token is a CLIENT concept — a second one for the desktop app or another machine, which
+      // is what `list` shows — and nobody should have to learn that to get their URL. So the
+      // no-argument form does the obvious thing: print yours, creating one if there is none.
       if (!sub) return cmdTokenMine(flags);
-      if (sub === "add") return cmdTokenAdd(_[2], flags);
+      if (sub === "add") return cmdTokenAdd(_[2]);
+      if (sub === "rm") return cmdTokenRm(_[2]);
       if (sub === "list") return cmdTokenList();
       if (sub === "url") return cmdTokenUrl(_[2]);
       return fail(`unknown token subcommand; see 'deckhand'`);
@@ -198,20 +201,38 @@ function cmdInit(flags: Args["flags"]): void {
   if (!config.githubApp) {
     console.log("no GitHub App configured — deckhand will use your `gh` CLI session (githubAmbient) to read repos.");
   }
-  console.log("next: `deckhand token add <you> --role admin`, then set up the cloudflared tunnel (Phase 4 automates this).");
+  console.log("next: `deckhand token`, then set up the cloudflared tunnel (Phase 4 automates this).");
 }
 
-function cmdTokenAdd(name: string | undefined, flags: Args["flags"]): void {
-  if (!name) fail("usage: deckhand token add <name> [--role admin|member] [--owners a,b]");
-  const role = (str(flags.role) ?? "member") as Role;
-  if (role !== "admin" && role !== "member") fail("role must be admin or member");
-  const owners = str(flags.owners)?.split(",").map((s) => s.trim()).filter(Boolean);
-  const { tokens, created } = addTokenEntry(loadTokensSafe(), { name: name!, role, ...(owners ? { owners } : {}) });
+function cmdTokenAdd(name: string | undefined): void {
+  if (!name) fail("usage: deckhand token add <name>");
+  const { tokens, created } = addTokenEntry(loadTokensSafe(), { name: name! });
   writeTokens(tokens);
   const hostname = tryHostname();
-  console.log(`created token for "${created.name}" (${created.role})`);
+  console.log(`created token "${created.name}"`);
   if (hostname) console.log(`connector URL:  https://${hostname}/mcp/${created.token}`);
   else console.log(`token: ${created.token}`);
+}
+
+/**
+ * Revoke a credential. The connector URL carries the token as a path segment, so it lands in
+ * every proxy log, screen share and scrollback it ever passes through — this is the way back
+ * from that, and until it existed the answer was "hand-edit tokens.yaml".
+ *
+ * Takes effect immediately: the running server watches the file (`tokensWatcher.ts`) and the
+ * watcher compares CONTENT, so rotating a value under the same name applies too.
+ */
+function cmdTokenRm(name: string | undefined): void {
+  if (!name) fail("usage: deckhand token rm <name>   (`deckhand token list` shows the names)");
+  let result;
+  try {
+    result = removeTokenEntry(loadTokensSafe(), name!);
+  } catch (e) {
+    fail(e instanceof Error ? e.message : String(e));
+  }
+  writeTokens(result.tokens);
+  console.log(`revoked "${result.removed.name}" — that connector URL stops working now.`);
+  if (result.tokens.length === 0) console.log("no tokens left; `deckhand token` mints a new one.");
 }
 
 function cmdTokenList(): void {
@@ -223,32 +244,31 @@ function cmdTokenList(): void {
     // screenshot. The one you actually want goes through `token url <name>`, which is a
     // deliberate act rather than a side effect.
     const hint = hostname ? `https://${hostname}/mcp/${t.token.slice(0, 6)}…` : `${t.token.slice(0, 6)}…`;
-    console.log(`${t.name}\t${t.role}${t.owners ? `\towners=${t.owners.join(",")}` : ""}\t${hint}`);
+    console.log(`${t.name}\t${hint}`);
   }
   if (tokens.length) console.log(`\nFull connector URL for one of them:  deckhand token url <name>`);
-  else console.log(`no tokens yet — create one with \`deckhand token add <you> --role admin\``);
+  else console.log(`no tokens yet — create one with \`deckhand token\``);
 }
 
 /**
  * "Give me my connector URL" — the only token command most installs ever need.
  *
  * Creates one on first use, prints the existing one after that, and when there are several
- * (a team, or one token per client) says so and points at the explicit commands rather than
- * guessing which one the caller meant.
+ * (one per client — claude.ai, the desktop app, a second machine) says so and points at the
+ * explicit commands rather than guessing which one the caller meant.
  */
 function cmdTokenMine(flags: Args["flags"]): void {
   const tokens = loadTokensSafe();
-  const admins = tokens.filter((t) => t.role === "admin");
-  if (admins.length === 1) return printConnector(admins[0]!);
-  if (admins.length > 1) {
-    console.error(`${admins.length} admin tokens exist — say which one:`);
-    for (const t of admins) console.error(`  deckhand token url ${t.name}`);
+  if (tokens.length === 1) return printConnector(tokens[0]!);
+  if (tokens.length > 1) {
+    console.error(`${tokens.length} tokens exist — say which one:`);
+    for (const t of tokens) console.error(`  deckhand token url ${t.name}`);
     process.exit(1);
   }
   const name = str(flags.name) ?? process.env.USER ?? "me";
-  const { tokens: next, created } = addTokenEntry(tokens, { name, role: "admin" });
+  const { tokens: next, created } = addTokenEntry(tokens, { name });
   writeTokens(next);
-  console.log(`created an admin token for "${created.name}".`);
+  console.log(`created a token for "${created.name}".`);
   printConnector(created);
 }
 

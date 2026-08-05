@@ -236,7 +236,7 @@ export function createServer(): DeckhandServer {
       // Registering an app must not cost a restart — a restart tears down every
       // booted simulator on the machine.
       // A token minted while the server runs must work immediately. It did not: setup starts
-      // the LaunchAgent and then mints the admin token, so a brand-new install's only token
+      // the LaunchAgent and then mints the token, so a brand-new install's only token
       // was invisible until a restart — the connector 404'd and claude.ai reported an OAuth
       // failure for a server that does not use OAuth.
       watchTokens(auth, {

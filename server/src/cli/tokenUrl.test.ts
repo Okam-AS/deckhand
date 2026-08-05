@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 /**
  * A connector token used to be UNRECOVERABLE.
  *
- * `token add` printed the URL once; `token list` showed only names and roles. Lose the
+ * `token add` printed the URL once; `token list` showed only names. Lose the
  * scrollback and the only ways back were minting a new token — which invalidates every client
  * already using the old one — or opening tokens.yaml by hand, which is what people did.
  * Reported by a user running `deckhand token list` after being told, by this repo's own setup
@@ -28,9 +28,8 @@ const run = (...args: string[]): string =>
 before(() => {
   home = mkdtempSync(join(tmpdir(), "deckhand-tok-"));
   run("init", "--hostname", "deckhand.example.com");
-  run("token", "add", "alice", "--role", "admin");
-  run("token", "add", "bob", "--role", "member");
-  run("token", "add", "carol", "--role", "admin"); // a second ADMIN, for the ambiguity case
+  run("token", "add", "alice");
+  run("token", "add", "bob"); // a second credential, for the ambiguity case
 });
 after(() => rmSync(home, { recursive: true, force: true }));
 
@@ -57,12 +56,12 @@ describe("deckhand token url", () => {
 
 describe("deckhand token list", () => {
   it("masks the tokens, because listing who has access should not hand out credentials", () => {
-    // `list` answers "who has access". Printing every credential in full to answer that puts
+    // `list` answers "which credentials exist". Printing every one in full to answer that puts
     // them in a scrollback, a screen share and a screenshot. The one you want is a deliberate
     // act: `token url <name>`.
     const out = run("token", "list");
-    assert.match(out, /alice\s+admin/);
-    assert.match(out, /bob\s+member/);
+    assert.match(out, /alice/);
+    assert.match(out, /bob/);
     assert.doesNotMatch(out, /[0-9a-f]{64}/, "no full token may appear here");
     assert.match(out, /deckhand token url <name>/, "and it says how to get the real one");
   });
@@ -75,17 +74,51 @@ describe("deckhand token list", () => {
         env: { ...process.env, DECKHAND_HOME: fresh },
       });
       assert.match(out, /no tokens yet/, "silence reads as a broken command");
-      assert.match(out, /token add/);
+      assert.match(out, /deckhand token/);
     } finally {
       rmSync(fresh, { recursive: true, force: true });
     }
   });
 });
 
+describe("deckhand token rm", () => {
+  it("revokes one credential and leaves the other", () => {
+    // The way back from a leaked connector URL. Before this existed the answer was
+    // "hand-edit tokens.yaml", and the running server ignored the edit anyway
+    // (tokensWatcher compared names, not content).
+    const fresh = mkdtempSync(join(tmpdir(), "deckhand-tokrm-"));
+    const at = (...args: string[]): string =>
+      execFileSync(process.execPath, [BIN, ...args], { encoding: "utf8", env: { ...process.env, DECKHAND_HOME: fresh } });
+    try {
+      at("init", "--hostname", "deckhand.example.com");
+      at("token", "add", "keep");
+      at("token", "add", "leaked");
+      const out = at("token", "rm", "leaked");
+      assert.match(out, /revoked "leaked"/);
+      assert.doesNotMatch(out, /[0-9a-f]{64}/, "revoking must not print the credential it just killed");
+      const list = at("token", "list");
+      assert.match(list, /keep/);
+      assert.doesNotMatch(list, /leaked/, "and it is gone from the file");
+    } finally {
+      rmSync(fresh, { recursive: true, force: true });
+    }
+  });
+
+  it("names the mistake when the token does not exist", () => {
+    assert.throws(
+      () => run("token", "rm", "nope"),
+      (e: Error & { stderr?: string }) => {
+        assert.match(`${e.stderr ?? ""}`, /no token named "nope"/);
+        return true;
+      },
+    );
+  });
+});
+
 describe("deckhand token (no subcommand)", () => {
   it("creates one on a fresh install and prints the URL", () => {
-    // Tokens are a TEAM concept — one per person or client, which is what `list` shows. A solo
-    // user should not have to learn that to answer "what do I paste into claude.ai".
+    // More than one token is a CLIENT concept — a second one for another machine, which is what
+    // `list` shows. Nobody should have to learn that to answer "what do I paste into claude.ai".
     const fresh = mkdtempSync(join(tmpdir(), "deckhand-tok1-"));
     const at = (...args: string[]): string =>
       execFileSync(process.execPath, [BIN, ...args], { encoding: "utf8", env: { ...process.env, DECKHAND_HOME: fresh } });
@@ -101,12 +134,12 @@ describe("deckhand token (no subcommand)", () => {
     }
   });
 
-  it("refuses to guess when a team has several admin tokens", () => {
-    // Picking one at random would hand out the wrong person's credential.
+  it("refuses to guess when several tokens exist", () => {
+    // Picking one at random would hand out a credential the caller did not mean.
     assert.throws(
       () => run("token"),
       (e: Error & { stderr?: string }) => {
-        assert.match(`${e.stderr ?? ""}`, /2 admin tokens exist/);
+        assert.match(`${e.stderr ?? ""}`, /2 tokens exist/);
         assert.match(`${e.stderr ?? ""}`, /deckhand token url alice/, "and it names the exact commands");
         return true;
       },

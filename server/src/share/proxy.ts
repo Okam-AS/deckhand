@@ -223,13 +223,23 @@ export interface PinGateOptions {
 /** Far above any real share count; a bound, not a tuning knob. */
 const THROTTLE_MAX_ENTRIES = 1000;
 
+/** Ceiling on the escalating lock — long enough to make guessing pointless, short enough that a
+ *  person who fat-fingered their own PIN is not shut out for the afternoon. */
+const THROTTLE_MAX_LOCK_MS = 15 * 60_000;
+
+/** How long after its lock lapses an entry may be forgotten. Shorter than the time it takes to
+ *  make a dent in a 4-digit space, so eviction can never be the attacker's reset button. */
+const THROTTLE_FORGET_MS = 60 * 60_000;
+
 /** Build the shared PIN gate: cookie validation + a per-share attempt throttle. */
 export function createPinGate(engine: PreviewEngine, shareSecret: string, opts: PinGateOptions = {}): PinGate {
   const ttlMs = opts.ttlMs ?? UNLOCK_TTL_MS;
   const maxFails = opts.maxFails ?? 5;
   const lockMs = opts.lockMs ?? 30_000;
   const now = opts.now ?? (() => Date.now());
-  const throttle = new Map<string, { fails: number; lockedUntil: number }>();
+  // `lockouts` is what makes waiting expensive: it survives the lock it caused, so each
+  // subsequent lock is longer. Without it, sitting out one lock restored a full budget.
+  const throttle = new Map<string, { fails: number; lockedUntil: number; lockouts: number }>();
   return {
     info: (shareId) => engine.pinInfoForShare(shareId),
     allowed: (cookieHeader, shareId) => {
@@ -253,17 +263,17 @@ export function createPinGate(engine: PreviewEngine, shareSecret: string, opts: 
       // throttle entry for any attacker-chosen string — one free Map entry per
       // request, unbounded — while verifyPin just returns false for unknown ids.
       if (!engine.pinInfoForShare(shareId).required) return { ok: false, lockedMs: 0 };
-      // Cheap eviction backstop. Only drop entries whose LOCK has expired
-      // (lockedUntil > 0 and now past it) — a lapsed lock grants a fresh budget
-      // on its own, so forgetting it changes nothing. Entries mid-accumulation
-      // (lockedUntil === 0, fails 1..max-1) are the brute-force counter itself,
-      // so they must survive: evicting them hands the attacker a clean slate.
+      // Cheap eviction backstop. An entry may only be forgotten once its lock lapsed
+      // LONG ago (THROTTLE_FORGET_MS) — the lockout count is the whole defence, so
+      // dropping it the moment a lock expires would hand the attacker the reset the
+      // escalation exists to deny. Entries mid-accumulation (lockedUntil === 0) are the
+      // counter itself and never qualify.
       if (throttle.size > THROTTLE_MAX_ENTRIES) {
         for (const [id, entry] of throttle) {
-          if (entry.lockedUntil > 0 && entry.lockedUntil <= now()) throttle.delete(id);
+          if (entry.lockedUntil > 0 && now() - entry.lockedUntil > THROTTLE_FORGET_MS) throttle.delete(id);
         }
       }
-      const t = throttle.get(shareId) ?? { fails: 0, lockedUntil: 0 };
+      const t = throttle.get(shareId) ?? { fails: 0, lockedUntil: 0, lockouts: 0 };
       const remaining = t.lockedUntil - now();
       if (remaining > 0) return { ok: false, lockedMs: remaining };
       if (engine.verifyPin(shareId, pin)) {
@@ -272,8 +282,12 @@ export function createPinGate(engine: PreviewEngine, shareSecret: string, opts: 
         return { ok: true, cookie: signUnlockCookie(shareSecret, shareId, now() + ttlMs, fp) };
       }
       t.fails += 1;
-      if (t.fails >= maxFails) {
-        t.lockedUntil = now() + lockMs;
+      // After the first lockout the budget is ONE: `fails` starts at 0 again, but a single
+      // further wrong PIN meets `maxFails` only because a locked-out share re-locks on the
+      // next miss — guessing costs 30s, then 60s, then 120s, capped.
+      if (t.fails >= (t.lockouts > 0 ? 1 : maxFails)) {
+        t.lockouts += 1;
+        t.lockedUntil = now() + Math.min(lockMs * 2 ** (t.lockouts - 1), THROTTLE_MAX_LOCK_MS);
         t.fails = 0;
       }
       throttle.set(shareId, t);

@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { writeFileSync, mkdirSync, renameSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { stringify as toYaml, parse as parseYaml } from "yaml";
-import { appSchema, appsSchema, tokenSchema, type App, type Role, type TokenEntry } from "../config.ts";
+import { appSchema, appsSchema, tokenSchema, type App, type TokenEntry } from "../config.ts";
 import { parseEnvFile } from "../secrets.ts";
 import { paths } from "../paths.ts";
 
@@ -18,16 +18,26 @@ export function generateToken(): string {
 /** Add a token entry; throws on duplicate name or invalid shape. */
 export function addTokenEntry(
   tokens: TokenEntry[],
-  input: { name: string; role: Role; owners?: string[] },
+  input: { name: string },
 ): { tokens: TokenEntry[]; created: TokenEntry } {
   if (tokens.some((t) => t.name === input.name)) throw new Error(`a token named "${input.name}" already exists`);
-  const created = tokenSchema.parse({
-    name: input.name,
-    role: input.role,
-    token: generateToken(),
-    ...(input.owners && input.owners.length ? { owners: input.owners } : {}),
-  });
+  const created = tokenSchema.parse({ name: input.name, token: generateToken() });
   return { tokens: [...tokens, created], created };
+}
+
+/**
+ * Drop a token entry by name; throws when there is no such name.
+ *
+ * Removing the LAST token is allowed on purpose: a leaked connector URL has to be killable, and
+ * `deckhand token` mints a fresh one on the spot. Refusing would leave the leak live.
+ */
+export function removeTokenEntry(
+  tokens: TokenEntry[],
+  name: string,
+): { tokens: TokenEntry[]; removed: TokenEntry } {
+  const removed = tokens.find((t) => t.name === name);
+  if (!removed) throw new Error(`no token named "${name}" — \`deckhand token list\` shows them`);
+  return { tokens: tokens.filter((t) => t !== removed), removed };
 }
 
 /** Add an app entry (repo, local path, or both); throws on duplicate id or invalid shape. */
