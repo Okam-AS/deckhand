@@ -227,8 +227,13 @@ const THROTTLE_MAX_ENTRIES = 1000;
  *  person who fat-fingered their own PIN is not shut out for the afternoon. */
 const THROTTLE_MAX_LOCK_MS = 15 * 60_000;
 
-/** How long after its lock lapses an entry may be forgotten. Shorter than the time it takes to
- *  make a dent in a 4-digit space, so eviction can never be the attacker's reset button. */
+/** How long a share must be QUIET before its throttle entry is forgotten — the forgiveness a
+ *  legitimate viewer needs, and the attacker's cheapest reset, which is why it is an hour and
+ *  not a minute. Two attack paths, both measured in the tests: sit out each lock and the 15-min
+ *  cap governs (~96 guesses/day); go properly quiet and spend a fresh five, which is ~120/day
+ *  here and would be ~7 200/day at a minute. So a 4-digit PIN on a share that stays up for
+ *  weeks is walkable in roughly two months, and a 6-digit one is not — that is an argument for
+ *  six digits, not for shortening this. */
 const THROTTLE_FORGET_MS = 60 * 60_000;
 
 /** Build the shared PIN gate: cookie validation + a per-share attempt throttle. */
@@ -239,7 +244,7 @@ export function createPinGate(engine: PreviewEngine, shareSecret: string, opts: 
   const now = opts.now ?? (() => Date.now());
   // `lockouts` is what makes waiting expensive: it survives the lock it caused, so each
   // subsequent lock is longer. Without it, sitting out one lock restored a full budget.
-  const throttle = new Map<string, { fails: number; lockedUntil: number; lockouts: number }>();
+  const throttle = new Map<string, { fails: number; lockedUntil: number; lockouts: number; lastFailMs: number }>();
   return {
     info: (shareId) => engine.pinInfoForShare(shareId),
     allowed: (cookieHeader, shareId) => {
@@ -263,26 +268,30 @@ export function createPinGate(engine: PreviewEngine, shareSecret: string, opts: 
       // throttle entry for any attacker-chosen string — one free Map entry per
       // request, unbounded — while verifyPin just returns false for unknown ids.
       if (!engine.pinInfoForShare(shareId).required) return { ok: false, lockedMs: 0 };
-      // Forget an entry whose lock lapsed LONG ago (THROTTLE_FORGET_MS). This runs on every
-      // attempt, not only when the map is large: the escalation is otherwise a one-way ratchet
-      // for the life of the process — and the process is a LaunchAgent that runs for weeks. A
-      // colleague who mistypes across an afternoon would reach the 15-minute cap with a
-      // one-attempt budget and stay there, their CORRECT pin refused for the whole window,
-      // with no command to clear it (set_pin rewrites the PIN, not this map). An hour of
-      // silence is far longer than a brute-force run can afford and far shorter than a
-      // working day. Entries mid-accumulation (lockedUntil === 0) are the counter itself and
-      // never qualify — dropping those would hand back the budget the escalation exists to deny.
-      const forgettable = (e: { lockedUntil: number }): boolean =>
-        e.lockedUntil > 0 && now() - e.lockedUntil > THROTTLE_FORGET_MS;
+      // An entry is forgotten once it has been QUIET for THROTTLE_FORGET_MS — measured from
+      // its last failure or the end of its last lock, whichever is later. Both halves of that
+      // were bugs first:
+      //   - keyed on lock expiry alone, an entry that gathered misses without ever locking
+      //     (four of a five-budget) never aged out, so one typo a month later locked the share;
+      //   - swept only when the map exceeded THROTTLE_MAX_ENTRIES — a bound this file calls
+      //     "far above any real share count" — the sweep never ran at all on a one-Mac install,
+      //     and the escalation became a one-way ratchet for the life of a process that runs for
+      //     weeks. A colleague mistyping across an afternoon reached the 15-minute cap with a
+      //     one-attempt budget and stayed there, their CORRECT pin refused for the whole window,
+      //     with no command to clear it (set_pin rewrites the PIN record, not this map).
+      // An hour of silence is far longer than a brute-force run can afford (it caps the attacker
+      // near 4 guesses/hour) and far shorter than a working day.
+      const forgettable = (e: { lockedUntil: number; lastFailMs: number }): boolean =>
+        now() - Math.max(e.lockedUntil, e.lastFailMs) > THROTTLE_FORGET_MS;
       const own = throttle.get(shareId);
       if (own && forgettable(own)) throttle.delete(shareId);
-      // Size backstop for every OTHER share, so an attacker sweeping ids cannot grow the map.
+      // Size backstop for every OTHER id, so sweeping shareIds cannot grow the map without bound.
       if (throttle.size > THROTTLE_MAX_ENTRIES) {
         for (const [id, entry] of throttle) {
           if (forgettable(entry)) throttle.delete(id);
         }
       }
-      const t = throttle.get(shareId) ?? { fails: 0, lockedUntil: 0, lockouts: 0 };
+      const t = throttle.get(shareId) ?? { fails: 0, lockedUntil: 0, lockouts: 0, lastFailMs: 0 };
       const remaining = t.lockedUntil - now();
       if (remaining > 0) return { ok: false, lockedMs: remaining };
       if (engine.verifyPin(shareId, pin)) {
@@ -291,6 +300,7 @@ export function createPinGate(engine: PreviewEngine, shareSecret: string, opts: 
         return { ok: true, cookie: signUnlockCookie(shareSecret, shareId, now() + ttlMs, fp) };
       }
       t.fails += 1;
+      t.lastFailMs = now();
       // After the first lockout the budget is ONE: `fails` starts at 0 again, but a single
       // further wrong PIN meets `maxFails` only because a locked-out share re-locks on the
       // next miss — guessing costs 30s, then 60s, then 120s, capped.

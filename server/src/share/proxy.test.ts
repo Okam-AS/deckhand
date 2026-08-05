@@ -756,6 +756,63 @@ describe("pin gate throttle", () => {
     assert.equal(relock, 30_000, "and the budget and the lock are back to their starting size");
   });
 
+  it("forgets stale failures too, not just stale lockouts", () => {
+    // The sibling of the bug above, and it survived the first fix: `forgettable` required
+    // `lockedUntil > 0`, so an entry that accumulated failures WITHOUT ever locking (four
+    // typos, budget five) aged out never. A month later the next single mistake locked the
+    // share. Four-fifths of a lockout is not a state anyone should carry for a month.
+    const clock = { t: 6_000_000 };
+    const g = gate(clock);
+    for (let i = 0; i < 4; i++) assert.equal(lockOf(g.attempt(SHARE, "0000")), 0, "four misses do not lock");
+
+    clock.t += 60 * 60_000 + 1; // nobody touches this share for an hour
+    for (let i = 0; i < 4; i++) {
+      assert.equal(lockOf(g.attempt(SHARE, "0000")), 0, `miss ${i + 1} after the quiet spell must not lock`);
+    }
+    assert.equal(lockOf(g.attempt(SHARE, "0000")), 30_000, "the fifth does, from a full budget");
+  });
+
+  it("makes waiting out a lock cost the cap, not a fresh budget", () => {
+    // Strategy A for an attacker who knows the URL: guess until locked, sit out exactly the
+    // lock, repeat. That path never goes quiet, so forgiveness never applies and the escalation
+    // cap governs: ~4 guesses an hour. THIS is where the ~96/day figure comes from — not from
+    // THROTTLE_FORGET_MS, which an attacker on this path never reaches.
+    const clock = { t: 0 };
+    const g = createPinGate({ ...gateEngine, verifyPin: () => false } as unknown as PreviewEngine, "test-secret", {
+      now: () => clock.t,
+    });
+    const DAY = 24 * 60 * 60_000;
+    let guesses = 0;
+    while (clock.t < 7 * DAY) {
+      const r = g.attempt(SHARE, "0000");
+      guesses++;
+      if (!r.ok && r.lockedMs > 0) clock.t += r.lockedMs + 1;
+    }
+    assert.ok(guesses / 7 < 150, `${(guesses / 7).toFixed(0)}/day on the wait-out-the-lock path`);
+  });
+
+  it("makes a FULL budget cost half an hour of total silence, whatever the lock was", () => {
+    // Strategy B, and the better one: go quiet until the entry is forgotten, then spend a fresh
+    // five. That is worth ~120/day at an hour of forgiveness and ~7 200/day at a minute — so the
+    // rate test above cannot see a shortened THROTTLE_FORGET_MS at all (its attacker always
+    // retries the instant a lock expires, and is therefore never quiet). This one binds the
+    // constant directly: no amount of silence under half an hour may hand back the budget.
+    const clock = { t: 0 };
+    const g = gate(clock);
+    failUntilLocked(g);
+
+    // Twenty-nine minutes of silence: still one attempt, still an immediate re-lock.
+    clock.t += 29 * 60_000;
+    assert.ok(lockOf(g.attempt(SHARE, "0000")) > 0, "under half an hour must not restore the budget");
+
+    // Properly quiet — measured from THAT attempt, which reset the clock by re-locking.
+    clock.t += 121 * 60_000;
+    for (let i = 0; i < 4; i++) {
+      assert.equal(lockOf(g.attempt(SHARE, "0000")), 0, `miss ${i + 1} of a restored budget must not lock`);
+    }
+    assert.equal(lockOf(g.attempt(SHARE, "0000")), 30_000, "and the fifth locks from the start of the ladder");
+  });
+
   it("keeps ignoring a share that has no PIN", () => {
     const g = gate({ t: 4_000_000 });
     const r = g.attempt("no-such-share", "0000");
