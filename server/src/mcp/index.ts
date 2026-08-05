@@ -21,8 +21,10 @@ export interface McpRouterDeps {
 
 /**
  * The `/mcp/:token` router. Stateless: a fresh McpServer + transport per POST,
- * bound to the authenticated principal so role/owner-scope are enforced per
- * call. An unknown token → 404 (indistinguishable from a wrong path). GET/DELETE
+ * bound to the authenticated principal, whose name the audit trail records — there is no
+ * authorization step, because one install serves one operator (CONSTITUTION §"Who it is
+ * for"), so a valid token IS the operator. An unknown token → 404 (indistinguishable from a
+ * wrong path). GET/DELETE
  * (session semantics) are rejected.
  */
 export function createMcpRouter(deps: McpRouterDeps): express.Router {

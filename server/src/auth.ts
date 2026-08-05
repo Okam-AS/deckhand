@@ -1,15 +1,16 @@
 import { createHash, timingSafeEqual } from "node:crypto";
-import type { App, Role, TokenEntry } from "./config.ts";
-import { repoOwner } from "./config.ts";
+import type { TokenEntry } from "./config.ts";
 
 /**
  * Authenticated caller derived from a valid `/mcp/<token>` path segment.
- * `owners` (if present) restricts which apps this caller may touch.
+ *
+ * A name and nothing else: deckhand serves ONE operator's devices on ONE Mac,
+ * so every token that authenticates is that operator's, and there is no second
+ * party to hold a lesser one back from. The name exists for the audit trail —
+ * which credential acted — not as an identity to authorize against.
  */
 export interface Principal {
   name: string;
-  role: Role;
-  owners?: string[];
 }
 
 function sha256(s: string): Buffer {
@@ -31,10 +32,7 @@ export class TokenAuthenticator {
   }
 
   private static digest(tokens: TokenEntry[]): { hash: Buffer; principal: Principal }[] {
-    return tokens.map((t) => ({
-      hash: sha256(t.token),
-      principal: { name: t.name, role: t.role, ...(t.owners ? { owners: t.owners } : {}) },
-    }));
+    return tokens.map((t) => ({ hash: sha256(t.token), principal: { name: t.name } }));
   }
 
   /**
@@ -60,25 +58,4 @@ export class TokenAuthenticator {
     }
     return matched;
   }
-}
-
-export function isAdmin(p: Principal): boolean {
-  return p.role === "admin";
-}
-
-/**
- * Whether a principal may act on a given app. Members with an `owners` scope
- * are restricted to apps whose repo owner is in that list; an unscoped
- * principal (or admin) may touch any app. Owner scopes are GitHub owners, so
- * a local-only app (no repo) is out of reach for scoped tokens.
- */
-export function canAccessApp(p: Principal, app: App): boolean {
-  if (!p.owners || p.owners.length === 0) return true;
-  if (!app.repo) return false;
-  return p.owners.includes(repoOwner(app.repo));
-}
-
-/** Filter a list of apps to the ones a principal may see/use. */
-export function visibleApps(p: Principal, apps: App[]): App[] {
-  return apps.filter((a) => canAccessApp(p, a));
 }

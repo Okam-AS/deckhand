@@ -11,7 +11,6 @@ import { versionStatus } from "../version.ts";
 import { DEV_MENU_PREFLIGHT, devMenuHint } from "../testing/devMenu.ts";
 import { selectorMissHint } from "../testing/tree.ts";
 import type { Principal } from "../auth.ts";
-import { canAccessApp, isAdmin, visibleApps } from "../auth.ts";
 import type { PreviewEngine, CompareReference } from "../engine/preview.ts";
 import { PreviewError } from "../engine/preview.ts";
 import { parseRefSpec, refDescription, RefError } from "../engine/worktree.ts";
@@ -27,7 +26,7 @@ import { SimDeckActionError, type UiAction } from "../testing/control.ts";
 
 // ---------------------------------------------------------------------------
 // MCP tool registrations (PLAN §6). Bound per request to the authenticated
-// principal so role + owner-scope are enforced server-side. Every tool returns
+// principal, whose name is what the audit trail records. Every tool returns
 // a structured result — never a bare throw — so Claude can relay an actionable
 // message. Every call is audited.
 // ---------------------------------------------------------------------------
@@ -208,50 +207,23 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       });
   };
 
-  /** Resolve an app the principal may access, or a failure result. */
+  /** Resolve a registered app, or a failure result. */
   const resolveApp = (id: string): App | CallToolResult => {
     const app = apps.find((a) => a.id === id);
     if (!app) return fail("unknown_app", `no app named "${id}"`, "call list_apps to see available apps");
-    if (!canAccessApp(principal, app)) {
-      return fail("forbidden", `you don't have access to app "${id}"`, "this token is scoped to specific repo owners");
-    }
     return app;
   };
   const isResult = (x: App | CallToolResult): x is CallToolResult => "content" in x;
 
-  const previewOwnedByPrincipal = (previewId: string): CallToolResult | null => {
-    const appId = engine.appIdFor(previewId);
-    if (!appId) return fail("unknown_preview", `no active preview "${previewId}"`);
-    // Compare/migration reference panes are public by construction and run under
-    // a synthetic app id that is never in apps.yaml — the one legitimate miss.
-    // Public to VIEW is not the same as drivable: scope it to the repo it booted
-    // from, so a token scoped to another owner can't read its build logs or drive
-    // it. (An against.worktree reference has no repo and is admin-gated already.)
-    if (engine.isReference(previewId)) {
-      const refApp = engine.appFor(previewId);
-      if (isAdmin(principal) || (refApp && canAccessApp(principal, refApp))) return null;
-      return fail(
-        "forbidden",
-        `you don't have access to preview "${previewId}"`,
-        "this reference pane belongs to a repo owner this token isn't scoped to",
-      );
-    }
-    const app = apps.find((a) => a.id === appId);
-    // Deny by DEFAULT on a miss — EXCEPT for admins. apps.yaml is hot-reloaded, so
-    // deleting an app while its preview runs orphans it; denying everyone left the
-    // devices booted against maxTotalDevices with no MCP way to reclaim them.
-    // Skipping the check entirely let any valid token drive `ui` / `screenshot` /
-    // `logs` / `stop_preview` on such a preview.
-    if (!app && isAdmin(principal)) return null;
-    if (!app || !canAccessApp(principal, app)) {
-      return fail(
-        "forbidden",
-        `you don't have access to preview "${previewId}"`,
-        "this token is scoped to specific repo owners; call list_apps to see what you can reach",
-      );
-    }
-    return null;
-  };
+  /**
+   * A live preview, or the failure to hand back. Existence is the whole check:
+   * one operator owns every preview on this machine, so there is nobody to
+   * scope a running preview against — including an orphaned one whose app was
+   * removed from apps.yaml while it ran, which must stay reachable or its
+   * devices are stuck against maxTotalDevices with no MCP way to reclaim them.
+   */
+  const requireLivePreview = (previewId: string): CallToolResult | null =>
+    engine.appIdFor(previewId) ? null : fail("unknown_preview", `no active preview "${previewId}"`);
 
   server.registerTool(
     "list_apps",
@@ -263,9 +235,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     },
     () =>
       audited("list_apps", {}, () => {
-        const visible = visibleApps(principal, apps);
         return ok({
-          apps: visible.map((a) => ({
+          apps: apps.map((a) => ({
             id: a.id,
             repo: a.repo ?? null,
             path: a.path ?? null,
@@ -276,15 +247,14 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           // Empty-state onboarding (PLAN §6): tell the agent exactly what to ask
           // the user next. Relay `nextStep` to the user verbatim. Local checkout
           // beats every credential flow, so it is always the first suggestion.
-          ...(visible.length === 0
+          ...(apps.length === 0
             ? {
                 onboarding: {
                   state: "no_apps",
                   host: deckhandHost(),
-                  nextStep: isAdmin(principal)
-                    ? `No apps are registered yet. ${localCheckoutHint(deckhandHost(), null, null)} ` +
-                      "If there is NO local checkout on this machine, DON'T silently fall back to git — ask the user to choose: (a) give you the path to a local checkout (still local mode — preferred), or (b) preview from git, where deckhand fetches a pushed branch/PR from GitHub itself (the repo need not be on the machine, but it builds what's PUSHED, not local edits). A GitHub credential/PAT is NEVER needed for local mode — don't ask about connecting GitHub unless the user picks git; only then does add_app deal with read access (and only if no ambient credential already works). Explain that choice, then act: a path → `deckhand app add <id> --path <dir>`; git → call add_app with the repo. If a chosen git repo is private and no credential works, add_app returns a one-time setup link — relay it; never ask for the token in chat."
-                    : "No apps are registered yet, and this token can only run previews, not add apps. Ask the user to have an admin register an app (an admin token can call add_app).",
+                  nextStep:
+                    `No apps are registered yet. ${localCheckoutHint(deckhandHost(), null, null)} ` +
+                    "If there is NO local checkout on this machine, DON'T silently fall back to git — ask the user to choose: (a) give you the path to a local checkout (still local mode — preferred), or (b) preview from git, where deckhand fetches a pushed branch/PR from GitHub itself (the repo need not be on the machine, but it builds what's PUSHED, not local edits). A GitHub credential/PAT is NEVER needed for local mode — don't ask about connecting GitHub unless the user picks git; only then does add_app deal with read access (and only if no ambient credential already works). Explain that choice, then act: a path → `deckhand app add <id> --path <dir>`; git → call add_app with the repo. If a chosen git repo is private and no credential works, add_app returns a one-time setup link — relay it; never ask for the token in chat.",
                 },
               }
             : {}),
@@ -395,7 +365,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       // this lookup structurally misses it — and the old hint ("call start_preview")
       // then sent the agent to boot a SECOND set of simulators under a second
       // share link, invisible in the viewer, which streams the pane. Hand over the
-      // pane's previewId instead: panes ARE drivable (see previewOwnedByPrincipal).
+      // pane's previewId instead: panes ARE drivable (see requireLivePreview).
       const panes = engine.referencePanesFor(resolved);
       if (panes.length) {
         return fail(
@@ -716,12 +686,6 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       spec = source === "git" ? parseRefSpec({ ref: base.defaultBranch }) : undefined;
       key = `app:${resolved.id}`;
     } else if (a.worktree) {
-      // Admin only: an arbitrary local path has no owner to scope against, and
-      // booting it runs that checkout's install/build scripts as the deckhand
-      // user. That is exactly the capability requireAdmin() guards on add_app —
-      // a member token must not reach it through the side door.
-      const denied = requireAdmin();
-      if (denied) return denied;
       if (!a.worktree.startsWith("/")) return fail("bad_request", "against.worktree must be an absolute path");
       base = { ...workingApp, path: a.worktree, repo: undefined };
       source = "local";
@@ -734,34 +698,20 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           'pass against: { repo, ref } — e.g. ref: "main".',
         );
       }
-      // Owner scoping applies to an arbitrary repo too: check the synthetic app
-      // the reference would boot, or a token scoped to one org could clone and
-      // build any repo deckhand's credential can read.
-      //
-      // But `canAccessApp` returns TRUE for a principal with no `owners` — that
-      // is correct for registered apps (an unscoped member may use them all) and
-      // completely wrong here, where the point is reaching PAST the registered
-      // set. Cloning an arbitrary repo runs its install and build scripts as the
-      // deckhand user; that is the same capability `requireAdmin()` guards on the
-      // worktree branch two cases up, so an unscoped member must not get it for
-      // free just by leaving `owners` unset.
-      const probe: App = { ...workingApp, repo: a.repo, path: undefined };
-      const scoped = (principal.owners?.length ?? 0) > 0;
-      if (!isAdmin(principal) && !scoped) {
-        return fail(
-          "forbidden",
-          "building an arbitrary repo needs an owner-scoped or admin token",
-          "use alongside: [{ app }] for a registered app, or ask an admin to scope this token to the repo's owner.",
-        );
+      // An arbitrary repo reaches PAST the registered set and runs that repo's
+      // install and build scripts here — the widest thing a caller can ask for,
+      // and gated by nothing but the token, since there is no lesser token to
+      // hold back. What bounds it is the repo string's HOST: that is who git
+      // hands deckhand's credential to when the clone gets a 401, and this
+      // string came from the model, not from apps.yaml. Parse it HERE, before a
+      // worktree or a credential exists — the engine would otherwise reach the
+      // clone with the host already pinned.
+      try {
+        parseRepo(a.repo);
+      } catch (e) {
+        return fail("bad_repo", e instanceof Error ? e.message : String(e), "use a github.com repo, or register it as an app first.");
       }
-      if (!canAccessApp(principal, probe)) {
-        return fail(
-          "forbidden",
-          `you don't have access to repo "${a.repo}"`,
-          "this token is scoped to specific repo owners",
-        );
-      }
-      base = probe;
+      base = { ...workingApp, repo: a.repo, path: undefined };
       source = "git";
       spec = parseRefSpec({ ref: a.ref });
       key = `repo:${a.repo}@${a.ref}`;
@@ -848,7 +798,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       audited("parity_set", args, () => {
         const id = resolvePreviewId(args);
         if (typeof id !== "string") return id;
-        const denied = previewOwnedByPrincipal(id);
+        const denied = requireLivePreview(id);
         if (denied) return denied;
         const counts = engine.setCompareItem(id, { item: args.item, verdict: args.verdict, note: args.note });
         return ok({ counts });
@@ -870,7 +820,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       audited("parity_status", args, () => {
         const id = resolvePreviewId(args);
         if (typeof id !== "string") return id;
-        const denied = previewOwnedByPrincipal(id);
+        const denied = requireLivePreview(id);
         if (denied) return denied;
         const status = engine.compareStatus(id);
         if (!status) return fail("no_checklist", "no parity checklist on this preview", "seed it with start_preview's `items`");
@@ -893,7 +843,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       audited("restart_preview", args, () => {
         const id = resolvePreviewId(args);
         if (typeof id !== "string") return id;
-        const denied = previewOwnedByPrincipal(id);
+        const denied = requireLivePreview(id);
         if (denied) return denied;
         const result = engine.restartPreview(id);
         return ok({
@@ -918,7 +868,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       audited("preview_status", args, () => {
         const id = resolvePreviewId(args);
         if (typeof id !== "string") return id;
-        const denied = previewOwnedByPrincipal(id);
+        const denied = requireLivePreview(id);
         if (denied) return denied;
         const status = engine.getStatus(id);
         if (!status) return fail("unknown_preview", `no active preview "${id}"`);
@@ -957,7 +907,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         // cannot be followed with what the reader has is worse than none (CONSTITUTION §1).
         const id = resolvePreviewId(args);
         if (typeof id !== "string") return id;
-        const denied = previewOwnedByPrincipal(id);
+        const denied = requireLivePreview(id);
         if (denied) return denied;
         const stopped = await engine.stopPreview(id);
         return stopped ? ok({ stopped: true }) : fail("unknown_preview", `no active preview "${id}"`);
@@ -980,7 +930,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       audited("stop_device", args, async () => {
         const id = resolvePreviewId(args);
         if (typeof id !== "string") return id;
-        const denied = previewOwnedByPrincipal(id);
+        const denied = requireLivePreview(id);
         if (denied) return denied;
         const removed = await engine.removeDevices(id, [args.deviceId]);
         const left = engine.getStatus(id, { touch: false })?.devices ?? [];
@@ -1001,7 +951,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     },
     (args) =>
       audited("screenshot", args, async () => {
-        const denied = previewOwnedByPrincipal(args.previewId);
+        const denied = requireLivePreview(args.previewId);
         if (denied) return denied;
         const png = await engine.screenshot(args.previewId, args.deviceId);
         return { content: [{ type: "image", data: png.toString("base64"), mimeType: "image/png" }] };
@@ -1027,7 +977,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     },
     (args) =>
       audited("describe", args, async () => {
-        const denied = previewOwnedByPrincipal(args.previewId);
+        const denied = requireLivePreview(args.previewId);
         if (denied) return denied;
         const tree = await engine.describe(args.previewId, args.deviceId, {
           source: args.source,
@@ -1054,7 +1004,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     },
     (args) =>
       audited("ui", args, async () => {
-        const denied = previewOwnedByPrincipal(args.previewId);
+        const denied = requireLivePreview(args.previewId);
         if (denied) return denied;
         const action = args.action as UiAction;
         // A failed verifier throws, and `audited` turns it into an error result — so the
@@ -1110,7 +1060,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       audited("logs", args, () => {
         const id = resolvePreviewId(args);
         if (typeof id !== "string") return id;
-        const denied = previewOwnedByPrincipal(id);
+        const denied = requireLivePreview(id);
         if (denied) return denied;
         const source = args.source ?? "build";
         const log = engine.logs(id, args.deviceId, source, args.tailLines ?? 200);
@@ -1149,7 +1099,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       audited("set_pin", args, () => {
         const id = resolvePreviewId(args);
         if (typeof id !== "string") return id;
-        const denied = previewOwnedByPrincipal(id);
+        const denied = requireLivePreview(id);
         if (denied) return denied;
         const appId = engine.appIdFor(id);
         if (!appId) return fail("unknown_preview", `no active preview "${id}"`);
@@ -1192,7 +1142,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       audited("start_test_run", args, () => {
         const id = resolvePreviewId(args);
         if (typeof id !== "string") return id;
-        const denied = previewOwnedByPrincipal(id);
+        const denied = requireLivePreview(id);
         if (denied) return denied;
         const { runId } = engine.startTestRun(id, args.title, args.steps ?? []);
         return ok({
@@ -1235,7 +1185,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       audited("update_test_run", args, () => {
         const id = resolvePreviewId(args);
         if (typeof id !== "string") return id;
-        const denied = previewOwnedByPrincipal(id);
+        const denied = requireLivePreview(id);
         if (denied) return denied;
         // An update that updates nothing used to answer `ok: {updated: true}` — the exact shape
         // of a success. That is principle 3: an empty result and a failed lookup must not be the
@@ -1327,7 +1277,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       audited("clear_test_run", args, () => {
         const id = resolvePreviewId(args);
         if (typeof id !== "string") return id;
-        const denied = previewOwnedByPrincipal(id);
+        const denied = requireLivePreview(id);
         if (denied) return denied;
         const cleared = engine.clearTestRun(id);
         return ok({
@@ -1356,7 +1306,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       audited("finish_test_run", args, () => {
         const id = resolvePreviewId(args);
         if (typeof id !== "string") return id;
-        const denied = previewOwnedByPrincipal(id);
+        const denied = requireLivePreview(id);
         if (denied) return denied;
         // Read the tallies BEFORE finishing — finishing settles any running step, which would
         // hide the very mismatch we are checking for.
@@ -1405,10 +1355,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       }),
   );
 
-  // --- admin: app registration (the onboarding state machine, PLAN §6) -------
-
-  const requireAdmin = (): CallToolResult | null =>
-    isAdmin(principal) ? null : fail("forbidden", "this action requires an admin token", "ask an admin to register the app");
+  // --- app registration (the onboarding state machine, PLAN §6) -------------
 
   /** Default a kebab-case app id from a repo name. */
   const defaultAppId = (name: string): string =>
@@ -1437,9 +1384,6 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     },
     (args) =>
       audited("add_app", args, async () => {
-        const denied = requireAdmin();
-        if (denied) return denied;
-
         let owner: string;
         let name: string;
         try {
@@ -1559,8 +1503,6 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     },
     (args) =>
       audited("remove_app", args, () => {
-        const denied = requireAdmin();
-        if (denied) return denied;
         const idx = apps.findIndex((a) => a.id === args.id);
         if (idx < 0) return fail("unknown_app", `no app named "${args.id}"`, "call list_apps to see registered apps");
         // Deleting the checkout under a live preview pulls the tree out from

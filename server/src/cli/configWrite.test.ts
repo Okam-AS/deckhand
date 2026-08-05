@@ -3,7 +3,15 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { addTokenEntry, addAppEntry, buildInitConfig, parseEnvAssignment, generateToken, writeApps } from "./configWrite.ts";
+import {
+  addTokenEntry,
+  removeTokenEntry,
+  addAppEntry,
+  buildInitConfig,
+  parseEnvAssignment,
+  generateToken,
+  writeApps,
+} from "./configWrite.ts";
 import type { App, TokenEntry } from "../config.ts";
 
 describe("generateToken", () => {
@@ -14,22 +22,47 @@ describe("generateToken", () => {
 });
 
 describe("addTokenEntry", () => {
-  it("appends a valid token with role and owners", () => {
-    const { tokens, created } = addTokenEntry([], { name: "kari", role: "member", owners: ["ainfrastructure"] });
+  it("appends a valid token", () => {
+    const { tokens, created } = addTokenEntry([], { name: "kari" });
     assert.equal(tokens.length, 1);
     assert.equal(created.name, "kari");
-    assert.deepEqual(created.owners, ["ainfrastructure"]);
     assert.match(created.token, /^[0-9a-f]{64}$/);
   });
 
-  it("omits an empty owners list", () => {
-    const { created } = addTokenEntry([], { name: "a", role: "admin", owners: [] });
-    assert.equal(created.owners, undefined);
+  it("writes a name and a token and nothing else", () => {
+    // tokens.yaml is the file a permission field would creep back into.
+    const { created } = addTokenEntry([], { name: "a" });
+    assert.deepEqual(Object.keys(created).sort(), ["name", "token"]);
   });
 
   it("rejects a duplicate name", () => {
-    const existing: TokenEntry[] = [{ name: "a", role: "admin", token: "0".repeat(64) }];
-    assert.throws(() => addTokenEntry(existing, { name: "a", role: "member" }), /already exists/);
+    const existing: TokenEntry[] = [{ name: "a", token: "0".repeat(64) }];
+    assert.throws(() => addTokenEntry(existing, { name: "a" }), /already exists/);
+  });
+});
+
+describe("removeTokenEntry", () => {
+  it("drops the named entry and leaves the rest", () => {
+    const tokens: TokenEntry[] = [
+      { name: "a", token: "0".repeat(64) },
+      { name: "b", token: "1".repeat(64) },
+    ];
+    const { tokens: next, removed } = removeTokenEntry(tokens, "a");
+    assert.equal(removed.name, "a");
+    assert.deepEqual(next.map((t) => t.name), ["b"]);
+  });
+
+  it("names the mistake instead of silently removing nothing", () => {
+    // An empty result and a failed lookup must not be the same value (CONSTITUTION 3):
+    // "revoked" is exactly the claim a caller must not get wrong.
+    assert.throws(() => removeTokenEntry([{ name: "a", token: "0".repeat(64) }], "nope"), /no token named "nope"/);
+  });
+
+  it("lets the last token go", () => {
+    // Locking yourself out is a legitimate thing to do deliberately — `deckhand token`
+    // mints a new one. Refusing would leave a leaked credential live with no way back.
+    const { tokens: next } = removeTokenEntry([{ name: "only", token: "0".repeat(64) }], "only");
+    assert.deepEqual(next, []);
   });
 });
 

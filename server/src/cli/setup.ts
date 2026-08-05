@@ -221,17 +221,23 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
       ok(`wrote ${paths.config()}`);
     }
 
-    step("Admin token");
+    step("Connector token");
     const list = deckhandCli(["token", "list"]);
-    if (list.code === 0 && /admin/.test(list.out)) {
-      ok("an admin token already exists — `deckhand token url <name>` prints its connector URL");
+    // `token list` is NOT silent on an empty install — it prints "no tokens yet — create one
+    // with `deckhand token`", by design, because silence reads as a broken command. So a
+    // non-empty stdout is not the existence test: that version took the "already exists"
+    // branch on every fresh install, minted nothing, and ignored --token. Match the empty
+    // state itself. (The check before that grepped for the word "admin", which stopped
+    // meaning anything when roles went away — same class, twice.)
+    if (list.code === 0 && !/no tokens yet/.test(list.out)) {
+      ok("a token already exists — `deckhand token` prints its connector URL");
     } else {
       const name = opts.tokenName ?? process.env.USER ?? "me";
-      const added = deckhandCli(["token", "add", name, "--role", "admin"]);
+      const added = deckhandCli(["token", "add", name]);
       if (added.code !== 0) throw new SetupError(`could not create a token: ${added.out}`, "Fix the above, then re-run.");
       // Only the name. The URL is a credential and belongs in exactly one place: the single
       // step at the end, which the user is about to run deliberately.
-      say(`  ✓ created an admin token for "${opts.tokenName ?? process.env.USER ?? "me"}"`);
+      say(`  ✓ created a token for "${name}"`);
     }
 
     if (!opts.noServices) {

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createServer, request as httpRequest, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import express from "express";
-import { createShareRouter, createHostWebProxyMiddleware, createPinGate } from "./proxy.ts";
+import { createShareRouter, createHostWebProxyMiddleware, createPinGate, type PinGate } from "./proxy.ts";
 import { PreviewError, type PreviewEngine } from "../engine/preview.ts";
 import { hashPassword, type PasswordHash } from "./shares.ts";
 
@@ -665,5 +665,158 @@ describe("unlock answers with the state", () => {
     assert.equal(res.status, 401);
     const body = (await res.json()) as Record<string, unknown>;
     assert.equal(body.state, undefined, "no state for a wrong PIN");
+  });
+});
+
+/**
+ * The PIN throttle is the only thing standing between a 4-digit share PIN and
+ * whoever has the URL — and a share grants device INPUT, not just video.
+ *
+ * The bug these pin down: on lockout the gate set `lockedUntil` AND reset
+ * `fails` to 0, so waiting out one 30-second lock handed back a full fresh
+ * budget. That is a self-renewing ~600 guesses an hour against a 10,000-key
+ * space, i.e. the whole space inside a day, with nothing to see in any log.
+ */
+describe("pin gate throttle", () => {
+  const SHARE = "throttled-share";
+  const gateEngine = {
+    pinInfoForShare: (id: string) => (id === SHARE ? { required: true, length: 4 } : { required: false, length: 0 }),
+    pinRecordForShare: (id: string) => (id === SHARE ? { ...hashPassword("1234"), length: 4 } : null),
+    verifyPin: (id: string, pin: string) => id === SHARE && pin === "1234",
+  } as unknown as PreviewEngine;
+
+  /** A gate whose clock the test drives. maxFails/lockMs are the production defaults. */
+  const gate = (clock: { t: number }) => createPinGate(gateEngine, "test-secret", { now: () => clock.t });
+
+  /** A successful attempt carries no lock; narrowing it here keeps the assertions readable. */
+  const lockOf = (r: ReturnType<PinGate["attempt"]>): number => (r.ok ? 0 : r.lockedMs);
+
+  const failUntilLocked = (g: ReturnType<typeof createPinGate>): number => {
+    for (let i = 0; i < 5; i++) {
+      const locked = lockOf(g.attempt(SHARE, "0000"));
+      if (locked > 0) return locked;
+    }
+    throw new Error("never locked");
+  };
+
+  it("does not restore the attempt budget when a lock expires", () => {
+    const clock = { t: 1_000_000 };
+    const g = gate(clock);
+    const firstLock = failUntilLocked(g);
+    assert.ok(firstLock > 0, "five wrong PINs lock the share");
+
+    clock.t += firstLock + 1; // wait it out
+    assert.ok(lockOf(g.attempt(SHARE, "0000")) > 0, "one further wrong PIN re-locks immediately — no fresh five-guess budget");
+  });
+
+  it("escalates the lock, so guessing gets slower rather than staying free", () => {
+    const clock = { t: 2_000_000 };
+    const g = gate(clock);
+    const first = failUntilLocked(g);
+
+    clock.t += first + 1;
+    const second = lockOf(g.attempt(SHARE, "0000"));
+    assert.ok(second > first, `second lock (${second}ms) must exceed the first (${first}ms)`);
+
+    clock.t += second + 1;
+    const third = lockOf(g.attempt(SHARE, "0000"));
+    assert.ok(third > second, `third lock (${third}ms) must exceed the second (${second}ms)`);
+  });
+
+  it("still lets the right PIN through, and clears the record when it does", () => {
+    const clock = { t: 3_000_000 };
+    const g = gate(clock);
+    g.attempt(SHARE, "0000");
+    g.attempt(SHARE, "0000");
+    const ok = g.attempt(SHARE, "1234");
+    assert.equal(ok.ok, true);
+    assert.ok(ok.cookie, "and hands back the unlock cookie");
+    // A correct PIN wipes the counter: the next wrong guess starts a fresh budget.
+    for (let i = 0; i < 4; i++) assert.equal(lockOf(g.attempt(SHARE, "0000")), 0);
+  });
+
+  it("forgives after a long quiet spell, so a fumbling colleague is not locked out for the week", () => {
+    // The escalation has to decay or it is a one-way ratchet: `lockouts` only cleared on a
+    // CORRECT pin, and the server is a LaunchAgent that runs for weeks. Someone who mistypes
+    // across an afternoon reaches the 15-minute cap with a one-attempt budget and stays there —
+    // and their correct PIN is refused for the whole window. An hour of silence is far longer
+    // than any brute-force run can afford and far shorter than a working day.
+    const clock = { t: 5_000_000 };
+    const g = gate(clock);
+    let lock = 0;
+    for (let round = 0; round < 4; round++) {
+      lock = failUntilLocked(g);
+      clock.t += lock + 1;
+    }
+    assert.ok(lock >= 240_000, `escalation reached ${lock}ms before the quiet spell`);
+
+    clock.t += 60 * 60_000 + 1; // an hour of nobody trying
+    assert.equal(lockOf(g.attempt(SHARE, "0000")), 0, "the first wrong PIN after the quiet spell must not re-lock");
+    const relock = failUntilLocked(g);
+    assert.equal(relock, 30_000, "and the budget and the lock are back to their starting size");
+  });
+
+  it("forgets stale failures too, not just stale lockouts", () => {
+    // The sibling of the bug above, and it survived the first fix: `forgettable` required
+    // `lockedUntil > 0`, so an entry that accumulated failures WITHOUT ever locking (four
+    // typos, budget five) aged out never. A month later the next single mistake locked the
+    // share. Four-fifths of a lockout is not a state anyone should carry for a month.
+    const clock = { t: 6_000_000 };
+    const g = gate(clock);
+    for (let i = 0; i < 4; i++) assert.equal(lockOf(g.attempt(SHARE, "0000")), 0, "four misses do not lock");
+
+    clock.t += 60 * 60_000 + 1; // nobody touches this share for an hour
+    for (let i = 0; i < 4; i++) {
+      assert.equal(lockOf(g.attempt(SHARE, "0000")), 0, `miss ${i + 1} after the quiet spell must not lock`);
+    }
+    assert.equal(lockOf(g.attempt(SHARE, "0000")), 30_000, "the fifth does, from a full budget");
+  });
+
+  it("makes waiting out a lock cost the cap, not a fresh budget", () => {
+    // Strategy A for an attacker who knows the URL: guess until locked, sit out exactly the
+    // lock, repeat. That path never goes quiet, so forgiveness never applies and the escalation
+    // cap governs: ~4 guesses an hour. THIS is where the ~96/day figure comes from — not from
+    // THROTTLE_FORGET_MS, which an attacker on this path never reaches.
+    const clock = { t: 0 };
+    const g = createPinGate({ ...gateEngine, verifyPin: () => false } as unknown as PreviewEngine, "test-secret", {
+      now: () => clock.t,
+    });
+    const DAY = 24 * 60 * 60_000;
+    let guesses = 0;
+    while (clock.t < 7 * DAY) {
+      const r = g.attempt(SHARE, "0000");
+      guesses++;
+      if (!r.ok && r.lockedMs > 0) clock.t += r.lockedMs + 1;
+    }
+    assert.ok(guesses / 7 < 150, `${(guesses / 7).toFixed(0)}/day on the wait-out-the-lock path`);
+  });
+
+  it("makes a FULL budget cost half an hour of total silence, whatever the lock was", () => {
+    // Strategy B, and the better one: go quiet until the entry is forgotten, then spend a fresh
+    // five. That is worth ~120/day at an hour of forgiveness and ~7 200/day at a minute — so the
+    // rate test above cannot see a shortened THROTTLE_FORGET_MS at all (its attacker always
+    // retries the instant a lock expires, and is therefore never quiet). This one binds the
+    // constant directly: no amount of silence under half an hour may hand back the budget.
+    const clock = { t: 0 };
+    const g = gate(clock);
+    failUntilLocked(g);
+
+    // Twenty-nine minutes of silence: still one attempt, still an immediate re-lock.
+    clock.t += 29 * 60_000;
+    assert.ok(lockOf(g.attempt(SHARE, "0000")) > 0, "under half an hour must not restore the budget");
+
+    // Properly quiet — measured from THAT attempt, which reset the clock by re-locking.
+    clock.t += 121 * 60_000;
+    for (let i = 0; i < 4; i++) {
+      assert.equal(lockOf(g.attempt(SHARE, "0000")), 0, `miss ${i + 1} of a restored budget must not lock`);
+    }
+    assert.equal(lockOf(g.attempt(SHARE, "0000")), 30_000, "and the fifth locks from the start of the ladder");
+  });
+
+  it("keeps ignoring a share that has no PIN", () => {
+    const g = gate({ t: 4_000_000 });
+    const r = g.attempt("no-such-share", "0000");
+    assert.equal(r.ok, false);
+    assert.equal(lockOf(r), 0, "an unknown share must not mint a throttle entry");
   });
 });

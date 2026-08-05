@@ -39,13 +39,13 @@ implementation:
 | NOT WebRTC/TURN, NOT SimDeck | An earlier revision of this plan used SimDeck + WebRTC relayed through Cloudflare TURN. **Rejected (2026-07-09):** TURN costs $0.05/GB and adds a credential/relay subsystem; SimDeck removed its WS transport (v0.1.31) and its display bridge rides private CoreSimulator APIs (unhedgeable risk against future Xcode); most of the predecessor project's operational scar tissue (display-heal ladder, daemon port cleanup, token discovery) was SimDeck-specific pathology. WS-carried H.264 has none of these problems: free, and exactly as firewall-proof as claude.ai itself. `docs/reference/simdeck-notes.md` is retained as historical context only. |
 | App types (day one) | React Native (Expo **and** bare) + NativeScript. Flutter / plain-Xcode later. **Amended (2026-07-15): `web`.** A fourth app type hosts a **frontend web project** (a Vite dev server). It is unlike the mobile types: no device/simulator, **local-`path` only** (registered on the machine via `deckhand app add <id> --path <dir> --type web`, never over MCP), and the "preview" IS the running dev server — `start_preview` starts `npm run dev` as a long-lived process (reusing `DevProcessManager`, like NativeScript livesync) on a loopback port and reverse-proxies it through the share URL. Ready = the dev server answers HTTP 200 (no first-frame/screenshot; `screenshot` returns a clear error for web). The dev server is started with Vite's `--base=/s/<shareId>/web/ --host 127.0.0.1 --port <p>` so every asset URL (and HMR) sits under the share path. Vite-first; Next.js/others and git-based web previews are follow-ups. |
 | Build strategy | Build locally on the mini: git worktree → install deps → native build. No CI artifacts. |
-| Local dev mode + daily-loop contract | **Amended (2026-07-15):** an app may declare a local `path` (instead of, or alongside, `repo`). Local previews build **in place** in the developer's working copy — no worktree, no push — and NativeScript runs as a long-lived **livesync** process (`ns run --no-hmr`, watch on, HMR off — NS HMR is unreliable) so file saves reach the running sim with no tool calls. The loop rides in the tools themselves: `start_preview` is **idempotent** per (app, source, ref), share ids are **stable per app** (persisted; a bookmarked viewer URL never rots), and `restart_preview` rebuilds in place (git: fetch new tip + reset worktree; local: re-run) on the same booted devices. Consequence: named branches/PRs now **always fetch** (the old local-first shortcut served stale commits; SHAs remain local-first). Local previews trade snapshot determinism for the loop — the build mirrors whatever is on disk; the source dir is borrowed, never wiped (`npm ci` guarded) and never removed. Local apps are registered on the machine itself (`deckhand app add <id> --path <dir>`), not over MCP; owner-scoped tokens cannot touch repo-less apps. |
+| Local dev mode + daily-loop contract | **Amended (2026-07-15):** an app may declare a local `path` (instead of, or alongside, `repo`). Local previews build **in place** in the developer's working copy — no worktree, no push — and NativeScript runs as a long-lived **livesync** process (`ns run --no-hmr`, watch on, HMR off — NS HMR is unreliable) so file saves reach the running sim with no tool calls. The loop rides in the tools themselves: `start_preview` is **idempotent** per (app, source, ref), share ids are **stable per app** (persisted; a bookmarked viewer URL never rots), and `restart_preview` rebuilds in place (git: fetch new tip + reset worktree; local: re-run) on the same booted devices. Consequence: named branches/PRs now **always fetch** (the old local-first shortcut served stale commits; SHAs remain local-first). Local previews trade snapshot determinism for the loop — the build mirrors whatever is on disk; the source dir is borrowed, never wiped (`npm ci` guarded) and never removed. Local apps are registered on the machine itself (`deckhand app add <id> --path <dir>`), not over MCP. |
 | Tunnel | `cloudflared` **named tunnel** with a stable hostname on the owner's Cloudflare-managed domain. Deckhand binds `127.0.0.1` only. |
-| MCP auth (v1) | Per-person secret token in the URL path: `/mcp/<token>`. Roles `admin`/`member` in `tokens.yaml`. No OAuth yet — but isolate auth in one module so OAuth 2.1 (for Claude Enterprise org-wide connectors) can be added later without touching anything else. |
+| MCP auth (v1) | A secret token in the URL path: `/mcp/<token>`, listed in `tokens.yaml`. Every token is the operator's — one install serves one person (CONSTITUTION §"Who it is for"), so authenticating IS authorizing and there are no roles. More than one entry means more than one CLIENT. No OAuth: an org-wide connector would mean many people on one Mac's six device slots, which is not what deckhand is. |
 | GitHub access | **Minimal GitHub App** — permissions `Contents: Read-only` (optionally `Pull requests: Read-only`), **no webhooks, no OAuth, no callback URLs**. One App ID + private key PEM on the mini. Each repo org installs the app and picks repos. Hourly installation tokens, injected into git via ephemeral `GIT_ASKPASS`. The set of app installations *is* the repo allowlist. **Amended (2026-07-10):** a **fine-grained PAT** (`Contents: Read-only`, selected repos) is an equally supported auth mode — same tokenResolver seam, far less setup, and the mode agent-led onboarding (§6) walks new users through. The App remains the recommended path for multi-org installs. **Amended (2026-07-15): the access ladder.** Asking a user for a PAT when the machine can already read the repo is bad onboarding, so credentials resolve in order: PAT file → GitHub App → (if `githubAmbient`, default on) the deckhand user's **gh CLI session** (`gh auth token`, in-memory, same `GIT_ASKPASS` handling) → anonymous git (public repos; gated on `allowPublicRepos`) → the one-time setup URL as **last resort**. Explicit credentials always shadow ambient ones, so an App's installation set remains the allowlist. Before any of this, onboarding steers to a **local checkout** when one exists (§6). Ambient tradeoff recorded in §11.4. |
-| Multi-org / multi-dev | The mini serves ~3 different repo orgs and several developers. Tokens support optional `owners: [...]` scoping. Fork PRs are rejected by default (per-app opt-in). |
+| Multi-org / multi-dev | **Dropped (2026-08-05.)** One install, one operator, however many repo orgs their credential reaches. A second developer runs their own deckhand; a colleague who only needs to WATCH uses the share link, which needs no token. |
 | Viewer | One page (ours — not serve-sim's preview UI), multiple devices side by side, live video + **touch control on** (not view-only), public or password-protected share links. |
-| Setup story | Setup on the mini will be performed **by an AI over SSH**. `AGENTS.md`/`CLAUDE.md` must be an agent runbook; `deckhand init` must be idempotent/resumable with non-interactive flags; `deckhand doctor` must prove the install works end to end. Target: only 3 human questions (GitHub App ID + PEM, tunnel hostname, MCP token holders). |
+| Setup story | Setup on the mini will be performed **by an AI over SSH**. `AGENTS.md`/`CLAUDE.md` must be an agent runbook; `deckhand init` must be idempotent/resumable with non-interactive flags; `deckhand doctor` must prove the install works end to end. Target: only 3 human questions (GitHub App ID + PEM, tunnel hostname, the token name). |
 | State | No database. `config.yaml`, `apps.yaml`, `tokens.yaml` + a small `state.json` (atomic writes) for restart recovery. Previews are ephemeral. |
 | Host | Apple Silicon Mac mini (serve-sim's helper binary is arm64-only). |
 
@@ -60,7 +60,7 @@ claude.ai / Claude Code / Routines / any MCP client        share-link viewers (a
                                │
 ┌──────────────────────────────▼─── deckhand server (Node, 127.0.0.1:4300) ────────────────┐
 │                                                                                           │
-│  /mcp/<token>              MCP Streamable HTTP (stateless), role-gated tools             │
+│  /mcp/<token>              MCP Streamable HTTP (stateless), token-gated tools            │
 │  /s/<shareId>              viewer page (our built static assets + preview metadata)       │
 │  /s/<shareId>/dev/<id>/*   scoped proxy → that device's streaming helper                  │
 │                            (video WS / MJPEG, input WS — nothing else)                    │
@@ -97,7 +97,7 @@ deckhand/
 │   │   ├── cli.ts               # `deckhand` CLI entry: init, doctor, serve, token, app, env
 │   │   ├── server.ts            # express app wiring: /mcp, /s, health
 │   │   ├── config.ts            # load/validate config.yaml, apps.yaml, tokens.yaml (zod)
-│   │   ├── auth.ts              # token lookup (sha256 map, timingSafeEqual), roles, owner scoping
+│   │   ├── auth.ts              # token lookup (sha256 map, timingSafeEqual) → the operator
 │   │   ├── audit.ts             # append-only JSONL audit log
 │   │   ├── mcp/
 │   │   │   ├── index.ts         # McpServer + StreamableHTTPServerTransport (stateless)
@@ -212,11 +212,8 @@ the native build env).
 ```yaml
 tokens:
   - name: audun
-    role: admin                   # admin: everything. member: preview lifecycle only.
-    token: <64 hex chars>         # generated by `deckhand token add`
-  - name: kari
-    role: member
-    owners: [ainfrastructure]     # optional: restrict to apps under these repo owners
+    token: <64 hex chars>         # generated by `deckhand token`
+  - name: audun-laptop            # a second CLIENT, not a second person
     token: <64 hex chars>
 ```
 
@@ -267,23 +264,23 @@ agent (from `list_apps` empty state) asks which repos → `add_app` → agent re
 PAT instructions + setup link → user completes it → `add_app` re-run auto-detects type,
 doctor-builds, reports `ready` → agent offers the first `start_preview`.
 
-| Tool | Role | Input → Output |
-|---|---|---|
-| `list_apps` | member | → apps with `{id, repo, type, defaultBranch, lastDoctor}` |
-| `list_devices` | member | → available iOS runtimes + device types (`simctl list -j`), Android API levels/system images (P2), connected PHYSICAL devices (`physical`: paired iOS hardware via `devicectl`, adb-connected Android — detection only, `server/src/devices/physical.ts`; `targetable` says whether start_preview can build to them, false until a later phase; `errors` marks a FAILED scan as distinct from a zero-device one), current capacity vs `limits` |
-| `start_preview` | member | `{app, ref?, pr?, devices?: [{platform: "ios"\|"android", runtime?, model?}], alongside?: [{app?\|ref?\|worktree?\|repo?}], items?, share: {access: "public"\|"pin", pin?}}` → `{previewId, url, source, alreadyRunning, alongside?, nextStep, devices: [...]}`. **Idempotent**: an equivalent live preview (same app+source(+ref)) is returned as-is with `alreadyRunning: true` — this is also how the agent answers "what's the link?". No ref/pr on a `path` app → local dev mode. Returns immediately; work continues async. **Amended (2026-07-31):** `alongside` puts extra sources on the SAME page — the page is a set of panes, so one link and one PIN cover however many sources. `{}` means the app's registered `migratesFrom`. Each `alongside` entry carries the pane's own `previewId` — panes are drivable, but ONLY by that id: a pane runs under a synthetic app id, so by-app lookups answer `app_is_a_pane` with the pane's previewId instead of a "boot one" hint, and a plain `start_preview` of an app already on a page as a pane returns `duplicatesPane` with a leading warning in `nextStep` (the duplicate's devices are invisible to whoever watches the page). See "One page, several sources" below. |
-| `restart_preview` | member | `{previewId?}` or `{app?}` → rebuild in place on the same booted devices, same shareId/URL. Local: re-run the livesync build (needed after native-level changes; ordinary edits livesync by themselves). Git: fetch the ref's new tip, reset the worktree, rebuild — the post-push step of the loop. |
-| `preview_status` | member | `{previewId?}` or `{app?}` → per-device `{phase, detail, error?, logTail?}`; overall `{ready, url, source}` |
-| `stop_preview` | member | `{previewId|app}` → teardown (devices deleted, worktree removed per policy; a local app's source dir is never touched) |
-| `stop_device` | member | `{previewId|app, deviceId}` → tear down ONE device, leave the rest running and the URL unchanged. The way back from `start_preview` with an extra platform. Refuses the last device — that is `stop_preview`, which also frees the worktree and the share |
-| `screenshot` | member | `{previewId, deviceId}` → MCP image content (PNG). iOS: `xcrun simctl io <udid> screenshot`; Android: `adb -s <serial> exec-out screencap -p` |
-| `describe` | member | `{previewId, deviceId}` → accessibility tree. iOS: serve-sim's ax endpoint (token-efficient, built for agents); Android: `adb shell uiautomator dump` (parsed/compacted) |
-| `ui` | member | `{previewId, deviceId, action}` where action ∈ `{tap {x,y}, type {text}, key {name}, button {name}, home, openUrl {url}}` (normalized 0..1 coords) — validated passthrough. iOS: serve-sim gesture/button/type commands; Android: adb input |
-| `logs` | member | `{previewId, deviceId?, source: "build"\|"metro"\|"app", tailLines?}` → text. `app` taps the streaming helper's forwarded simulator logs (serve-sim event-log) / adb logcat |
-| `add_app` | admin | `{repo, type?}` → clone, detect, **doctor build** on a default device, structured report (`ready` or `missing: [...]`) |
-| `remove_app` | admin | `{id, deleteCheckout?}` |
-| `start_test_run` / `update_test_run` / `finish_test_run` / `clear_test_run` | member | **Amended (2026-07-17):** agent-driven end-to-end testing. The agent (the brain) reports what it's testing — `{title, steps}`, per-step `running`/`passed`/`failed`, then a verdict + summary — surfaced live in the viewer as a calm spinner button + step popover. deckhand records; the agent writes the human report in chat. |
-| `parity_set` / `parity_status` | member | Maintain and read the per-item parity checklist (`pending`/`doing`/`done`/`adjusted`/`regression`). Deliberately NOT merged with the `*_test_run` tools: a test run is one ephemeral pass whose steps go pending → running → passed, parity is a durable per-screen verdict, and the viewer renders them as separate sections precisely because the statuses do not mean the same thing. |
+| Tool | Input → Output |
+|---|---|
+| `list_apps` | → apps with `{id, repo, type, defaultBranch, lastDoctor}` |
+| `list_devices` | → available iOS runtimes + device types (`simctl list -j`), Android API levels/system images (P2), connected PHYSICAL devices (`physical`: paired iOS hardware via `devicectl`, adb-connected Android — detection only, `server/src/devices/physical.ts`; `targetable` says whether start_preview can build to them, false until a later phase; `errors` marks a FAILED scan as distinct from a zero-device one), current capacity vs `limits` |
+| `start_preview` | `{app, ref?, pr?, devices?: [{platform: "ios"\|"android", runtime?, model?}], alongside?: [{app?\|ref?\|worktree?\|repo?}], items?, share: {access: "public"\|"pin", pin?}}` → `{previewId, url, source, alreadyRunning, alongside?, nextStep, devices: [...]}`. **Idempotent**: an equivalent live preview (same app+source(+ref)) is returned as-is with `alreadyRunning: true` — this is also how the agent answers "what's the link?". No ref/pr on a `path` app → local dev mode. Returns immediately; work continues async. **Amended (2026-07-31):** `alongside` puts extra sources on the SAME page — the page is a set of panes, so one link and one PIN cover however many sources. `{}` means the app's registered `migratesFrom`. Each `alongside` entry carries the pane's own `previewId` — panes are drivable, but ONLY by that id: a pane runs under a synthetic app id, so by-app lookups answer `app_is_a_pane` with the pane's previewId instead of a "boot one" hint, and a plain `start_preview` of an app already on a page as a pane returns `duplicatesPane` with a leading warning in `nextStep` (the duplicate's devices are invisible to whoever watches the page). See "One page, several sources" below. |
+| `restart_preview` | `{previewId?}` or `{app?}` → rebuild in place on the same booted devices, same shareId/URL. Local: re-run the livesync build (needed after native-level changes; ordinary edits livesync by themselves). Git: fetch the ref's new tip, reset the worktree, rebuild — the post-push step of the loop. |
+| `preview_status` | `{previewId?}` or `{app?}` → per-device `{phase, detail, error?, logTail?}`; overall `{ready, url, source}` |
+| `stop_preview` | `{previewId|app}` → teardown (devices deleted, worktree removed per policy; a local app's source dir is never touched) |
+| `stop_device` | `{previewId|app, deviceId}` → tear down ONE device, leave the rest running and the URL unchanged. The way back from `start_preview` with an extra platform. Refuses the last device — that is `stop_preview`, which also frees the worktree and the share |
+| `screenshot` | `{previewId, deviceId}` → MCP image content (PNG). iOS: `xcrun simctl io <udid> screenshot`; Android: `adb -s <serial> exec-out screencap -p` |
+| `describe` | `{previewId, deviceId}` → accessibility tree. iOS: serve-sim's ax endpoint (token-efficient, built for agents); Android: `adb shell uiautomator dump` (parsed/compacted) |
+| `ui` | `{previewId, deviceId, action}` where action ∈ `{tap {x,y}, type {text}, key {name}, button {name}, home, openUrl {url}}` (normalized 0..1 coords) — validated passthrough. iOS: serve-sim gesture/button/type commands; Android: adb input |
+| `logs` | `{previewId, deviceId?, source: "build"\|"metro"\|"app", tailLines?}` → text. `app` taps the streaming helper's forwarded simulator logs (serve-sim event-log) / adb logcat |
+| `add_app` | `{repo, type?}` → clone, detect, **doctor build** on a default device, structured report (`ready` or `missing: [...]`) |
+| `remove_app` | `{id, deleteCheckout?}` |
+| `start_test_run` / `update_test_run` / `finish_test_run` / `clear_test_run` | **Amended (2026-07-17):** agent-driven end-to-end testing. The agent (the brain) reports what it's testing — `{title, steps}`, per-step `running`/`passed`/`failed`, then a verdict + summary — surfaced live in the viewer as a calm spinner button + step popover. deckhand records; the agent writes the human report in chat. |
+| `parity_set` / `parity_status` | Maintain and read the per-item parity checklist (`pending`/`doing`/`done`/`adjusted`/`regression`). Deliberately NOT merged with the `*_test_run` tools: a test run is one ephemeral pass whose steps go pending → running → passed, parity is a durable per-screen verdict, and the viewer renders them as separate sections precisely because the statuses do not mean the same thing. |
 
 **Amended (2026-07-17): `describe`/`ui` backend = SimDeck, control-only.** The 2026-07-09
 rejection of SimDeck (row §2) was about its **video transport** (WebRTC/TURN); its
@@ -636,8 +633,11 @@ dir is never touched).
   on a live preview later (same URL). The gate: content routes (`/dev`, `/web`, `/restart`,
   the subdomain-web proxy) and both WS upgrades require a valid HMAC unlock cookie
   (`deck_unlock`, signed with an auto-generated `~/.deckhand/share-secret`); `/state` +
-  `/unlock` + the viewer shell stay public. `/unlock` is throttled per share (lockout after
-  N wrong PINs). The viewer shows an elegant pad (auto-submits on the last digit, shakes on
+  `/unlock` + the viewer shell stay public. `/unlock` is throttled per share: 5 wrong PINs lock it
+  for 30s, and every lockout after that DOUBLES (capped at 15 min) with a budget of one
+  attempt — the count survives its own lock, so waiting one out no longer buys a fresh five.
+  Before 2026-08-05 the lockout reset the counter, which made the throttle a self-renewing
+  ~600 guesses/hour against a 4-digit space. The viewer shows an elegant pad (auto-submits on the last digit, shakes on
   a wrong code); subdomain-web hosts get a self-contained vanilla pad since they have no
   React viewer.
   **Amended (audit 2026-07-27): a web share is ALWAYS PIN-protected.** `start_preview` on a
@@ -709,15 +709,16 @@ change eases in/out — nothing snaps.
   Run with `--hostname` it does the rest: adopt-or-create the named tunnel, DNS route,
   **merge** `~/.cloudflared/config.yml` (`cli/tunnelConfig.ts` — never generate it; that file
   routinely carries other services), `npm link` the `deckhand` command onto PATH, write
-  `config.yaml`, mint the admin connector URL, install the launchd agents, run doctor.
+  `config.yaml`, mint the connector URL, install the launchd agents, run doctor.
   Idempotent by design, so it is also the repair tool.
 - `deckhand init` — writes `config.yaml` only. `setup` calls it; you rarely call it directly.
   Flags: `--hostname`, `--port`, and optionally `--github-app-id`/`--github-app-pem` (the App
   is optional — without it deckhand uses the ambient `gh` CLI session).
 - `deckhand token` — **your connector URL**, creating one on first use. `token list` shows who
-  has access with the URLs MASKED; `token url <name>` prints one in full; `token add` mints
-  another. Roles and owner scoping are a team feature that a solo install never has to meet
-  (CONSTITUTION principle 7).
+  which credentials exist with the URLs MASKED; `token url <name>` prints one in full;
+  `token add` mints another for a second client; `token rm <name>` revokes one, effective on the
+  running server (the watcher compares content, so rotating a value under the same name applies
+  too). There are no roles: every token is the operator's (CONSTITUTION §"Who it is for").
 - `deckhand doctor` — the verification loop, each check independently reportable:
   toolchains present (xcodebuild, simctl, node; P2: java, sdkmanager, adb, emulator),
   serve-sim helper spawns for a booted sim + **stream WS upgrades + a first frame decodes**
@@ -726,7 +727,7 @@ change eases in/out — nothing snaps.
   boot a sim, build+install `fixtures/expo-smoke`, screenshot, teardown. Exit non-zero on
   any failure.
 - `deckhand serve` — run the server (what launchd invokes).
-- `deckhand token add|revoke|list`, `deckhand app add|remove|list`,
+- `deckhand token add|rm|list|url`, `deckhand app add|remove|list`,
   `deckhand env set|unset <appId> KEY[=VALUE]`, `deckhand service install|status|restart`.
 
 ## 11. Security model (recap, enforced in code)
@@ -744,14 +745,17 @@ change eases in/out — nothing snaps.
    `--localhost` binds IPv6 `::1` only and the simulator then cannot load the bundle
    (`metro.ts`). It serves the previewed app's JS bundle to anything on the LAN for the
    life of the preview. Item 7's dedicated user and a host firewall are the mitigations.
-2. **MCP auth**: per-person 256-bit path tokens, hashed lookup, constant-time compare,
-   404 on miss, roles + optional owner scoping, JSONL audit of every call.
+2. **MCP auth**: 256-bit path tokens, hashed lookup, constant-time compare, 404 on miss,
+   JSONL audit of every call under the token's name. No roles: one install, one operator,
+   so a valid token is the operator and there is nobody to grant less to.
 3. **Capability bounding**: no arbitrary shell tool; only registered apps; only refs in
    those repos; device-count + disk-tier limits. (`start_preview`'s `alongside[].worktree` /
-   `alongside[].repo` reach past "registered apps" by design — both are gated: worktree on
-   `requireAdmin`, repo on the caller's owner scope. These branches hang off a tool every member already
-   calls, so the gates carry more weight there, not less. Fork PRs are
-   *not* gated; see §6.)
+   `alongside[].repo` reach past "registered apps" by design, and since 2026-08-05 nothing
+   gates them but the token — the role and owner-scope gates went with team support. What
+   still bounds `repo` is the HOST in the repo string, which decides who receives deckhand's
+   git credential — allow-listed in `parseRepo` (github.com only until someone widens it
+   deliberately) and re-checked in the `alongside` branch before any credential is resolved.
+   Fork PRs are *not* gated either; see §6.)
 4. **GitHub**: App with Contents:Read-only — deckhand can never write to any repo. Hourly
    installation tokens, never persisted, never in argv/URLs/logs. **Ambient-credential
    note (2026-07-15):** with `githubAmbient` (no PAT/App configured, `gh` logged in on

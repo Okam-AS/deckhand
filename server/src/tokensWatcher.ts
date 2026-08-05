@@ -1,4 +1,5 @@
 import { watch, statSync, type FSWatcher } from "node:fs";
+import { createHash } from "node:crypto";
 import { basename, dirname } from "node:path";
 import { loadTokens, type TokenEntry } from "./config.ts";
 import { paths } from "./paths.ts";
@@ -22,7 +23,7 @@ export interface WatchTokensOptions {
  * restart. tokens.yaml was not, and that is worse, because it breaks the FIRST thing a new
  * user does:
  *
- *   setup starts the server (LaunchAgent), then mints the admin token. `loadTokens()` had
+ *   setup starts the server (LaunchAgent), then mints the token. `loadTokens()` had
  *   already run. So the server did not know the only token that exists, every request to
  *   `/mcp/<token>` answered 404, and claude.ai — finding no MCP server — fell back to OAuth
  *   discovery and reported "Couldn't register with Deckhand's sign-in service".
@@ -55,7 +56,7 @@ export function watchTokens(auth: TokenAuthenticator, opts: WatchTokensOptions =
     }
   };
   let lastStamp = stamp();
-  let lastNames = "";
+  let lastFingerprint = "";
 
   const reload = (): void => {
     lastStamp = stamp();
@@ -68,9 +69,18 @@ export function watchTokens(auth: TokenAuthenticator, opts: WatchTokensOptions =
       opts.onError?.(err);
       return;
     }
-    const names = next.map((t) => t.name).join(",");
-    if (names === lastNames) return; // our own echo, or an unrelated touch
-    lastNames = names;
+    // Fingerprint the CONTENT, not the names. Comparing names made rotation a no-op: `token add`
+    // refuses a duplicate name, so replacing a leaked credential means writing a new value under
+    // the same name — the one case this early-return swallowed. The file changed, the operator
+    // believed the old URL was dead, and it kept working until the next restart.
+    // Hashed so a token value never sits in a long-lived string in this process. JSON, not a
+    // hand-rolled separator: a name may hold any character, so two different lists could
+    // concatenate to identical bytes and make a real change look like an echo.
+    const fingerprint = createHash("sha256")
+      .update(JSON.stringify(next.map((t) => [t.name, t.token])))
+      .digest("hex");
+    if (fingerprint === lastFingerprint) return; // our own echo, or an unrelated touch
+    lastFingerprint = fingerprint;
     auth.replace(next);
     opts.onReload?.(next.map((t) => t.name));
   };

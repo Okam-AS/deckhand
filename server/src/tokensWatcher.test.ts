@@ -72,6 +72,42 @@ describe("watchTokens", () => {
     assert.ok(auth.authenticate(tokenOf("alice")), "and the others still work");
   });
 
+  it("applies a rotation that keeps the name and changes the value", async () => {
+    // THE case a leak is fixed by: `deckhand token` refuses a duplicate name, so rotating a
+    // credential means writing a new value under the same name. The reload used to compare
+    // NAMES and return early — so the file changed, the operator believed the old URL was
+    // dead, and it kept opening the door until the next restart.
+    //
+    // Its OWN directory: the other cases share `file`, and a second watcher on it fires on
+    // every write here. That coupling is what made an unrelated case fail when this one was
+    // added — the tests were never independent, they only looked it.
+    const ownDir = mkdtempSync(join(tmpdir(), "deckhand-rotate-"));
+    const ownFile = join(ownDir, "tokens.yaml");
+    const put = (value: string): void => {
+      const tmp = `${ownFile}.tmp`;
+      writeFileSync(tmp, `tokens:\n  - name: asharghi\n    token: ${value}\n`);
+      renameSync(tmp, ownFile);
+    };
+    const oldValue = tokenOf("rotate-old");
+    const newValue = tokenOf("rotate-new");
+    put(oldValue);
+    const auth = new TokenAuthenticator([]);
+    const stop = watchTokens(auth, { file: ownFile, debounceMs: 20, pollMs: 100 });
+    try {
+      put(oldValue); // a touch the watcher can see, so the first list is loaded
+      await settle();
+      assert.ok(auth.authenticate(oldValue), "the old credential works to begin with");
+
+      put(newValue);
+      await settle();
+      assert.equal(auth.authenticate(oldValue), null, "the rotated-away value must stop working");
+      assert.equal(auth.authenticate(newValue)?.name, "asharghi", "and the new one must work");
+    } finally {
+      stop();
+      rmSync(ownDir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps the current tokens when the file is unreadable", async () => {
     // A half-written file must not lock everyone out mid-session.
     write("alice");

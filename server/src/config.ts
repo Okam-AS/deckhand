@@ -196,17 +196,32 @@ export const appsSchema = z
   });
 export type AppsFile = z.infer<typeof appsSchema>;
 
-export const roleSchema = z.enum(["admin", "member"]);
-export type Role = z.infer<typeof roleSchema>;
+/**
+ * Keys an older tokens.yaml carries from when deckhand had roles and owner
+ * scoping. Stripped before the strict parse so every existing install's file
+ * keeps loading untouched (principle 2: never destroy what you did not create).
+ *
+ * Removed 2026-08-05 together with team support: one Mac serves one operator's
+ * devices, so every valid token is that operator's. `owners` returned "allowed"
+ * whenever it was unset — which is how every token the CLI minted looked — so
+ * the scope described a permission system that was not there.
+ */
+const LEGACY_TOKEN_KEYS = ["role", "owners"] as const;
 
-export const tokenSchema = z
-  .object({
-    name: z.string().min(1),
-    role: roleSchema,
-    owners: z.array(z.string().min(1)).optional(),
-    token: z.string().regex(/^[0-9a-f]{64}$/, "token must be 64 lowercase hex chars"),
-  })
-  .strict();
+export const tokenSchema = z.preprocess(
+  (raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+    const rest = { ...(raw as Record<string, unknown>) };
+    for (const k of LEGACY_TOKEN_KEYS) delete rest[k];
+    return rest;
+  },
+  z
+    .object({
+      name: z.string().min(1),
+      token: z.string().regex(/^[0-9a-f]{64}$/, "token must be 64 lowercase hex chars"),
+    })
+    .strict(),
+);
 
 export type TokenEntry = z.infer<typeof tokenSchema>;
 
@@ -309,9 +324,29 @@ export function githubPatPath(config: Config): string {
 }
 
 /**
+ * Hosts a repo string may name.
+ *
+ * This is a CREDENTIAL boundary, not a convenience. The host in a repo string is what
+ * `GIT_ASKPASS` gets pinned to (`engine/worktree.ts`), while the credential resolver keys on the
+ * repo OWNER alone and never sees a host (`github/credentials.ts`) — so whatever host reaches
+ * here is the host that receives deckhand's PAT or `gh` session when its 401 comes back. And the
+ * string is not always the operator's: `start_preview`'s `alongside: [{repo, ref}]` takes one
+ * straight from an MCP argument, chosen by a model that may have just read attacker-authored
+ * repo content.
+ *
+ * Widen it deliberately (an enterprise GitHub host belongs here) — nothing downstream will.
+ */
+const ALLOWED_REPO_HOSTS = new Set(["github.com"]);
+
+/**
  * The repo owner (org/user) and name from an app's `repo` string. Handles
  * `github.com/owner/name`, `https://github.com/owner/name(.git)`,
  * `git@github.com:owner/name(.git)`, and bare `owner/name`.
+ *
+ * Throws on a host outside ALLOWED_REPO_HOSTS. Every path that turns a repo STRING into a git
+ * operation comes through here — `add_app`, `cloneUrl`, `alongside` — so it is where the check
+ * belongs. Note apps.yaml's `repo` is a plain string in the schema, so a hand-edited foreign
+ * host is not rejected at load; it fails when `cloneUrl` first needs it, naming apps.yaml.
  */
 export function parseRepo(repo: string): { host: string; owner: string; name: string } {
   let s = repo.trim().replace(/\.git$/, "");
@@ -328,6 +363,13 @@ export function parseRepo(repo: string): { host: string; owner: string; name: st
   const name = parts[parts.length - 1]!;
   const owner = parts[parts.length - 2]!;
   const host = parts.length >= 3 ? parts[0]! : "github.com";
+  if (!ALLOWED_REPO_HOSTS.has(host.toLowerCase())) {
+    throw new ConfigError(
+      "apps.yaml",
+      `repo "${repo}" names host "${host}", which deckhand will not hand a git credential to ` +
+        `(allowed: ${[...ALLOWED_REPO_HOSTS].join(", ")})`,
+    );
+  }
   return { host, owner, name };
 }
 

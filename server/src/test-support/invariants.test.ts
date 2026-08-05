@@ -486,3 +486,27 @@ describe("the detached-spawn rule", () => {
     }
   });
 });
+
+describe("source stays source", () => {
+  it("holds no control characters, so git never treats a .ts file as binary", () => {
+    // Caught by eye, not by a test: a fingerprint built with `\x00`/`\x01` as field
+    // separators compiled, passed every test, and turned tokensWatcher.ts into
+    // `Bin 3906 -> 4509 bytes` in `git diff` — a security-relevant file no reviewer
+    // could read the diff of. Nothing else here looks at bytes, and a diff nobody
+    // can read is exactly how the cross-page auth bypass survived its first review.
+    // Tab, newline and carriage return are the legitimate ones.
+    for (const file of [...sourceFiles(), ...testFiles()]) {
+      const bad = [...read(file)].findIndex((ch) => {
+        const c = ch.codePointAt(0)!;
+        return (c < 0x20 && c !== 0x09 && c !== 0x0a && c !== 0x0d) || c === 0x7f;
+      });
+      assert.equal(
+        bad,
+        -1,
+        `${rel(file)} contains a control character at offset ${bad}. Git will treat the file as ` +
+          `binary and show no diff. Use a readable serialization (JSON.stringify) instead of a ` +
+          `hand-rolled byte separator.`,
+      );
+    }
+  });
+});
