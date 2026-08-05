@@ -111,6 +111,16 @@ export function watchTokens(auth: TokenAuthenticator, opts: WatchTokensOptions =
     opts.onError?.(err);
   }
 
+  // Adopt what is on disk RIGHT NOW, before waiting for a change.
+  //
+  // Without this, "watch this file" quietly means "watch changes made after this line": a file
+  // written a millisecond earlier is picked up only if fs.watch happens to deliver an event for
+  // it, and the poll cannot help — it compares against a stamp taken at construction, which
+  // already includes that write. In production the caller has just loaded the same file, so the
+  // gap is invisible; it surfaced as a CI-only test failure, which is the worst way to learn
+  // that a component depends on its caller having done something first.
+  reload();
+
   return () => {
     if (timer) clearTimeout(timer);
     clearInterval(poll);
