@@ -343,8 +343,10 @@ const ALLOWED_REPO_HOSTS = new Set(["github.com"]);
  * `github.com/owner/name`, `https://github.com/owner/name(.git)`,
  * `git@github.com:owner/name(.git)`, and bare `owner/name`.
  *
- * Throws on a host outside ALLOWED_REPO_HOSTS. This is the one function every path shares —
- * apps.yaml, `add_app`, `cloneUrl`, `alongside` — so it is where the check belongs.
+ * Throws on a host outside ALLOWED_REPO_HOSTS. Every path that turns a repo STRING into a git
+ * operation comes through here — `add_app`, `cloneUrl`, `alongside` — so it is where the check
+ * belongs. Note apps.yaml's `repo` is a plain string in the schema, so a hand-edited foreign
+ * host is not rejected at load; it fails when `cloneUrl` first needs it, naming apps.yaml.
  */
 export function parseRepo(repo: string): { host: string; owner: string; name: string } {
   let s = repo.trim().replace(/\.git$/, "");

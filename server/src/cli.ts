@@ -206,7 +206,7 @@ function cmdInit(flags: Args["flags"]): void {
 
 function cmdTokenAdd(name: string | undefined): void {
   if (!name) fail("usage: deckhand token add <name>");
-  const { tokens, created } = addTokenEntry(loadTokensSafe(), { name: name! });
+  const { tokens, created } = addTokenEntry(loadTokensForWrite(), { name: name! });
   writeTokens(tokens);
   const hostname = tryHostname();
   console.log(`created token "${created.name}"`);
@@ -226,7 +226,7 @@ function cmdTokenRm(name: string | undefined): void {
   if (!name) fail("usage: deckhand token rm <name>   (`deckhand token list` shows the names)");
   let result;
   try {
-    result = removeTokenEntry(loadTokensSafe(), name!);
+    result = removeTokenEntry(loadTokensForWrite(), name!);
   } catch (e) {
     fail(e instanceof Error ? e.message : String(e));
   }
@@ -258,7 +258,7 @@ function cmdTokenList(): void {
  * explicit commands rather than guessing which one the caller meant.
  */
 function cmdTokenMine(flags: Args["flags"]): void {
-  const tokens = loadTokensSafe();
+  const tokens = loadTokensForWrite();
   if (tokens.length === 1) return printConnector(tokens[0]!);
   if (tokens.length > 1) {
     console.error(`${tokens.length} tokens exist — say which one:`);
@@ -387,6 +387,30 @@ function loadTokensSafe() {
     return loadTokens();
   } catch {
     return [];
+  }
+}
+
+/**
+ * The token list for a command that WRITES it back.
+ *
+ * `loadTokensSafe` answers "" with an empty list, which is right for a read-only view and wrong
+ * here twice over: `token add` would write a file containing only the new entry, silently
+ * destroying every other credential (principle 2), and `token rm` would report `no token named
+ * X` for a credential that is still live in the running server (principle 3 — a failed lookup
+ * and an empty result must not be the same value). A missing file is genuinely empty; an
+ * unreadable one is an error the operator has to see, because the watcher keeps serving the old
+ * set either way.
+ */
+function loadTokensForWrite() {
+  if (!existsSync(paths.tokens())) return [];
+  try {
+    return loadTokens();
+  } catch (e) {
+    fail(
+      `${e instanceof Error ? e.message : String(e)}\n` +
+        `refusing to rewrite ${paths.tokens()} from a copy that would not load back — ` +
+        `fix the file first. The running server is still using the last good list.`,
+    );
   }
 }
 /** Read-only paths (`app list`): an unreadable file honestly shows nothing. */

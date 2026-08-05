@@ -223,10 +223,13 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
 
     step("Connector token");
     const list = deckhandCli(["token", "list"]);
-    // `token list` prints one masked line per token and nothing at all when there are none —
-    // so a non-empty stdout is the existence test. (It used to grep for the word "admin",
-    // which stopped meaning anything when roles went away.)
-    if (list.code === 0 && list.out.trim().length > 0) {
+    // `token list` is NOT silent on an empty install — it prints "no tokens yet — create one
+    // with `deckhand token`", by design, because silence reads as a broken command. So a
+    // non-empty stdout is not the existence test: that version took the "already exists"
+    // branch on every fresh install, minted nothing, and ignored --token. Match the empty
+    // state itself. (The check before that grepped for the word "admin", which stopped
+    // meaning anything when roles went away — same class, twice.)
+    if (list.code === 0 && !/no tokens yet/.test(list.out)) {
       ok("a token already exists — `deckhand token` prints its connector URL");
     } else {
       const name = opts.tokenName ?? process.env.USER ?? "me";

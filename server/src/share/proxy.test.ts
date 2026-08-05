@@ -735,6 +735,27 @@ describe("pin gate throttle", () => {
     for (let i = 0; i < 4; i++) assert.equal(lockOf(g.attempt(SHARE, "0000")), 0);
   });
 
+  it("forgives after a long quiet spell, so a fumbling colleague is not locked out for the week", () => {
+    // The escalation has to decay or it is a one-way ratchet: `lockouts` only cleared on a
+    // CORRECT pin, and the server is a LaunchAgent that runs for weeks. Someone who mistypes
+    // across an afternoon reaches the 15-minute cap with a one-attempt budget and stays there —
+    // and their correct PIN is refused for the whole window. An hour of silence is far longer
+    // than any brute-force run can afford and far shorter than a working day.
+    const clock = { t: 5_000_000 };
+    const g = gate(clock);
+    let lock = 0;
+    for (let round = 0; round < 4; round++) {
+      lock = failUntilLocked(g);
+      clock.t += lock + 1;
+    }
+    assert.ok(lock >= 240_000, `escalation reached ${lock}ms before the quiet spell`);
+
+    clock.t += 60 * 60_000 + 1; // an hour of nobody trying
+    assert.equal(lockOf(g.attempt(SHARE, "0000")), 0, "the first wrong PIN after the quiet spell must not re-lock");
+    const relock = failUntilLocked(g);
+    assert.equal(relock, 30_000, "and the budget and the lock are back to their starting size");
+  });
+
   it("keeps ignoring a share that has no PIN", () => {
     const g = gate({ t: 4_000_000 });
     const r = g.attempt("no-such-share", "0000");

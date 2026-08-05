@@ -263,14 +263,23 @@ export function createPinGate(engine: PreviewEngine, shareSecret: string, opts: 
       // throttle entry for any attacker-chosen string — one free Map entry per
       // request, unbounded — while verifyPin just returns false for unknown ids.
       if (!engine.pinInfoForShare(shareId).required) return { ok: false, lockedMs: 0 };
-      // Cheap eviction backstop. An entry may only be forgotten once its lock lapsed
-      // LONG ago (THROTTLE_FORGET_MS) — the lockout count is the whole defence, so
-      // dropping it the moment a lock expires would hand the attacker the reset the
-      // escalation exists to deny. Entries mid-accumulation (lockedUntil === 0) are the
-      // counter itself and never qualify.
+      // Forget an entry whose lock lapsed LONG ago (THROTTLE_FORGET_MS). This runs on every
+      // attempt, not only when the map is large: the escalation is otherwise a one-way ratchet
+      // for the life of the process — and the process is a LaunchAgent that runs for weeks. A
+      // colleague who mistypes across an afternoon would reach the 15-minute cap with a
+      // one-attempt budget and stay there, their CORRECT pin refused for the whole window,
+      // with no command to clear it (set_pin rewrites the PIN, not this map). An hour of
+      // silence is far longer than a brute-force run can afford and far shorter than a
+      // working day. Entries mid-accumulation (lockedUntil === 0) are the counter itself and
+      // never qualify — dropping those would hand back the budget the escalation exists to deny.
+      const forgettable = (e: { lockedUntil: number }): boolean =>
+        e.lockedUntil > 0 && now() - e.lockedUntil > THROTTLE_FORGET_MS;
+      const own = throttle.get(shareId);
+      if (own && forgettable(own)) throttle.delete(shareId);
+      // Size backstop for every OTHER share, so an attacker sweeping ids cannot grow the map.
       if (throttle.size > THROTTLE_MAX_ENTRIES) {
         for (const [id, entry] of throttle) {
-          if (entry.lockedUntil > 0 && now() - entry.lockedUntil > THROTTLE_FORGET_MS) throttle.delete(id);
+          if (forgettable(entry)) throttle.delete(id);
         }
       }
       const t = throttle.get(shareId) ?? { fails: 0, lockedUntil: 0, lockouts: 0 };
