@@ -56,6 +56,18 @@ describe("watchTokens", () => {
     assert.equal(auth.authenticate(tokenOf("alice"))?.name, "alice", "after: it just works");
   });
 
+  it("adopts the file that already exists when it starts", async () => {
+    // The regression this pins: watchTokens used to react only to changes made AFTER it was
+    // constructed, so a file written a millisecond earlier was picked up only if fs.watch
+    // happened to deliver an event. Locally it always did; on a CI runner it did not, and the
+    // test below failed there while passing on every developer machine. No settle() here on
+    // purpose — adoption is synchronous, or it is the same race again.
+    write("carol");
+    const auth = new TokenAuthenticator([]);
+    stops.push(watchTokens(auth, { file, debounceMs: 20, pollMs: 100 }));
+    assert.equal(auth.authenticate(tokenOf("carol"))?.name, "carol", "no event needed, and no waiting");
+  });
+
   it("revokes immediately, rather than keeping the old list", async () => {
     // Opposite of apps.yaml, deliberately. There an empty file is treated as a truncated
     // write; here the safe direction is the other way — a token someone deleted must stop
