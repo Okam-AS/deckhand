@@ -171,4 +171,20 @@ describe("listing pull requests is not opening one", () => {
     assert.match(blocked("gh api repos/Okam-AS/deckhand/pulls -X POST -f base=main"), /a human's call/);
     assert.match(blocked("gh api repos/Okam-AS/deckhand/pulls -F title=t -F head=f"), /a human's call/);
   });
+
+  // The first version of the method check read the RAW command anywhere in it, so DATA could name
+  // the method: a title mentioning `-X GET` cleared the POST indicator on a real create-a-PR call.
+  // A quoted argument may add nothing to this decision, only the command itself may.
+  it("does not let a quoted argument name the method", () => {
+    for (const cmd of [
+      `gh api repos/Okam-AS/deckhand/pulls -f body="see -X GET note" -f head=b -f base=main -X POST`,
+      `gh api repos/Okam-AS/deckhand/pulls -f title="Support -X GET in the bash guard" -f head=b -f base=main`,
+      // No boundary before the flag matched `-X` mid-word, which did the same thing unquoted.
+      "gh api repos/Okam-AS/deckhand/pulls -f title=Fix-XY -f head=b -f base=main",
+      // Case is not a way out either.
+      "gh api repos/Okam-AS/deckhand/pulls -X Post --input b.json",
+    ]) {
+      assert.match(blocked(cmd), /a human's call/);
+    }
+  });
 });

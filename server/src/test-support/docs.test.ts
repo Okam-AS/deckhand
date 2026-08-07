@@ -260,7 +260,10 @@ describe("docs describe the code that exists", () => {
     // eight lines above its own "do not attempt those steps" — the check was scoped to one file
     // while the class belongs to every document an agent is pointed at.
     const HUMAN_ONLY = [/cloudflared tunnel login/];
-    const shellBlocks = ["AGENTS.md", "README.md", "CONSTITUTION.md"].flatMap((doc) =>
+    // PLAN.md is included because AGENTS.md orders an agent to read it end to end, and the skills
+    // because a slash command runs them — "every document an agent is pointed at" has to mean all
+    // of them, or the sentence is the same kind of claim this file exists to catch.
+    const shellBlocks = ["AGENTS.md", "README.md", "CONSTITUTION.md", "PLAN.md", ".claude/skills/shipping-a-change/SKILL.md", ".claude/skills/reviewing-deckhand/SKILL.md"].flatMap((doc) =>
       [...readFileSync(join(REPO, doc), "utf8").matchAll(/```(?:sh|bash|console)\n([\s\S]*?)```/g)].map((m) => `${doc}: ${m[1]!}`),
     );
     for (const block of shellBlocks) {

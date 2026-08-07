@@ -98,12 +98,20 @@ export function opensAPullRequest(cmd: string): boolean {
   // indicator is still required, so reading the same endpoint stays allowed — and `gh api`
   // switches to POST on its own the moment any parameter flag is present, which is why `-f`,
   // `-F` and `--input` count as one.
-  // An explicit non-POST method settles it. `-f`/`-F` count as a POST indicator because `gh api`
-  // switches on its own when a parameter flag appears — but only when no method was NAMED, or
-  // `gh api -X GET .../pulls -F state=open` (listing PRs a page at a time) was refused under the
-  // rule with no override, which is the one over-block this file cannot afford.
-  const named = /(?:-X|--request|--method)[= ]?\s*([A-Z]+)/.exec(cmd)?.[1];
-  const posts = named ? /^POST$/.test(named) : /(?:^|\s)-(?:f|F|d)\s|(?:^|\s)--(?:input|data\S*)\b/.test(cmd);
+  // An explicit non-POST method settles it: `gh api -X GET .../pulls -F state=open` is paging
+  // through PRs, and refusing that under the rule with no override is the one over-block this
+  // file cannot afford. `-f`/`-F` still count on their own, because `gh api` switches to POST the
+  // moment a parameter flag appears with no method given.
+  //
+  // Read from the BLANKED text and only in argument position. Both were bugs the first version
+  // shipped: scanning the raw command let `-f title="Support -X GET in the guard"` name the
+  // method from inside a quoted string, so a real `-X POST` create-a-PR call was allowed — data
+  // clearing a POST indicator instead of only adding one. And with no boundary before the flag,
+  // `-f title=Fix-XY` matched `-X` mid-word. EVERY named method must be POST-free, not just the
+  // first, or a second flag overrides the real one.
+  const methods = [...bare.matchAll(/(?:^|\s)(?:-X|--request|--method)[= ]?\s*([A-Za-z]+)/g)].map((m) => m[1]!.toUpperCase());
+  const paramFlag = /(?:^|\s)-(?:f|F|d)\s|(?:^|\s)--(?:input|data\S*)\b/.test(bare);
+  const posts = methods.length > 0 ? methods.includes("POST") : paramFlag;
   // The COLLECTION, not a sub-resource: `/pulls` opens one, `/pulls/12/comments` and
   // `/pulls/12/reviews` are how you talk about one that exists — including this repo's own
   // review-comment path. Blocking those under a rule with no override is the one over-block

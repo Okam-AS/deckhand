@@ -333,7 +333,13 @@ export function validate(receipt: Receipt | null, hash: string): Verdict {
   ) {
     return { ok: false, reason: "the receipt is malformed (rounds are not a list of rounds with findings). Re-run the review." };
   }
-  if (receipt.waived !== undefined && (!Array.isArray(receipt.waived) || receipt.waived.some((w) => !isObject(w)))) {
+  // `why` is checked HERE, not at the point it is read: the filter below calls `.trim()` on it,
+  // and a receipt is a file on disk, so a number there threw a TypeError out of `validate` — the
+  // crash class this whole guard block exists for, reintroduced by the waiver rule.
+  if (
+    receipt.waived !== undefined &&
+    (!Array.isArray(receipt.waived) || receipt.waived.some((w) => !isObject(w) || (w.why !== undefined && typeof w.why !== "string")))
+  ) {
     return { ok: false, reason: "the receipt is malformed (`waived` is not a list of waivers). Re-run the review." };
   }
   if (hash === UNRESOLVABLE_DIFF) {

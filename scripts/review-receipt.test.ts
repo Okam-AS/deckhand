@@ -191,6 +191,9 @@ describe("the gate", () => {
       JSON.parse(`{"rounds":[null,${JSON.stringify(round({ cold: true }))}]}`),
       JSON.parse(JSON.stringify({ ...converged(), waived: "whatever" })),
       JSON.parse(JSON.stringify({ ...converged(), waived: [null] })),
+      // The waiver rule reads `why` and calls `.trim()` on it, which threw a TypeError out of
+      // `validate` for a number there — the same crash class, reintroduced by that rule.
+      JSON.parse(`{"rounds":[${JSON.stringify(round({ newFindings: 1, diff: OLD }))},${JSON.stringify(round({ cold: true }))}],"waived":[{"finding":"f::x","why":12345}]}`),
       JSON.parse(`{"rounds":[${JSON.stringify(round({ newFindings: 1, diff: OLD }))},{"lens":"cold","cold":true,"diff":"${HASH}","newFindings":0,"findings":[null]}]}`),
     ]) {
       const v = validate(bad as unknown as Receipt, HASH);
