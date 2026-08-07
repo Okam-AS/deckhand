@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -f scripts/hooks/bash-guard.ts ] || exit 0; npx tsx scripts/hooks/bash-guard.ts"
+            "command": "G=\"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/bash-guard.ts\"; [ -f \"$G\" ] || exit 0; npx --prefix \"${CLAUDE_PROJECT_DIR:-.}\" tsx \"$G\""
           }
         ]
       }

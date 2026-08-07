@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -111,7 +111,9 @@ describe("the gate", () => {
 
   it("counts it answered once the fix moves the diff the round reviewed", () => {
     const raised = round({ cold: true, findings: [{ id: "f.ts::auth bypass", severity: "must" }], newFindings: 1, diff: OLD });
-    assert.deepEqual(validate(converged({ rounds: [raised, round({ lens: "after-the-fix" })] }), HASH), { ok: true });
+    // The round after the fix is cold too — which the freshness rule below now requires, since
+    // the fix moved the hash the first cold round reviewed.
+    assert.deepEqual(validate(converged({ rounds: [raised, round({ lens: "after-the-fix", cold: true })] }), HASH), { ok: true });
   });
 
   it("accepts that same finding once it is waived with a reason", () => {
@@ -129,6 +131,14 @@ describe("the gate", () => {
     const v = validate(converged({ rounds: [round({ newFindings: 1, diff: OLD }), round()] }), HASH);
     assert.equal(v.ok, false);
     assert.match(!v.ok ? v.reason : "", /cold round is required/);
+  });
+
+  // A cold round somewhere in the history is not a cold round on this code: the cheap path was
+  // one cold look early, then change whatever you like under warm rounds only.
+  it("refuses when the only cold round reviewed earlier code", () => {
+    const v = validate(converged({ rounds: [round({ cold: true, newFindings: 2, diff: OLD }), round({ lens: "inline" })] }), HASH);
+    assert.equal(v.ok, false);
+    assert.match(!v.ok ? v.reason : "", /cold round reviewed earlier code/);
   });
 
   it("refuses gates that were never run, failed, or ran on another diff", () => {
@@ -291,6 +301,24 @@ describe("the handover to a human", () => {
 // folds the untracked-file list in, so a receipt git can see changes the diff it attests to.
 // Every round would be instantly stale and `review:gates` would call the tree dirty forever —
 // a wedge with no honest way out, and no red test to explain it.
+// The gate is only as reachable as its wiring. A cwd-relative hook command exits 0 — allow —
+// whenever the Bash call runs from anywhere but the repo root, which silently switches off the
+// one rule documented as having no override.
+describe("the hook is wired to the repo, not to the cwd", () => {
+  it("resolves the guard through CLAUDE_PROJECT_DIR, and names a file that exists", () => {
+    const settings = JSON.parse(readFileSync(join(process.cwd(), ".claude", "settings.json"), "utf8")) as {
+      hooks?: { PreToolUse?: { matcher?: string; hooks?: { command?: string }[] }[] };
+    };
+    const commands = (settings.hooks?.PreToolUse ?? []).flatMap((h) => (h.hooks ?? []).map((x) => x.command ?? ""));
+    const guard = commands.find((c) => c.includes("bash-guard.ts"));
+    assert.ok(guard, "no PreToolUse hook runs bash-guard.ts — the gate is off");
+    assert.match(guard, /CLAUDE_PROJECT_DIR/, "a cwd-relative hook allows everything from any other directory");
+    for (const path of guard.match(/[\w./-]*scripts\/[\w./-]+\.ts/g) ?? []) {
+      assert.ok(existsSync(join(process.cwd(), path.replace(/^.*scripts\//, "scripts/"))), `${path} does not exist`);
+    }
+  });
+});
+
 describe("the receipt must be invisible to git", () => {
   it("keeps the receipt dir and the PR body ignored", () => {
     for (const path of [`${RECEIPT_DIR}/feature-x.json`, HANDOVER_FILE]) {
@@ -306,6 +334,15 @@ describe("what a quick gate run may overwrite", () => {
   // new information — and the gate would refuse until it was paid.
   it("leaves a clean pass standing when it passes on the same diff", () => {
     assert.equal(keepsCleanRun(converged(), HASH, true), true);
+  });
+
+  // The nastier direction, and the one the first version of this got wrong: not downgrading a
+  // pass, but UPGRADING a failure. `review:gates` goes red on the worktree, `review:gates:quick`
+  // goes green in place, and the receipt reads "green on a clean checkout".
+  it("never promotes a red clean run to a green one", () => {
+    const red = converged({ gates: { passed: false, command: "npm run ci", diff: HASH, clean: true } });
+    assert.equal(keepsCleanRun(red, HASH, true), false);
+    assert.equal(validate({ ...red, gates: { ...red.gates!, passed: true, clean: keepsCleanRun(red, HASH, true) } }, HASH).ok, false);
   });
 
   it("does not launder a clean pass on other code, or one that has just gone red", () => {
@@ -341,7 +378,22 @@ describe("where the clean gate runs", () => {
     const target = gatesWorktree(inLinked)!;
     assert.ok(statSync(dirname(target)).isDirectory(), `${dirname(target)} must be a directory git can create a worktree under`);
     assert.equal(spawnSync("git", ["worktree", "add", "--detach", target, "HEAD"], { cwd: linked }).status, 0);
-    spawnSync("git", ["worktree", "remove", "--force", target], { cwd: linked });
+
+    // …and one NAME per caller, not per repo. The common dir is shared by every linked
+    // worktree, and a run's first act is `worktree remove --force` on that path — so with one
+    // shared name a second agent deletes the first's checkout mid-`npm ci`.
+    const inMain = (args: string[]) => spawnSync("git", args, { cwd: main, encoding: "utf8" }).stdout ?? "";
+    const fromMain = gatesWorktree(inMain)!;
+    assert.equal(dirname(fromMain), dirname(target), "both still live under the shared common git dir");
+    assert.notEqual(fromMain, target, "two worktrees must not share one gates checkout");
+    assert.equal(spawnSync("git", ["worktree", "add", "--detach", fromMain, "HEAD"], { cwd: main }).status, 0, "both can exist at once");
+
+    for (const [cwd, path] of [
+      [linked, target],
+      [main, fromMain],
+    ] as const) {
+      spawnSync("git", ["worktree", "remove", "--force", path], { cwd });
+    }
   });
 });
 

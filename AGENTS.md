@@ -149,7 +149,7 @@ PR for someone else to catch, rather than a PR nobody reviewed.
 The review itself is a **loop with a receipt**, not a single pass:
 
 ```
-npm run review:show      # this branch's curve: rounds → 4 · 1 · 0
+npm run review:show      # this branch's curve, one entry per round: "cold-subagent (cold): 4 · inline: 0"
 npm run review:check     # exactly what the handover gate will say
 npm run review:round     # record one round (JSON on stdin; see the skill)
 ```

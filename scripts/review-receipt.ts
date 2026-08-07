@@ -14,8 +14,9 @@
  *   1. It converged — at least {@link MIN_ROUNDS} rounds, the last finding nothing new.
  *   2. That last round, and the gates, ran against the code as it stands now. Each round
  *      records the {@link diffHash} it reviewed, so stale evidence is visible, not assumed.
- *   3. At least one round was cold — a reviewer starting from the diff alone, carrying none
- *      of the context the code was written in. Repeating one lens re-finds one lens's bugs.
+ *   3. At least one round was cold AND against the current diff — a reviewer starting from
+ *      the diff alone, carrying none of the context the code was written in, having read the
+ *      code as it ships. Repeating one lens re-finds one lens's bugs.
  *   4. Nothing blocking is left standing against the current diff — in any round that reviewed
  *      it, not just the last one, since fixing a finding is what moves the diff and dropping
  *      one silently would otherwise be the cheapest way out. Fixed, or waived on the record.
@@ -227,9 +228,15 @@ const runGit: Run = (args) => {
  * Identity of "the code under review": one diff from the merge base to the WORKING TREE.
  *
  * Keyed on content rather than on `HEAD` so the ordinary tidy-up before a PR — amending a
- * message, rebasing onto a moved main, squashing, or committing work that was reviewed while
- * uncommitted — does not void a round that still describes the same code. Editing one line
- * does void it, which is the behaviour we want.
+ * message, rebasing onto a moved main, squashing, or committing an edit to a tracked file that
+ * was reviewed while uncommitted — does not void a round that still describes the same code.
+ * Editing one line does void it, which is the behaviour we want.
+ *
+ * One case it does NOT survive, so review after `git add`, not before: committing a NEW file.
+ * An untracked file contributes its NAME to the hash and, once tracked, its CONTENT — so the
+ * commit moves the hash without changing a byte of code, and the round before it is voided.
+ * Fixing that means either trusting the untracked list less or reading every untracked file,
+ * and staging first costs nothing.
  *
  * Deliberately ONE diff against the merge base rather than `base...HEAD` plus `HEAD`: two
  * hashed separately makes committing the reviewed change produce a different hash, and two
@@ -383,12 +390,19 @@ export function validate(receipt: Receipt | null, hash: string): Verdict {
     };
   }
 
-  if (!receipt.rounds.some((r) => r.cold)) {
+  // Against the CURRENT diff, not merely somewhere in the history. Accepting a stale one made
+  // the cheapest compliant path "one cold round early, then change whatever you like" — nothing
+  // cold need ever have read the code as it ships. In practice this means the converging round
+  // is a cold one, since a fix moves the hash: which is the rule as it was always described.
+  if (!receipt.rounds.some((r) => r.cold && r.diff === hash)) {
+    const everCold = receipt.rounds.some((r) => r.cold);
     return {
       ok: false,
-      reason:
-        "every round was run by the session that wrote the code. At least one cold round is required — a reviewer starting " +
-        "from the diff alone: a fresh session, a colleague, or a subagent spawned for exactly this.",
+      reason: everCold
+        ? "the cold round reviewed earlier code, and the fixes since have only been read by the session that wrote them. " +
+          "One cold round on the diff as it stands — a reviewer starting from it alone."
+        : "every round was run by the session that wrote the code. At least one cold round is required — a reviewer starting " +
+          "from the diff alone: a fresh session, a colleague, or a subagent spawned for exactly this.",
     };
   }
 
@@ -503,7 +517,11 @@ export function recordRound(input: RoundInput, hash: string, branch: string, dir
  * is still true of this diff. A FAILURE is different: that is new information, and it stands.
  */
 export function keepsCleanRun(base: Receipt, hash: string, passed: boolean): boolean {
-  return passed && base.gates?.clean === true && base.gates.diff === hash;
+  // `passed` on BOTH sides. Keeping the flag when the clean run was RED laundered a failure
+  // into a pass: `review:gates` fails on the worktree, `review:gates:quick` goes green in
+  // place, and the receipt reads "green on a clean checkout". Only a clean run that PASSED is
+  // a clean pass worth preserving.
+  return passed && base.gates?.clean === true && base.gates.passed && base.gates.diff === hash;
 }
 
 export function runGates(branch: string, dir = RECEIPT_DIR): Receipt {
@@ -542,7 +560,13 @@ export function runGates(branch: string, dir = RECEIPT_DIR): Receipt {
  */
 export function gatesWorktree(run: Run = runGit): string | null {
   const gitDir = run(["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim();
-  return gitDir ? join(gitDir, "review-gates") : null;
+  if (!gitDir) return null;
+  // One name per CALLER, not one per repo. The common dir is shared by every linked worktree
+  // by definition, and the first thing a run does is `worktree remove --force` — so two agents
+  // in two worktrees would delete each other's checkout mid-`npm ci`. The caller's own
+  // worktree path is the thing that differs, so it is what names the directory.
+  const here = run(["rev-parse", "--path-format=absolute", "--show-toplevel"]).trim();
+  return join(gitDir, `review-gates-${createHash("sha256").update(here).digest("hex").slice(0, 12)}`);
 }
 
 export function runGatesClean(branch: string, dir = RECEIPT_DIR): Receipt | { dirty: string } {
