@@ -9,7 +9,6 @@ import { PairingStore } from "./pairing.ts";
 import { OAuthStore } from "./store.ts";
 
 const LOCAL = "local-credential-value";
-const REQ = { clientId: "c1", clientName: "Claude", redirectUri: "https://claude.ai/cb", codeChallenge: "chal" };
 
 let base: string;
 let server: Server;
@@ -56,45 +55,24 @@ describe("the operator's half of pairing", () => {
   // the local credential, holding the connector URL would be enough to approve your own request
   // — the whole mechanism inverted.
   it("refuses every route without the local credential", async () => {
-    const parked = pairing.park(REQ)!;
     for (const [path, body] of [
-      ["pending", undefined],
       ["connections", undefined],
-      ["approve", { code: parked.code }],
-      ["deny", { code: parked.code }],
+      ["code", {}],
       ["revoke", { clientId: "c1" }],
     ] as const) {
       assert.equal((await call(path, undefined, body)).status, 401, `${path} must refuse`);
       assert.equal((await call(path, "not-the-token", body)).status, 401, `${path} must refuse a wrong credential`);
     }
-    assert.equal(pairing.pending().length, 1, "and none of that may have changed anything");
+    assert.equal(pairing.outstanding(), null, "and none of that may have minted anything");
   });
 
-  it("lists what is waiting, then approves it by code", async () => {
-    const parked = pairing.park(REQ)!;
-    const listed = (await (await call("pending", LOCAL)).json()) as { pending: { code: string }[] };
-    assert.deepEqual(
-      listed.pending.map((p) => p.code),
-      [parked.code],
-    );
-
-    const res = await call("approve", LOCAL, { code: parked.code });
+  it("mints a code, and only for the credential that asked", async () => {
+    const res = await call("code", LOCAL, {});
     assert.equal(res.status, 200);
-    const taken = pairing.take(parked.id)!;
-    assert.equal(taken.status, "approved");
-    assert.ok(taken.authCode, "approving is what mints — nothing before it does");
-  });
-
-  it("says so rather than inventing a request when the code is unknown", async () => {
-    const res = await call("approve", LOCAL, { code: "NOP-E42" });
-    assert.equal(res.status, 404);
-    assert.match(String(((await res.json()) as { detail: string }).detail), /expired/);
-  });
-
-  it("denies without issuing anything", async () => {
-    const parked = pairing.park(REQ)!;
-    assert.equal((await call("deny", LOCAL, { code: parked.code })).status, 200);
-    assert.deepEqual(pairing.poll(parked.id), { status: "denied" });
+    const { code, expiresMs } = (await res.json()) as { code: string; expiresMs: number };
+    assert.match(code, /^[A-Z0-9]{3}-[A-Z0-9]{3}$/);
+    assert.ok(expiresMs > Date.now(), "a code that is already expired is a support ticket");
+    assert.ok(pairing.claim(code), "the minted code is the one the browser can spend");
   });
 
   it("revokes a client's grants and reports how many went", async () => {

@@ -60,8 +60,7 @@ Everything else, for when you already know what you want:
   deckhand init --hostname H [--github-app-id N --github-app-pem P] [--port 4300]
                                                    the App is optional: without it
                                                    deckhand uses your gh CLI session
-  deckhand approve [CODE]                          approve a waiting connection (bare: list what waits)
-  deckhand deny CODE                               refuse one
+  deckhand pair                                    mint a pairing code to let one client in
   deckhand connections                             clients that hold a grant now
   deckhand revoke <client-id>                      take a client's access away
   deckhand token add <name>                        another LOCAL credential (Claude Code on this Mac)
@@ -150,11 +149,8 @@ async function main(): Promise<void> {
       });
     }
 
-    case "approve":
-      return cmdApprove(sub);
-
-    case "deny":
-      return cmdDeny(sub);
+    case "pair":
+      return cmdPair();
 
     case "connections":
       return cmdConnections();
@@ -332,33 +328,19 @@ async function pairCall(path: string, body?: unknown): Promise<Record<string, un
 const waited = (ms: number): string => (ms < 60_000 ? `${Math.round(ms / 1000)}s ago` : `${Math.round(ms / 60_000)}m ago`);
 
 /**
- * Approve a waiting connection — the one place a new client is let in.
+ * Mint a pairing code — the only way a new client gets in.
  *
- * Bare `deckhand approve` LISTS rather than approving anything. Approving whatever happens to
- * be waiting is exactly the mistake this whole mechanism exists to prevent: the operator has
- * to match the code on their own screen against the one in the browser, or a colleague's
- * request is indistinguishable from their own.
+ * The operator mints; the browser types it. The other direction (park the request, let the
+ * operator approve it from a list) reads friendlier and collapses under a flood: parking is
+ * unauthenticated, so a stranger fills the list faster than a person can walk to the Mac.
+ * Nothing incoming is stored now, so there is nothing to flood.
  */
-async function cmdApprove(code: string | undefined): Promise<void> {
-  if (!code) {
-    const { pending } = (await pairCall("pending")) as { pending: { code: string; clientName: string; waitingMs: number }[] };
-    if (!pending.length) {
-      console.log("nothing is waiting. Paste your connector URL into claude.ai and click Connect, then run this again.");
-      return;
-    }
-    for (const p of pending) console.log(`${p.code}   ${p.clientName}   ${waited(p.waitingMs)}`);
-    console.error(`\nApprove the one whose code matches YOUR browser: \`deckhand approve <CODE>\``);
-    console.error(`If none of them is yours, approve none of them — somebody else has your connector URL.`);
-    return;
-  }
-  const { approved } = (await pairCall("approve", { code })) as { approved: { code: string; clientName: string } };
-  console.log(`approved ${approved.code} (${approved.clientName}) — the browser waiting on it will continue.`);
-}
-
-async function cmdDeny(code: string | undefined): Promise<void> {
-  if (!code) fail("usage: deckhand deny <CODE>   (`deckhand approve` lists what is waiting)");
-  const { denied } = (await pairCall("deny", { code: code! })) as { denied: { code: string; clientName: string } };
-  console.log(`refused ${denied.code} (${denied.clientName}). Nothing was connected.`);
+async function cmdPair(): Promise<void> {
+  const { code, expiresMs } = (await pairCall("code", {})) as { code: string; expiresMs: number };
+  console.log(code);
+  const minutes = Math.max(1, Math.round((expiresMs - Date.now()) / 60_000));
+  console.error(`\nType it into the deckhand page in the browser. Good for ~${minutes} min, one use.`);
+  console.error(`Nobody can connect without it, so do not paste it anywhere you would not paste a password.`);
 }
 
 async function cmdConnections(): Promise<void> {

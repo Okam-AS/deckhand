@@ -142,10 +142,10 @@ describe("deckhand token (no subcommand)", () => {
   });
 });
 
-describe("deckhand approve", () => {
-  // Approving needs the running server — pairing state is in memory there, deliberately. What
-  // is testable without one is the refusal: it must name the reason rather than crash, because
-  // "cannot connect to the server" and "nothing is waiting" send the operator opposite ways.
+describe("deckhand pair", () => {
+  // Minting needs the running server — the code lives in memory there, deliberately. What is
+  // testable without one is the refusal: it must name the reason rather than crash, because
+  // "the server is down" and "you have no credential" send the operator opposite ways.
   it("says the server is not answering rather than throwing", () => {
     const fresh = mkdtempSync(join(tmpdir(), "deckhand-approve-"));
     const at = (...args: string[]): string =>
@@ -155,7 +155,7 @@ describe("deckhand approve", () => {
       at("token", "add", "me");
       let stderr = "";
       try {
-        at("approve");
+        at("pair");
       } catch (e) {
         stderr = String((e as { stderr?: Buffer }).stderr ?? "");
       }
@@ -176,7 +176,7 @@ describe("deckhand approve", () => {
       at("init", "--hostname", "deckhand.example.com");
       let stderr = "";
       try {
-        at("approve");
+        at("pair");
       } catch (e) {
         stderr = String((e as { stderr?: Buffer }).stderr ?? "");
       }

@@ -84,7 +84,7 @@ viewer page, a ruthlessly short dependency list.
   bearer token), per-app share links (optionally PIN-gated). The OAuth discovery,
   registration and sign-in endpoints are open by construction — a client with no
   credential has to start somewhere — and grant nothing on their own: a request that
-  reaches them waits for `deckhand approve`.
+  reaches them needs a pairing code minted on the Mac with `deckhand pair`.
 - The MCP surface is capability-bounded — no arbitrary commands, only pre-registered
   apps and their repos' refs. Every call lands in an append-only audit log.
 - Secrets never travel through MCP; tokens never appear in argv, URLs, or logs.
@@ -134,9 +134,9 @@ npx tsx server/src/cli.ts setup \
   and will hang you forever.
 - Install what it says you can install. Then ask the user for a hostname on a
   domain they have on Cloudflare, and run `setup --hostname <that>`.
-- At the end, ask the user for the code Claude shows on Connect and run
-  `deckhand approve <CODE>` yourself. Do not tell them to run it — reading the code
-  is theirs to do, typing the command is yours.
+- At the end, run `deckhand pair` yourself and give the user the code it prints;
+  they type it into the page Claude opens. Typing the command is yours, typing the
+  code into their own browser is theirs.
 - Xcode is a ~10 GB App Store download needing an Apple ID and a `sudo` licence
   accept. Ask; do not claim to have done it.
 - Android is optional. Without it, iOS previews work and Android does not —
@@ -170,14 +170,14 @@ and admits nobody because they have it. Clicking Connect shows a short code and
 waits. You let that one client in, from the Mac:
 
 ```sh
-deckhand approve                   # what is waiting, with its code
-deckhand approve RED-4W7           # let that one in — match YOUR browser's code
+deckhand pair                      # mint a code; type it into the page Claude opens
 deckhand connections               # who holds a grant now
 deckhand revoke <client-id>        # take it back, effective next call, no restart
 ```
 
-A colleague who pastes the same URL gets a code nobody matches. If a code appears
-that you did not start, approve nothing: somebody else has your connector URL.
+A colleague who pastes the same URL is asked for a code they do not have. Nothing
+waits, nothing queues, and there is no list for a stranger to fill — the code exists
+only on your machine, for ten minutes, for one use.
 
 Claude Code on the same Mac has no browser to sign in with, so it uses a local
 credential instead: `deckhand token add <name>`, sent as an

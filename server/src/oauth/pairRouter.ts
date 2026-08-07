@@ -4,15 +4,15 @@ import type { OAuthStore } from "./store.ts";
 import type { PairingStore } from "./pairing.ts";
 
 /**
- * The operator's side of pairing: see what is waiting, and say yes or no.
+ * The operator's side of pairing: mint a code, and manage what it let in.
  *
  * Reachable through the tunnel like everything else, so it is NOT protected by being loopback —
  * it is protected by `tokens.yaml`, the credential you can only get by being at the machine
  * (`deckhand token`). That asymmetry is the whole design: the public half parks requests and
  * proves nothing, this half decides and needs the local secret.
  *
- * An OAuth grant deliberately cannot approve. A connector that talked its way in once would
- * otherwise be able to wave the next one through, which turns one approval into a standing
+ * An OAuth grant deliberately cannot mint. A connector that talked its way in once would
+ * otherwise be able to let the next one through, which turns one approval into a standing
  * one — the opposite of what the operator agreed to.
  */
 export interface PairRouterDeps {
@@ -36,30 +36,9 @@ export function createPairRouter(deps: PairRouterDeps): express.Router {
     next();
   });
 
-  router.get("/pending", (_req, res) => {
-    res.json({ pending: deps.pairing.pending() });
-  });
-
-  router.post("/approve", (req, res) => {
-    const code = typeof (req.body as { code?: unknown })?.code === "string" ? (req.body as { code: string }).code : "";
-    const approved = deps.pairing.approve(code, (p) =>
-      deps.store.mintCode({ clientId: p.clientId, redirectUri: p.redirectUri, label: p.clientName, codeChallenge: p.codeChallenge }),
-    );
-    if (!approved) {
-      res.status(404).json({ error: "no_such_request", detail: "no request is waiting with that code — it may have expired" });
-      return;
-    }
-    res.json({ approved: { code: approved.code, clientName: approved.clientName } });
-  });
-
-  router.post("/deny", (req, res) => {
-    const code = typeof (req.body as { code?: unknown })?.code === "string" ? (req.body as { code: string }).code : "";
-    const denied = deps.pairing.deny(code);
-    if (!denied) {
-      res.status(404).json({ error: "no_such_request", detail: "no request is waiting with that code — it may have expired" });
-      return;
-    }
-    res.json({ denied: { code: denied.code, clientName: denied.clientName } });
+  // Minting is the whole operator side now: there is no queue to list and nothing to pick.
+  router.post("/code", (_req, res) => {
+    res.json(deps.pairing.mint());
   });
 
   router.get("/connections", (_req, res) => {

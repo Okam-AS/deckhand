@@ -1,144 +1,82 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { PairingStore, MAX_PENDING, PENDING_TTL_MS } from "./pairing.ts";
+import { PairingStore, CODE_TTL_MS, MAX_ATTEMPTS } from "./pairing.ts";
 
-const REQ = {
-  clientId: "client-1",
-  clientName: "Claude",
-  redirectUri: "https://claude.ai/api/mcp/auth_callback",
-  codeChallenge: "challenge",
-};
-
-/** A clock the test moves by hand: waiting five real minutes is not a test. */
+/** A clock the test moves by hand: waiting ten real minutes is not a test. */
 function clock(start = 1_000): { now: () => number; advance: (ms: number) => void } {
   let t = start;
   return { now: () => t, advance: (ms) => (t += ms) };
 }
 
-describe("requests waiting for the operator", () => {
-  it("parks a request and shows a code, issuing nothing", () => {
-    const store = new PairingStore();
-    const parked = store.park(REQ)!;
-    assert.ok(parked.id.length >= 32, "the poll handle must not be guessable");
-    assert.match(parked.code, /^[A-Z0-9]{3}-[A-Z0-9]{3}$/);
-    assert.equal(parked.status, "pending");
-    assert.equal(parked.authCode, undefined, "nothing is minted by arriving");
-    assert.deepEqual(store.poll(parked.id), { status: "pending" });
+describe("the pairing code", () => {
+  it("mints a code a person can read off one screen and type on another", () => {
+    const { code, expiresMs } = new PairingStore({ now: () => 1_000 }).mint();
+    assert.match(code, /^[ACDEFGHJKLMNPQRTUVWXY2346789]{3}-[ACDEFGHJKLMNPQRTUVWXY2346789]{3}$/);
+    assert.doesNotMatch(code, /[O0I1S5B8]/, "characters that get misread cost a retry the operator cannot diagnose");
+    assert.equal(expiresMs, 1_000 + CODE_TTL_MS);
   });
 
-  // The operator's list must not carry anything that would let a screenshot stand in for being
-  // at the machine — the id is the browser's, and the challenge and redirect are the client's.
-  it("shows the operator the code, the client and the wait — and nothing else", () => {
+  it("accepts the code once and never again", () => {
+    const store = new PairingStore();
+    const { code } = store.mint();
+    assert.equal(store.claim(code), true);
+    assert.equal(store.claim(code), false, "a connector that got in must not leave the door open behind it");
+  });
+
+  it("accepts it however it was typed back", () => {
+    const store = new PairingStore();
+    const { code } = store.mint();
+    assert.equal(store.claim(`  ${code.toLowerCase()} `), true);
+  });
+
+  // The whole threat model: the URL is public, so anyone can submit. Guessing is the only move
+  // left, and it has to be bounded or ~4.8e8 possibilities is just a slow afternoon.
+  it("destroys the code after a handful of wrong guesses", () => {
+    const store = new PairingStore();
+    const { code } = store.mint();
+    for (let i = 0; i < MAX_ATTEMPTS; i++) assert.equal(store.claim("AAA-AAA"), false);
+    assert.equal(store.claim(code), false, "the real code must die too — otherwise the burst simply continues");
+    assert.equal(store.outstanding(), null);
+  });
+
+  it("counts guesses against the code, so minting again gives a fresh budget", () => {
+    const store = new PairingStore();
+    store.mint();
+    for (let i = 0; i < MAX_ATTEMPTS - 1; i++) store.claim("AAA-AAA");
+    const { code } = store.mint();
+    for (let i = 0; i < MAX_ATTEMPTS - 1; i++) store.claim("AAA-AAA");
+    assert.equal(store.claim(code), true, "a retry is not the previous attempt's leftovers");
+  });
+
+  it("expires", () => {
     const c = clock();
     const store = new PairingStore({ now: c.now });
-    store.park(REQ);
-    c.advance(3_000);
-    const [waiting] = store.pending();
-    assert.deepEqual(Object.keys(waiting!).sort(), ["clientName", "code", "waitingMs"]);
-    assert.equal(waiting!.waitingMs, 3_000);
+    const { code } = store.mint();
+    c.advance(CODE_TTL_MS + 1);
+    assert.equal(store.outstanding(), null);
+    assert.equal(store.claim(code), false, "a code left on a screen is not a standing offer");
   });
 
-  it("mints only on approval, and hands the browser the same request", () => {
+  // A second `deckhand pair` means the first attempt is being retried. Leaving the old code
+  // alive would keep a window open that nobody is watching any more.
+  it("replaces the outstanding code rather than keeping both", () => {
     const store = new PairingStore();
-    const parked = store.park(REQ)!;
-    const approved = store.approve(parked.code, () => "auth-code-1");
-    assert.equal(approved?.id, parked.id);
-    assert.deepEqual(store.poll(parked.id), { status: "approved" }, "the poll never carries the code itself");
-    assert.equal(store.take(parked.id)?.authCode, "auth-code-1");
+    const first = store.mint().code;
+    const second = store.mint().code;
+    assert.equal(store.claim(first), false);
+    assert.equal(store.claim(second), true);
   });
 
-  it("approves case-insensitively, because the code is read off one screen and typed on another", () => {
+  it("refuses everything when nothing was minted", () => {
     const store = new PairingStore();
-    const parked = store.park(REQ)!;
-    assert.ok(store.approve(parked.code.toLowerCase(), () => "auth-code-1"));
+    assert.equal(store.claim("ABC-123"), false);
+    assert.equal(store.outstanding(), null);
   });
 
-  it("hands an approved request over exactly once", () => {
+  // `outstanding` exists for doctor and for the CLI's wording, and neither needs the secret.
+  it("never hands the code back out once minted", () => {
     const store = new PairingStore();
-    const parked = store.park(REQ)!;
-    store.approve(parked.code, () => "auth-code-1");
-    assert.equal(store.take(parked.id)?.authCode, "auth-code-1");
-    assert.equal(store.take(parked.id), null, "a replayed resume must not deliver the code again");
-  });
-
-  it("mints nothing twice for one approval", () => {
-    const store = new PairingStore();
-    const parked = store.park(REQ)!;
-    let mints = 0;
-    store.approve(parked.code, () => `code-${++mints}`);
-    assert.equal(store.approve(parked.code, () => `code-${++mints}`), null, "it is no longer pending");
-    assert.equal(mints, 1);
-  });
-
-  it("refuses a denied request without issuing anything", () => {
-    const store = new PairingStore();
-    const parked = store.park(REQ)!;
-    assert.ok(store.deny(parked.code));
-    assert.deepEqual(store.poll(parked.id), { status: "denied" });
-    assert.equal(store.approve(parked.code, () => "nope"), null);
-  });
-
-  // The URL is public, so anyone holding it can make this Mac show a prompt. Refusing the
-  // newcomer was the first instinct and it inverts: hold every slot and refresh them, and the
-  // OPERATOR can never park a request again — a lockout of the one person this is for, needing
-  // no credential to mount.
-  it("always lets the newest request in, so a flood cannot lock the operator out", () => {
-    const c = clock();
-    const store = new PairingStore({ now: c.now });
-    const flood: { code: string }[] = [];
-    for (let i = 0; i < MAX_PENDING; i++) {
-      c.advance(1_000);
-      flood.push(store.park(REQ)!);
-    }
-    c.advance(1_000);
-    const mine = store.park(REQ);
-    assert.ok(mine, "the request made by the person at the machine must always fit");
-    assert.equal(store.pending().length, MAX_PENDING, "and the queue stays bounded");
-    assert.ok(
-      store.pending().some((p) => p.code === mine!.code),
-      "the newest is the one kept",
-    );
-    assert.ok(
-      !store.pending().some((p) => p.code === flood[0]!.code),
-      "the oldest is the one dropped",
-    );
-  });
-
-  it("keeps the queue bounded however many arrive", () => {
-    const c = clock();
-    const store = new PairingStore({ now: c.now });
-    for (let i = 0; i < MAX_PENDING * 4; i++) {
-      c.advance(100);
-      assert.ok(store.park(REQ));
-    }
-    assert.equal(store.pending().length, MAX_PENDING, "evicting is not the same as growing");
-  });
-
-  it("expires a request rather than leaving it approvable", () => {
-    const c = clock();
-    const store = new PairingStore({ now: c.now });
-    const parked = store.park(REQ)!;
-    c.advance(PENDING_TTL_MS + 1);
-    assert.deepEqual(store.poll(parked.id), { status: "expired" });
-    assert.equal(store.approve(parked.code, () => "nope"), null, "an unattended screen is not a standing offer");
-    assert.deepEqual(store.pending(), []);
-  });
-
-  it("reads an unknown id as expired rather than saying which it is", () => {
-    assert.deepEqual(new PairingStore().poll("never-existed"), { status: "expired" });
-  });
-
-  // Two identical codes make "which one is mine" unanswerable, which is the code's entire job.
-  it("never shows the same code twice at once, even when the source repeats itself", () => {
-    let calls = 0;
-    // Deterministic and colliding on purpose: the first two draws produce the same code.
-    const pick = (n: number): number => {
-      calls++;
-      return calls <= 6 ? 0 : calls % n;
-    };
-    const store = new PairingStore({ pick });
-    const a = store.park(REQ)!;
-    const b = store.park(REQ)!;
-    assert.notEqual(a.code, b.code);
+    store.mint();
+    assert.deepEqual(Object.keys(store.outstanding()!), ["expiresMs"]);
   });
 });

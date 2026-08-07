@@ -79,19 +79,19 @@ function authorize(url: string): Promise<Response> {
 }
 
 /**
- * Do what the operator does: read the waiting code and approve it, then follow the resume the
- * browser would follow. Returns the redirect back to the client.
+ * Do what a visitor does: read the form, get the code the operator minted, submit it. Returns
+ * the redirect back to the client.
  */
-async function approveAndResume(res: Response): Promise<Response> {
+async function submitCode(res: Response, clientId: string, challenge: string, code?: string): Promise<Response> {
   const html = await res.text();
-  const id = /pending\/" \+ encodeURIComponent\(id\)/.test(html) ? /const id = "([^"]+)"/.exec(html)?.[1] : null;
-  assert.ok(id, "the waiting page must carry the poll id");
-  const waiting = pairing.pending();
-  assert.equal(waiting.length, 1, "exactly one request should be waiting");
-  pairing.approve(waiting[0]!.code, (p) =>
-    store.mintCode({ clientId: p.clientId, redirectUri: p.redirectUri, label: p.clientName, codeChallenge: p.codeChallenge }),
-  );
-  return fetch(`${base}/oauth/resume/${encodeURIComponent(id!)}`, { redirect: "manual" });
+  assert.match(html, /name="code"/, "the authorize page must ask for the code");
+  const minted = code ?? pairing.mint().code;
+  return fetch(`${base}/oauth/authorize`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ client_id: clientId, redirect_uri: REDIRECT, code_challenge: challenge, state: "opaque-state", code: minted }),
+  });
 }
 
 const codeFrom = (res: Response): string | null => new URL(res.headers.get("location")!).searchParams.get("code");
@@ -109,7 +109,7 @@ describe("OAuth authorization server", () => {
     const clientId = await register();
     const { verifier, challenge } = pkce();
 
-    const res = await approveAndResume(await authorize(authorizeUrl(clientId, challenge)));
+    const res = await submitCode(await authorize(authorizeUrl(clientId, challenge)), clientId, challenge);
     assert.equal(res.status, 302);
     const location = new URL(res.headers.get("location")!);
     assert.equal(location.origin + location.pathname, REDIRECT);
@@ -164,7 +164,7 @@ describe("OAuth authorization server", () => {
   it("rejects a code redeemed with the wrong verifier, and burns it in the process", async () => {
     const clientId = await register();
     const { verifier, challenge } = pkce();
-    const code = codeFrom(await approveAndResume(await authorize(authorizeUrl(clientId, challenge))))!;
+    const code = codeFrom(await submitCode(await authorize(authorizeUrl(clientId, challenge)), clientId, challenge))!;
 
     const wrong = await token({
       grant_type: "authorization_code",
@@ -190,7 +190,7 @@ describe("OAuth authorization server", () => {
   it("rejects a replayed code", async () => {
     const clientId = await register();
     const { verifier, challenge } = pkce();
-    const code = codeFrom(await approveAndResume(await authorize(authorizeUrl(clientId, challenge))))!;
+    const code = codeFrom(await submitCode(await authorize(authorizeUrl(clientId, challenge)), clientId, challenge))!;
     const args = { grant_type: "authorization_code", client_id: clientId, redirect_uri: REDIRECT, code, code_verifier: verifier };
     assert.equal((await token(args)).status, 200);
     assert.equal((await token(args)).status, 400);
@@ -200,7 +200,7 @@ describe("OAuth authorization server", () => {
     const clientId = await register();
     const other = await register();
     const { verifier, challenge } = pkce();
-    const code = codeFrom(await approveAndResume(await authorize(authorizeUrl(clientId, challenge))))!;
+    const code = codeFrom(await submitCode(await authorize(authorizeUrl(clientId, challenge)), clientId, challenge))!;
     const res = await token({
       grant_type: "authorization_code",
       client_id: other,
@@ -214,7 +214,7 @@ describe("OAuth authorization server", () => {
   it("rotates the refresh token and refuses the one it replaced", async () => {
     const clientId = await register();
     const { verifier, challenge } = pkce();
-    const code = codeFrom(await approveAndResume(await authorize(authorizeUrl(clientId, challenge))))!;
+    const code = codeFrom(await submitCode(await authorize(authorizeUrl(clientId, challenge)), clientId, challenge))!;
     const first = (await (
       await token({ grant_type: "authorization_code", client_id: clientId, redirect_uri: REDIRECT, code, code_verifier: verifier })
     ).json()) as { refresh_token: string; access_token: string };
@@ -246,7 +246,7 @@ describe("OAuth authorization server", () => {
   it("caps registered clients, and never evicts one that holds a live grant", async () => {
     const clientId = await register();
     const { verifier, challenge } = pkce();
-    const code = codeFrom(await approveAndResume(await authorize(authorizeUrl(clientId, challenge))))!;
+    const code = codeFrom(await submitCode(await authorize(authorizeUrl(clientId, challenge)), clientId, challenge))!;
     assert.equal(
       (await token({ grant_type: "authorization_code", client_id: clientId, redirect_uri: REDIRECT, code, code_verifier: verifier }))
         .status,
@@ -283,11 +283,14 @@ describe("who can mint an authorization code", () => {
   // request. The failure this guards is a future edit that "just returns the code when there
   // is one obvious client" — which hands a grant to whoever holds the URL, the exact thing
   // the parking exists to prevent. Minting belongs to the approval path alone.
-  it("never mints a code from the public authorize endpoint", () => {
+  it("mints only after the pairing code has been spent", () => {
     const source = readFileSync(join(import.meta.dirname, "router.ts"), "utf8")
       .split("\n")
       .filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("*"))
       .join("\n");
-    assert.doesNotMatch(source, /mintCode/, "router.ts must not mint codes — pairRouter.ts does, behind the local credential");
+    const mints = [...source.matchAll(/mintCode\(/g)];
+    assert.equal(mints.length, 1, "one mint, in one place — a second is a second way in");
+    const claim = source.indexOf("pairing.claim(");
+    assert.ok(claim >= 0 && claim < mints[0]!.index!, "the mint must sit behind a claimed code, not beside it");
   });
 });

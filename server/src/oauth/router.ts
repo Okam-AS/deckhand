@@ -51,47 +51,31 @@ button:hover{transform:translateY(-1px)}button:active{transform:scale(.98)}
 }
 
 /**
- * The page a visitor waits on, showing the code the operator must match.
+ * The page that asks for the code.
  *
- * It polls rather than holding the connection open: a request parked for minutes behind a
- * tunnel is a request some proxy will cut, and a page that dies silently reads as deckhand
- * being broken. `<noscript>` gets a meta refresh — it cannot auto-resume, but it can tell the
- * visitor what is happening, which is the part that matters.
+ * No status, no polling, no waiting: the browser holds everything needed to finish, and the
+ * only missing piece is a string that exists on the operator's machine. The form carries the
+ * request's own parameters so the POST can re-validate them rather than trust a session.
  */
-function waitingPage(res: express.Response, id: string, code: string): void {
+function codeForm(
+  res: express.Response,
+  req: { clientId: string; redirectUri: string; state: string | null; challenge: string },
+  error?: string,
+): void {
+  const hidden = (name: string, value: string): string => `<input type="hidden" name="${name}" value="${esc(value)}">`;
   page(
     res,
-    200,
-    "Waiting for approval",
-    `<p>Give this to your agent.</p>
-     <div class="codebox"><span class="code">${esc(code)}</span><button id="c" type="button">Copy</button></div>
-     <p id="s" class="status">Waiting…</p>
-     <noscript><meta http-equiv="refresh" content="5"><p>Reload this page once it has been approved.</p></noscript>
-     <script>
-       const id = ${JSON.stringify(id)};
-       // Absolute, not relative: express also serves this page at /oauth/authorize/, and from
-       // that base a relative poll targets /oauth/authorize/pending/... — a 404 the retry loop
-       // reads as a dropped connection, so the page says "Waiting…" forever after approval.
-       const BASE = "/oauth";
-       const say = (t) => { document.getElementById("s").textContent = t; };
-       const btn = document.getElementById("c");
-       btn.onclick = async () => {
-         try { await navigator.clipboard.writeText(${JSON.stringify(code)}); } catch { /* no clipboard: the code is on screen anyway */ }
-         btn.textContent = "Copied";
-         setTimeout(() => (btn.textContent = "Copy"), 1600);
-       };
-       const tick = async () => {
-         try {
-           const r = await fetch(BASE + "/pending/" + encodeURIComponent(id), { headers: { accept: "application/json" } });
-           const { status } = await r.json();
-           if (status === "approved") { location.href = BASE + "/resume/" + encodeURIComponent(id); return; }
-           if (status === "denied") { say("Refused. Nothing was connected."); return; }
-           if (status === "expired") { say("This request expired. Start again from Claude."); return; }
-         } catch { /* a dropped poll is not a verdict — keep asking */ }
-         setTimeout(tick, 2000);
-       };
-       tick();
-     </script>`,
+    error ? 400 : 200,
+    "Enter the pairing code",
+    `<p>Ask whoever runs this deckhand for a pairing code — they run <code>deckhand pair</code>.</p>
+     ${error ? `<p class="err">${esc(error)}</p>` : ""}
+     <form method="post" action="/oauth/authorize">
+       ${hidden("client_id", req.clientId)}${hidden("redirect_uri", req.redirectUri)}
+       ${hidden("code_challenge", req.challenge)}${req.state ? hidden("state", req.state) : ""}
+       <input class="code" name="code" autocomplete="off" autocapitalize="characters" spellcheck="false"
+              placeholder="ABC-123" maxlength="7" autofocus>
+       <button type="submit">Connect</button>
+     </form>`,
   );
 }
 
@@ -125,12 +109,12 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
       oauthError(res, 400, "invalid_redirect_uri", "redirect_uris must be https");
       return;
     }
-    // The clients of requests already waiting for the operator are not idle, whatever the grant
-    // table says — see `evictIdleClients`.
-    const client = deps.store.registerClient(
-      { redirectUris: uris, name: (singleString(body.client_name) ?? "unnamed client").slice(0, 60) },
-      deps.pairing.busyClientIds(),
-    );
+    const client = deps.store.registerClient({
+      redirectUris: uris,
+      // Bounded: this name becomes the grant's label and the audit trail's actor, and it
+      // arrives from an unauthenticated endpoint.
+      name: (singleString(body.client_name) ?? "unnamed client").slice(0, 60),
+    });
     res.status(201).json({
       client_id: client.clientId,
       client_id_issued_at: Math.floor(client.createdMs / 1000),
@@ -186,53 +170,35 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
       return;
     }
 
-    // Nobody is authorized by arriving here. The request waits until the operator
-    // approves it at the machine — that wait IS the authorization.
-    const parked = deps.pairing.park({
-      clientId: client.clientId,
-      clientName: client.name,
-      redirectUri,
-      state: state ?? undefined,
-      codeChallenge: challenge,
-    });
-    if (!parked) {
-      // A full queue evicts rather than refuses (see MAX_PENDING), so the only way here is the
-      // code draw failing to find a free code — vanishingly unlikely, and still not a reason to
-      // hand the client an opaque failure. A page, because the visitor can act on it: retry.
-      page(
-        res,
-        503,
-        "Could not start that request",
-        `<p>deckhand could not allocate a code for this request. Try again.</p>`,
-      );
-      return;
-    }
-    waitingPage(res, parked.id, parked.code);
+    // Nothing is stored and nothing waits. The request carries no authority; the CODE does,
+    // and the operator minted it at the machine.
+    codeForm(res, { clientId: client.clientId, redirectUri, state, challenge });
   });
 
-  // -- The waiting browser asks whether it may proceed yet --------------------
-  //
-  // Unauthenticated on purpose, and safe because the id is a 32-byte secret handed
-  // only to the browser that made the request: polling proves you opened the page,
-  // which is exactly what it is allowed to prove. The APPROVAL is elsewhere and
-  // needs the machine's own credential.
-  router.get("/pending/:id", (req, res) => {
-    // Status only. The authorization code is never handed to the page: the page
-    // navigates to `/oauth/resume`, which builds the redirect server-side, so the
-    // registered redirect URI stays the only place a code can land.
-    res.json({ status: deps.pairing.poll(req.params.id ?? "").status });
-  });
-
-  // -- Approved: hand the browser back to the client --------------------------
-  router.get("/resume/:id", (req, res) => {
-    const parked = deps.pairing.take(req.params.id ?? "");
-    if (!parked || parked.status !== "approved" || !parked.authCode) {
-      page(res, 410, "Nothing to resume", `<p>This request was never approved, or it has already been used.</p>`);
+  // -- The visitor submits the code the operator minted -----------------------
+  router.post("/authorize", (req, res) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const clientId = singleString(b.client_id);
+    const redirectUri = singleString(b.redirect_uri);
+    const state = singleString(b.state);
+    const challenge = singleString(b.code_challenge);
+    const client = clientId ? deps.store.getClient(clientId) : null;
+    // Re-validated from scratch: these arrive from a form the visitor controls, so trusting
+    // them because GET checked them once would let a submission name any client it liked.
+    if (!clientId || !client || !redirectUri || !client.redirectUris.includes(redirectUri) || !challenge) {
+      page(res, 400, "Cannot authorize that request", `<p>This form no longer matches a client deckhand knows.</p>`);
       return;
     }
-    const url = new URL(parked.redirectUri);
-    url.searchParams.set("code", parked.authCode);
-    if (parked.state) url.searchParams.set("state", parked.state);
+    if (!deps.pairing.claim(singleString(b.code) ?? "")) {
+      // Deliberately one message for wrong, expired, spent and never-minted. Telling them
+      // apart tells an attacker whether a code exists to be guessed.
+      codeForm(res, { clientId, redirectUri, state, challenge }, "That code is not valid. Ask for a fresh one.");
+      return;
+    }
+    const authCode = deps.store.mintCode({ clientId, redirectUri, label: client.name, codeChallenge: challenge });
+    const url = new URL(redirectUri);
+    url.searchParams.set("code", authCode);
+    if (state) url.searchParams.set("state", state);
     res.redirect(302, url.toString());
   });
 

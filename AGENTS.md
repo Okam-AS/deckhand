@@ -40,13 +40,14 @@ the wildcard-hostname model, see PLAN §2/§8, not by editing their config.)
 **The connector is public; the approval is not** (PLAN §11.6). `/mcp` takes an
 `Authorization: Bearer` credential and never a path token: a connector URL added in a Claude
 organisation is visible to everyone in it, so the URL cannot be the secret. Nothing decides in
-advance who may use it. `/oauth/authorize` **parks** the request and shows a short code, and
-`deckhand approve` — which needs a local `tokens.yaml` credential, so it needs the machine —
-admits that one client. A colleague holding the same URL gets a parked request nobody matches.
-Bare `deckhand approve` LISTS rather than approving: the code has to be matched against the
-browser that is waiting, or that request and a stranger's look identical. An agent gets the code
-by ASKING the user for it, then runs `deckhand approve <CODE>` itself. `deckhand revoke
-<client-id>` takes one back, effective on its next call, no restart. Claude Code on the machine
+advance who may use it. `/oauth/authorize` asks for a **pairing code**, and the only place one
+exists is `deckhand pair` on the machine — it needs the local `tokens.yaml` credential. Mint,
+hand the code over, they type it in. A colleague holding the same URL is asked for a code they
+have not got. The direction matters: the earlier design parked incoming requests for the
+operator to approve, and a stranger could park faster than a person can walk to the Mac, so the
+operator's own request was gone before they read it. Nothing incoming is stored now, so there is
+nothing to flood — only guessing, and a code dies after a few wrong tries. `deckhand revoke
+<client-id>` takes a client back, effective on its next call, no restart. Claude Code on the machine
 uses a local `tokens.yaml` bearer token instead and needs no approval.
 
 **The GitHub access ladder** (PLAN §2/§6/§11.4): credentials resolve PAT → GitHub App →
@@ -391,12 +392,11 @@ list of green ticks reads as "nothing left to do".
 
 **Their connector URL:** `deckhand token` — just `https://<their-host>/mcp`. It
 carries no secret, so relaying it in chat is fine. What keeps everyone else out is
-that Claude parks and waits: it shows a short code, and that code has to be approved
-here. **Ask them for it, then run `deckhand approve <CODE>` yourself** — do not hand
-them the command. Reading the code off their own screen is the part only they can
-do; typing a command is yours. Say so in the same breath as the URL, or a connector
-that sits at "connecting" reads as broken. With no local credential nothing can ever
-be approved; `deckhand doctor` fails on that, and it is not a warning.
+that Claude's page asks for a pairing code that exists only here. **Run `deckhand
+pair` yourself and give them the code** — they type it into their browser. Say so in
+the same breath as the URL, or a page asking for a code they have never heard of
+reads as broken. With no local credential nothing can ever be minted; `deckhand
+doctor` fails on that, and it is not a warning.
 
 Do not confuse that with `deckhand token add|url <name>`, which mints a LOCAL
 bearer credential for Claude Code on the machine. That one IS a password: never

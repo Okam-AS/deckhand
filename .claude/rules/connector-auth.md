@@ -23,26 +23,19 @@ Hardest rules:
   stopped authenticating, the URL would approve its own request. An OAuth grant deliberately
   cannot approve either — one connector waving the next one through turns a single approval into
   a standing one. → `invariants.test.ts` "puts no approval path outside the credential the machine holds"
-- **Authorize never mints.** A future edit that "just returns the code when there is one obvious
-  client" hands a grant to whoever holds the URL — the exact thing parking exists to prevent.
-  Enforced at the SOURCE level, because a runtime test only proves today's code parks. → `oauth/router.test.ts` "never mints a code from the public authorize endpoint"
-- **Bare `deckhand approve` lists; it never approves.** Approving whatever happens to be waiting
-  is the mistake the mechanism exists to prevent: the code has to be matched against the browser
-  that is waiting, or a colleague's request is indistinguishable from the operator's.
-- **A code the user READ is the approval; the command is the agent's to type.** An agent driving
-  a setup asks for the code and runs `deckhand approve <CODE>` itself. That keeps the human step
-  the one only a human can do — reading their own screen — instead of making them a typist for a
-  command the agent could run. It does not weaken the gate: the agent has the machine's
-  credential either way, and what it cannot do is invent a code nobody saw.
-- **A full queue evicts the OLDEST; the newest always fits.** Refusing the newcomer reads safer
-  and inverts: hold every slot and refresh them, and the operator can never park a request
-  again — a lockout of the one person this is for, mountable by a stranger with no credential.
-  The newest request is the operator's, because they just made it. → `oauth/pairing.test.ts` "always lets the newest request in, so a flood cannot lock the operator out"
-- **A parked request is memory, not disk.** Surviving a restart would let an approval outlive
-  the browser that asked for it, so the operator would be approving something they can no longer
-  see. It is also why `deckhand approve` talks to the running server instead of reading a file.
-- **An approved request is claimed once.** `/oauth/resume` deletes as it reads, so a replay
-  cannot deliver the same authorization code twice. → `oauth/pairing.test.ts` "hands an approved request over exactly once"
+- **The operator MINTS; the browser types.** The other direction — park the request, let the
+  operator approve it from a list — reads friendlier and collapses under load: parking is
+  unauthenticated, so a stranger parks faster than a person can walk to the Mac, and the
+  operator's own request is gone before they read its code. Nothing incoming is stored now, so
+  there is nothing to flood. → `oauth/pairing.test.ts`
+- **The code is single-use, replaced on re-mint, and dies after a few wrong guesses.** Guessing
+  is the only move a stranger has left, and ~4.8e8 possibilities is only strong while it is
+  bounded. → `oauth/pairing.test.ts` "destroys the code after a handful of wrong guesses"
+- **Mint after claim, once.** `/oauth/authorize`'s POST is the only place an authorization code
+  is minted, and it sits behind `pairing.claim`. A second mint is a second way in. → `oauth/router.test.ts` "mints only after the pairing code has been spent"
+- **The code lives in memory, never on disk.** It is worth minutes, and a code that survived a
+  restart would outlive the person who asked for it. It is also why `deckhand pair` talks to the
+  running server rather than writing a file.
 - **`/oauth/register` is unauthenticated, so everything it writes needs a ceiling.** RFC 7591
   registration has no credential to check — a client does not have one yet. Registering grants
   nothing, but each one is a row on disk, and this machine needs its free space for simulators
