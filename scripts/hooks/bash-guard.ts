@@ -2,8 +2,10 @@
  * PreToolUse hook (Bash): the mechanical backstop for the rules AGENTS.md states in prose.
  * Exit 2 blocks the command and feeds stderr back to the agent; exit 0 allows.
  *
- *   1. A human opens the pull request. `gh pr create` is refused for the agent, with NO
- *      override — that is the point of it. Everything before it (review to convergence, the
+ *   1. A human opens the pull request. Every way of opening one is refused for the agent —
+ *      `gh pr create`, and a POST to the `pulls` endpoint through `gh api` or `curl`, which
+ *      does the same thing — with NO override, and failing CLOSED if the guard itself throws.
+ *      That is the point of it. Everything before it (review to convergence, the
  *      gates on a clean checkout) is what earns the handover; the handover itself is a
  *      person's decision, and a gate the agent can talk its way past is not one.
  *   2. Never commit or push to `main`, whether by being on it or pushing at it
@@ -58,9 +60,18 @@ export function withoutQuotedText(cmd: string): string {
     .replace(/"(?:[^"\\]|\\.)*"/g, " ");
 }
 
-/** Does this command RUN `gh pr create`, as opposed to containing the words? */
+/**
+ * Does this command RUN something that opens a pull request, as opposed to containing the
+ * words? `gh pr create` is the porcelain; `gh api <owner>/<repo>/pulls -X POST` and a POST to
+ * the same path through `curl` do exactly the same thing, and a rule that only knows the
+ * porcelain reserves nothing.
+ */
 export function opensAPullRequest(cmd: string): boolean {
-  if (/\bgh\s+pr\s+create\b/.test(withoutQuotedText(cmd))) return true;
+  const bare = withoutQuotedText(cmd);
+  if (/\bgh\s+pr\s+create\b/.test(bare)) return true;
+  if (/\/pulls\b/.test(bare) && /\b(?:gh\s+api|curl)\b/.test(bare) && /(?:-X|--request)\s+POST|--method\s+POST|(?:^|\s)-f\s/.test(bare)) {
+    return true;
+  }
   // One place quoted text is code rather than data: an interpreter handed a script to run.
   // Blanking quotes is right everywhere else and wrong exactly here, so the quoted form counts
   // once something is standing by to execute it.
@@ -92,7 +103,15 @@ export function decide(cmd: string, resolveBranch: BranchResolver = gitBranch, r
   // prevented — so being "wrong" here is not possible in the way it is for the others. The way
   // past it is to ask the human, which is the intended behaviour rather than a workaround.
   if (opensAPullRequest(cmd)) {
-    const review = reviewStatus();
+    // The block does not depend on the receipt being readable — only the wording does. A
+    // throw here used to exit the hook 1, which the harness reads as "the guard errored, carry
+    // on": the one rule with no override was the one a malformed JSON file could switch off.
+    let review: { ok: boolean; detail: string };
+    try {
+      review = reviewStatus();
+    } catch (err) {
+      review = { ok: false, detail: `the review receipt could not be read (${(err as Error).message}). Re-run the review.` };
+    }
     const readiness = review.ok
       ? `The review has converged, so you have something to hand over: run \`npm run review:handover\` (it writes the PR body) and give the printed command to the user.`
       : `And the review is not finished anyway — ${review.detail}`;
@@ -106,9 +125,16 @@ export function decide(cmd: string, resolveBranch: BranchResolver = gitBranch, r
   }
 
   // 2. Never commit or push to main — work lands via PRs from feature branches.
-  const commit = /\bgit\s+(?:-C\s+(\S+)\s+)?commit\b/.exec(cmd);
+  //
+  // "Commit" is every verb that LANDS one, not just `git commit`: a merge, a cherry-pick and a
+  // revert all write to the branch, and blocking only the porcelain leaves the rule stating
+  // more than it enforces. `-c k=v` is skipped the same way `-C <dir>` is read.
+  const commit = /\bgit\s+(?:-c\s+\S+\s+)*(?:-C\s+(\S+)\s+)?(?:-c\s+\S+\s+)*(commit|merge|cherry-pick|revert)\b/.exec(cmd);
   if (commit) {
-    const branch = resolveBranch(commit[1] ?? cdTarget(cmd, commit.index));
+    // A `git switch main` earlier in the same command line moves the target before the verb
+    // runs, so the branch we are on now is the wrong thing to ask about.
+    const switched = /(?:^|[;&|]\s*)git\s+(?:switch|checkout)\s+(?:-\S+\s+)*main(?:\s|$|[;&|])/.test(cmd.slice(0, commit.index));
+    const branch = switched ? "main" : resolveBranch(commit[1] ?? cdTarget(cmd, commit.index));
     if (branch === "main") {
       return {
         blocked: true,
@@ -120,7 +146,10 @@ export function decide(cmd: string, resolveBranch: BranchResolver = gitBranch, r
   }
   // Pushing AT main from a feature branch is the same rule, one indirection along: it is how a
   // branch-first workflow gets bypassed without ever checking main out.
-  if (/\bgit\s+push\b/.test(cmd) && /(?:^|\s)(?:HEAD:)?(?:refs\/heads\/)?main(?:\s|$)/.test(withoutQuotedText(cmd))) {
+  // Matched against the RAW command, quotes and all: `git push origin "main"` is the same push,
+  // and rules 2–3 accept over-blocking (see the header) where rule 1 cannot. The refspec forms
+  // count too — `main:main` and `+main` push there just as squarely as a bare `main`.
+  if (/\bgit\s+push\b/.test(cmd) && /(?:^|\s|['"+])(?:HEAD:)?(?:\+)?(?:refs\/heads\/)?main(?::(?:refs\/heads\/)?\S+)?(?:\s|$|['"])/.test(cmd)) {
     return {
       blocked: true,
       reason: "Blocked: this pushes at `main`. Work lands through a pull request from a feature branch (AGENTS.md § How work lands here).",
@@ -157,7 +186,23 @@ if (isEntryPoint) {
     // uninstalled, and rule 1 is also stated in AGENTS.md.
     process.exit(0);
   }
-  const verdict = decide(command);
+  // A crash anywhere in the policy exits non-2, which the harness reads as "the hook errored"
+  // and runs the command. That is tolerable for rules 2–3, where the cost is a commit the
+  // author can undo — and not for rule 1, whose whole value is that it cannot be got past. So
+  // the fallback is per-rule: fail CLOSED on the pull request, open on everything else.
+  let verdict: Verdict;
+  try {
+    verdict = decide(command);
+  } catch (err) {
+    verdict = opensAPullRequest(command)
+      ? {
+          blocked: true,
+          reason:
+            `Blocked: opening a pull request is a human's call, not yours, and the guard could not check the review ` +
+            `(${(err as Error).message}). Fix that, then hand the command to the user.`,
+        }
+      : ALLOW;
+  }
   if (verdict.blocked) {
     console.error(verdict.reason);
     process.exit(2);

@@ -69,6 +69,35 @@ describe("a human opens the pull request", () => {
   it("leaves the other gh pr subcommands alone", () => {
     for (const cmd of ["gh pr view 84", "gh pr diff 84", "gh pr list", "gh pr checks"]) allowed(cmd);
   });
+
+  // The porcelain is not the act. A POST to the pulls endpoint opens the same PR, and a rule
+  // that only knows `gh pr create` reserves nothing from an agent that reads the API docs.
+  it("blocks opening a PR through the API as well as the porcelain", () => {
+    for (const cmd of [
+      "gh api repos/Okam-AS/deckhand/pulls -X POST -f base=main -f head=feature/x -f title=t",
+      "gh api --method POST repos/Okam-AS/deckhand/pulls -f title=t",
+      "curl -X POST https://api.github.com/repos/Okam-AS/deckhand/pulls -d @body.json",
+    ]) {
+      assert.match(blocked(cmd), /a human's call/);
+    }
+  });
+
+  it("leaves reading the same endpoint alone", () => {
+    allowed("gh api repos/Okam-AS/deckhand/pulls --jq '.[].number'");
+    allowed("curl https://api.github.com/repos/Okam-AS/deckhand/pulls/84");
+  });
+
+  // The receipt is a JSON file an agent writes, so it can be any shape. When reading it threw,
+  // the hook exited 1 — which the harness reads as "the guard errored" and runs the command.
+  // The one rule with no override was the one a malformed file could switch off.
+  it("still blocks when the review status cannot be read at all", () => {
+    const exploded: ReviewStatus = () => {
+      throw new TypeError("receipt.waived?.map is not a function");
+    };
+    const reason = blocked("gh pr create --base main", "feature/x", exploded);
+    assert.match(reason, /a human's call/);
+    assert.match(reason, /could not be read/);
+  });
 });
 
 describe("nothing lands on main directly", () => {
@@ -89,8 +118,33 @@ describe("nothing lands on main directly", () => {
     assert.equal(decide(`cd /tmp/other && git commit -m "x"`, resolver, converged).blocked, false);
   });
 
+  // A merge, a cherry-pick and a revert all land a commit. Blocking only `git commit` states
+  // the rule and enforces a third of it.
+  it("blocks the other verbs that land a commit on main", () => {
+    for (const cmd of ["git merge --no-ff feature/x", "git cherry-pick abc123", "git revert abc123", "git -c user.name=x commit -m y"]) {
+      assert.match(blocked(cmd, "main"), /nothing lands there directly/);
+    }
+  });
+
+  // The branch was resolved as of BEFORE the command ran, so switching to main inside the same
+  // line landed the commit exactly where the rule forbids.
+  it("blocks a commit that switches to main first", () => {
+    assert.match(blocked("git switch main && git commit -m y", "feature/x"), /nothing lands there directly/);
+    assert.match(blocked("git checkout main && git cherry-pick abc123", "feature/x"), /nothing lands there directly/);
+  });
+
   it("blocks a push AT main from a feature branch", () => {
-    for (const cmd of ["git push origin main", "git push origin HEAD:main", "git push origin HEAD:refs/heads/main"]) {
+    for (const cmd of [
+      "git push origin main",
+      "git push origin HEAD:main",
+      "git push origin HEAD:refs/heads/main",
+      // Quoting it is the same push. Rule 2 matches raw text for exactly this reason — the
+      // quote-blanking that rule 1 needs is what let these three through.
+      `git push origin "main"`,
+      `git push origin 'main'`,
+      "git push origin main:main",
+      "git push origin +main",
+    ]) {
       assert.match(blocked(cmd), /pushes at `main`/);
     }
   });

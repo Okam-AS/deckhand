@@ -90,7 +90,23 @@ describe("the gate", () => {
     const open = round({ cold: true, findings: [{ id: "f.ts::boom", severity: "must" }] });
     const v = validate(converged({ rounds: [round({ newFindings: 1, diff: OLD }), open] }), HASH);
     assert.equal(v.ok, false);
-    assert.match(!v.ok ? v.reason : "", /unresolved finding/);
+    assert.match(!v.ok ? v.reason : "", /unresolved blocking finding/);
+  });
+
+  // Checking only the LAST round made silence the cheapest exit: the cold round reports a
+  // must, the next round simply does not mention it, and the gate opens with nothing fixed.
+  // Dropping a finding is distinguishable from fixing one, because a fix moves the diff.
+  it("refuses a blocking finding an earlier round raised against this same diff and no one answered", () => {
+    const raised = round({ cold: true, findings: [{ id: "f.ts::auth bypass", severity: "must" }], newFindings: 1 });
+    const silent = round({ lens: "second-look" });
+    const v = validate(converged({ rounds: [raised, silent] }), HASH);
+    assert.equal(v.ok, false);
+    assert.match(!v.ok ? v.reason : "", /f\.ts::auth bypass/);
+  });
+
+  it("counts it answered once the fix moves the diff the round reviewed", () => {
+    const raised = round({ cold: true, findings: [{ id: "f.ts::auth bypass", severity: "must" }], newFindings: 1, diff: OLD });
+    assert.deepEqual(validate(converged({ rounds: [raised, round({ lens: "after-the-fix" })] }), HASH), { ok: true });
   });
 
   it("accepts that same finding once it is waived with a reason", () => {
@@ -132,7 +148,21 @@ describe("the gate", () => {
   // A crash in the guard OPENS the gate it exists to close: a PreToolUse hook that throws is
   // reported as a non-blocking error and the command runs.
   it("returns a verdict rather than throwing on a malformed receipt", () => {
-    for (const bad of [{}, { rounds: "no" }, { rounds: [{}] }, { rounds: [{ newFindings: 0 }, { newFindings: 0 }] }]) {
+    // Every one of these reached a field read one level in and threw. The first two got past
+    // the top-level `Array.isArray(rounds)` check that was supposed to cover this class — which
+    // is why the shapes are enumerated here rather than trusted to a single guard.
+    for (const bad of [
+      {},
+      { rounds: "no" },
+      { rounds: [{}] },
+      { rounds: [{ newFindings: 0 }, { newFindings: 0 }] },
+      // Written as JSON because that is how they arrive: the receipt is a file on disk, so the
+      // types say nothing about what `validate` is actually handed.
+      JSON.parse(`{"rounds":[null,${JSON.stringify(round({ cold: true }))}]}`),
+      JSON.parse(JSON.stringify({ ...converged(), waived: "whatever" })),
+      JSON.parse(JSON.stringify({ ...converged(), waived: [null] })),
+      JSON.parse(`{"rounds":[${JSON.stringify(round({ newFindings: 1, diff: OLD }))},{"lens":"cold","cold":true,"diff":"${HASH}","newFindings":0,"findings":[null]}]}`),
+    ]) {
       const v = validate(bad as unknown as Receipt, HASH);
       assert.equal(v.ok, false, `expected a refusal for ${JSON.stringify(bad)}`);
     }

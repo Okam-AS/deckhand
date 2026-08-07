@@ -16,7 +16,9 @@
  *      records the {@link diffHash} it reviewed, so stale evidence is visible, not assumed.
  *   3. At least one round was cold — a reviewer starting from the diff alone, carrying none
  *      of the context the code was written in. Repeating one lens re-finds one lens's bugs.
- *   4. Nothing blocking is left standing in that last round — fixed, or waived on the record.
+ *   4. Nothing blocking is left standing against the current diff — in any round that reviewed
+ *      it, not just the last one, since fixing a finding is what moves the diff and dropping
+ *      one silently would otherwise be the cheapest way out. Fixed, or waived on the record.
  *   5. `npm run ci` passed, on a clean checkout, recorded by RUNNING it rather than by being
  *      told. Deckhand's CI is exactly `npm run ci`, and the pre-commit hook runs the same
  *      command, so there is one definition of green and this is it.
@@ -41,7 +43,7 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 /**
  * Rounds required before convergence can be claimed at all.
@@ -301,9 +303,21 @@ export function validate(receipt: Receipt | null, hash: string): Verdict {
   }
   // A receipt is a JSON file an agent can write, so it can be any shape at all. Reading a
   // field off a malformed one used to throw, which took the PreToolUse hook down with a
-  // non-blocking error — a crash in the guard OPENS the gate it exists to close.
-  if (!Array.isArray(receipt.rounds)) {
-    return { ok: false, reason: "the receipt is malformed (no rounds). Re-run the review." };
+  // non-blocking error — a crash in the guard OPENS the gate it exists to close. Checking the
+  // top-level array was not enough: `rounds: [null]` and `waived: "x"` both still threw, one
+  // level in. Every field this function walks is checked before it is walked.
+  // Junk is REFUSED rather than skipped over. Filtering a null finding out and carrying on
+  // would make the most permissive reading of a broken file the one the gate acts on, which is
+  // the same failure in slower motion.
+  const isObject = (v: unknown): boolean => !!v && typeof v === "object";
+  if (
+    !Array.isArray(receipt.rounds) ||
+    receipt.rounds.some((r) => !isObject(r) || !Array.isArray(r.findings) || r.findings.some((f) => !isObject(f)))
+  ) {
+    return { ok: false, reason: "the receipt is malformed (rounds are not a list of rounds with findings). Re-run the review." };
+  }
+  if (receipt.waived !== undefined && (!Array.isArray(receipt.waived) || receipt.waived.some((w) => !isObject(w)))) {
+    return { ok: false, reason: "the receipt is malformed (`waived` is not a list of waivers). Re-run the review." };
   }
   if (hash === UNRESOLVABLE_DIFF) {
     return {
@@ -322,10 +336,7 @@ export function validate(receipt: Receipt | null, hash: string): Verdict {
     };
   }
 
-  const last = receipt.rounds.at(-1);
-  if (!last || !Array.isArray(last.findings)) {
-    return { ok: false, reason: "the receipt is malformed (a round has no findings). Re-run the review." };
-  }
+  const last = receipt.rounds.at(-1)!;
   if (last.newFindings !== 0) {
     return {
       ok: false,
@@ -347,14 +358,25 @@ export function validate(receipt: Receipt | null, hash: string): Verdict {
   // must-fixes scores zero new and would sail through. Worse, the freshness rule makes that
   // the CHEAPER path, because fixing them changes the diff and costs another round. So the
   // last round must have nothing blocking left standing — fixed, or waived on the record.
-  const waived = new Set(receipt.waived?.map((w) => w.finding) ?? []);
-  const open = last.findings.filter((f) => f.severity !== "nit" && !waived.has(f.id));
-  if (open.length) {
+  //
+  // "Left standing" spans rounds, not just the last one. Checking only the last round made
+  // SILENCE the cheapest exit: a cold round reports a must, the next round simply does not
+  // mention it, and the gate opens with nothing fixed. Dropping it is distinguishable from
+  // fixing it, because fixing it changes the diff — so a blocking finding counts as open when
+  // the round that raised it reviewed the code AS IT STANDS and no later round cleared it.
+  const waived = new Set((receipt.waived ?? []).map((w) => w.finding));
+  const open = new Set<string>();
+  for (const round of receipt.rounds) {
+    if (round.diff !== hash) continue; // reviewed older code; a fix is why the hash moved
+    for (const f of round.findings) if (f.severity !== "nit" && !waived.has(f.id)) open.add(f.id);
+  }
+  if (open.size) {
     return {
       ok: false,
       reason:
-        `the last review round still reports ${open.length} unresolved ${open.length === 1 ? "finding" : "findings"}. ` +
-        `Fix them and review again, or waive each one with a reason (\`waived\` takes the fingerprint).`,
+        `the review still has ${open.size} unresolved blocking ${open.size === 1 ? "finding" : "findings"} against this diff ` +
+        `(${[...open].join("; ")}). Fix them and review again, or waive each one with a reason ` +
+        `(\`waived\` takes the fingerprint).`,
     };
   }
 
@@ -539,7 +561,7 @@ export function handover(receipt: Receipt | null, hash: string, body: string, fi
   const verdict = validate(receipt, hash);
   if (!verdict.ok) return verdict;
   if (!body.trim()) return { ok: false, reason: "the PR body is empty — pipe the filled-in body in on stdin." };
-  mkdirSync(".claude", { recursive: true });
+  mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, body.endsWith("\n") ? body : `${body}\n`);
   return { ok: true };
 }
@@ -568,7 +590,9 @@ if (isEntryPoint) {
   } else if (cmd === "hash") {
     console.log(hash);
   } else if (cmd === "show") {
-    console.log(receipt ? JSON.stringify(receipt, null, 2) : `no receipt for ${branch}`);
+    // The curve first, because that is what the docs promise `show` prints and what a reader
+    // wants; the raw receipt after it, for the fingerprints a waiver has to quote.
+    console.log(receipt ? `${summarize(receipt)}\n\n${JSON.stringify(receipt, null, 2)}` : `no receipt for ${branch}`);
   } else if (cmd === "gates" || cmd === "gates:quick") {
     const next = cmd === "gates" ? runGatesClean(branch) : runGates(branch);
     if ("dirty" in next) {

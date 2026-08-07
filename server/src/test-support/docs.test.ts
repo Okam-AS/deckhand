@@ -270,7 +270,7 @@ describe("docs describe the code that exists", () => {
     // fixture directory that was never created.
     const missing: string[] = [];
     for (const doc of [PLAN, AGENTS]) {
-      for (const m of doc.matchAll(/`((?:server|viewer|landing|ops|patches|docs)\/[A-Za-z0-9_\-./]+\.(?:ts|tsx|md|json|sh|yml))`/g)) {
+      for (const m of doc.matchAll(/`((?:server|viewer|landing|ops|patches|docs|scripts)\/[A-Za-z0-9_\-./]+\.(?:ts|tsx|md|json|sh|yml))`/g)) {
         const path = m[1]!;
         if (!existsSync(join(REPO, path))) missing.push(path);
       }
@@ -289,6 +289,9 @@ describe("docs describe the code that exists", () => {
       }
     };
     for (const ws of ["server", "viewer", "landing"]) walk(join(REPO, ws, "src"));
+    // `scripts/` is not a workspace, but AGENTS.md now cites files there by path — and this
+    // check's own comment lists `scripts/` among the phantom paths it was written to catch.
+    walk(join(REPO, "scripts"));
     for (const doc of [PLAN, AGENTS]) {
       for (const m of doc.matchAll(/(?:`|\s)([a-zA-Z][A-Za-z0-9_-]*\.tsx?)\b/g)) {
         const name = m[1]!;
