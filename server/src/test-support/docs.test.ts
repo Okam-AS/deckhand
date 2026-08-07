@@ -176,6 +176,24 @@ describe("docs describe the code that exists", () => {
     assert.ok(verbs.size > 4, `only ${verbs.size} cli verbs parsed — the switch changed, fix this check`);
 
     const missing: string[] = [];
+    // The CLI's OWN output is checked too, and it is the harder half: a dead command hidden in
+    // a `console.log` is invisible to every markdown guardrail, and it is read by the person
+    // being onboarded at the exact moment they cannot tell a broken instruction from their own
+    // mistake. Three commands this branch deleted survived in setup's closing screen, in
+    // `deckhand token`, and in doctor — all of them green.
+    for (const [name, body] of [
+      ["cli.ts", cli],
+      ["cli/setup.ts", readFileSync(join(SRC, "cli", "setup.ts"), "utf8")],
+      ["cli/doctor.ts", readFileSync(join(SRC, "cli", "doctor.ts"), "utf8")],
+    ] as const) {
+      // Only where it reads as a command being typed: the verb ends the quote, or takes a flag
+      // or an argument placeholder. `deckhand listening on …` is a log line, and a check that
+      // cannot tell those apart gets deleted rather than obeyed.
+      for (const m of body.matchAll(/`deckhand ([a-z-]+)(?=`| <|-{2}| [a-z-]+`)/g)) {
+        const verb = m[1]!;
+        if (!verbs.has(verb) && !subs.has(verb)) missing.push(`${name}: "deckhand ${verb}"`);
+      }
+    }
     for (const [name, body] of [
       ["AGENTS.md", AGENTS],
       ["CONSTITUTION.md", readFileSync(join(REPO, "CONSTITUTION.md"), "utf8")],
