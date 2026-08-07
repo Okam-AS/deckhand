@@ -36,7 +36,8 @@ the machine.
                             │
 ┌───────────────────────────▼── deckhand server (loopback only) ──┐
 │                                                                 │
-│  /mcp/<token>            MCP tools, the operator's token        │
+│  /mcp                    MCP tools, bearer-authenticated       │
+│  /oauth/*                per-person sign-in (Cloudflare Access) │
 │  /s/<shareId>            viewer page (device grid + controls)   │
 │  /s/<shareId>/dev/<id>/* scoped proxy → that device's stream    │
 │                                                                 │
@@ -47,7 +48,7 @@ the machine.
 │                                                (Android)        │
 └─────────────────────────────────────────────────────────────────┘
 
- on-disk: ~/.deckhand/{config.yaml, apps.yaml, tokens.yaml, state.json, audit.jsonl}
+ on-disk: ~/.deckhand/{config.yaml, apps.yaml, tokens.yaml, oauth.json, state.json, audit.jsonl}
 ```
 
 ## Building blocks
@@ -78,7 +79,11 @@ viewer page, a ruthlessly short dependency list.
 ## Security model
 
 - Everything binds **loopback**; the only way in is the Cloudflare named tunnel.
-- No tokenless paths: the operator's MCP token, per-app share links (optionally PIN-gated).
+- Nothing that touches a device or a repo is reachable without a credential: a
+  per-person MCP credential (OAuth behind a Cloudflare Access email allowlist, or a
+  local bearer token), per-app share links (optionally PIN-gated). The OAuth
+  discovery, registration and sign-in endpoints are open by construction — a client
+  with no credential has to start somewhere — and grant nothing on their own.
 - The MCP surface is capability-bounded — no arbitrary commands, only pre-registered
   apps and their repos' refs. Every call lands in an append-only audit log.
 - Secrets never travel through MCP; tokens never appear in argv, URLs, or logs.
@@ -152,10 +157,28 @@ deckhand doctor --device-only                            # boots a real sim + em
 Then paste your connector URL into claude.ai → Settings → Connectors:
 
 ```sh
-deckhand token          # prints your URL (creates one the first time)
+deckhand token          # prints https://<your-hostname>/mcp
 ```
 
-It is a credential — treat it like a password. If it leaks, `deckhand token rm <name>`
-kills it on the running server. `deckhand token list` shows which credentials exist,
-with the URLs masked; `deckhand token url <name>` prints one in
-full.
+**The URL is not a credential.** In a Claude team or Enterprise organisation a
+connector is visible to everyone in it, so deckhand does not put a secret in the
+URL — it authenticates each person individually. Clicking Connect sends them to a
+Cloudflare Access sign-in, which emails a one-time code, and only addresses on
+your allowlist get through:
+
+```sh
+deckhand allow you@example.com     # who may connect
+deckhand allow                     # who may connect today
+deckhand allow rm them@example.com # revoked on their next call, no restart
+```
+
+`setup` walks you through creating the Cloudflare Access application (it needs
+your Zero Trust dashboard, so it prints the steps rather than doing it for you)
+and `deckhand doctor` fails if the allowlist or the Access application is missing
+— either one means nobody can connect.
+
+Claude Code on the same Mac has no browser to sign in with, so it uses a local
+credential instead: `deckhand token add <name>`, sent as an
+`Authorization: Bearer` header. That one *is* a password — `token list` shows
+which exist with the values masked, `token url <name>` prints one in full, and
+`token rm <name>` revokes it on the running server.

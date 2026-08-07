@@ -474,6 +474,47 @@ function gitHead(cwd: string): Promise<string | null> {
   });
 }
 
+/**
+ * Who may connect, and whether anything is actually checking (PLAN §11.6).
+ *
+ * Both halves have to hold, and each fails in a way that looks like the other's
+ * problem — so they are reported as one check with a detail that says which:
+ *   - an EMPTY allowlist means nobody can connect, which reads as "OAuth is broken"
+ *   - a MISSING Access application means authorize refuses everyone, which reads
+ *     as "the allowlist is wrong"
+ * Neither is a warning. A connector nobody can authorize is an outage, and the
+ * operator has no other signal that it happened.
+ */
+export function checkConnectorAuth(config: Config): Check {
+  const { allowedEmails, access } = config.connector;
+  if (!access && allowedEmails.length === 0) {
+    return {
+      name: "connector auth",
+      ok: false,
+      detail: "no allowlist and no Cloudflare Access application — nobody can connect; run `deckhand setup --hostname … --email <you>`",
+    };
+  }
+  if (!access) {
+    return {
+      name: "connector auth",
+      ok: false,
+      detail: `allowlist has ${allowedEmails.length}, but no Cloudflare Access application is recorded — /oauth/authorize refuses everyone until \`setup --access-team … --access-aud …\``,
+    };
+  }
+  if (allowedEmails.length === 0) {
+    return {
+      name: "connector auth",
+      ok: false,
+      detail: "Cloudflare Access is configured but the allowlist is empty — an empty allowlist admits nobody; `deckhand allow <email>`",
+    };
+  }
+  return {
+    name: "connector auth",
+    ok: true,
+    detail: `${allowedEmails.join(", ")} via ${access.teamDomain}`,
+  };
+}
+
 export async function runDoctor(opts: { smoke?: boolean } = {}): Promise<{ checks: Check[]; ok: boolean }> {
   const checks: Check[] = [];
 
@@ -491,6 +532,7 @@ export async function runDoctor(opts: { smoke?: boolean } = {}): Promise<{ check
   checks.push(...(await checkToolchains()));
 
   if (config) {
+    checks.push(checkConnectorAuth(config));
     checks.push(checkServeSim());
     checks.push(await checkServices());
     checks.push(await checkGitHub(config));

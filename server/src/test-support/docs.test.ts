@@ -123,12 +123,21 @@ describe("docs describe the code that exists", () => {
     // exist, one layer up.
     const rulesDir = join(REPO, ".claude", "rules");
     const testNames = new Set<string>();
-    for (const f of readdirSync(join(SRC, "test-support"))) {
-      if (!f.endsWith(".test.ts")) continue;
-      for (const m of readFileSync(join(SRC, "test-support", f), "utf8").matchAll(/\bit\(\s*"([^"]+)"/g)) {
-        testNames.add(m[1]!);
+    // EVERY test file, not just test-support. A rule for an area cites the check that
+    // enforces it, and for a security invariant that is often the area's own regression
+    // test — `oauth/router.test.ts` proves authorize refuses an address off the allowlist,
+    // and no repo-wide guardrail can. Scanning only test-support made those citations
+    // dangle, which pushes the next author to drop the citation rather than fix it.
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.name.endsWith(".test.ts")) {
+          for (const m of readFileSync(full, "utf8").matchAll(/\bit\(\s*"([^"]+)"/g)) testNames.add(m[1]!);
+        }
       }
-    }
+    };
+    walk(SRC);
     assert.ok(testNames.size > 5, "no guardrail test names parsed — the `it(\"...\")` pattern changed");
 
     const dangling: string[] = [];

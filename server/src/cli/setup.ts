@@ -5,6 +5,9 @@ import { dirname, join } from "node:path";
 import { paths } from "../paths.ts";
 import { mergeTunnelConfig, renderTunnelConfig, parseTunnelConfig, tunnelIdFor, needsLogin } from "./tunnelConfig.ts";
 import { checkPrereqs, humanInput, formatPrereqs, blocking, type Probe } from "./preflight.ts";
+import { manualInstructions, normalizeTeamDomain } from "./accessApp.ts";
+import { allowEmail, setAccessApplication } from "./configWrite.ts";
+import { loadConfig } from "../config.ts";
 
 // ---------------------------------------------------------------------------
 // `deckhand setup` — one command from a bare Mac to a working connector URL.
@@ -54,6 +57,11 @@ export interface SetupOptions {
   webHost?: string;
   port?: number;
   tokenName?: string;
+  /** The address allowed to connect. Everything else about the connector follows from this one answer. */
+  email?: string;
+  /** Zero Trust team domain and Application Audience tag, read off the Access application. */
+  accessTeam?: string;
+  accessAud?: string;
   /** Skip the LaunchAgents (useful when running deckhand by hand). */
   noServices?: boolean;
 }
@@ -132,6 +140,23 @@ function ensureTunnelConfig(tunnelId: string, hostnames: string[], port: number)
   }
   writeFileSync(file, body);
   ok(`cloudflared config points ${hostnames.join(", ")} at 127.0.0.1:${port}`);
+}
+
+/** The allowlist as it stands, or [] when there is no readable config yet. */
+function currentAllowlist(): string[] {
+  try {
+    return loadConfig().connector.allowedEmails;
+  } catch {
+    return [];
+  }
+}
+
+function accessConfigured(): boolean {
+  try {
+    return Boolean(loadConfig().connector.access);
+  } catch {
+    return false;
+  }
 }
 
 function deckhandCli(args: string[]): Run {
@@ -221,7 +246,47 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
       ok(`wrote ${paths.config()}`);
     }
 
-    step("Connector token");
+    // Who may connect, and the Access application that proves it. This lives in the
+    // tunnel half of setup on purpose: the tunnel is what makes deckhand reachable
+    // from a Claude organisation, so the answer to "who" belongs in the same breath
+    // as "reachable". Until it is answered, nobody can connect at all — the
+    // allowlist starts empty and an empty allowlist admits no one.
+    step("Who may connect");
+    const emails = opts.email ? [opts.email.trim().toLowerCase()] : currentAllowlist();
+    if (opts.email) {
+      const { emails: after } = allowEmail(opts.email);
+      ok(`only ${after.join(", ")} may connect this deckhand`);
+    } else if (emails.length) {
+      ok(`allowlist: ${emails.join(", ")} (change it with \`deckhand allow\`)`);
+    } else {
+      throw new SetupError(
+        "nobody is allowed to connect yet",
+        `Ask the user this, in these words: "Which email address should be allowed to connect to deckhand?" — ` +
+          `then re-run with \`setup --hostname ${hostname} --email <their answer>\`. ` +
+          `A connector URL added in Claude is visible to their whole organisation, so this address is what keeps everyone else out.`,
+      );
+    }
+
+    if (opts.accessTeam && opts.accessAud) {
+      setAccessApplication({ teamDomain: normalizeTeamDomain(opts.accessTeam), aud: opts.accessAud.trim() });
+      ok(`Cloudflare Access application recorded — sign-ins are verified against ${normalizeTeamDomain(opts.accessTeam)}`);
+    } else if (accessConfigured()) {
+      ok("Cloudflare Access application already recorded");
+    } else {
+      // BLOCKED, in the preflight's sense: it needs their Cloudflare account and a
+      // browser. Never attempt it, and never continue as if it were done — without
+      // it `/oauth/authorize` refuses every request and the connector cannot be
+      // authorized by anyone, including them.
+      say("");
+      say(manualInstructions({ hostname, emails }).split("\n").map((l) => `  ${l}`).join("\n"));
+      throw new SetupError(
+        "the Cloudflare Access application does not exist yet",
+        "Relay the steps above to the user and stop — they need their own Cloudflare Zero Trust dashboard for this. " +
+          "Everything else is done; re-running setup with --access-team and --access-aud finishes it.",
+      );
+    }
+
+    step("Local credential");
     const list = deckhandCli(["token", "list"]);
     // `token list` is NOT silent on an empty install — it prints "no tokens yet — create one
     // with `deckhand token`", by design, because silence reads as a broken command. So a
@@ -237,8 +302,9 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
       if (added.code !== 0) throw new SetupError(`could not create a token: ${added.out}`, "Fix the above, then re-run.");
       // Only the name. The URL is a credential and belongs in exactly one place: the single
       // step at the end, which the user is about to run deliberately.
-      say(`  ✓ created a token for "${name}"`);
+      say(`  ✓ created a local credential for "${name}"`);
     }
+    info("that one is for Claude Code on this Mac; claude.ai authorizes through Access instead");
 
     if (!opts.noServices) {
       step("Keep it running (LaunchAgents)");
@@ -268,10 +334,11 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
     say("  │  ONE THING LEFT — deckhand does nothing until you do it.     │");
     say("  └─────────────────────────────────────────────────────────────┘");
     say("");
-    say("   1.  deckhand token          ← prints your connector URL");
-    say("   2.  Paste it into claude.ai → Settings → Connectors → Add");
+    say(`   1.  Paste  https://${hostname}/mcp  into claude.ai → Settings → Connectors → Add`);
+    say("   2.  Click Connect. Cloudflare emails you a one-time code.");
     say("");
-    say("   It is a password. Do not paste it into a chat or a commit.");
+    say("   The URL is not a password — it is safe to share with your organisation.");
+    say(`   Only ${emails.join(", ")} can actually connect through it.`);
     say("");
     say("   After that: `deckhand app add <id> --path /path/to/a/checkout`,");
     say("   then ask Claude for a preview.");
