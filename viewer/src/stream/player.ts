@@ -410,8 +410,11 @@ export class DevicePlayer {
    * cleared it: the budget was a LIFETIME allowance rather than a
    * consecutive-failure one, so a device that recovered fine seven times over an
    * afternoon gave up permanently on the eighth — reported as "gave up", with a
-   * reload as the only cure. Android is MJPEG by default, and iOS falls back to
-   * it, so this was the common path, not the rare one.
+   * reload as the only cure. The image tier is no rare corner: `start()` branches
+   * on `isAvccSupported()` alone — there is no iOS/Android switch anywhere in the
+   * viewer — so EITHER platform lands here when WebCodecs is missing, when a
+   * decode errors, or when the server has no AVCC to give (the Android helper
+   * 404s /stream.avcc on system images with no working encoder).
    */
   private streamIsHealthy(): void {
     this.recovery = 0;

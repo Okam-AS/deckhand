@@ -63,7 +63,7 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
   const frameRef = useRef<HTMLElement>(null); // the whole card is the fullscreen target
   const inputRef = useRef<DeviceInput | null>(null); // control buttons ride the same HID ws as touch
   // Streaming is gated on three independent signals, so they can't clobber each
-  // other: `hidden` (a compare pane showing a different device), on-screen (the
+  // other: `hidden` (a pane the stage is not currently showing), on-screen (the
   // IntersectionObserver), and tab visibility. setActive tears the stream DOWN,
   // so a single source getting this wrong leaves a permanently blank canvas.
   //
@@ -72,7 +72,11 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
   // the mobile stage uses it withheld activation on phones while desktop — which
   // has no containment there — worked fine. `hidden` is the complete truth about
   // whether a frame should stream, because every ancestor that can hide one
-  // folds its own visibility into that prop (see CompareView's refPaneOff).
+  // folds its own visibility into that prop: App.tsx passes
+  // `hidden={!visible.has(p.key)}` from computeStage's `visible` set, and the one
+  // ancestor that hides anything — the `pane-group--off` column — is switched off
+  // by that same set. Nothing guards that in a test (the viewer has no DOM test
+  // setup); a new way to hide a frame has to feed `hidden` too.
   const playerRef = useRef<DevicePlayer | null>(null);
   const onScreenRef = useRef(true);
   // Seeded from the first render, so the stream effect below sees the right value
