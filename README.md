@@ -36,8 +36,8 @@ the machine.
                             │
 ┌───────────────────────────▼── deckhand server (loopback only) ──┐
 │                                                                 │
-│  /mcp                    MCP tools, bearer-authenticated       │
-│  /oauth/*                per-client sign-in (you approve each one) │
+│  /mcp                    MCP tools, bearer-authenticated        │
+│  /oauth/*                per-client sign-in (pairing code)      │
 │  /s/<shareId>            viewer page (device grid + controls)   │
 │  /s/<shareId>/dev/<id>/* scoped proxy → that device's stream    │
 │                                                                 │
@@ -80,8 +80,8 @@ viewer page, a ruthlessly short dependency list.
 
 - Everything binds **loopback**; the only way in is the Cloudflare named tunnel.
 - Nothing that touches a device or a repo is reachable without a credential: a
-  per-client MCP credential (an OAuth grant you approved at the machine, or a local
-  bearer token), per-app share links (optionally PIN-gated). The OAuth discovery,
+  per-client MCP credential (an OAuth grant, or a local bearer token), per-app share
+  links (optionally PIN-gated). The OAuth discovery,
   registration and sign-in endpoints are open by construction — a client with no
   credential has to start somewhere — and grant nothing on their own: a request that
   reaches them needs a pairing code minted on the Mac with `deckhand pair`.
@@ -121,9 +121,12 @@ npx tsx server/src/cli.ts setup \
 
 ### If you are the agent
 
-- Run `setup` with no arguments first. Relay its **NEEDS YOU** list verbatim and
-  stop; do not attempt those steps. `cloudflared tunnel login` opens a browser
-  and will hang you forever.
+- Run `setup` with no arguments first. It labels every line with who acts:
+  `fix:` is yours to run, **BLOCKED** is an errand needing a browser or their
+  Cloudflare account — relay it verbatim and stop, never attempt it, because
+  `cloudflared tunnel login` opens a browser and will hang you forever — and
+  **ASK THE USER** is one question to ask in the words given, not a report to
+  paste at them.
 - Install what it says you can install. Then ask the user for a hostname on a
   domain they have on Cloudflare, and run `setup --hostname <that>`.
 - At the end, run `deckhand pair` yourself and give the user the code it prints;
