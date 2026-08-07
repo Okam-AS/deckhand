@@ -600,26 +600,28 @@ describe("setup decides on state, not on its own prose", () => {
   // it wants is in tokens.yaml, config.yaml and apps.yaml, which are typed and loaded.
   it("never branches on the text of deckhand's own output", () => {
     const src = read(join(SRC, "cli", "setup.ts"));
-    // The variables holding a deckhand invocation's result, e.g. `const list = deckhandCli([…])`.
+    // An ALLOW-list, not a list of banned methods. The first version of this banned `.test()`,
+    // `.includes()` and `===` — and `out.trim() !== ""` walked straight past it, which is the
+    // exact shape of failure #2 above. A deny-list here is a guessing game against a language:
+    // `indexOf`, an intermediate variable, an inline call with nothing captured, a `switch`. So
+    // the rule is inverted. The output may go to the screen or into an error message; every other
+    // mention of it is a finding.
     const ours = [...src.matchAll(/(?:const|let)\s+(\w+)\s*=\s*deckhandCli\(/g)].map((m) => m[1]!);
     assert.ok(ours.length > 0, "no `deckhandCli` result is captured — this check has lost its subject");
-    const offences: string[] = [];
-    for (const name of ours) {
-      // A regex tested against it, a substring search in it, or a comparison of it.
-      for (const pattern of [
-        new RegExp(`\\.test\\(\\s*${name}\\.out`),
-        new RegExp(`${name}\\.out\\s*\\.(?:includes|match|search|startsWith|endsWith)\\(`),
-        new RegExp(`${name}\\.out\\s*(?:===|!==|==|!=)`),
-      ]) {
-        if (pattern.test(src)) offences.push(`${name}.out`);
-      }
-    }
+    const sink = /\b(?:say|info|ok|step|console\.(?:log|error))\(|new SetupError\(/;
+    const mentions = new RegExp(`(?:${[...ours, "deckhandCli\\([^)]*\\)"].join("|")})\\.out\\b`);
+    const offences = src
+      .split("\n")
+      .map((line, i) => ({ code: line.replace(/\/\/.*$/, ""), n: i + 1 }))
+      .filter(({ code }) => mentions.test(code) && !sink.test(code))
+      .map(({ n }) => `setup.ts:${n}`);
     assert.deepEqual(
-      [...new Set(offences)],
+      offences,
       [],
-      "setup.ts branches on the TEXT of a `deckhand` command's output. That text is written for a " +
-        "person and gets reworded; read the state instead (tokens.yaml/config.yaml via their " +
-        "loaders) or check the exit code. Printing it is fine.",
+      "setup.ts uses the TEXT of a `deckhand` command's output for something other than showing it. " +
+        "That text is written for a person and gets reworded — three setup branches have already " +
+        "been broken that way. Read the state instead (tokens.yaml/config.yaml via their loaders), " +
+        "or check the exit code. Printing it, or quoting it in a SetupError, is fine.",
     );
   });
 });

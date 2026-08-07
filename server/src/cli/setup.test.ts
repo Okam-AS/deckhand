@@ -71,11 +71,16 @@ describe("whether a local credential already exists", () => {
     }
   });
 
+  // TWO credentials, not one: with a single entry the assertion holds for anything that returns
+  // a non-zero constant, which is "there is at least one" rather than a count.
   it("counts what is in the file, not what any message says", () => {
     const home = mkdtempSync(join(tmpdir(), "deckhand-setup1-"));
     try {
-      writeFileSync(join(home, "tokens.yaml"), "tokens:\n  - name: me\n    token: " + "a".repeat(64) + "\n");
-      withHome(home, () => assert.equal(credentialCount(), 1));
+      writeFileSync(
+        join(home, "tokens.yaml"),
+        `tokens:\n  - name: me\n    token: ${"a".repeat(64)}\n  - name: laptop\n    token: ${"b".repeat(64)}\n`,
+      );
+      withHome(home, () => assert.equal(credentialCount(), 2));
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

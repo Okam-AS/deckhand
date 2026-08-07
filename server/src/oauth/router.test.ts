@@ -33,7 +33,9 @@ before(async () => {
       get pairing() {
         return pairing;
       },
-      // A test that needs to move the clock sets this; the rest read real time.
+      // EVERY test runs on this clock, frozen at the beforeEach snapshot — not just the one that
+      // moves it. That is deliberate: in-flight deadlines then never lapse mid-test, however long
+      // the test takes, so the one test that advances it is the only place a lapse can happen.
       now: () => routerNow,
     }),
   );
