@@ -147,10 +147,13 @@ export interface Receipt {
   /** Findings deliberately left unmechanised, each with the reason it cannot be. */
   waived: { finding: string; why: string }[];
   /**
-   * Whether {@link GATES_COMMAND} passed, and on which diff. Written only by the gate
-   * runners, which run the command and read its exit code — never supplied by the caller,
-   * because "the gates were green" is the easiest thing in the world to assert and the
-   * cheapest to check.
+   * Whether {@link GATES_COMMAND} passed, and on which diff. There is no CLI path that takes
+   * this as input: the gate runners write it from the command's own exit code, because "the
+   * gates were green" is the easiest thing in the world to assert and the cheapest to check.
+   *
+   * That is a missing affordance, not a guarantee — the receipt is a file on disk, so anything
+   * that can write the file can write this field. Same limit as the rest of the receipt (see
+   * the header): it makes the claim explicit and attributable, not unforgeable.
    */
   gates?: {
     passed: boolean;
@@ -419,11 +422,14 @@ export function summarize(receipt: Receipt): string {
   // Nits do not block, but they should not vanish either — a count keeps them a visible
   // choice the author made rather than something the gate quietly swallowed.
   const nits = new Set(receipt.rounds.flatMap((r) => r.findings.filter((f) => f.severity === "nit").map((f) => f.id)));
+  // Defaulted, not asserted: this runs on the success path right after `validate`, and a
+  // receipt missing an optional key would otherwise throw AFTER the handover body is written —
+  // leaving a human with no printed command and a nonzero exit for a review that passed.
   return [
     `rounds → ${curve.join(" · ")}`,
-    `checks added: ${receipt.conversions.length}`,
+    `checks added: ${receipt.conversions?.length ?? 0}`,
     nits.size ? `nits (non-blocking): ${nits.size}` : null,
-    receipt.waived.length ? `waived: ${receipt.waived.length}` : null,
+    receipt.waived?.length ? `waived: ${receipt.waived.length}` : null,
   ]
     .filter(Boolean)
     .join(" · ");

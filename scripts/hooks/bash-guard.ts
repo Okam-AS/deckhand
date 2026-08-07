@@ -2,10 +2,11 @@
  * PreToolUse hook (Bash): the mechanical backstop for the rules AGENTS.md states in prose.
  * Exit 2 blocks the command and feeds stderr back to the agent; exit 0 allows.
  *
- *   1. A human opens the pull request. Every way of opening one is refused for the agent —
- *      `gh pr create`, and a POST to the `pulls` endpoint through `gh api` or `curl`, which
- *      does the same thing — with NO override, and failing CLOSED if the guard itself throws.
- *      That is the point of it. Everything before it (review to convergence, the
+ *   1. A human opens the pull request. `gh pr create` is refused for the agent, and so are the
+ *      other forms of the same act — a POST to the `pulls` endpoint via `gh api` or `curl`,
+ *      the `createPullRequest` mutation — with NO override, and failing CLOSED if the guard
+ *      itself throws. It does not claim to catch every route (see {@link opensAPullRequest});
+ *      the rule is AGENTS.md's, and this is what makes reaching for the obvious tool fail. Everything before it (review to convergence, the
  *      gates on a clean checkout) is what earns the handover; the handover itself is a
  *      person's decision, and a gate the agent can talk its way past is not one.
  *   2. Never commit or push to `main`, whether by being on it or pushing at it
@@ -62,20 +63,35 @@ export function withoutQuotedText(cmd: string): string {
 
 /**
  * Does this command RUN something that opens a pull request, as opposed to containing the
- * words? `gh pr create` is the porcelain; `gh api <owner>/<repo>/pulls -X POST` and a POST to
- * the same path through `curl` do exactly the same thing, and a rule that only knows the
- * porcelain reserves nothing.
+ * words? `gh pr create` is the porcelain; a POST to the `pulls` endpoint through `gh api` or
+ * `curl`, and the `createPullRequest` GraphQL mutation, do the same thing, and a rule that
+ * knows only the porcelain reserves nothing.
+ *
+ * It does NOT claim to enumerate every route — a text matcher over a shell cannot, and saying
+ * otherwise would invite trust it has not earned. A script file that opens one, an unmatched
+ * new `gh` alias, a Python client: all pass. What it covers is every form an agent reaching
+ * for the obvious tool would type, which is what the rule is for. The rule itself is stated in
+ * AGENTS.md, where it binds whether or not the regex matched.
  */
 export function opensAPullRequest(cmd: string): boolean {
   const bare = withoutQuotedText(cmd);
   if (/\bgh\s+pr\s+create\b/.test(bare)) return true;
-  if (/\/pulls\b/.test(bare) && /\b(?:gh\s+api|curl)\b/.test(bare) && /(?:-X|--request)\s+POST|--method\s+POST|(?:^|\s)-f\s/.test(bare)) {
-    return true;
-  }
-  // One place quoted text is code rather than data: an interpreter handed a script to run.
-  // Blanking quotes is right everywhere else and wrong exactly here, so the quoted form counts
-  // once something is standing by to execute it.
-  return /(?:^|\s)(?:(?:ba|z|k)?sh\s+-c|eval)\b/.test(cmd) && /\bgh\s+pr\s+create\b/.test(cmd);
+  // The GraphQL mutation. The mutation body is normally quoted, so it is matched raw — but
+  // only when the blanked text shows a `gh … graphql` call standing by to send it. Matching
+  // the name alone blocked this file's own review notes, which is the failure mode the header
+  // reserves for rules 2–3 and not for this one.
+  if (/\bgh\b/.test(bare) && /\bgraphql\b/i.test(bare) && /\bcreatePullRequest\b/.test(cmd)) return true;
+  // The endpoint is matched against the RAW command: quoting a URL is the ordinary way to
+  // write one, so blanking it here would hide the target rather than the mention. A POST
+  // indicator is still required, so reading the same endpoint stays allowed — and `gh api`
+  // switches to POST on its own the moment any parameter flag is present, which is why `-f`,
+  // `-F` and `--input` count as one.
+  const posts = /(?:-X|--request)[= ]?\s*POST|--method[= ]\s*POST|(?:^|\s)-(?:f|F|d)\s|(?:^|\s)--(?:input|data\S*)\b/;
+  if (/\/pulls\b/.test(cmd) && /\b(?:gh\s+api|curl)\b/.test(bare) && posts.test(cmd)) return true;
+  // One place quoted text is code rather than data: an interpreter standing by to run it —
+  // whether the script arrives as an argument or down a pipe.
+  const interpreter = /(?:^|\s)(?:(?:ba|z|k)?sh\s+-c|eval)\b|\|\s*(?:(?:ba|z|k)?sh|bash)\b/;
+  return interpreter.test(cmd) && /\bgh\s+pr\s+create\b/.test(cmd);
 }
 
 /** The last `cd <dir>` before a command, if any — the worktree-per-branch flow uses it. */
@@ -128,9 +144,15 @@ export function decide(cmd: string, resolveBranch: BranchResolver = gitBranch, r
   //
   // "Commit" is every verb that LANDS one, not just `git commit`: a merge, a cherry-pick and a
   // revert all write to the branch, and blocking only the porcelain leaves the rule stating
-  // more than it enforces. `-c k=v` is skipped the same way `-C <dir>` is read.
-  const commit = /\bgit\s+(?:-c\s+\S+\s+)*(?:-C\s+(\S+)\s+)?(?:-c\s+\S+\s+)*(commit|merge|cherry-pick|revert)\b/.exec(cmd);
-  if (commit) {
+  // more than it enforces. Global options are skipped, `-C <dir>` is also read for the branch.
+  //
+  // `(?![-\w])` rather than `\b`, because `\b` matches before a hyphen: `git merge-base` is
+  // what THIS repo's own receipt runs, and blocking it would make the guard break the tooling
+  // it guards. The abort/skip flags are excluded for the same reason — they unwind a landing
+  // rather than perform one. `--continue` is deliberately NOT in that list: it finishes the
+  // commit.
+  const commit = /\bgit\s+(?:-[cC]\s+\S+\s+|--\S+\s+)*?(?:-C\s+(\S+)\s+)?(?:-[cC]\s+\S+\s+|--\S+\s+)*(commit|merge|cherry-pick|revert)(?![-\w])/.exec(cmd);
+  if (commit && !/--(?:abort|quit|skip|dry-run)\b/.test(cmd)) {
     // A `git switch main` earlier in the same command line moves the target before the verb
     // runs, so the branch we are on now is the wrong thing to ask about.
     const switched = /(?:^|[;&|]\s*)git\s+(?:switch|checkout)\s+(?:-\S+\s+)*main(?:\s|$|[;&|])/.test(cmd.slice(0, commit.index));
@@ -146,10 +168,20 @@ export function decide(cmd: string, resolveBranch: BranchResolver = gitBranch, r
   }
   // Pushing AT main from a feature branch is the same rule, one indirection along: it is how a
   // branch-first workflow gets bypassed without ever checking main out.
-  // Matched against the RAW command, quotes and all: `git push origin "main"` is the same push,
-  // and rules 2–3 accept over-blocking (see the header) where rule 1 cannot. The refspec forms
-  // count too — `main:main` and `+main` push there just as squarely as a bare `main`.
-  if (/\bgit\s+push\b/.test(cmd) && /(?:^|\s|['"+])(?:HEAD:)?(?:\+)?(?:refs\/heads\/)?main(?::(?:refs\/heads\/)?\S+)?(?:\s|$|['"])/.test(cmd)) {
+  //
+  // The ref is matched against the RAW text, quotes and all — `git push origin "main"` is the
+  // same push — but only within the SEGMENT that runs the push. Testing the whole line blocked
+  // `git push origin feature/x; git diff main`, where the two mentions of main have nothing to
+  // do with each other; over-blocking is acceptable for a quoted ref and not for a second
+  // command. `:main` counts: deleting main is not a gentler way of writing to it.
+  const pushesAtMain = cmd
+    .split(/[;&|]|\n/)
+    .some(
+      (part) =>
+        /\bgit\s+(?:-\S+(?:\s+\S+)?\s+)*push\b/.test(part) &&
+        /(?:^|\s|['":+])(?:HEAD:)?[+:]?(?:refs\/heads\/)?main(?::(?:refs\/heads\/)?\S+)?(?:\s|$|['"])/.test(part),
+    );
+  if (pushesAtMain) {
     return {
       blocked: true,
       reason: "Blocked: this pushes at `main`. Work lands through a pull request from a feature branch (AGENTS.md § How work lands here).",

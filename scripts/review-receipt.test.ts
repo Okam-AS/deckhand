@@ -283,6 +283,14 @@ describe("the handover to a human", () => {
 });
 
 describe("the summary a human reads", () => {
+  // It runs on the SUCCESS path, after `handover` has already written the body file. Throwing
+  // there hands a human a nonzero exit and no printed command for a review that passed.
+  it("does not throw on a receipt the gate accepted but that omits an optional key", () => {
+    const receipt = JSON.parse(JSON.stringify({ ...converged(), conversions: undefined, waived: undefined })) as Receipt;
+    assert.deepEqual(validate(receipt, HASH), { ok: true }, "the gate accepts it, so the summary must survive it");
+    assert.match(summarize(receipt), /rounds →/);
+  });
+
   it("shows the curve, which round was cold, the checks added and the nits", () => {
     const nitty = round({ lens: "cold-subagent", cold: true, findings: [{ id: "x", severity: "nit" }] });
     const s = summarize(converged({ rounds: [round({ lens: "inline", newFindings: 3, diff: OLD }), nitty] }));

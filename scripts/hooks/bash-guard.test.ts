@@ -45,6 +45,10 @@ describe("a human opens the pull request", () => {
     allowed(`git commit -m "block gh pr create for agents"`);
     allowed(`grep -rn 'gh pr create' .claude/`);
     allowed(`cat <<'EOF' > notes.md\nrun gh pr create yourself\nEOF`);
+    // This one is not hypothetical: writing the review round up blocked itself, because the
+    // notes name `createPullRequest` and a `pulls` URL. Data, not a command.
+    allowed(`cat <<'EOF' > round.json\nthe createPullRequest mutation and curl -d @pr.json .../pulls are allowed\nEOF`);
+    allowed(`git commit -m "cover the createPullRequest mutation"`);
   });
 
   // There is no override for this rule, unlike every other gate in the repo. An override would
@@ -76,7 +80,18 @@ describe("a human opens the pull request", () => {
     for (const cmd of [
       "gh api repos/Okam-AS/deckhand/pulls -X POST -f base=main -f head=feature/x -f title=t",
       "gh api --method POST repos/Okam-AS/deckhand/pulls -f title=t",
+      // `gh api` switches to POST on its own the moment a parameter flag appears, so `-f`/`-F`
+      // with no method at all is the shortest way to open one.
+      "gh api repos/Okam-AS/deckhand/pulls -F title=t -F head=f -F base=main",
+      "gh api repos/Okam-AS/deckhand/pulls --input pr.json",
+      "gh api --method=POST repos/Okam-AS/deckhand/pulls",
+      "gh api -XPOST repos/Okam-AS/deckhand/pulls",
       "curl -X POST https://api.github.com/repos/Okam-AS/deckhand/pulls -d @body.json",
+      "curl -d @pr.json https://api.github.com/repos/Okam-AS/deckhand/pulls",
+      // Quoting a URL is the ordinary way to write one — blanking it would hide the target.
+      `curl -X POST -d @pr.json "https://api.github.com/repos/Okam-AS/deckhand/pulls"`,
+      `gh api graphql -f query='mutation { createPullRequest(input: {}) { pullRequest { url } } }'`,
+      "echo 'gh pr create --fill' | bash",
     ]) {
       assert.match(blocked(cmd), /a human's call/);
     }
@@ -85,6 +100,7 @@ describe("a human opens the pull request", () => {
   it("leaves reading the same endpoint alone", () => {
     allowed("gh api repos/Okam-AS/deckhand/pulls --jq '.[].number'");
     allowed("curl https://api.github.com/repos/Okam-AS/deckhand/pulls/84");
+    allowed("gh api graphql -f query='query { repository(owner: \"o\", name: \"n\") { name } }'");
   });
 
   // The receipt is a JSON file an agent writes, so it can be any shape. When reading it threw,
@@ -149,10 +165,41 @@ describe("nothing lands on main directly", () => {
     }
   });
 
+  it("blocks a push at main that hides behind a global git option, and a delete of it", () => {
+    for (const cmd of ["git -C /tmp/wt push origin main", "git --no-pager push origin main", "git push origin :main"]) {
+      assert.match(blocked(cmd), /pushes at `main`/);
+    }
+  });
+
   it("allows pushing the feature branch itself, including one that merely contains the word", () => {
     allowed("git push -u origin feature/x");
     allowed("git push origin feature/mainline-cleanup");
     allowed(`git commit -m "push origin main is blocked"`);
+    // Two commands on one line are not one command. The raw-text match is scoped to the
+    // segment that runs the push, or reading main alongside a push became a blocked act.
+    allowed("git push origin feature/x; git diff main");
+    allowed("git log main --oneline && git push origin feature/y");
+  });
+
+  // Blocking what the rule does not cover is how a guard gets uninstalled — and `git merge-base`
+  // is what this repo's own review receipt runs on every command.
+  it("leaves the git verbs that do not land a commit alone, even on main", () => {
+    for (const cmd of [
+      "git merge-base origin/main HEAD",
+      "git merge-tree a b",
+      "git commit-tree abc123",
+      "git merge --abort",
+      "git cherry-pick --abort",
+      "git revert --abort",
+      "git commit --dry-run",
+    ]) {
+      allowed(cmd, "main");
+    }
+  });
+
+  // `--continue` is the opposite case: it finishes the commit the conflict interrupted.
+  it("still blocks finishing an interrupted cherry-pick on main", () => {
+    assert.match(blocked("git cherry-pick --continue", "main"), /nothing lands there directly/);
   });
 });
 
