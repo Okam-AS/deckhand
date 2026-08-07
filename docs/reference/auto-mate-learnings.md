@@ -16,10 +16,12 @@ checkout is gone.
   **only** PIDs whose command matches `simdeck`/`SimDeck` (SIGTERM→SIGKILL), clean both 4310
   and 4311, retry once.
 - Readiness: poll `GET /api/health` every 250 ms, ≤15 s.
-- Health gate before streaming: require software codec active, a stream-quality profile,
-  and fps > 0. Auto-mate hard-required the **software (x264) encoder** for realtime
-  previews — the hardware encoder stalled under multi-stream load. (SimDeck now handles
-  hardware/software failover in `auto` mode; still verify under 3+ concurrent streams.)
+- Auto-mate streamed VIDEO through SimDeck and hard-required its **software (x264)
+  encoder**: the hardware one stalled once several previews streamed at once. Deckhand does
+  not stream through SimDeck — serve-sim for iOS, adb for Android (PLAN §2/§8), and SimDeck's
+  control REST surface only (`.claude/rules/testing-control.md`) — so there is no codec state
+  here to gate on and nothing to poll for one. What survives is a lesson about deckhand's OWN
+  streaming: an encoder that is fine for one stream is no evidence about three.
 - Cheap pre-flight worth copying: before showing a viewer, open the upstream stream WS
   with a 1.5 s timeout to confirm it upgrades; cache the verdict (60 s ok / 15 s fail).
 - iOS: auto-mate created/booted sims itself via `simctl`; SimDeck merely attached display.
@@ -176,12 +178,16 @@ bounded recovery, letterbox-corrected input — and apply directly to Deckhand's
 
 ## 7. Reliability: display-heal ladder, warm pool, watchdogs
 
-- **Display-heal ladder** (fixes the #1 "stream is black but device is booted" failure):
-  if booted but display detached/not-ready, escalate cheapest-first, stopping when healthy:
-  (a) SimDeck boot/attach call (sub-second), (b) single-device shutdown+boot,
-  (c) SimDeck daemon restart — **rate-limited to 1/60 s globally** (it's host-wide;
-  concurrent previews must not stampede it). Never hand out a "ready" device without a
-  display-health check.
+- **"The stream is black but the device is booted" was auto-mate's #1 failure.** It healed
+  it with a ladder that escalated cheapest-first, ending in a SimDeck daemon restart —
+  deckhand cannot climb that ladder and must not try, since it neither attaches displays
+  through SimDeck nor restarts its daemon (control REST only, `.claude/rules/testing-control.md`).
+  Two lessons survive it. Never hand out a "ready" device without checking it actually
+  produced a frame — a device that boots and never streams is the most common failure on
+  this machine, which is why `npm run test:device` scores boot and stream separately. And
+  never let a host-wide restart run unthrottled: it is global, so concurrent previews
+  stampede it and kill each other's streams. Auto-mate rate-limited its to 1/60 s;
+  deckhand's equivalent is the `launchctl kickstart` rule — announce it, batch it.
 - **Warm pool**: pre-created+booted bare devices pay the ~40 s boot
   ahead of demand; adopt into a preview on request; erase back to bare on release so app A
   never leaks into preview B. Leases carried a token + TTL backstop, but the real reclaim
@@ -208,7 +214,7 @@ bounded recovery, letterbox-corrected input — and apply directly to Deckhand's
 | 8 | Unbounded decode queue | Latency drift into unusability |
 | 9 | No letterbox correction on input | Taps land offset |
 | 10 | Guessing adb serials | Wrong-device installs when >1 emulator |
-| 11 | Global daemon restarts unthrottled | Concurrent previews kill each other's streams |
+| 11 | Host-wide restarts unthrottled | Concurrent previews kill each other's streams |
 | 12 | `git remote get-url` + insteadOf | Wrong repo-identity decisions |
 | 13 | Env only in launch args | `EXPO_PUBLIC_*` silently missing from bundle |
 | 14 | No display-health gate on "ready" | Black-screen links handed to users |
