@@ -58,7 +58,7 @@ the machine.
 | `server/src/mcp/` | The MCP surface: previews, screenshots, UI tree, test runs, app registration |
 | `server/src/engine/` | Preview state machine, build recipes (Expo / RN / NativeScript), app-type detection, worktrees, dev-server lifecycle |
 | `server/src/devices/` | iOS (`simctl`) and Android (`avdmanager`/`emulator`/`adb`) control, tool env resolution |
-| `server/src/streaming/` | Swappable `StreamingBackend` seam — H.264 both sides: serve-sim on iOS, `adb screenrecord` repackaged Annex-B→AVCC on Android, with an `adb screencap` PNG fallback for system images whose encoder is broken |
+| `server/src/streaming/` | Swappable `StreamingBackend` seam — serve-sim on iOS (MJPEG today; its H.264 `stream.avcc` path is probed for when a serve-sim release serves it), `adb screenrecord` repackaged Annex-B→AVCC on Android, with an `adb screencap` PNG fallback for system images whose encoder is broken |
 | `server/src/share/` | Share ids, PIN protection, and the scoped HTTP+WS proxy (video + input, nothing else) |
 | `server/src/github/` | Credential ladder: PAT → GitHub App → ambient `gh` → anonymous (public repos) |
 | `server/src/cli.ts` | `deckhand` CLI: setup, serve, doctor, token, app, env |
@@ -88,17 +88,6 @@ viewer page, a ruthlessly short dependency list.
 - The MCP surface is capability-bounded — no arbitrary commands, only pre-registered
   apps and their repos' refs. Every call lands in an append-only audit log.
 - Secrets never travel through MCP; tokens never appear in argv, URLs, or logs.
-
-## Status
-
-**Phases 0–2.5 done, most of Phase 3 landed** — iOS + Android multi-device previews,
-local dev mode, agent-driven test runs (`describe`/`ui`/`logs`), agent-led onboarding
-(`add_app`, PIN-gated shares), multi-source pages (`alongside`) with an app→app
-migration parity harness, and physical-device detection (paired iPhones/iPads and
-adb-connected Android hardware in `list_devices` — detection only; previews still run
-on simulators/emulators). Validated end-to-end on real hardware over a live tunnel
-(734 tests, CI green). Next: the rest of Phase 3, then Phase 4 (ops hardening + AI
-setup runbook).
 
 [PLAN.md](./PLAN.md) describes what the system is — architecture, the MCP surface,
 the security model; background knowledge in [docs/reference/](./docs/reference/).

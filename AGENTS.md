@@ -85,9 +85,9 @@ unlock minting fanning out from a single partner to the set. The viewer has ONE 
 tested code in `viewer/` — keep new layout rules there, not in `App.tsx`.
 See PLAN §6 "One page, several sources" and the accepted-risk note beside it.
 
-What remains to build is PLAN's, not this file's, to enumerate — see PLAN §6 (the
-agent-led onboarding contract: password shares, describe/ui/logs, add_app, relayable
-errors) and the ops runbook work that follows it.
+What remains to build is PLAN's, not this file's, to enumerate — see PLAN §6 (of the
+agent-led onboarding contract, password shares are the piece still outstanding; shares
+today are PIN-gated) and the ops runbook work that follows it.
 
 If you are here to **implement further**, your instructions are:
 
@@ -103,8 +103,12 @@ If you are here to **implement further**, your instructions are:
    risk register back. Add to PLAN when you change what the system is; git holds how it
    got here. **Every bug fixed gets a regression test in the closest layer** — the one
    rule not covered by `npm run ci` or the guardrails.
-4. The streaming layer is **decided** (PLAN.md §2/§8): iOS via **serve-sim**
-   (H.264-over-WebSocket + WebCodecs, MJPEG fallback), Android via **adb** — `screencap`
+4. The streaming layer is **decided** (PLAN.md §2/§8): iOS via **serve-sim** — its
+   H.264 path is `stream.avcc` over a long-lived **chunked HTTP** response decoded with
+   WebCodecs, NOT a WebSocket (the WebSocket carries HID input only), and the pinned
+   serve-sim does not serve it, so `stream.mjpeg` is the live iOS path today and the
+   AVCC probe in `streaming/serveSim.ts` is there for a future version. Android via
+   **adb** — `screencap`
    for MJPEG and on-device `screenrecord` for H.264, NOT scrcpy, which was evaluated and
    not taken — and web via a proxy to the dev server. All behind the `StreamingBackend`
    seam. **No WebRTC, no TURN, and no SimDeck for VIDEO** —
@@ -377,7 +381,8 @@ screen. That is the class this exists to catch.
 An agent on THIS machine should read `~/.deckhand/state.json` rather than
 sleep-looping `preview_status` — and must check every device for an `error`
 before trusting the preview phase, because a preview with one failed device and
-one ready device reports `ready` (`preview.ts:952`). The how-to, including a
+one ready device reports `ready` (`recomputePreviewPhase` in
+`server/src/engine/preview.ts`). The how-to, including a
 ready-to-paste poller, is the `waiting-for-a-preview` skill in `.claude/skills/`.
 
 ## If a tool response carries `deckhandUpdate`
@@ -505,7 +510,7 @@ from under a citation fails `docs.test.ts`.
 
 `server/src/test-support/` holds checks that fail the build when a decision this
 project already made gets broken. They exist because prose did not work — PLAN §2
-and §11 were broken repeatedly by agents who had not read 885 lines.
+and §11 were broken repeatedly by agents who had not read them.
 
 If one of these fails, it is telling you about a decision — not asking you to
 make the check pass.
