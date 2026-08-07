@@ -37,16 +37,16 @@ a user's repo. (This is why the `web` type injects Vite's base/host/port as runt
 flags — zero source edits; frameworks that can't be configured at runtime are hosted via
 the wildcard-hostname model, see PLAN §2/§8, not by editing their config.)
 
-**The connector is public, the person is not** (PLAN §11.6). `/mcp` takes an
+**The connector is public; the approval is not** (PLAN §11.6). `/mcp` takes an
 `Authorization: Bearer` credential and never a path token: a connector URL added in a Claude
-organisation is visible to everyone in it, so the URL cannot be the secret. claude.ai gets a
-per-person OAuth grant, issued only after **Cloudflare Access** proves an email that is on
-`connector.allowedEmails` — checked at authorize, at redemption, and on every MCP call, so
-`deckhand allow rm` revokes without a restart. Access protects exactly one path,
-`/oauth/authorize`; widening it to `/oauth/*` or `/mcp` breaks the connector, because Claude's
-backend has no browser to redirect. An empty allowlist means nobody, and an unconfigured
-Access application makes authorize refuse everyone — both are `doctor` failures, not warnings.
-Claude Code on the machine uses a local `tokens.yaml` bearer token instead.
+organisation is visible to everyone in it, so the URL cannot be the secret. Nothing decides in
+advance who may use it. `/oauth/authorize` **parks** the request and shows a short code, and
+`deckhand approve` — which needs a local `tokens.yaml` credential, so it needs the machine —
+admits that one client. A colleague holding the same URL gets a parked request nobody matches.
+Bare `deckhand approve` LISTS rather than approving: the operator has to compare the code with
+their own browser, or their request and a stranger's look identical. `deckhand revoke
+<client-id>` takes one back, effective on its next call, no restart. Claude Code on the machine
+uses a local `tokens.yaml` bearer token instead and needs no approval.
 
 **The GitHub access ladder** (PLAN §2/§6/§11.4): credentials resolve PAT → GitHub App →
 ambient `gh` CLI session (`githubAmbient`, default on) → anonymous git for public repos
@@ -390,10 +390,11 @@ list of green ticks reads as "nothing left to do".
 
 **Their connector URL:** `deckhand token` — just `https://<their-host>/mcp`. It
 carries no secret, so relaying it in chat is fine. What keeps everyone else out is
-the email allowlist: `deckhand allow <email>`, enforced by a Cloudflare Access
-sign-in that emails a one-time code. On an install where the allowlist is empty or
-the Access application is missing, **nobody can connect** — `deckhand doctor` fails
-on both, and neither is a warning.
+that Claude parks and waits: it shows a code, and the user runs `deckhand approve`
+on the Mac to match it. Tell them that in the same breath as the URL — a connector
+that sits at "connecting" with no explanation reads as broken. With no local
+credential nothing can ever be approved; `deckhand doctor` fails on that, and it is
+not a warning.
 
 Do not confuse that with `deckhand token add|url <name>`, which mints a LOCAL
 bearer credential for Claude Code on the machine. That one IS a password: never

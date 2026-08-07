@@ -25,7 +25,6 @@ const config: Config = {
   githubApp: { appId: 1, privateKeyPath: "k.pem" },
   githubAmbient: true,
   allowPublicRepos: false,
-  connector: { allowedEmails: [] },
   limits: { maxDevicesPerPreview: 4, maxTotalDevices: 6, idleMinutes: 45, failedGraceMinutes: 15, stuckMinutes: 90, reuseDevices: false, disk: { watch: 50, pressure: 35, critical: 20 } },
 };
 

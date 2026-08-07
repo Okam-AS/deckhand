@@ -8,16 +8,16 @@ import { paths } from "../paths.ts";
 //
 // Deckhand's connector URL is pasted into a Claude organisation, where everyone
 // can see it. That is the whole reason this file exists: the URL can no longer BE
-// the credential. What authenticates is a per-person grant, issued only after
-// Cloudflare Access proved the person's email and that email was on the
-// allowlist.
+// the credential. What authenticates is a per-CLIENT grant, issued only after the
+// operator approved that client at the machine (`pairing.ts`).
 //
 // Nothing here stores a token in the clear. Disk holds sha256 hashes, the same
 // shape `auth.ts` compares — so a leaked oauth.json cannot be replayed, and a
 // grant is looked up in constant time.
 // ---------------------------------------------------------------------------
 
-/** How long an issued access token is good for. Refresh re-checks the allowlist, so this also bounds how stale an allowlist decision can be. */
+/** How long an issued access token is good for. A refresh mints from the stored grant, so a
+ *  revoked client stops at its next refresh at the latest — and immediately on `revokeClient`. */
 const ACCESS_TTL_MS = 12 * 60 * 60 * 1000;
 /** Authorization codes are handed over in a redirect and redeemed immediately. */
 const CODE_TTL_MS = 60 * 1000;
@@ -46,7 +46,9 @@ export interface Grant {
   accessHash: string;
   /** sha256 of the refresh token, hex. */
   refreshHash: string;
-  email: string;
+  /** What the operator approved: the client's own name, e.g. "Claude". Not a person —
+   *  deckhand never learns one, and does not need to (see `pairing.ts`). */
+  label: string;
   clientId: string;
   createdMs: number;
   accessExpiresMs: number;
@@ -60,14 +62,14 @@ interface Persisted {
 interface PendingCode {
   clientId: string;
   redirectUri: string;
-  email: string;
+  label: string;
   codeChallenge: string;
   createdMs: number;
 }
 
-/** The person a bearer token identifies. */
+/** What a bearer token names: an approved client, not a person. */
 export interface GrantIdentity {
-  email: string;
+  label: string;
   clientId: string;
 }
 
@@ -150,7 +152,7 @@ export class OAuthStore {
    *
    * `/oauth/register` is UNAUTHENTICATED, as RFC 7591 dynamic registration is — a client has
    * no credential yet, which is the point. Registering buys nothing on its own: a client_id
-   * still cannot obtain a grant without passing Cloudflare Access and the email allowlist.
+   * still cannot obtain a grant until the operator approves the request it parks.
    *
    * What it does buy is a row on disk, and an unbounded number of them is a disk-fill on a
    * machine whose whole job needs free space for simulators and builds. So the set is capped
@@ -189,13 +191,13 @@ export class OAuthStore {
   // -- Authorization codes ---------------------------------------------------
 
   /**
-   * Mint a single-use code for an email Access has already proved.
+   * Mint a single-use code for a request the operator has already approved.
    *
    * `codeChallenge` is PKCE S256 and mandatory: the redirect that carries the
    * code lands in a browser, and without a verifier anything that observes it can
    * redeem it.
    */
-  mintCode(input: { clientId: string; redirectUri: string; email: string; codeChallenge: string }): string {
+  mintCode(input: { clientId: string; redirectUri: string; label: string; codeChallenge: string }): string {
     this.pruneCodes();
     const code = this.genToken();
     this.codes.set(code, { ...input, createdMs: this.now() });
@@ -203,7 +205,7 @@ export class OAuthStore {
   }
 
   /** Redeem a code once. Returns null when it is unknown, expired, already used, or the client/redirect/verifier does not match. */
-  redeemCode(code: string, check: { clientId: string; redirectUri: string; codeVerifier: string }): { email: string } | null {
+  redeemCode(code: string, check: { clientId: string; redirectUri: string; codeVerifier: string }): { label: string } | null {
     const pending = this.codes.get(code);
     if (!pending) return null;
     // Delete FIRST: a code is single-use even when the redemption then fails, so
@@ -215,7 +217,7 @@ export class OAuthStore {
     const derived = createHash("sha256").update(check.codeVerifier, "utf8").digest("base64url");
     if (derived.length !== pending.codeChallenge.length) return null;
     if (!timingSafeEqual(Buffer.from(derived, "utf8"), Buffer.from(pending.codeChallenge, "utf8"))) return null;
-    return { email: pending.email };
+    return { label: pending.label };
   }
 
   private pruneCodes(): void {
@@ -233,13 +235,13 @@ export class OAuthStore {
 
   // -- Grants ----------------------------------------------------------------
 
-  issueGrant(input: { email: string; clientId: string }): IssuedTokens {
+  issueGrant(input: { label: string; clientId: string }): IssuedTokens {
     const accessToken = this.genToken();
     const refreshToken = this.genToken();
     this.grants.push({
       accessHash: sha256Hex(accessToken),
       refreshHash: sha256Hex(refreshToken),
-      email: input.email.toLowerCase(),
+      label: input.label,
       clientId: input.clientId,
       createdMs: this.now(),
       accessExpiresMs: this.now() + ACCESS_TTL_MS,
@@ -262,13 +264,13 @@ export class OAuthStore {
     for (const g of this.grants) {
       if (!hashEquals(hash, g.accessHash)) continue;
       if (g.accessExpiresMs <= nowMs) continue;
-      matched = { email: g.email, clientId: g.clientId };
+      matched = { label: g.label, clientId: g.clientId };
     }
     return matched;
   }
 
   /** Exchange a refresh token for a fresh pair, rotating both. Null when unknown or the client does not match. */
-  refresh(refreshToken: string, check: { clientId: string }): (IssuedTokens & { email: string }) | null {
+  refresh(refreshToken: string, check: { clientId: string }): (IssuedTokens & { label: string }) | null {
     const hash = sha256Hex(refreshToken);
     let found: Grant | null = null;
     for (const g of this.grants) {
@@ -276,15 +278,18 @@ export class OAuthStore {
     }
     if (!found) return null;
     this.grants = this.grants.filter((g) => g !== found);
-    const issued = this.issueGrant({ email: found.email, clientId: found.clientId });
-    return { ...issued, email: found.email };
+    const issued = this.issueGrant({ label: found.label, clientId: found.clientId });
+    return { ...issued, label: found.label };
   }
 
-  /** Drop every grant for an address. Used when an email leaves the allowlist. */
-  revokeEmail(email: string): number {
-    const target = email.toLowerCase();
+  /**
+   * Drop every grant a client holds — `deckhand revoke`, and the undo for an approval given in
+   * haste. Keyed by client because that is what was approved: revoking one connector must not
+   * disturb another the same person authorized separately.
+   */
+  revokeClient(clientId: string): number {
     const before = this.grants.length;
-    this.grants = this.grants.filter((g) => g.email !== target);
+    this.grants = this.grants.filter((g) => g.clientId !== clientId);
     if (this.grants.length !== before) this.save();
     return before - this.grants.length;
   }
@@ -294,8 +299,9 @@ export class OAuthStore {
     return this.clients.size;
   }
 
-  /** Addresses that currently hold at least one grant, for `deckhand token list` and doctor. */
-  activeEmails(): string[] {
-    return [...new Set(this.grants.map((g) => g.email))].sort();
+  /** Clients that currently hold at least one grant, for `deckhand connections` and doctor. */
+  activeClients(): { clientId: string; label: string }[] {
+    const byId = new Map(this.grants.map((g) => [g.clientId, g.label]));
+    return [...byId].map(([clientId, label]) => ({ clientId, label })).sort((a, b) => a.label.localeCompare(b.label));
   }
 }

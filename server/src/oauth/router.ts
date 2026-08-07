@@ -1,31 +1,26 @@
 import express from "express";
-import type { AccessIdentityVerifier } from "./access.ts";
 import type { OAuthStore } from "./store.ts";
+import type { PairingStore } from "./pairing.ts";
 
 // ---------------------------------------------------------------------------
 // Deckhand's OAuth 2.1 authorization server (PLAN §11.6).
 //
 // It exists for one reason: a connector URL added to a Claude organisation is
 // visible to that whole organisation, so the URL cannot be the credential. With
-// OAuth, every person authorizes individually — and `/oauth/authorize` is the one
-// endpoint Cloudflare Access sits in front of, which is where a colleague who is
-// not on the allowlist is stopped.
+// OAuth, every person authorizes individually — and nobody is authorized by
+// arriving here. `/oauth/authorize` PARKS the request and shows a code; the
+// operator approves it on the Mac with `deckhand approve`, matching that code.
 //
-// WHICH ENDPOINTS ACCESS MAY PROTECT, and why it matters:
-//   /oauth/authorize   — a BROWSER navigation. Access protects this one.
-//   /oauth/register    — called by Claude's backend. Access would break it.
-//   /oauth/token       — called by Claude's backend. Access would break it.
-//   /mcp               — called by Claude's backend. Access would break it.
-// `deckhand doctor` asserts exactly this shape, because an Access policy widened
-// to `/oauth/*` fails in a way that reads as "the connector is broken".
+// So the check is not "who are you" — deckhand has no way to know and no list to
+// check you against — it is "did the person at the machine say yes to THIS
+// request". A colleague holding the same URL gets a parked request and a code
+// nobody will match.
 // ---------------------------------------------------------------------------
 
 export interface OAuthRouterDeps {
   store: OAuthStore;
-  /** Null when Cloudflare Access is not configured — authorize then refuses outright rather than falling open. */
-  access: AccessIdentityVerifier | null;
-  /** Is this address allowed to hold a connector grant? */
-  isAllowed: (email: string) => boolean;
+  /** Requests waiting for the operator. See `pairing.ts` for why the wait is the whole design. */
+  pairing: PairingStore;
 }
 
 function esc(s: string): string {
@@ -42,7 +37,45 @@ body{font-family:ui-rounded,system-ui,-apple-system,sans-serif;line-height:1.55;
   background:#241b20;max-width:34rem;margin:0 auto;padding:9vh 1.25rem}
 h1{font-family:"New York",Georgia,ui-serif,serif;font-size:1.5rem;margin:0 0 .6rem}
 p{color:#c9baae}code{font-family:ui-monospace,Menlo,monospace;font-size:.9em;color:#e0a971}
+.code{font-family:ui-monospace,Menlo,monospace;font-size:2rem;letter-spacing:.18em;color:#e0a971;margin:.4rem 0 1rem}
 </style></head><body><h1>${esc(title)}</h1>${body}</body></html>`,
+  );
+}
+
+/**
+ * The page a visitor waits on, showing the code the operator must match.
+ *
+ * It polls rather than holding the connection open: a request parked for minutes behind a
+ * tunnel is a request some proxy will cut, and a page that dies silently reads as deckhand
+ * being broken. `<noscript>` gets a meta refresh — it cannot auto-resume, but it can tell the
+ * visitor what is happening, which is the part that matters.
+ */
+function waitingPage(res: express.Response, id: string, code: string): void {
+  page(
+    res,
+    200,
+    "Waiting for approval",
+    `<p>Ask whoever runs this deckhand to approve this code on their Mac:</p>
+     <p class="code">${esc(code)}</p>
+     <p>They run <code>deckhand approve</code> and confirm this code. Nothing connects until they do,
+        and the request expires in a few minutes.</p>
+     <p id="s">Waiting…</p>
+     <noscript><meta http-equiv="refresh" content="5"><p>Reload this page once it has been approved.</p></noscript>
+     <script>
+       const id = ${JSON.stringify(id)};
+       const say = (t) => { document.getElementById("s").textContent = t; };
+       const tick = async () => {
+         try {
+           const r = await fetch("pending/" + encodeURIComponent(id), { headers: { accept: "application/json" } });
+           const { status } = await r.json();
+           if (status === "approved") { location.href = "resume/" + encodeURIComponent(id); return; }
+           if (status === "denied") { say("Refused. Nothing was connected."); return; }
+           if (status === "expired") { say("This request expired. Start again from Claude."); return; }
+         } catch { /* a dropped poll is not a verdict — keep asking */ }
+         setTimeout(tick, 2000);
+       };
+       tick();
+     </script>`,
   );
 }
 
@@ -90,8 +123,8 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
     });
   });
 
-  // -- Authorize (the ONLY endpoint behind Cloudflare Access) ----------------
-  router.get("/authorize", async (req, res) => {
+  // -- Authorize: park the request, show the code, wait for the operator ------
+  router.get("/authorize", (req, res) => {
     const q = req.query as Record<string, unknown>;
     const clientId = singleString(q.client_id);
     const redirectUri = singleString(q.redirect_uri);
@@ -130,54 +163,54 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
       return;
     }
 
-    // Not configured is a REFUSAL, not a bypass. If this ever fell through to
-    // issuing a code, every member of the organisation holding the connector URL
-    // would get one — the exact failure this whole flow exists to prevent.
-    if (!deps.access) {
+    // Nobody is authorized by arriving here. The request waits until the operator
+    // approves it at the machine — that wait IS the authorization.
+    const parked = deps.pairing.park({
+      clientId: client.clientId,
+      clientName: client.name,
+      redirectUri,
+      state: state ?? undefined,
+      codeChallenge: challenge,
+    });
+    if (!parked) {
+      // Refusing the overflow rather than evicting: see MAX_PENDING. This is a
+      // page, not a redirect, because the visitor can act on it — wait and retry —
+      // and handing it back to the client shows up as an opaque connector failure.
       page(
         res,
         503,
-        "Not accepting connections yet",
-        `<p>This deckhand has no Cloudflare Access application configured, so it cannot tell who you are.</p>
-         <p>The operator fixes this by running <code>deckhand setup --hostname &lt;host&gt;</code> on the machine.</p>`,
+        "Too many requests waiting",
+        `<p>This deckhand already has as many connection requests waiting as it will hold, so yours was not added.</p>
+         <p>Try again in a few minutes. If that keeps happening, the operator should check what is asking.</p>`,
       );
       return;
     }
+    waitingPage(res, parked.id, parked.code);
+  });
 
-    const identity = await deps.access.verify(req.header("cf-access-jwt-assertion") ?? undefined);
-    if (!identity) {
-      // Reaching here means the request did not come through the Access
-      // application — a misconfigured policy, or someone hitting the origin
-      // directly. Either way there is no identity, so there is no code.
-      page(
-        res,
-        403,
-        "Not signed in",
-        `<p>This page must be reached through Cloudflare Access, which did not vouch for this request.</p>
-         <p>If you are the operator, check that the Access application covers <code>/oauth/authorize</code> on this hostname.</p>`,
-      );
+  // -- The waiting browser asks whether it may proceed yet --------------------
+  //
+  // Unauthenticated on purpose, and safe because the id is a 32-byte secret handed
+  // only to the browser that made the request: polling proves you opened the page,
+  // which is exactly what it is allowed to prove. The APPROVAL is elsewhere and
+  // needs the machine's own credential.
+  router.get("/pending/:id", (req, res) => {
+    // Status only. The authorization code is never handed to the page: the page
+    // navigates to `/oauth/resume`, which builds the redirect server-side, so the
+    // registered redirect URI stays the only place a code can land.
+    res.json({ status: deps.pairing.poll(req.params.id ?? "").status });
+  });
+
+  // -- Approved: hand the browser back to the client --------------------------
+  router.get("/resume/:id", (req, res) => {
+    const parked = deps.pairing.take(req.params.id ?? "");
+    if (!parked || parked.status !== "approved" || !parked.authCode) {
+      page(res, 410, "Nothing to resume", `<p>This request was never approved, or it has already been used.</p>`);
       return;
     }
-
-    if (!deps.isAllowed(identity.email)) {
-      // Says the address back — that is the one thing the visitor already knows,
-      // and without it "not authorized" is unactionable. It does NOT list who is
-      // allowed; that is the operator's business.
-      page(
-        res,
-        403,
-        "Not authorized",
-        `<p><code>${esc(identity.email)}</code> is not on this deckhand's allowlist, so it cannot connect.</p>
-         <p>It previews apps from one person's machine. If that should be you, ask the operator to run
-         <code>deckhand allow ${esc(identity.email)}</code>.</p>`,
-      );
-      return;
-    }
-
-    const code = deps.store.mintCode({ clientId: client.clientId, redirectUri, email: identity.email, codeChallenge: challenge });
-    const url = new URL(redirectUri);
-    url.searchParams.set("code", code);
-    if (state) url.searchParams.set("state", state);
+    const url = new URL(parked.redirectUri);
+    url.searchParams.set("code", parked.authCode);
+    if (parked.state) url.searchParams.set("state", parked.state);
     res.redirect(302, url.toString());
   });
 
@@ -204,13 +237,11 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
         oauthError(res, 400, "invalid_grant", "the authorization code is unknown, expired, or already used");
         return;
       }
-      // Re-checked at redemption as well as at authorize: an address removed from
-      // the allowlist between the two must not complete the exchange.
-      if (!deps.isAllowed(redeemed.email)) {
-        oauthError(res, 400, "invalid_grant", "that address is no longer allowed to connect to this deckhand");
-        return;
-      }
-      const issued = deps.store.issueGrant({ email: redeemed.email, clientId });
+      // No second check here on purpose: approval is a decision about THIS request,
+      // and the code it minted is single-use and short-lived. There is no list that
+      // could have changed underneath it — revoking is `deckhand revoke`, which drops
+      // the grant itself.
+      const issued = deps.store.issueGrant({ label: redeemed.label, clientId });
       res.json({
         access_token: issued.accessToken,
         refresh_token: issued.refreshToken,
@@ -229,11 +260,6 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
       const rotated = deps.store.refresh(refreshToken, { clientId });
       if (!rotated) {
         oauthError(res, 400, "invalid_grant", "the refresh token is unknown or belongs to another client");
-        return;
-      }
-      if (!deps.isAllowed(rotated.email)) {
-        deps.store.revokeEmail(rotated.email);
-        oauthError(res, 400, "invalid_grant", "that address is no longer allowed to connect to this deckhand");
         return;
       }
       res.json({

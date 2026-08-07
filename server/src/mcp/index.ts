@@ -21,7 +21,6 @@ export interface McpRouterDeps {
   /** Per-person OAuth grants. Absent only in tests that exercise the local credential alone. */
   oauth?: OAuthStore;
   /** Is this address still allowed to connect? Consulted on EVERY request, so removing an address revokes at once. */
-  isAllowed?: (email: string) => boolean;
   /** Public origin, for the `WWW-Authenticate` pointer that starts the OAuth flow. */
   baseUrl?: string;
 }
@@ -37,8 +36,8 @@ export interface McpRouterDeps {
  * therefore read the credential out of the URL and drive this Mac.
  *
  * So: two ways to hold a bearer credential, and both are per-person.
- *   - an OAuth grant, issued only after Cloudflare Access proved an email that is on the
- *     allowlist (`oauth/router.ts`)
+ *   - an OAuth grant, issued only after the operator approved that client at the machine
+ *     (`oauth/pairing.ts`)
  *   - a local tokens.yaml token, which requires already being at the machine
  *
  * A missing or unknown credential → 401 carrying `WWW-Authenticate` with the
@@ -55,10 +54,10 @@ export function createMcpRouter(deps: McpRouterDeps): express.Router {
   const authenticate = (token: string): Principal | null => {
     const grant = deps.oauth?.authenticate(token);
     if (grant) {
-      // Re-checked here rather than only at issuance: `deckhand allow rm` has to
-      // take a connector away NOW, not whenever the access token happens to expire.
-      if (deps.isAllowed && !deps.isAllowed(grant.email)) return null;
-      return { name: grant.email, email: grant.email };
+      // The grant names the CLIENT the operator approved, not a person: deckhand
+      // never learns one. `deckhand revoke` drops the grant itself, so there is
+      // nothing to re-check here — an authenticated token IS a live approval.
+      return { name: grant.label };
     }
     return deps.auth.authenticate(token);
   };

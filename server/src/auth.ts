@@ -8,13 +8,13 @@ import type { TokenEntry } from "./config.ts";
  * devices on ONE Mac, so anything that authenticates is that operator. What the
  * fields carry is the audit trail's answer to "which credential acted".
  *
- * `email` is present for an OAuth grant, where Cloudflare Access proved an
- * address before deckhand issued anything. It is absent for a local tokens.yaml
- * credential, which is only obtainable by already being at the machine.
+ * `name` is all there is, because deckhand learns no more: an OAuth grant names the CLIENT the
+ * operator approved, and a local tokens.yaml credential names itself. There is deliberately no
+ * address field — nothing in the flow proves one, so carrying it would invite a check that
+ * cannot hold.
  */
 export interface Principal {
   name: string;
-  email?: string;
 }
 
 function sha256(s: string): Buffer {

@@ -475,44 +475,24 @@ function gitHead(cwd: string): Promise<string | null> {
 }
 
 /**
- * Who may connect, and whether anything is actually checking (PLAN §11.6).
+ * Can a new client be let in at all (PLAN §11.6)?
  *
- * Both halves have to hold, and each fails in a way that looks like the other's
- * problem — so they are reported as one check with a detail that says which:
- *   - an EMPTY allowlist means nobody can connect, which reads as "OAuth is broken"
- *   - a MISSING Access application means authorize refuses everyone, which reads
- *     as "the allowlist is wrong"
- * Neither is a warning. A connector nobody can authorize is an outage, and the
- * operator has no other signal that it happened.
+ * There is no allowlist to be empty and no Access application to be missing — approval is a
+ * live decision, so the only way this half breaks is the operator having no way to make it.
+ * `deckhand approve` reaches the running server with a LOCAL credential, so no local
+ * credential means no approvals, and the connector can never be authorized by anybody.
+ *
+ * Not a warning. A connector nobody can approve is an outage, and nothing else reports it.
  */
-export function checkConnectorAuth(config: Config): Check {
-  const { allowedEmails, access } = config.connector;
-  if (!access && allowedEmails.length === 0) {
+export function checkConnectorAuth(tokens: { name: string }[]): Check {
+  if (tokens.length === 0) {
     return {
       name: "connector auth",
       ok: false,
-      detail: "no allowlist and no Cloudflare Access application — nobody can connect; run `deckhand setup --hostname … --email <you>`",
+      detail: "no local credential, so `deckhand approve` cannot reach the server and nothing can be let in — `deckhand token add me`",
     };
   }
-  if (!access) {
-    return {
-      name: "connector auth",
-      ok: false,
-      detail: `allowlist has ${allowedEmails.length}, but no Cloudflare Access application is recorded — /oauth/authorize refuses everyone until \`setup --access-team … --access-aud …\``,
-    };
-  }
-  if (allowedEmails.length === 0) {
-    return {
-      name: "connector auth",
-      ok: false,
-      detail: "Cloudflare Access is configured but the allowlist is empty — an empty allowlist admits nobody; `deckhand allow <email>`",
-    };
-  }
-  return {
-    name: "connector auth",
-    ok: true,
-    detail: `${allowedEmails.join(", ")} via ${access.teamDomain}`,
-  };
+  return { name: "connector auth", ok: true, detail: "approval is per request; `deckhand approve` lists what is waiting" };
 }
 
 export async function runDoctor(opts: { smoke?: boolean } = {}): Promise<{ checks: Check[]; ok: boolean }> {
@@ -520,10 +500,11 @@ export async function runDoctor(opts: { smoke?: boolean } = {}): Promise<{ check
 
   let config: Config | null = null;
   let apps: App[] = [];
+  let tokens: { name: string }[] = [];
   try {
     config = loadConfig();
     apps = loadApps();
-    loadTokens();
+    tokens = loadTokens();
     checks.push({ name: "config files", ok: true, detail: `hostname ${config.hostname}` });
   } catch (e) {
     checks.push({ name: "config files", ok: false, detail: (e as Error).message });
@@ -532,7 +513,7 @@ export async function runDoctor(opts: { smoke?: boolean } = {}): Promise<{ check
   checks.push(...(await checkToolchains()));
 
   if (config) {
-    checks.push(checkConnectorAuth(config));
+    checks.push(checkConnectorAuth(tokens));
     checks.push(checkServeSim());
     checks.push(await checkServices());
     checks.push(await checkGitHub(config));

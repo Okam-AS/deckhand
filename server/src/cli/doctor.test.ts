@@ -121,34 +121,20 @@ describe("freshnessVerdict", () => {
 });
 
 describe("checkConnectorAuth", () => {
-  const withConnector = (connector: Config["connector"]): Config => ({ connector }) as unknown as Config;
-  const ACCESS = { teamDomain: "acme.cloudflareaccess.com", aud: "aud-tag" };
-
-  it("passes when an address is allowed and Access is there to prove it", () => {
-    const c = checkConnectorAuth(withConnector({ allowedEmails: ["owner@example.com"], access: ACCESS }));
+  it("passes once there is a local credential to approve with", () => {
+    const c = checkConnectorAuth([{ name: "me" }]);
     assert.equal(c.ok, true);
-    assert.match(String(c.detail), /owner@example\.com/);
+    assert.match(String(c.detail), /per request/);
   });
 
-  // Each of the next three is an OUTAGE the operator has no other signal for: the
-  // connector URL still resolves, still looks right, and authorizes nobody.
-  it("fails an empty allowlist even when Access is configured", () => {
-    const c = checkConnectorAuth(withConnector({ allowedEmails: [], access: ACCESS }));
+  // An OUTAGE the operator has no other signal for: the connector URL still resolves, still
+  // looks right, and can never be authorized, because approving needs a credential that is
+  // only obtainable at the machine.
+  it("fails with no local credential, and names the command that fixes it", () => {
+    const c = checkConnectorAuth([]);
     assert.equal(c.ok, false);
-    assert.equal(c.warn, undefined, "a connector nobody can authorize is not an advisory");
-    assert.match(String(c.detail), /deckhand allow/, "and it names the command that fixes it");
-  });
-
-  it("fails a missing Access application, and says authorize refuses everyone", () => {
-    const c = checkConnectorAuth(withConnector({ allowedEmails: ["owner@example.com"] }));
-    assert.equal(c.ok, false);
-    assert.match(String(c.detail), /access-aud/);
-  });
-
-  it("names the fresh-install case as one errand rather than two failures", () => {
-    const c = checkConnectorAuth(withConnector({ allowedEmails: [] }));
-    assert.equal(c.ok, false);
-    assert.match(String(c.detail), /deckhand setup/);
+    assert.equal(c.warn, undefined, "a connector nobody can approve is not an advisory");
+    assert.match(String(c.detail), /deckhand token add/);
   });
 });
 

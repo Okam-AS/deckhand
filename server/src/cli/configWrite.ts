@@ -138,49 +138,6 @@ export function updateConfig(mutate: (config: Record<string, unknown>) => void):
 }
 
 /**
- * Add an address to the connector allowlist. Idempotent, and lowercased on the
- * way in so `Owner@x.com` and `owner@x.com` cannot both sit in the list looking
- * like two decisions.
- */
-export function allowEmail(email: string): { emails: string[]; added: boolean } {
-  const address = email.trim().toLowerCase();
-  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(address)) throw new Error(`"${email}" does not look like an email address`);
-  let added = false;
-  const next = updateConfig((config) => {
-    const connector = (config.connector ?? {}) as { allowedEmails?: unknown };
-    const emails = Array.isArray(connector.allowedEmails) ? (connector.allowedEmails as string[]).map((e) => e.toLowerCase()) : [];
-    if (!emails.includes(address)) {
-      emails.push(address);
-      added = true;
-    }
-    config.connector = { ...connector, allowedEmails: emails };
-  });
-  return { emails: ((next.connector as { allowedEmails: string[] }).allowedEmails ?? []), added };
-}
-
-/** Remove an address from the allowlist. Its live grants stop working on the next MCP call. */
-export function disallowEmail(email: string): { emails: string[]; removed: boolean } {
-  const address = email.trim().toLowerCase();
-  let removed = false;
-  const next = updateConfig((config) => {
-    const connector = (config.connector ?? {}) as { allowedEmails?: unknown };
-    const emails = Array.isArray(connector.allowedEmails) ? (connector.allowedEmails as string[]).map((e) => e.toLowerCase()) : [];
-    const kept = emails.filter((e) => e !== address);
-    removed = kept.length !== emails.length;
-    config.connector = { ...connector, allowedEmails: kept };
-  });
-  return { emails: ((next.connector as { allowedEmails: string[] }).allowedEmails ?? []), removed };
-}
-
-/** Record the Cloudflare Access application that proves identity at `/oauth/authorize`. */
-export function setAccessApplication(input: { teamDomain: string; aud: string }): void {
-  updateConfig((config) => {
-    const connector = (config.connector ?? {}) as Record<string, unknown>;
-    config.connector = { ...connector, access: { teamDomain: input.teamDomain, aud: input.aud } };
-  });
-}
-
-/**
  * Write apps.yaml, having first confirmed it can be read back.
  *
  * The write path and the read path had no relationship: anything that produced an in-memory

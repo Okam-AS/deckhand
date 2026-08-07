@@ -5,9 +5,6 @@ import { dirname, join, resolve } from "node:path";
 import { paths } from "../paths.ts";
 import { mergeTunnelConfig, renderTunnelConfig, parseTunnelConfig, tunnelIdFor, needsLogin } from "./tunnelConfig.ts";
 import { checkPrereqs, humanInput, formatPrereqs, blocking, type Probe } from "./preflight.ts";
-import { manualInstructions, normalizeTeamDomain } from "./accessApp.ts";
-import { allowEmail, setAccessApplication } from "./configWrite.ts";
-import { loadConfig } from "../config.ts";
 
 // ---------------------------------------------------------------------------
 // `deckhand setup` — one command from a bare Mac to a working connector URL.
@@ -78,11 +75,6 @@ export interface SetupOptions {
   webHost?: string;
   port?: number;
   tokenName?: string;
-  /** The address allowed to connect. Everything else about the connector follows from this one answer. */
-  email?: string;
-  /** Zero Trust team domain and Application Audience tag, read off the Access application. */
-  accessTeam?: string;
-  accessAud?: string;
   /** Skip the LaunchAgents (useful when running deckhand by hand). */
   noServices?: boolean;
 }
@@ -161,23 +153,6 @@ function ensureTunnelConfig(tunnelId: string, hostnames: string[], port: number)
   }
   writeFileSync(file, body);
   ok(`cloudflared config points ${hostnames.join(", ")} at 127.0.0.1:${port}`);
-}
-
-/** The allowlist as it stands, or [] when there is no readable config yet. */
-function currentAllowlist(): string[] {
-  try {
-    return loadConfig().connector.allowedEmails;
-  } catch {
-    return [];
-  }
-}
-
-function accessConfigured(): boolean {
-  try {
-    return Boolean(loadConfig().connector.access);
-  } catch {
-    return false;
-  }
 }
 
 function deckhandCli(args: string[]): Run {
@@ -269,46 +244,9 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
       ok(`wrote ${paths.config()}`);
     }
 
-    // Who may connect, and the Access application that proves it. This lives in the
-    // tunnel half of setup on purpose: the tunnel is what makes deckhand reachable
-    // from a Claude organisation, so the answer to "who" belongs in the same breath
-    // as "reachable". Until it is answered, nobody can connect at all — the
-    // allowlist starts empty and an empty allowlist admits no one.
-    step("Who may connect");
-    const emails = opts.email ? [opts.email.trim().toLowerCase()] : currentAllowlist();
-    if (opts.email) {
-      const { emails: after } = allowEmail(opts.email);
-      ok(`only ${after.join(", ")} may connect this deckhand`);
-    } else if (emails.length) {
-      ok(`allowlist: ${emails.join(", ")} (change it with \`deckhand allow\`)`);
-    } else {
-      throw new SetupError(
-        "nobody is allowed to connect yet",
-        `Ask the user this, in these words: "Which email address should be allowed to connect to deckhand?" — ` +
-          `then re-run with \`setup --hostname ${hostname} --email <their answer>\`. ` +
-          `A connector URL added in Claude is visible to their whole organisation, so this address is what keeps everyone else out.`,
-      );
-    }
-
-    if (opts.accessTeam && opts.accessAud) {
-      setAccessApplication({ teamDomain: normalizeTeamDomain(opts.accessTeam), aud: opts.accessAud.trim() });
-      ok(`Cloudflare Access application recorded — sign-ins are verified against ${normalizeTeamDomain(opts.accessTeam)}`);
-    } else if (accessConfigured()) {
-      ok("Cloudflare Access application already recorded");
-    } else {
-      // BLOCKED, in the preflight's sense: it needs their Cloudflare account and a
-      // browser. Never attempt it, and never continue as if it were done — without
-      // it `/oauth/authorize` refuses every request and the connector cannot be
-      // authorized by anyone, including them.
-      say("");
-      say(manualInstructions({ hostname, emails }).split("\n").map((l) => `  ${l}`).join("\n"));
-      throw new SetupError(
-        "the Cloudflare Access application does not exist yet",
-        "Relay the steps above to the user and stop — they need their own Cloudflare Zero Trust dashboard for this. " +
-          "Everything else is done; re-running setup with --access-team and --access-aud finishes it.",
-      );
-    }
-
+    // Nothing here decides who may connect: nobody may, until the operator approves a
+    // request one at a time (`deckhand approve`). There is no list to seed and no
+    // question to ask, which is why setup finishes on one answer.
     step("Local credential");
     const list = deckhandCli(["token", "list"]);
     // `token list` is NOT silent on an empty install — it prints "no tokens yet — create one
@@ -327,7 +265,7 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
       // step at the end, which the user is about to run deliberately.
       say(`  ✓ created a local credential for "${name}"`);
     }
-    info("that one is for Claude Code on this Mac; claude.ai authorizes through Access instead");
+    info("that one is for Claude Code on this Mac; claude.ai asks for approval instead");
 
     if (!opts.noServices) {
       step("Keep it running (LaunchAgents)");
@@ -358,19 +296,13 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
     say("  └─────────────────────────────────────────────────────────────┘");
     say("");
     say(`   1.  Paste  https://${hostname}/mcp  into claude.ai → Settings → Connectors → Add`);
-    say("   2.  Click Connect. Cloudflare emails you a one-time code.");
+    say("   2.  Click Connect. Claude shows a code and waits.");
+    say("   3.  Run `deckhand approve` here and approve THAT code.");
     say("");
-    say("   The URL is not a password — it is safe to share with your organisation.");
-    say(`   Only ${emails.join(", ")} can actually connect through it.`);
+    say("   The URL is not a password — share it with your organisation if you like.");
+    say("   Nothing connects until somebody at this Mac approves it, one client at a time.");
     say("");
-    say("   After that: `deckhand app add <id> --path /path/to/a/checkout`,");
-    say("   then ask Claude for a preview.");
-    // Addressed to the agent, because the agent is who reads this. Getting the ending right
-    // did not survive relaying: an agent that has just watched a long install writes a long
-    // summary of it, and the one instruction lands under a paragraph nobody reaches. The
-    // output above is already on the user's screen — repeating it is the failure mode.
-    say("");
-    say("   AGENT: reply in TWO LINES — step 1, and that Cloudflare emails a code. Then stop.");
+    say("   AGENT: reply in TWO LINES — paste the URL, then approve the code it shows.");
     say("   Do not summarise this output, list what was installed, or report status: they can");
     say("   see all of it above. Anything you add pushes the only instruction out of view.");
   } catch (e) {

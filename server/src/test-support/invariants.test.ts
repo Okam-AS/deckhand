@@ -393,26 +393,14 @@ describe("the connector URL is public by construction", () => {
     );
   });
 
-  it("never reads Cloudflare's unsigned identity header", () => {
-    // Access sends the email twice: as `Cf-Access-Authenticated-User-Email`, and inside the
-    // signed `Cf-Access-Jwt-Assertion`. Only the second is evidence — anything that can reach
-    // the origin can set a header, and every process on this Mac shares loopback (an iOS
-    // Simulator's 127.0.0.1 IS the host's, PLAN §11 item 1). Reading the header would be a
-    // total bypass of the email allowlist, with nothing else failing.
-    const offenders: string[] = [];
-    for (const file of sourceFiles()) {
-      const stripped = read(file)
-        .split("\n")
-        .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
-        .join("\n")
-        .toLowerCase();
-      if (stripped.includes("cf-access-authenticated-user-email")) offenders.push(file.slice(SRC.length + 1));
-    }
-    assert.deepEqual(
-      offenders,
-      [],
-      "identity must come from the signed Cf-Access-Jwt-Assertion, never from the plain header",
-    );
+  it("puts no approval path outside the credential the machine holds", () => {
+    // The public half of pairing parks requests and proves nothing; the deciding half needs
+    // tokens.yaml. If `pairRouter` ever stopped authenticating, the connector URL alone would
+    // approve its own request — a total bypass with nothing else failing.
+    const source = read(join(SRC, "oauth", "pairRouter.ts"));
+    assert.match(source, /bearerToken\(/, "pairRouter must authenticate every call");
+    assert.match(source, /deps\.auth\.authenticate\(/, "…against tokens.yaml, not against an OAuth grant");
+    assert.doesNotMatch(source, /oauth\?\.authenticate|store\.authenticate\(/, "an OAuth grant must not be able to approve the next one");
   });
 });
 
@@ -429,11 +417,6 @@ describe("config that changes at runtime is watched", () => {
     for (const [what, call] of [
       ["apps.yaml", /watchApps\(/],
       ["tokens.yaml", /watchTokens\(/],
-      // config.yaml's allowlist, for the same reason one layer worse: `deckhand allow rm`
-      // printed "starting with their next call", PLAN said it was re-checked per request, and
-      // the per-request check DID run — against an array loaded once at boot. Revocation
-      // silently required a restart, which tears down every booted simulator on the machine.
-      ["config.yaml's allowlist", /watchAllowlist\(/],
     ] as const) {
       assert.match(server, call, `${what} must be watched — reading it once at boot means an edit needs a restart, and nothing says so`);
     }

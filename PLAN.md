@@ -41,7 +41,7 @@ implementation:
 | Build strategy | Build locally on the mini: git worktree → install deps → native build. No CI artifacts. |
 | Local dev mode + daily-loop contract | **Amended (2026-07-15):** an app may declare a local `path` (instead of, or alongside, `repo`). Local previews build **in place** in the developer's working copy — no worktree, no push — and NativeScript runs as a long-lived **livesync** process (`ns run --no-hmr`, watch on, HMR off — NS HMR is unreliable) so file saves reach the running sim with no tool calls. The loop rides in the tools themselves: `start_preview` is **idempotent** per (app, source, ref), share ids are **stable per app** (persisted; a bookmarked viewer URL never rots), and `restart_preview` rebuilds in place (git: fetch new tip + reset worktree; local: re-run) on the same booted devices. Consequence: named branches/PRs now **always fetch** (the old local-first shortcut served stale commits; SHAs remain local-first). Local previews trade snapshot determinism for the loop — the build mirrors whatever is on disk; the source dir is borrowed, never wiped (`npm ci` guarded) and never removed. Local apps are registered on the machine itself (`deckhand app add <id> --path <dir>`), not over MCP. |
 | Tunnel | `cloudflared` **named tunnel** with a stable hostname on the owner's Cloudflare-managed domain. Deckhand binds `127.0.0.1` only. |
-| MCP auth | An `Authorization: Bearer` credential at `/mcp` — **never a path segment**. Two ways to hold one, both per-person: an **OAuth grant** (the claude.ai path), or a local `tokens.yaml` token for a client on the machine that has no browser. Every credential is still the operator's, so authenticating IS authorizing and there are still no roles. **Superseded (2026-08-07): the path token, and the "no OAuth" decision with it.** `/mcp/<token>` was safe only while the connector URL was a secret, and it is not: a connector added in **Claude Enterprise is visible to the whole organisation**, so everyone in it could read the credential out of the URL and drive this Mac. OAuth is what makes each person authorize individually; who may complete that is `connector.allowedEmails`, proved by Cloudflare Access at sign-in (§11.6). The original worry — many people on one Mac's six device slots — is answered by the allowlist, not by hoping a URL stays private. |
+| MCP auth | An `Authorization: Bearer` credential at `/mcp` — **never a path segment**. Two ways to hold one, both per-person: an **OAuth grant** (the claude.ai path), or a local `tokens.yaml` token for a client on the machine that has no browser. Every credential is still the operator's, so authenticating IS authorizing and there are still no roles. **Superseded (2026-08-07): the path token, and the "no OAuth" decision with it.** `/mcp/<token>` was safe only while the connector URL was a secret, and it is not: a connector added in **Claude Enterprise is visible to the whole organisation**, so everyone in it could read the credential out of the URL and drive this Mac. OAuth is what makes each client authorize individually; who may complete that is the operator, live, one request at a time — `/oauth/authorize` parks and `deckhand approve` admits (§11.6). The original worry — many people on one Mac's six device slots — is answered by that approval, not by hoping a URL stays private. |
 | GitHub access | **Minimal GitHub App** — permissions `Contents: Read-only` (optionally `Pull requests: Read-only`), **no webhooks, no OAuth, no callback URLs**. One App ID + private key PEM on the mini. Each repo org installs the app and picks repos. Hourly installation tokens, injected into git via ephemeral `GIT_ASKPASS`. The set of app installations *is* the repo allowlist. **Amended (2026-07-10):** a **fine-grained PAT** (`Contents: Read-only`, selected repos) is an equally supported auth mode — same tokenResolver seam, far less setup, and the mode agent-led onboarding (§6) walks new users through. The App remains the recommended path for multi-org installs. **Amended (2026-07-15): the access ladder.** Asking a user for a PAT when the machine can already read the repo is bad onboarding, so credentials resolve in order: PAT file → GitHub App → (if `githubAmbient`, default on) the deckhand user's **gh CLI session** (`gh auth token`, in-memory, same `GIT_ASKPASS` handling) → anonymous git (public repos; gated on `allowPublicRepos`) → the one-time setup URL as **last resort**. Explicit credentials always shadow ambient ones, so an App's installation set remains the allowlist. Before any of this, onboarding steers to a **local checkout** when one exists (§6). Ambient tradeoff recorded in §11.4. |
 | Multi-org / multi-dev | **Dropped (2026-08-05.)** One install, one operator, however many repo orgs their credential reaches. A second developer runs their own deckhand; a colleague who only needs to WATCH uses the share link, which needs no token. |
 | Viewer | One page (ours — not serve-sim's preview UI), multiple devices side by side, live video + **touch control on** (not view-only), public or password-protected share links. |
@@ -97,7 +97,7 @@ deckhand/
 │   │   ├── cli.ts               # `deckhand` CLI entry: init, doctor, serve, token, app, env
 │   │   ├── server.ts            # express app wiring: /mcp, /oauth, /s, health
 │   │   ├── config.ts            # load/validate config.yaml, apps.yaml, tokens.yaml (zod)
-│   │   ├── oauth/               # the authorization server + Cloudflare Access verification
+│   │   ├── oauth/               # the authorization server + the approval a person gives
 │   │   ├── auth.ts              # token lookup (sha256 map, timingSafeEqual) → the operator
 │   │   ├── audit.ts             # append-only JSONL audit log
 │   │   ├── mcp/
@@ -226,8 +226,8 @@ Auth middleware: store `sha256(token) → entry` in memory; match by hashing the
 bearer value and `timingSafeEqual`. Unknown or missing credential → 401 with
 `WWW-Authenticate: Bearer resource_metadata="…"`, which is how an MCP client discovers where
 to authorize. Every tool call is appended to `audit.jsonl`
-(`{ts, tokenName, tool, args-summary, result}`); for an OAuth grant the name is the email
-Cloudflare Access proved.
+(`{ts, tokenName, tool, args-summary, result}`); for an OAuth grant the name is the client the
+operator approved.
 
 ### oauth.json
 
@@ -727,9 +727,10 @@ change eases in/out — nothing snaps.
 - `deckhand init` — writes `config.yaml` only. `setup` calls it; you rarely call it directly.
   Flags: `--hostname`, `--port`, and optionally `--github-app-id`/`--github-app-pem` (the App
   is optional — without it deckhand uses the ambient `gh` CLI session).
-- `deckhand allow <email>` — **who may connect** (§11.6). Bare `deckhand allow` lists them;
-  `allow rm <email>` revokes, effective on that person's next MCP call. The address must also
-  be on the Cloudflare Access policy, or they never reach the sign-in page.
+- `deckhand approve [CODE]` — **let a waiting client in** (§11.6). Bare, it lists what is
+  waiting; with a code it approves that one. `deckhand deny CODE` refuses one.
+- `deckhand connections` — clients holding a grant now; `deckhand revoke <client-id>` takes one
+  away, effective on its next MCP call.
 - `deckhand token` — **your connector URL**, `https://<hostname>/mcp`. It carries no
   credential and is safe to share with your organisation. The subcommands manage LOCAL
   credentials instead, for a client on this Mac that cannot run a browser sign-in:
@@ -757,8 +758,8 @@ change eases in/out — nothing snaps.
    somewhere: the two `/.well-known/oauth-*` discovery documents (public, no secret in them),
    `POST /oauth/register` (RFC 7591 dynamic registration — capped, since it writes to disk), and
    `GET /oauth/authorize`, which is unauthenticated at the origin and authenticated by
-   **Cloudflare Access in front of it**. Registering or discovering buys nothing: a grant needs
-   a verified Access identity on the allowlist (§11.6). Everything that touches a device or a
+   **the operator's approval in front of it**. Registering or discovering buys nothing: a grant
+   needs a request the operator approved at the machine (§11.6). Everything that touches a device or a
    repo is still behind a credential.
    **Caveat (audit 2026-07-27):** loopback is *not* a boundary against a share holder. An
    iOS Simulator shares the host's network stack (`127.0.0.1` inside it is the Mac's
@@ -817,40 +818,43 @@ change eases in/out — nothing snaps.
 7. **Host hygiene** (documented in runbook, not code): dedicated macOS user, no personal
    credentials on the machine, FileVault on.
 
-### 11.6 Who may connect — the email allowlist (2026-08-07)
+### 11.6 Who may connect — approval at the machine (2026-08-07)
 
 The connector URL is **public by construction**. Added in Claude Enterprise it is visible to
 the whole organisation, so nothing about deckhand's safety may rest on it staying private.
-What keeps everyone else out is an address list plus a login they cannot pass:
+What keeps everyone else out is not a list — it is that **nobody is admitted without the
+operator saying so, once, per client, at the Mac**:
 
-- `connector.allowedEmails` in `config.yaml` is the authorization decision. It defaults to
-  **empty, and empty means nobody** — a URL a whole organisation can see must not admit
-  anyone by default. Edited with `deckhand allow` / `deckhand allow rm`.
-- It is checked in three places: at `/oauth/authorize`, again when the code is redeemed, and
-  again on **every MCP request**. So `deckhand allow rm` takes a connector away on the next
-  call — not on the next token expiry, and never at the cost of a restart (which would tear
-  down every booted simulator on the machine).
-- Identity comes from **Cloudflare Access**, from the signed `Cf-Access-Jwt-Assertion` and
-  never from the `Cf-Access-Authenticated-User-Email` header: anything that can reach the
-  origin can set a header, and every process on this Mac shares loopback (see item 1's
-  caveat). The JWT is verified against the team JWKS with `alg` pinned to RS256 and the
-  audience pinned to THIS application's AUD tag, so an Access token for another app on the
-  same team is not accepted.
-- **Access protects exactly one path: `<hostname>/oauth/authorize`.** It works by redirecting
-  a browser, so covering `/mcp`, `/oauth/token` or `/oauth/register` — all called by Claude's
-  backend, which has no browser — breaks the connector in a way that reads as "deckhand is
-  broken". Deckhand does not create the application: that needs a Cloudflare API token with
-  `Access: Edit`, a second credential with a far wider blast radius than the tunnel's, held
-  forever to save one visit to a dashboard. `setup` prints the errand and takes the team
-  domain + AUD back via `--access-team` / `--access-aud`.
-- If the Access application is **not configured, `/oauth/authorize` refuses outright**. It
-  never falls back to trusting the caller — a permissive default here would hand a grant to
-  everyone holding the URL, which is the exact failure this section exists to prevent.
+- `/oauth/authorize` **parks** the request and shows a short code. It authorizes nobody and
+  mints nothing. A colleague who pastes the same URL gets a parked request and a code that
+  nobody will match.
+- `deckhand approve` lists what is waiting and takes the code. Bare, it only LISTS: approving
+  whatever happens to be waiting is the mistake this exists to prevent, because the operator
+  has to compare the code against their own browser to know the request is theirs.
+- The two halves are protected differently, and that asymmetry IS the design. The public half
+  (`/oauth/authorize`, `/oauth/pending`, `/oauth/resume`) proves nothing and needs nothing. The
+  deciding half (`/pair/*`) needs a `tokens.yaml` credential — obtainable only by being at the
+  machine. An OAuth grant deliberately cannot approve, or one connector could wave the next one
+  through.
+- **Superseded (2026-08-07): Cloudflare Access and `connector.allowedEmails`.** Both are gone.
+  They worked, but they made a from-scratch install stop dead on an errand deckhand could not
+  perform — creating an Access application needs a Cloudflare API token with `Access: Edit`, a
+  credential with a far wider blast radius than the tunnel's, held forever to save one dashboard
+  visit. Approval needs no second account, no list to maintain, and no answer at setup time.
+  It is also strictly narrower: an allowlist admits an address forever, an approval admits one
+  client once.
+- Parked requests live **in memory**, capped, and expire in minutes. Surviving a restart would
+  let an approval outlive the browser that asked for it. The cap refuses the overflow rather
+  than evicting, so a flood cannot push the operator's own request off the list.
+- Revocation is `deckhand revoke <client-id>`, keyed by client because a client is what was
+  approved. Effective on that client's next call, with no restart — a restart tears down every
+  booted simulator on the machine, so it can never be the price of taking access away.
 - The OAuth server itself: authorization-code + PKCE **S256 only** (`plain` puts the verifier
   in the same redirect as the code), single-use codes burned even on a failed redemption,
-  rotating refresh tokens, public clients via RFC 7591 dynamic registration, https redirect
-  URIs only, and no error ever redirected to an unregistered URI (that would make authorize
-  an open redirector).
+  an approved request claimed exactly once, rotating refresh tokens, public clients via RFC 7591
+  dynamic registration, https redirect URIs only, and no error ever redirected to an
+  unregistered URI (that would make authorize an open redirector).
+
 ## 11a. Staying current
 
 Deckhand reports whether it is running the latest code; it never updates itself.

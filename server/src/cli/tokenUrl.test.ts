@@ -142,36 +142,45 @@ describe("deckhand token (no subcommand)", () => {
   });
 });
 
-describe("deckhand allow", () => {
-  it("is empty on a fresh install, because a visible URL must admit nobody by default", () => {
-    const fresh = mkdtempSync(join(tmpdir(), "deckhand-allow-"));
+describe("deckhand approve", () => {
+  // Approving needs the running server — pairing state is in memory there, deliberately. What
+  // is testable without one is the refusal: it must name the reason rather than crash, because
+  // "cannot connect to the server" and "nothing is waiting" send the operator opposite ways.
+  it("says the server is not answering rather than throwing", () => {
+    const fresh = mkdtempSync(join(tmpdir(), "deckhand-approve-"));
     const at = (...args: string[]): string =>
       execFileSync(process.execPath, [BIN, ...args], { encoding: "utf8", env: { ...process.env, DECKHAND_HOME: fresh } });
     try {
-      at("init", "--hostname", "deckhand.example.com");
-      assert.match(at("allow"), /nobody may connect yet/);
-
-      at("allow", "Owner@Example.com");
-      assert.equal(at("allow").trim(), "owner@example.com", "lowercased, so one address cannot sit in the list twice");
-
-      at("allow", "owner@example.com"); // idempotent
-      assert.equal(at("allow").trim(), "owner@example.com");
-
-      at("allow", "rm", "owner@example.com");
-      assert.match(at("allow"), /nobody may connect yet/);
+      at("init", "--hostname", "deckhand.example.com", "--port", "4399");
+      at("token", "add", "me");
+      let stderr = "";
+      try {
+        at("approve");
+      } catch (e) {
+        stderr = String((e as { stderr?: Buffer }).stderr ?? "");
+      }
+      assert.match(stderr, /not answering on 127\.0\.0\.1:4399/);
     } finally {
       rmSync(fresh, { recursive: true, force: true });
     }
   });
 
-  it("refuses something that is not an address rather than writing it", () => {
-    const fresh = mkdtempSync(join(tmpdir(), "deckhand-allow2-"));
+  // The credential is how the CLI reaches the server, so its absence is the FIRST thing to
+  // say — chasing a connection error when there is nothing to authenticate with wastes the
+  // one debugging step an operator has.
+  it("names the missing local credential before anything else", () => {
+    const fresh = mkdtempSync(join(tmpdir(), "deckhand-approve2-"));
     const at = (...args: string[]): string =>
       execFileSync(process.execPath, [BIN, ...args], { encoding: "utf8", env: { ...process.env, DECKHAND_HOME: fresh } });
     try {
       at("init", "--hostname", "deckhand.example.com");
-      assert.throws(() => at("allow", "everyone"));
-      assert.match(at("allow"), /nobody may connect yet/, "and the allowlist is untouched");
+      let stderr = "";
+      try {
+        at("approve");
+      } catch (e) {
+        stderr = String((e as { stderr?: Buffer }).stderr ?? "");
+      }
+      assert.match(stderr, /no local credential yet/);
     } finally {
       rmSync(fresh, { recursive: true, force: true });
     }

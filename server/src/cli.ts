@@ -11,8 +11,6 @@ import {
   addAppEntry,
   buildInitConfig,
   parseEnvAssignment,
-  allowEmail,
-  disallowEmail,
   writeTokens,
   writeApps,
   writeSecretEnv,
@@ -62,9 +60,10 @@ Everything else, for when you already know what you want:
   deckhand init --hostname H [--github-app-id N --github-app-pem P] [--port 4300]
                                                    the App is optional: without it
                                                    deckhand uses your gh CLI session
-  deckhand allow <email>                           let this address connect (everyone else cannot)
-  deckhand allow                                   who may connect today
-  deckhand allow rm <email>                        revoke an address — takes effect on their next call
+  deckhand approve [CODE]                          approve a waiting connection (bare: list what waits)
+  deckhand deny CODE                               refuse one
+  deckhand connections                             clients that hold a grant now
+  deckhand revoke <client-id>                      take a client's access away
   deckhand token add <name>                        another LOCAL credential (Claude Code on this Mac)
   deckhand token                                   your connector URL
   deckhand token list                              the local credentials that exist (values masked)
@@ -147,17 +146,21 @@ async function main(): Promise<void> {
         webHost: str(flags["web-host"]),
         port: flags.port ? Number(flags.port) : undefined,
         tokenName: str(flags.token),
-        email: str(flags.email),
-        accessTeam: str(flags["access-team"]),
-        accessAud: str(flags["access-aud"]),
         noServices: Boolean(flags["no-services"]),
       });
     }
 
-    case "allow":
-      if (!sub) return cmdAllowList();
-      if (sub === "rm") return cmdAllowRm(_[2]);
-      return cmdAllowAdd(sub);
+    case "approve":
+      return cmdApprove(sub);
+
+    case "deny":
+      return cmdDeny(sub);
+
+    case "connections":
+      return cmdConnections();
+
+    case "revoke":
+      return cmdRevoke(sub);
 
     case "init":
       return cmdInit(flags);
@@ -268,21 +271,22 @@ function cmdTokenList(): void {
  * The answer no longer contains a secret. The credential used to be a path segment in this
  * URL, which was safe only while the URL was, and a connector added in Claude Enterprise is
  * visible to the whole organisation. Now the URL names the endpoint and nothing else; who may
- * actually connect is `deckhand allow`, enforced by Cloudflare Access at sign-in.
+ * actually connects is decided one request at a time, by the operator, with `deckhand approve`.
  */
 function cmdTokenMine(): void {
   const hostname = tryHostname();
   if (!hostname) fail("no hostname in config.yaml — run `deckhand setup --hostname ...` first");
   console.log(`https://${hostname}/mcp`);
   console.error(`\nPaste that into claude.ai → Settings → Connectors → Add, then click Connect.`);
-  console.error(`Cloudflare emails a one-time code to whoever is on the allowlist (\`deckhand allow\`).`);
-  console.error(`The URL itself is not a credential — sharing it with your organisation is fine.`);
+  console.error(`Claude will show a code and wait. Run \`deckhand approve\` here and match it.`);
+  console.error(`The URL itself is not a credential — sharing it with your organisation is fine,`);
+  console.error(`because nothing connects until somebody at this Mac approves it.`);
 }
 
 /**
  * Print one LOCAL credential in full.
  *
- * Local means Claude Code on this Mac, which has no browser to run the Access sign-in through.
+ * Local means a client on this Mac with no browser to wait in — Claude Code, a script.
  * It is a bearer token: it goes in an `Authorization: Bearer` header, never in a URL, and
  * never into a connector anyone else can see.
  */
@@ -292,37 +296,86 @@ function cmdTokenUrl(name: string | undefined): void {
   if (!found) fail(`no token named "${name}" — \`deckhand token list\` shows them`);
   console.log(found!.token);
   console.error(`\nA LOCAL credential, for a client on this Mac: send it as \`Authorization: Bearer <token>\` to`);
-  console.error(`https://${tryHostname() ?? "<hostname>"}/mcp. Treat it like a password — it bypasses the email allowlist.`);
+  console.error(`https://${tryHostname() ?? "<hostname>"}/mcp. Treat it like a password — it needs no approval.`);
 }
 
 // --- who may connect -------------------------------------------------------
 
-function cmdAllowList(): void {
-  const emails = loadConfig().connector.allowedEmails;
-  if (!emails.length) {
-    console.log("nobody may connect yet — `deckhand allow <email>` names the first address.");
+/**
+ * Talk to the running server with this machine's own credential.
+ *
+ * Pairing state is in memory in the server, not on disk, so the CLI cannot answer these
+ * questions by reading a file the way `token list` does — and should not: a pending request is
+ * worth seconds, and a file would make an approval outlive the browser waiting for it.
+ */
+async function pairCall(path: string, body?: unknown): Promise<Record<string, unknown>> {
+  const token = loadTokensSafe()[0]?.token;
+  if (!token) fail("no local credential yet — run `deckhand token add me` first");
+  const port = tryPort() ?? 4300;
+  let res: Response;
+  try {
+    res = await fetch(`http://127.0.0.1:${port}/pair/${path}`, {
+      method: body === undefined ? "GET" : "POST",
+      headers: { authorization: `Bearer ${token!}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  } catch {
+    fail(`the deckhand server is not answering on 127.0.0.1:${port} — \`deckhand doctor\` says why`);
+    throw new Error("unreachable");
+  }
+  const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!res.ok) fail(typeof json.detail === "string" ? json.detail : `the server refused: ${res.status}`);
+  return json;
+}
+
+const waited = (ms: number): string => (ms < 60_000 ? `${Math.round(ms / 1000)}s ago` : `${Math.round(ms / 60_000)}m ago`);
+
+/**
+ * Approve a waiting connection — the one place a new client is let in.
+ *
+ * Bare `deckhand approve` LISTS rather than approving anything. Approving whatever happens to
+ * be waiting is exactly the mistake this whole mechanism exists to prevent: the operator has
+ * to match the code on their own screen against the one in the browser, or a colleague's
+ * request is indistinguishable from their own.
+ */
+async function cmdApprove(code: string | undefined): Promise<void> {
+  if (!code) {
+    const { pending } = (await pairCall("pending")) as { pending: { code: string; clientName: string; waitingMs: number }[] };
+    if (!pending.length) {
+      console.log("nothing is waiting. Paste your connector URL into claude.ai and click Connect, then run this again.");
+      return;
+    }
+    for (const p of pending) console.log(`${p.code}   ${p.clientName}   ${waited(p.waitingMs)}`);
+    console.error(`\nApprove the one whose code matches YOUR browser: \`deckhand approve <CODE>\``);
+    console.error(`If none of them is yours, approve none of them — somebody else has your connector URL.`);
     return;
   }
-  for (const e of emails) console.log(e);
+  const { approved } = (await pairCall("approve", { code })) as { approved: { code: string; clientName: string } };
+  console.log(`approved ${approved.code} (${approved.clientName}) — the browser waiting on it will continue.`);
 }
 
-function cmdAllowAdd(email: string): void {
-  const { emails, added } = allowEmail(email);
-  console.log(added ? `${email.toLowerCase()} may now connect.` : `${email.toLowerCase()} was already allowed.`);
-  console.log(`allowlist: ${emails.join(", ")}`);
-  // Access decides who reaches the sign-in page; deckhand decides who gets a grant. Both
-  // have to name the address, and only one of them is editable from here.
-  console.error(`\nAlso add it to the Cloudflare Access policy, or they will never reach the sign-in page.`);
+async function cmdDeny(code: string | undefined): Promise<void> {
+  if (!code) fail("usage: deckhand deny <CODE>   (`deckhand approve` lists what is waiting)");
+  const { denied } = (await pairCall("deny", { code: code! })) as { denied: { code: string; clientName: string } };
+  console.log(`refused ${denied.code} (${denied.clientName}). Nothing was connected.`);
 }
 
-function cmdAllowRm(email: string | undefined): void {
-  if (!email) fail("usage: deckhand allow rm <email>");
-  const { emails, removed } = disallowEmail(email!);
-  if (!removed) fail(`${email} was not on the allowlist — \`deckhand allow\` shows it`);
-  // No restart, and none of the usual "takes effect on the next token expiry": the running
-  // server re-reads this decision on every MCP call.
-  console.log(`${email!.toLowerCase()} can no longer connect, starting with their next call.`);
-  console.log(emails.length ? `allowlist: ${emails.join(", ")}` : "allowlist is now empty — nobody can connect.");
+async function cmdConnections(): Promise<void> {
+  const { connections } = (await pairCall("connections")) as { connections: { clientId: string; label: string }[] };
+  if (!connections.length) {
+    console.log("no client holds a grant. Local credentials are separate — `deckhand token list`.");
+    return;
+  }
+  for (const c of connections) console.log(`${c.clientId}   ${c.label}`);
+  console.error(`\nTake one away with \`deckhand revoke <client-id>\`.`);
+}
+
+async function cmdRevoke(clientId: string | undefined): Promise<void> {
+  if (!clientId) fail("usage: deckhand revoke <client-id>   (`deckhand connections` lists them)");
+  const { revoked } = (await pairCall("revoke", { clientId: clientId! })) as { revoked: number };
+  // No restart and no waiting for expiry: the grant is gone, so the next call fails.
+  if (!revoked) fail(`no grant for "${clientId}" — \`deckhand connections\` shows them`);
+  console.log(`revoked ${revoked} grant${revoked === 1 ? "" : "s"} — that client is out as of its next call.`);
 }
 
 async function cmdAppAdd(id: string | undefined, repo: string | undefined, flags: Args["flags"]): Promise<void> {
@@ -477,6 +530,15 @@ function loadAppsForWrite() {
 function tryHostname(): string | null {
   try {
     return loadConfig().hostname;
+  } catch {
+    return null;
+  }
+}
+
+/** The port the server is on, or null when there is no readable config to say. */
+function tryPort(): number | null {
+  try {
+    return loadConfig().port;
   } catch {
     return null;
   }

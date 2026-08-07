@@ -8,30 +8,15 @@ import type { AddressInfo } from "node:net";
 import express from "express";
 import { createOAuthRouter, createOAuthMetadataRouter } from "./router.ts";
 import { OAuthStore } from "./store.ts";
-import type { AccessIdentity, AccessIdentityVerifier } from "./access.ts";
+import { PairingStore } from "./pairing.ts";
 
 const REDIRECT = "https://claude.ai/api/mcp/auth_callback";
-const OWNER = "owner@example.com";
-const COLLEAGUE = "someone.else@example.com";
 const BASE_URL = "https://deckhand.example.com";
-
-/**
- * A complete stand-in for the Access verifier — one method, implemented, not cast.
- * `assertion` is the header value; this fake treats it as the email Cloudflare
- * would have vouched for, so a test controls identity without minting real JWTs
- * (access.test.ts covers the signature checking).
- */
-class FakeAccess implements AccessIdentityVerifier {
-  async verify(assertion: string | undefined): Promise<AccessIdentity | null> {
-    return assertion ? { email: assertion.toLowerCase() } : null;
-  }
-}
 
 let base: string;
 let server: Server;
 let store: OAuthStore;
-let allowed: string[];
-let accessConfigured: boolean;
+let pairing: PairingStore;
 
 before(async () => {
   const app = express();
@@ -39,15 +24,14 @@ before(async () => {
   app.use(
     "/oauth",
     createOAuthRouter({
-      // A getter, so a test can flip the deps between requests without rebuilding
-      // the server — mirroring the live server, which reads the allowlist per call.
+      // Getters, so `beforeEach` can hand each test fresh stores without rebuilding the
+      // server around them.
       get store() {
         return store;
       },
-      get access() {
-        return accessConfigured ? new FakeAccess() : null;
+      get pairing() {
+        return pairing;
       },
-      isAllowed: (email: string) => allowed.includes(email.toLowerCase()),
     }),
   );
   server = createServer(app);
@@ -58,8 +42,7 @@ after(() => server?.close());
 
 beforeEach(() => {
   store = new OAuthStore({ persist: false });
-  allowed = [OWNER];
-  accessConfigured = true;
+  pairing = new PairingStore();
 });
 
 async function register(): Promise<string> {
@@ -90,12 +73,25 @@ function authorizeUrl(clientId: string, challenge: string, overrides: Record<str
   return `${base}/oauth/authorize?${q}`;
 }
 
-/** GET authorize as `email` (via the fake Access header), without following the redirect. */
-function authorize(url: string, email?: string): Promise<Response> {
-  return fetch(url, {
-    redirect: "manual",
-    headers: email ? { "cf-access-jwt-assertion": email } : {},
-  });
+/** GET authorize without following the redirect. Nobody is identified: the request parks. */
+function authorize(url: string): Promise<Response> {
+  return fetch(url, { redirect: "manual" });
+}
+
+/**
+ * Do what the operator does: read the waiting code and approve it, then follow the resume the
+ * browser would follow. Returns the redirect back to the client.
+ */
+async function approveAndResume(res: Response): Promise<Response> {
+  const html = await res.text();
+  const id = /pending\/" \+ encodeURIComponent\(id\)/.test(html) ? /const id = "([^"]+)"/.exec(html)?.[1] : null;
+  assert.ok(id, "the waiting page must carry the poll id");
+  const waiting = pairing.pending();
+  assert.equal(waiting.length, 1, "exactly one request should be waiting");
+  pairing.approve(waiting[0]!.code, (p) =>
+    store.mintCode({ clientId: p.clientId, redirectUri: p.redirectUri, label: p.clientName, codeChallenge: p.codeChallenge }),
+  );
+  return fetch(`${base}/oauth/resume/${encodeURIComponent(id!)}`, { redirect: "manual" });
 }
 
 const codeFrom = (res: Response): string | null => new URL(res.headers.get("location")!).searchParams.get("code");
@@ -109,11 +105,11 @@ function token(body: Record<string, string>): Promise<Response> {
 }
 
 describe("OAuth authorization server", () => {
-  it("completes the flow for an allowlisted address and returns a usable token pair", async () => {
+  it("completes the flow once the operator approves, and returns a usable token pair", async () => {
     const clientId = await register();
     const { verifier, challenge } = pkce();
 
-    const res = await authorize(authorizeUrl(clientId, challenge), OWNER);
+    const res = await approveAndResume(await authorize(authorizeUrl(clientId, challenge)));
     assert.equal(res.status, 302);
     const location = new URL(res.headers.get("location")!);
     assert.equal(location.origin + location.pathname, REDIRECT);
@@ -129,53 +125,13 @@ describe("OAuth authorization server", () => {
     assert.equal(t.status, 200);
     const body = (await t.json()) as { access_token: string; refresh_token: string; token_type: string };
     assert.equal(body.token_type, "Bearer");
-    assert.deepEqual(store.authenticate(body.access_token), { email: OWNER, clientId });
-  });
-
-  // The whole point of the change: the connector URL is visible to a whole Claude
-  // organisation, and this is where everyone else in it is stopped.
-  it("refuses an address Access proved but the allowlist does not carry, and mints no code", async () => {
-    const clientId = await register();
-    const { challenge } = pkce();
-    const res = await authorize(authorizeUrl(clientId, challenge), COLLEAGUE);
-    assert.equal(res.status, 403);
-    assert.equal(res.headers.get("location"), null, "a refusal must not redirect — there is no code to carry");
-    assert.match(await res.text(), /not on this deckhand's allowlist/);
-  });
-
-  it("refuses when Access did not vouch for the request at all", async () => {
-    const clientId = await register();
-    const { challenge } = pkce();
-    const res = await authorize(authorizeUrl(clientId, challenge)); // no Access header
-    assert.equal(res.status, 403);
-  });
-
-  // A permissive default here would hand a grant to everyone holding the URL —
-  // exactly the failure the flow exists to prevent.
-  it("refuses rather than falls open when no Access application is configured", async () => {
-    accessConfigured = false;
-    const clientId = await register();
-    const { challenge } = pkce();
-    const res = await authorize(authorizeUrl(clientId, challenge), OWNER);
-    assert.equal(res.status, 503);
-  });
-
-  // Trusting this header would be a total bypass: anything that can reach the
-  // origin can set it, and every process on this Mac shares loopback.
-  it("does not accept the Cf-Access-Authenticated-User-Email header as identity", async () => {
-    const clientId = await register();
-    const { challenge } = pkce();
-    const res = await fetch(authorizeUrl(clientId, challenge), {
-      redirect: "manual",
-      headers: { "cf-access-authenticated-user-email": OWNER },
-    });
-    assert.equal(res.status, 403);
+    assert.deepEqual(store.authenticate(body.access_token), { label: "Claude", clientId });
   });
 
   it("never redirects an error to an unregistered redirect_uri", async () => {
     const clientId = await register();
     const { challenge } = pkce();
-    const res = await authorize(authorizeUrl(clientId, challenge, { redirect_uri: "https://attacker.example/catch" }), OWNER);
+    const res = await authorize(authorizeUrl(clientId, challenge, { redirect_uri: "https://attacker.example/catch" }));
     assert.equal(res.status, 400);
     assert.equal(res.headers.get("location"), null, "redirecting here would make authorize an open redirector");
   });
@@ -183,7 +139,7 @@ describe("OAuth authorization server", () => {
   it("requires PKCE S256", async () => {
     const clientId = await register();
     const { challenge } = pkce();
-    const plain = await authorize(authorizeUrl(clientId, challenge, { code_challenge_method: "plain" }), OWNER);
+    const plain = await authorize(authorizeUrl(clientId, challenge, { code_challenge_method: "plain" }));
     assert.equal(plain.status, 302);
     assert.equal(new URL(plain.headers.get("location")!).searchParams.get("error"), "invalid_request");
     assert.equal(codeFrom(plain), null);
@@ -192,7 +148,7 @@ describe("OAuth authorization server", () => {
   it("rejects a code redeemed with the wrong verifier, and burns it in the process", async () => {
     const clientId = await register();
     const { verifier, challenge } = pkce();
-    const code = codeFrom(await authorize(authorizeUrl(clientId, challenge), OWNER))!;
+    const code = codeFrom(await approveAndResume(await authorize(authorizeUrl(clientId, challenge))))!;
 
     const wrong = await token({
       grant_type: "authorization_code",
@@ -218,7 +174,7 @@ describe("OAuth authorization server", () => {
   it("rejects a replayed code", async () => {
     const clientId = await register();
     const { verifier, challenge } = pkce();
-    const code = codeFrom(await authorize(authorizeUrl(clientId, challenge), OWNER))!;
+    const code = codeFrom(await approveAndResume(await authorize(authorizeUrl(clientId, challenge))))!;
     const args = { grant_type: "authorization_code", client_id: clientId, redirect_uri: REDIRECT, code, code_verifier: verifier };
     assert.equal((await token(args)).status, 200);
     assert.equal((await token(args)).status, 400);
@@ -228,7 +184,7 @@ describe("OAuth authorization server", () => {
     const clientId = await register();
     const other = await register();
     const { verifier, challenge } = pkce();
-    const code = codeFrom(await authorize(authorizeUrl(clientId, challenge), OWNER))!;
+    const code = codeFrom(await approveAndResume(await authorize(authorizeUrl(clientId, challenge))))!;
     const res = await token({
       grant_type: "authorization_code",
       client_id: other,
@@ -239,28 +195,10 @@ describe("OAuth authorization server", () => {
     assert.equal(res.status, 400);
   });
 
-  // The gap between authorize and redemption is small but real, and the
-  // allowlist is the authorization decision — not a one-time gate.
-  it("refuses to complete the exchange when the address left the allowlist after authorize", async () => {
-    const clientId = await register();
-    const { verifier, challenge } = pkce();
-    const code = codeFrom(await authorize(authorizeUrl(clientId, challenge), OWNER))!;
-    allowed = [];
-    const res = await token({
-      grant_type: "authorization_code",
-      client_id: clientId,
-      redirect_uri: REDIRECT,
-      code,
-      code_verifier: verifier,
-    });
-    assert.equal(res.status, 400);
-    assert.deepEqual(store.activeEmails(), []);
-  });
-
   it("rotates the refresh token and refuses the one it replaced", async () => {
     const clientId = await register();
     const { verifier, challenge } = pkce();
-    const code = codeFrom(await authorize(authorizeUrl(clientId, challenge), OWNER))!;
+    const code = codeFrom(await approveAndResume(await authorize(authorizeUrl(clientId, challenge))))!;
     const first = (await (
       await token({ grant_type: "authorization_code", client_id: clientId, redirect_uri: REDIRECT, code, code_verifier: verifier })
     ).json()) as { refresh_token: string; access_token: string };
@@ -268,24 +206,11 @@ describe("OAuth authorization server", () => {
     const second = await token({ grant_type: "refresh_token", client_id: clientId, refresh_token: first.refresh_token });
     assert.equal(second.status, 200);
     const rotated = (await second.json()) as { access_token: string };
-    assert.equal(store.authenticate(rotated.access_token)?.email, OWNER);
+    assert.equal(store.authenticate(rotated.access_token)?.label, "Claude");
     assert.equal(store.authenticate(first.access_token), null, "rotation must retire the old access token too");
 
     const replay = await token({ grant_type: "refresh_token", client_id: clientId, refresh_token: first.refresh_token });
     assert.equal(replay.status, 400);
-  });
-
-  it("revokes every grant when a refresh arrives for an address that left the allowlist", async () => {
-    const clientId = await register();
-    const { verifier, challenge } = pkce();
-    const code = codeFrom(await authorize(authorizeUrl(clientId, challenge), OWNER))!;
-    const issued = (await (
-      await token({ grant_type: "authorization_code", client_id: clientId, redirect_uri: REDIRECT, code, code_verifier: verifier })
-    ).json()) as { refresh_token: string };
-
-    allowed = [];
-    assert.equal((await token({ grant_type: "refresh_token", client_id: clientId, refresh_token: issued.refresh_token })).status, 400);
-    assert.deepEqual(store.activeEmails(), []);
   });
 
   it("refuses registration without an https redirect uri", async () => {
@@ -305,7 +230,7 @@ describe("OAuth authorization server", () => {
   it("caps registered clients, and never evicts one that holds a live grant", async () => {
     const clientId = await register();
     const { verifier, challenge } = pkce();
-    const code = codeFrom(await authorize(authorizeUrl(clientId, challenge), OWNER))!;
+    const code = codeFrom(await approveAndResume(await authorize(authorizeUrl(clientId, challenge))))!;
     assert.equal(
       (await token({ grant_type: "authorization_code", client_id: clientId, redirect_uri: REDIRECT, code, code_verifier: verifier }))
         .status,
@@ -337,22 +262,16 @@ describe("OAuth authorization server", () => {
   });
 });
 
-describe("Cloudflare Access header trust", () => {
-  // A source-level check, because the runtime test above only proves TODAY's code
-  // ignores the header. This one fails the moment someone reads it, which is the
-  // change that would turn a signed assertion into a spoofable string.
-  it("reads the identity header nowhere outside a comment", () => {
-    const dir = import.meta.dirname;
-    for (const file of ["access.ts", "router.ts"]) {
-      const source = readFileSync(join(dir, file), "utf8")
-        .split("\n")
-        .filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("*"))
-        .join("\n");
-      assert.doesNotMatch(
-        source.toLowerCase(),
-        /cf-access-authenticated-user-email/,
-        `${file} must not read Cf-Access-Authenticated-User-Email — only the signed assertion is evidence`,
-      );
-    }
+describe("who can mint an authorization code", () => {
+  // A source-level check, because the runtime tests only prove TODAY's authorize parks the
+  // request. The failure this guards is a future edit that "just returns the code when there
+  // is one obvious client" — which hands a grant to whoever holds the URL, the exact thing
+  // the parking exists to prevent. Minting belongs to the approval path alone.
+  it("never mints a code from the public authorize endpoint", () => {
+    const source = readFileSync(join(import.meta.dirname, "router.ts"), "utf8")
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("*"))
+      .join("\n");
+    assert.doesNotMatch(source, /mintCode/, "router.ts must not mint codes — pairRouter.ts does, behind the local credential");
   });
 });

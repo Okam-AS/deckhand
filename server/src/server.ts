@@ -15,7 +15,6 @@ import {
 } from "./config.ts";
 import { watchApps } from "./appsWatcher.ts";
 import { watchTokens } from "./tokensWatcher.ts";
-import { watchAllowlist } from "./connectorWatcher.ts";
 import { TokenAuthenticator } from "./auth.ts";
 import { AuditLog } from "./audit.ts";
 import { StateStore } from "./state.ts";
@@ -43,7 +42,8 @@ import {
 import { SetupStore } from "./setup/setupStore.ts";
 import { createSetupRouter } from "./setup/router.ts";
 import { OAuthStore } from "./oauth/store.ts";
-import { AccessVerifier } from "./oauth/access.ts";
+import { PairingStore } from "./oauth/pairing.ts";
+import { createPairRouter } from "./oauth/pairRouter.ts";
 import { createOAuthRouter, createOAuthMetadataRouter } from "./oauth/router.ts";
 import { writeApps } from "./cli/configWrite.ts";
 import { serverInfo } from "./meta.ts";
@@ -61,8 +61,8 @@ export interface AppDeps {
   persistApps?: (apps: App[]) => void;
   /** Credential onboarding: shared nonce store + PAT destination path. */
   setup?: { store: SetupStore; patPath: string };
-  /** Per-person connector grants + the Cloudflare Access application that gates them. */
-  connector?: { store: OAuthStore; access: AccessVerifier | null; baseUrl: string };
+  /** Connector grants, and the requests waiting for the operator to approve them. */
+  connector?: { store: OAuthStore; pairing: PairingStore; baseUrl: string };
 }
 
 /** Build the Express app (no listener). Split out so tests can inject deps. */
@@ -96,20 +96,6 @@ export function createApp(deps: AppDeps): express.Application {
   // Viewer static assets (Vite emits absolute /assets/... URLs).
   if (deps.viewerDist) app.use(express.static(deps.viewerDist, { index: false }));
 
-  // Re-read per call, from the array `watchAllowlist` mutates in place — so `deckhand allow rm`
-  // revokes on the next request rather than on the next restart, and a restart is the one repair
-  // that costs every booted simulator on the machine.
-  //
-  // Both halves are load-bearing: reading per call is useless if nothing updates the array, and
-  // that is exactly how this shipped broken the first time. `invariants.test.ts` "watches
-  // tokens.yaml as well as apps.yaml" fails if the watcher goes away.
-  const isAllowed = (email: string): boolean => deps.config.connector.allowedEmails.includes(email.toLowerCase());
-
-  if (deps.connector) {
-    app.use(createOAuthMetadataRouter(deps.connector.baseUrl));
-    app.use("/oauth", createOAuthRouter({ store: deps.connector.store, access: deps.connector.access, isAllowed }));
-  }
-
   app.use(
     "/mcp",
     createMcpRouter({
@@ -121,7 +107,6 @@ export function createApp(deps: AppDeps): express.Application {
       persistApps: deps.persistApps,
       setup: deps.setup?.store,
       oauth: deps.connector?.store,
-      isAllowed,
       baseUrl: deps.connector?.baseUrl,
     }),
   );
@@ -223,17 +208,7 @@ export function createServer(): DeckhandServer {
     viewerDist,
     persistApps: writeApps,
     setup: { store: new SetupStore(), patPath: githubPatPath(config) },
-    connector: {
-      store: new OAuthStore(),
-      // Null until `deckhand setup` has created the Access application. The
-      // authorize endpoint refuses while it is null; it never falls back to
-      // trusting the caller, because the caller reaches an origin that a whole
-      // Claude organisation can see.
-      access: config.connector.access
-        ? new AccessVerifier({ teamDomain: config.connector.access.teamDomain, aud: config.connector.access.aud })
-        : null,
-      baseUrl: publicBaseUrl(config),
-    },
+    connector: { store: new OAuthStore(), pairing: new PairingStore(), baseUrl: publicBaseUrl(config) },
   });
   const httpServer = createHttpServer(app);
   attachUpgrade(httpServer, engine, pinGate);
@@ -285,14 +260,6 @@ export function createServer(): DeckhandServer {
       watchTokens(auth, {
         onReload: (names) => console.log(`tokens.yaml: reloaded (${names.length}: ${names.join(", ")})`),
         onError: (err) => console.error(`tokens.yaml: keeping the previous list — ${(err as Error).message}`),
-      });
-      // Revoking an address must not cost a restart — a restart tears down every booted
-      // simulator on the machine, so "restart to revoke" means interrupting whoever is
-      // mid-test. Only the allowlist is adopted; see connectorWatcher.ts for why.
-      watchAllowlist(config, {
-        onReload: (emails) =>
-          console.log(`config.yaml: allowlist is now ${emails.length ? emails.join(", ") : "EMPTY — nobody can connect"}`),
-        onError: (err) => console.error(`config.yaml: keeping the previous allowlist — ${(err as Error).message}`),
       });
       watchApps(apps, {
         onReload: (_apps, { added, removed }) => {

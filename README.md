@@ -37,7 +37,7 @@ the machine.
 ┌───────────────────────────▼── deckhand server (loopback only) ──┐
 │                                                                 │
 │  /mcp                    MCP tools, bearer-authenticated       │
-│  /oauth/*                per-person sign-in (Cloudflare Access) │
+│  /oauth/*                per-client sign-in (you approve each one) │
 │  /s/<shareId>            viewer page (device grid + controls)   │
 │  /s/<shareId>/dev/<id>/* scoped proxy → that device's stream    │
 │                                                                 │
@@ -80,10 +80,11 @@ viewer page, a ruthlessly short dependency list.
 
 - Everything binds **loopback**; the only way in is the Cloudflare named tunnel.
 - Nothing that touches a device or a repo is reachable without a credential: a
-  per-person MCP credential (OAuth behind a Cloudflare Access email allowlist, or a
-  local bearer token), per-app share links (optionally PIN-gated). The OAuth
-  discovery, registration and sign-in endpoints are open by construction — a client
-  with no credential has to start somewhere — and grant nothing on their own.
+  per-client MCP credential (an OAuth grant you approved at the machine, or a local
+  bearer token), per-app share links (optionally PIN-gated). The OAuth discovery,
+  registration and sign-in endpoints are open by construction — a client with no
+  credential has to start somewhere — and grant nothing on their own: a request that
+  reaches them waits for `deckhand approve`.
 - The MCP surface is capability-bounded — no arbitrary commands, only pre-registered
   apps and their repos' refs. Every call lands in an append-only audit log.
 - Secrets never travel through MCP; tokens never appear in argv, URLs, or logs.
@@ -161,21 +162,19 @@ deckhand token          # prints https://<your-hostname>/mcp
 ```
 
 **The URL is not a credential.** In a Claude team or Enterprise organisation a
-connector is visible to everyone in it, so deckhand does not put a secret in the
-URL — it authenticates each person individually. Clicking Connect sends them to a
-Cloudflare Access sign-in, which emails a one-time code, and only addresses on
-your allowlist get through:
+connector is visible to everyone in it, so deckhand puts no secret in the URL —
+and admits nobody because they have it. Clicking Connect shows a short code and
+waits. You let that one client in, from the Mac:
 
 ```sh
-deckhand allow you@example.com     # who may connect
-deckhand allow                     # who may connect today
-deckhand allow rm them@example.com # revoked on their next call, no restart
+deckhand approve                   # what is waiting, with its code
+deckhand approve RED-42            # let that one in — match YOUR browser's code
+deckhand connections               # who holds a grant now
+deckhand revoke <client-id>        # take it back, effective next call, no restart
 ```
 
-`setup` walks you through creating the Cloudflare Access application (it needs
-your Zero Trust dashboard, so it prints the steps rather than doing it for you)
-and `deckhand doctor` fails if the allowlist or the Access application is missing
-— either one means nobody can connect.
+A colleague who pastes the same URL gets a code nobody matches. If a code appears
+that you did not start, approve nothing: somebody else has your connector URL.
 
 Claude Code on the same Mac has no browser to sign in with, so it uses a local
 credential instead: `deckhand token add <name>`, sent as an
