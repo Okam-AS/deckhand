@@ -1,7 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, copyFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { paths } from "../paths.ts";
 import { mergeTunnelConfig, renderTunnelConfig, parseTunnelConfig, tunnelIdFor, needsLogin } from "./tunnelConfig.ts";
 import { checkPrereqs, humanInput, formatPrereqs, blocking, type Probe } from "./preflight.ts";
@@ -31,6 +31,27 @@ const TUNNEL_NAME = "deckhand";
 interface Run {
   code: number;
   out: string;
+}
+
+/**
+ * Is `deckhand` a command the USER can type, as opposed to one this process can see?
+ *
+ * Setup runs under `npx`, which prepends the repo's `node_modules/.bin` to PATH — and npm puts
+ * a `deckhand` shim there for the workspace. So plain `which deckhand` succeeds inside setup
+ * and fails in the user's shell: setup reported "`deckhand` is on your PATH", skipped the link,
+ * and left every documented `deckhand <verb>` broken on a green install.
+ *
+ * Two narrowings, both load-bearing. The exit code decides, not the output, because `run`
+ * folds stderr into stdout and a `which` that explains itself would read as a path. And a hit
+ * inside this repo does not count: that is the npx shim, visible only to processes npm
+ * launched from here.
+ */
+export function deckhandOnUserPath(repoRoot: string, exec: (cmd: string, args: string[]) => Run = run): boolean {
+  const found = exec("which", ["deckhand"]);
+  if (found.code !== 0) return false;
+  const path = found.out.split("\n")[0]?.trim() ?? "";
+  if (!path.startsWith("/")) return false;
+  return !resolve(path).startsWith(`${resolve(repoRoot)}/`);
 }
 
 function run(cmd: string, args: string[]): Run {
@@ -224,17 +245,19 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
     ensureTunnelConfig(tunnelId, hostnames, port);
 
     step("The `deckhand` command");
-    if (run("which", ["deckhand"]).out.trim()) {
-      ok("`deckhand` is on your PATH");
-    } else {
-      // Every document in this repo tells people to type `deckhand <something>`, and until
-      // there was a bin entry no such command existed. `npm link` puts it in the same prefix
-      // npm/npx already use, so it needs no sudo and no PATH edit; undo with `npm unlink -g
-      // @deckhand/server`.
+    {
       const repoRoot = join(dirname(new URL(import.meta.url).pathname), "..", "..", "..");
-      const linked = spawnSync("npm", ["link", "--workspace", "@deckhand/server"], { cwd: repoRoot, encoding: "utf8" });
-      if ((linked.status ?? 1) === 0 && run("which", ["deckhand"]).out.trim()) ok("linked `deckhand` onto your PATH");
-      else info(`could not link it — keep using \`npx tsx ${join(repoRoot, "server/src/cli.ts")}\`, or add server/bin to PATH.`);
+      if (deckhandOnUserPath(repoRoot)) {
+        ok("`deckhand` is on your PATH");
+      } else {
+        // Every document in this repo tells people to type `deckhand <something>`, and until
+        // there was a bin entry no such command existed. `npm link` puts it in the same prefix
+        // npm/npx already use, so it needs no sudo and no PATH edit; undo with `npm unlink -g
+        // @deckhand/server`.
+        const linked = spawnSync("npm", ["link", "--workspace", "@deckhand/server"], { cwd: repoRoot, encoding: "utf8" });
+        if ((linked.status ?? 1) === 0 && deckhandOnUserPath(repoRoot)) ok("linked `deckhand` onto your PATH");
+        else info(`could not link it — keep using \`npx tsx ${join(repoRoot, "server/src/cli.ts")}\`, or add server/bin to PATH.`);
+      }
     }
 
     step("deckhand config");
@@ -342,6 +365,14 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
     say("");
     say("   After that: `deckhand app add <id> --path /path/to/a/checkout`,");
     say("   then ask Claude for a preview.");
+    // Addressed to the agent, because the agent is who reads this. Getting the ending right
+    // did not survive relaying: an agent that has just watched a long install writes a long
+    // summary of it, and the one instruction lands under a paragraph nobody reaches. The
+    // output above is already on the user's screen — repeating it is the failure mode.
+    say("");
+    say("   AGENT: reply in TWO LINES — step 1, and that Cloudflare emails a code. Then stop.");
+    say("   Do not summarise this output, list what was installed, or report status: they can");
+    say("   see all of it above. Anything you add pushes the only instruction out of view.");
   } catch (e) {
     if (e instanceof SetupError) {
       console.error(`\n✗ ${e.message}\n\n  ${e.fix}\n`);

@@ -120,7 +120,7 @@ and **who can fix it** — the things it can install itself, and the things it
 needs you for. Do those, then run it again with your hostname:
 
 ```sh
-cloudflared tunnel login                        # you: opens a browser, once
+cloudflared tunnel login                        # only if the preflight asked for it
 npx tsx server/src/cli.ts setup \
   --hostname deckhand.yourdomain.com \
   --web-host previews.yourdomain.com            # optional, for web previews

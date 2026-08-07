@@ -58,7 +58,7 @@ New here? One command does the whole install:
 
 Everything else, for when you already know what you want:
   deckhand serve                                   run the server
-  deckhand doctor [--smoke]                        verify the install
+  deckhand doctor [--smoke | --device-only]        verify the install
   deckhand init --hostname H [--github-app-id N --github-app-pem P] [--port 4300]
                                                    the App is optional: without it
                                                    deckhand uses your gh CLI session
