@@ -60,9 +60,13 @@ export function shellSpelling(cmd: string): string {
  * shell has more command positions than a regex can enumerate. Blanking the quotes keeps the
  * match permissive where it should be and blind only where the text is data.
  */
+/** A heredoc is written somewhere, not run: its body is data however the rest of the line reads. */
+export function withoutHeredocs(cmd: string): string {
+  return cmd.replace(/<<-?\s*(['"]?)(\w+)\1[\s\S]*?^\s*\2\s*$/gm, " ");
+}
+
 export function withoutQuotedText(cmd: string): string {
-  return cmd
-    .replace(/<<-?\s*(['"]?)(\w+)\1[\s\S]*?^\s*\2\s*$/gm, " ") // heredoc bodies
+  return withoutHeredocs(cmd)
     // A quoted span with no whitespace in it is shell ESCAPING, not data: `gh 'pr' create` and
     // `gh pr crea'te'` run exactly what `gh pr create` runs, and blanking them let four
     // spellings of the one rule with no override straight through. So those are unquoted, and
@@ -86,41 +90,49 @@ export function withoutQuotedText(cmd: string): string {
  * AGENTS.md, where it binds whether or not the regex matched.
  */
 export function opensAPullRequest(cmd: string): boolean {
-  const bare = withoutQuotedText(shellSpelling(cmd));
-  if (/\bgh\s+pr\s+create\b/.test(bare)) return true;
-  // The GraphQL mutation. The mutation body is normally quoted, so it is matched raw — but
-  // only when the blanked text shows a `gh … graphql` call standing by to send it. Matching
-  // the name alone blocked this file's own review notes — data, not a command, and this rule has
-  // no override to fall back on when it is wrong.
-  if (/\bgh\b/.test(bare) && /\bgraphql\b/i.test(bare) && /\bcreatePullRequest\b/.test(cmd)) return true;
-  // The endpoint is matched against the RAW command: quoting a URL is the ordinary way to
-  // write one, so blanking it here would hide the target rather than the mention. A POST
-  // indicator is still required, so reading the same endpoint stays allowed — and `gh api`
-  // switches to POST on its own the moment any parameter flag is present, which is why `-f`,
-  // `-F` and `--input` count as one.
-  // An explicit non-POST method settles it: `gh api -X GET .../pulls -F state=open` is paging
-  // through PRs, and refusing that under the rule with no override is the one over-block this
-  // file cannot afford. `-f`/`-F` still count on their own, because `gh api` switches to POST the
-  // moment a parameter flag appears with no method given.
-  //
-  // Read from the BLANKED text and only in argument position. Both were bugs the first version
-  // shipped: scanning the raw command let `-f title="Support -X GET in the guard"` name the
-  // method from inside a quoted string, so a real `-X POST` create-a-PR call was allowed — data
-  // clearing a POST indicator instead of only adding one. And with no boundary before the flag,
-  // `-f title=Fix-XY` matched `-X` mid-word. EVERY named method must be POST-free, not just the
-  // first, or a second flag overrides the real one.
-  const methods = [...bare.matchAll(/(?:^|\s)(?:-X|--request|--method)[= ]?\s*([A-Za-z]+)/g)].map((m) => m[1]!.toUpperCase());
-  const paramFlag = /(?:^|\s)-(?:f|F|d)\s|(?:^|\s)--(?:input|data\S*)\b/.test(bare);
-  const posts = methods.length > 0 ? methods.includes("POST") : paramFlag;
-  // The COLLECTION, not a sub-resource: `/pulls` opens one, `/pulls/12/comments` and
-  // `/pulls/12/reviews` are how you talk about one that exists — including this repo's own
-  // review-comment path. Blocking those under a rule with no override is the one over-block
-  // this file cannot afford, since the way past it is meant to be asking a person.
-  if (/\/pulls(?![\w/])/.test(cmd) && /\b(?:gh\s+api|curl)\b/.test(bare) && posts) return true;
-  // One place quoted text is code rather than data: an interpreter standing by to run it —
-  // whether the script arrives as an argument or down a pipe.
+  // Asked twice. Once of the command as written, with quoted spans blanked so DATA cannot decide
+  // anything — and once of the payload an interpreter is standing by to run, where the quotes are
+  // the shell's own and what is inside them is code. Wrapping the api form in `bash -c "..."`
+  // really opens a pull request, and the first version only re-checked the porcelain there.
+  if (opensIn(withoutQuotedText(shellSpelling(cmd)), cmd)) return true;
   const interpreter = /(?:^|\s)(?:(?:ba|z|k)?sh\s+-c|eval)\b|\|\s*(?:(?:ba|z|k)?sh|bash)\b/;
-  return interpreter.test(cmd) && /\bgh\s+pr\s+create\b/.test(cmd);
+  if (!interpreter.test(cmd)) return false;
+  // Heredoc bodies stay blanked even here. A heredoc is being WRITTEN somewhere, not executed, so
+  // its contents are data whatever else the line does — and reading them as code refused this
+  // repo's own review notes and probe scripts, which is how a guard gets switched off wholesale.
+  const payload = withoutHeredocs(shellSpelling(cmd)).replace(/['"]/g, " ");
+  return opensIn(payload, payload);
+}
+
+/**
+ * The three routes, over one piece of text.
+ *
+ * `text` is what may decide; `raw` is consulted only where quoting is the ordinary way to write
+ * the thing (a URL, a GraphQL body) and blanking it would hide the target rather than the mention.
+ */
+function opensIn(text: string, raw: string): boolean {
+  if (/\bgh\s+pr\s+create\b/.test(text)) return true;
+  // The GraphQL mutation. The body is normally quoted, so it is matched raw — but only when the
+  // blanked text shows a `gh … graphql` call standing by to send it. Matching the name alone
+  // blocked this file's own review notes: data, not a command, and this rule has no override to
+  // fall back on when it is wrong.
+  if (/\bgh\b/.test(text) && /\bgraphql\b/i.test(text) && /\bcreatePullRequest\b/.test(raw)) return true;
+
+  // A named method settles it, because `gh` sends what you named: `-X GET .../pulls -F state=open`
+  // is paging through PRs, and refusing that under the rule with no override is the one over-block
+  // this file cannot afford. EVERY named method must be POST-free, not just the first.
+  const methods = [...text.matchAll(/(?:^|\s)(?:-X|--request|--method)[= ]?\s*([A-Za-z]+)/g)].map((m) => m[1]!.toUpperCase());
+  // With no method named, a parameter flag IS the method: `gh api` switches to POST the moment one
+  // appears. Every spelling of one counts, which took two goes to get right — the long forms and
+  // the attached short form were all missed, and each was confirmed against real `gh` POSTing to a
+  // stub server on loopback.
+  const paramFlag = /(?:^|\s)-[fFd](?:[\s=]|\S)|(?:^|\s)--(?:field|raw-field|input|data\S*)\b/.test(text);
+  const posts = methods.length > 0 ? methods.includes("POST") : paramFlag;
+  // The COLLECTION, not a sub-resource: the collection opens one, while `/pulls/12/comments` and
+  // `/pulls/12/reviews` are how you talk about one that exists — including this repo's own
+  // review-comment path. Blocking those under a rule with no override is the over-block this file
+  // cannot afford, since the way past it is meant to be asking a person.
+  return /\/pulls(?![\w/])/.test(raw) && /\b(?:gh\s+api|curl)\b/.test(text) && posts;
 }
 
 /** The state of the review, for the handover message. Injected so tests need no real receipt. */

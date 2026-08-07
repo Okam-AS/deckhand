@@ -175,6 +175,30 @@ describe("listing pull requests is not opening one", () => {
   // The first version of the method check read the RAW command anywhere in it, so DATA could name
   // the method: a title mentioning `-X GET` cleared the POST indicator on a real create-a-PR call.
   // A quoted argument may add nothing to this decision, only the command itself may.
+  // Confirmed against real `gh` 2.91 POSTing to a stub server on loopback: every one of these
+  // sends the request that opens a pull request, and the parameter-flag scan saw none of them.
+  it("blocks every spelling of a parameter flag, since gh switches to POST on any of them", () => {
+    const P = "repos/Okam-AS/deckhand/pulls";
+    for (const cmd of [`gh api ${P} --field head=b --field base=main`, `gh api ${P} --raw-field head=b`, `gh api ${P} -fhead=b -fbase=main`]) {
+      assert.match(blocked(cmd), /a human's call/);
+    }
+  });
+
+  // An interpreter's quoted argument is code, and the api form is as much a way in as the
+  // porcelain — only the porcelain was re-checked there.
+  it("looks inside an interpreter for the API form too", () => {
+    const P = "repos/Okam-AS/deckhand/pulls";
+    for (const cmd of [`bash -c "gh api ${P} -f head=b -f base=main"`, `sh -c 'gh api ${P} -X POST -f head=b'`, `eval "gh api ${P} -f head=b"`]) {
+      assert.match(blocked(cmd), /a human's call/);
+    }
+  });
+
+  // …and a heredoc is still data, however the rest of the line reads. Reading one as code refused
+  // this repo's own review notes and probe scripts, which is how a guard gets switched off.
+  it("still treats a heredoc body as data next to an interpreter", () => {
+    allowed(`cat <<'EOF' > notes.md\nrun gh api repos/o/r/pulls -f head=b yourself\nEOF\necho done | bash`);
+  });
+
   it("does not let a quoted argument name the method", () => {
     for (const cmd of [
       `gh api repos/Okam-AS/deckhand/pulls -f body="see -X GET note" -f head=b -f base=main -X POST`,
