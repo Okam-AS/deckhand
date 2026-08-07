@@ -346,7 +346,20 @@ describe("deckhand ships nothing about one particular install", () => {
       }
       return out;
     };
-    const docs = ["README.md", "AGENTS.md", "PLAN.md"];
+    // EVERY markdown file, not a hardcoded three. The list was README/AGENTS/PLAN, and
+    // `docs/web-wildcard-hosting-plan.md` meanwhile carried 22 mentions of one person's domain,
+    // their employer, and a verification recipe with their home directory in it — in a PUBLIC
+    // repo, with this check green throughout. A document ships whatever directory it sits in,
+    // and naming three of them made every other one look like a deliberate exemption.
+    const markdown = (dir: string, out: string[] = []): string[] => {
+      for (const entry of readdirSync(dir)) {
+        if (entry === "node_modules" || entry === "dist" || entry === ".git") continue;
+        const full = join(dir, entry);
+        if (statSync(full).isDirectory()) markdown(full, out);
+        else if (entry.endsWith(".md")) out.push(full);
+      }
+      return out;
+    };
     const offenders: string[] = [];
     for (const root of ["server/src", "viewer/src", "landing/src"]) {
       for (const file of shipped(join(REPO, root))) {
@@ -354,10 +367,11 @@ describe("deckhand ships nothing about one particular install", () => {
         if (m) offenders.push(`${rel(file)}: "${m[0]}"`);
       }
     }
+    const docs = markdown(REPO);
+    assert.ok(docs.length > 8, `only ${docs.length} markdown files walked — the walk is wrong, fix this check`);
     for (const doc of docs) {
-      const body = readFileSync(join(REPO, doc), "utf8");
-      const m = banned.exec(body);
-      if (m) offenders.push(`${doc}: "${m[0]}"`);
+      const m = banned.exec(readFileSync(doc, "utf8"));
+      if (m) offenders.push(`${rel(doc)}: "${m[0]}"`);
     }
     assert.deepEqual(
       offenders,
