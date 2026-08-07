@@ -58,6 +58,38 @@ export const configSchema = z.object({
   // HMAC key for signing share unlock cookies (PIN gate). Omit and deckhand
   // auto-generates + persists one under ~/.deckhand/share-secret on first boot.
   shareSecret: z.string().min(1).optional(),
+  /**
+   * Who may hold a connector grant, and the Cloudflare Access application that
+   * proves it (PLAN §11.6).
+   *
+   * `allowedEmails` is the whole authorization decision. It is checked at
+   * authorize, again at code redemption, and again on every MCP request — so
+   * `deckhand allow rm <email>` takes effect on the next call, not on the next
+   * token expiry. An EMPTY list means nobody: a connector URL that everyone in a
+   * Claude organisation can see must not connect anyone by default.
+   *
+   * `access` is omitted only before `deckhand setup` has created the Access
+   * application. Without it `/oauth/authorize` refuses outright — it never falls
+   * back to trusting the request, because the request arrives from an origin the
+   * whole organisation can reach.
+   */
+  connector: z
+    .object({
+      allowedEmails: z
+        .array(z.string().min(3).toLowerCase())
+        .default([]),
+      access: z
+        .object({
+          /** Zero Trust team domain, e.g. `acme.cloudflareaccess.com`. */
+          teamDomain: z.string().min(1),
+          /** The Access application's AUD tag — pins the JWT to THIS application, not merely to this team. */
+          aud: z.string().min(1),
+        })
+        .strict()
+        .optional(),
+    })
+    .strict()
+    .default({ allowedEmails: [] }),
   // Agent-driven testing backend (PLAN §8, describe/ui). deckhand drives SimDeck
   // control-only (REST /action + /accessibility-tree) on the same booted device;
   // it keeps serve-sim/adb-screencap for the human video. Loopback only. Omit and

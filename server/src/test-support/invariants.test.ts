@@ -367,6 +367,55 @@ describe("deckhand ships nothing about one particular install", () => {
   });
 });
 
+describe("the connector URL is public by construction", () => {
+  // The premise: a connector added in a Claude team or Enterprise organisation is visible to
+  // everyone in it. The credential used to be a path segment in that URL — `/mcp/<token>` —
+  // which handed every colleague a working connector to this Mac. Both checks below guard the
+  // two ways that could come back, and neither is visible to a type, a lint, or a unit test.
+
+  it("puts no credential in an MCP route path", () => {
+    // A `:token`-shaped path parameter on the MCP router is the old design returning. The
+    // legacy 404 catch-all is allowed precisely because it authenticates nothing.
+    const router = read(join(SRC, "mcp", "index.ts"));
+    const offenders: string[] = [];
+    for (const m of router.matchAll(/router\.(get|post|delete|put|all)\(\s*"([^"]*)"/g)) {
+      const path = m[2]!;
+      if (!path.includes(":")) continue;
+      // The one exemption, by path and reason: it exists to REFUSE the old URL.
+      if (path === "/:legacyToken") continue;
+      offenders.push(`router.${m[1]} "${path}"`);
+    }
+    assert.deepEqual(
+      offenders,
+      [],
+      "an MCP route may not take a path parameter: a URL carrying a credential gets pasted into a shared connector, " +
+        "a screenshot and a log. The credential belongs in an Authorization header.",
+    );
+  });
+
+  it("never reads Cloudflare's unsigned identity header", () => {
+    // Access sends the email twice: as `Cf-Access-Authenticated-User-Email`, and inside the
+    // signed `Cf-Access-Jwt-Assertion`. Only the second is evidence — anything that can reach
+    // the origin can set a header, and every process on this Mac shares loopback (an iOS
+    // Simulator's 127.0.0.1 IS the host's, PLAN §11 item 1). Reading the header would be a
+    // total bypass of the email allowlist, with nothing else failing.
+    const offenders: string[] = [];
+    for (const file of sourceFiles()) {
+      const stripped = read(file)
+        .split("\n")
+        .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
+        .join("\n")
+        .toLowerCase();
+      if (stripped.includes("cf-access-authenticated-user-email")) offenders.push(file.slice(SRC.length + 1));
+    }
+    assert.deepEqual(
+      offenders,
+      [],
+      "identity must come from the signed Cf-Access-Jwt-Assertion, never from the plain header",
+    );
+  });
+});
+
 describe("config that changes at runtime is watched", () => {
   it("watches tokens.yaml as well as apps.yaml", () => {
     // tokens.yaml was read once at boot. `setup` starts the server and THEN mints the admin
@@ -380,6 +429,11 @@ describe("config that changes at runtime is watched", () => {
     for (const [what, call] of [
       ["apps.yaml", /watchApps\(/],
       ["tokens.yaml", /watchTokens\(/],
+      // config.yaml's allowlist, for the same reason one layer worse: `deckhand allow rm`
+      // printed "starting with their next call", PLAN said it was re-checked per request, and
+      // the per-request check DID run — against an array loaded once at boot. Revocation
+      // silently required a restart, which tears down every booted simulator on the machine.
+      ["config.yaml's allowlist", /watchAllowlist\(/],
     ] as const) {
       assert.match(server, call, `${what} must be watched — reading it once at boot means an edit needs a restart, and nothing says so`);
     }

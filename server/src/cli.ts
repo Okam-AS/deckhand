@@ -11,6 +11,8 @@ import {
   addAppEntry,
   buildInitConfig,
   parseEnvAssignment,
+  allowEmail,
+  disallowEmail,
   writeTokens,
   writeApps,
   writeSecretEnv,
@@ -60,11 +62,14 @@ Everything else, for when you already know what you want:
   deckhand init --hostname H [--github-app-id N --github-app-pem P] [--port 4300]
                                                    the App is optional: without it
                                                    deckhand uses your gh CLI session
-  deckhand token add <name>                        another credential for yourself (a second client)
-  deckhand token                                   your connector URL (creates one if needed)
-  deckhand token list                              the credentials that exist (URLs masked)
+  deckhand allow <email>                           let this address connect (everyone else cannot)
+  deckhand allow                                   who may connect today
+  deckhand allow rm <email>                        revoke an address — takes effect on their next call
+  deckhand token add <name>                        another LOCAL credential (Claude Code on this Mac)
+  deckhand token                                   your connector URL
+  deckhand token list                              the local credentials that exist (values masked)
   deckhand token rm <name>                         revoke one, effective immediately
-  deckhand token url <name>                        print one connector URL in full
+  deckhand token url <name>                        print one local credential in full
   deckhand app add <id> <repo> --type expo|react-native|nativescript [--branch main] [--bundle-id ID]
   deckhand app add <id> --path /abs/dir [--repo owner/name] [--type ...]   local dev mode (type auto-detected)
   deckhand app add <id> --path /abs/dir --type web                        local web dev server (Vite)
@@ -142,19 +147,26 @@ async function main(): Promise<void> {
         webHost: str(flags["web-host"]),
         port: flags.port ? Number(flags.port) : undefined,
         tokenName: str(flags.token),
+        email: str(flags.email),
+        accessTeam: str(flags["access-team"]),
+        accessAud: str(flags["access-aud"]),
         noServices: Boolean(flags["no-services"]),
       });
     }
+
+    case "allow":
+      if (!sub) return cmdAllowList();
+      if (sub === "rm") return cmdAllowRm(_[2]);
+      return cmdAllowAdd(sub);
 
     case "init":
       return cmdInit(flags);
 
     case "token":
-      // Bare `deckhand token` is the answer to "what do I paste into claude.ai". More than one
-      // token is a CLIENT concept — a second one for the desktop app or another machine, which
-      // is what `list` shows — and nobody should have to learn that to get their URL. So the
-      // no-argument form does the obvious thing: print yours, creating one if there is none.
-      if (!sub) return cmdTokenMine(flags);
+      // Bare `deckhand token` is the answer to "what do I paste into claude.ai" — now just the
+      // endpoint, since the credential left the URL. The subcommands manage LOCAL credentials
+      // for clients on this Mac that cannot run a browser sign-in.
+      if (!sub) return cmdTokenMine();
       if (sub === "add") return cmdTokenAdd(_[2]);
       if (sub === "rm") return cmdTokenRm(_[2]);
       if (sub === "list") return cmdTokenList();
@@ -251,51 +263,66 @@ function cmdTokenList(): void {
 }
 
 /**
- * "Give me my connector URL" — the only token command most installs ever need.
+ * "What do I paste into claude.ai" — the only token command most installs need.
  *
- * Creates one on first use, prints the existing one after that, and when there are several
- * (one per client — claude.ai, the desktop app, a second machine) says so and points at the
- * explicit commands rather than guessing which one the caller meant.
+ * The answer no longer contains a secret. The credential used to be a path segment in this
+ * URL, which was safe only while the URL was, and a connector added in Claude Enterprise is
+ * visible to the whole organisation. Now the URL names the endpoint and nothing else; who may
+ * actually connect is `deckhand allow`, enforced by Cloudflare Access at sign-in.
  */
-function cmdTokenMine(flags: Args["flags"]): void {
-  const tokens = loadTokensForWrite();
-  if (tokens.length === 1) return printConnector(tokens[0]!);
-  if (tokens.length > 1) {
-    console.error(`${tokens.length} tokens exist — say which one:`);
-    for (const t of tokens) console.error(`  deckhand token url ${t.name}`);
-    process.exit(1);
-  }
-  const name = str(flags.name) ?? process.env.USER ?? "me";
-  const { tokens: next, created } = addTokenEntry(tokens, { name });
-  writeTokens(next);
-  console.log(`created a token for "${created.name}".`);
-  printConnector(created);
-}
-
-function printConnector(t: { name: string; token: string }): void {
+function cmdTokenMine(): void {
   const hostname = tryHostname();
-  if (!hostname) {
-    console.log(t.token);
-    console.error(`(no hostname in config.yaml — run \`deckhand setup --hostname ...\` to get a full URL)`);
-    return;
-  }
-  console.log(`https://${hostname}/mcp/${t.token}`);
-  console.error(`\nPaste that into claude.ai → Settings → Connectors. It is a credential: treat it like a password.`);
+  if (!hostname) fail("no hostname in config.yaml — run `deckhand setup --hostname ...` first");
+  console.log(`https://${hostname}/mcp`);
+  console.error(`\nPaste that into claude.ai → Settings → Connectors → Add, then click Connect.`);
+  console.error(`Cloudflare emails a one-time code to whoever is on the allowlist (\`deckhand allow\`).`);
+  console.error(`The URL itself is not a credential — sharing it with your organisation is fine.`);
 }
 
 /**
- * Print one token's connector URL in full.
+ * Print one LOCAL credential in full.
  *
- * Until this existed a token was UNRECOVERABLE: `token add` printed the URL once and `token
- * list` showed only names, so losing the scrollback meant minting a new token and updating
- * every client — or reading tokens.yaml by hand, which is what people actually did.
+ * Local means Claude Code on this Mac, which has no browser to run the Access sign-in through.
+ * It is a bearer token: it goes in an `Authorization: Bearer` header, never in a URL, and
+ * never into a connector anyone else can see.
  */
 function cmdTokenUrl(name: string | undefined): void {
   if (!name) fail("usage: deckhand token url <name>   (see `deckhand token list`)");
   const found = loadTokensSafe().find((t) => t.name === name);
   if (!found) fail(`no token named "${name}" — \`deckhand token list\` shows them`);
-  const hostname = tryHostname();
-  printConnector(found!);
+  console.log(found!.token);
+  console.error(`\nA LOCAL credential, for a client on this Mac: send it as \`Authorization: Bearer <token>\` to`);
+  console.error(`https://${tryHostname() ?? "<hostname>"}/mcp. Treat it like a password — it bypasses the email allowlist.`);
+}
+
+// --- who may connect -------------------------------------------------------
+
+function cmdAllowList(): void {
+  const emails = loadConfig().connector.allowedEmails;
+  if (!emails.length) {
+    console.log("nobody may connect yet — `deckhand allow <email>` names the first address.");
+    return;
+  }
+  for (const e of emails) console.log(e);
+}
+
+function cmdAllowAdd(email: string): void {
+  const { emails, added } = allowEmail(email);
+  console.log(added ? `${email.toLowerCase()} may now connect.` : `${email.toLowerCase()} was already allowed.`);
+  console.log(`allowlist: ${emails.join(", ")}`);
+  // Access decides who reaches the sign-in page; deckhand decides who gets a grant. Both
+  // have to name the address, and only one of them is editable from here.
+  console.error(`\nAlso add it to the Cloudflare Access policy, or they will never reach the sign-in page.`);
+}
+
+function cmdAllowRm(email: string | undefined): void {
+  if (!email) fail("usage: deckhand allow rm <email>");
+  const { emails, removed } = disallowEmail(email!);
+  if (!removed) fail(`${email} was not on the allowlist — \`deckhand allow\` shows it`);
+  // No restart, and none of the usual "takes effect on the next token expiry": the running
+  // server re-reads this decision on every MCP call.
+  console.log(`${email!.toLowerCase()} can no longer connect, starting with their next call.`);
+  console.log(emails.length ? `allowlist: ${emails.join(", ")}` : "allowlist is now empty — nobody can connect.");
 }
 
 async function cmdAppAdd(id: string | undefined, repo: string | undefined, flags: Args["flags"]): Promise<void> {

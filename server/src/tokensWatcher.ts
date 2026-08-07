@@ -1,12 +1,8 @@
-import { watch, statSync, type FSWatcher } from "node:fs";
 import { createHash } from "node:crypto";
-import { basename, dirname } from "node:path";
 import { loadTokens, type TokenEntry } from "./config.ts";
 import { paths } from "./paths.ts";
+import { watchFileForChanges } from "./watchFile.ts";
 import type { TokenAuthenticator } from "./auth.ts";
-
-const DEBOUNCE_MS = 150;
-const POLL_MS = 2_000;
 
 export interface WatchTokensOptions {
   file?: string;
@@ -24,13 +20,15 @@ export interface WatchTokensOptions {
  * user does:
  *
  *   setup starts the server (LaunchAgent), then mints the token. `loadTokens()` had
- *   already run. So the server did not know the only token that exists, every request to
- *   `/mcp/<token>` answered 404, and claude.ai — finding no MCP server — fell back to OAuth
+ *   already run. So the server did not know the only token that exists, every request to the
+ *   MCP endpoint was refused, and claude.ai — finding no MCP server — fell back to OAuth
  *   discovery and reported "Couldn't register with Deckhand's sign-in service".
  *
- * A brand-new install therefore looked broken at the one step that cannot be skipped, with an
- * error message pointing at OAuth, which deckhand does not use. Observed on a real machine;
- * the fix at the time was a restart nobody would have guessed at.
+ * A brand-new install therefore looked broken at the one step that cannot be skipped. Observed
+ * on a real machine; the fix at the time was a restart nobody would have guessed at. (The OAuth
+ * error message was misleading THEN. Since 2026-08-07 deckhand does serve OAuth, so a failure
+ * here and a real sign-in failure look alike — `deckhand doctor`'s `connector auth` check is
+ * what tells them apart.)
  *
  * The authenticator is updated in place, because `createApp` closed over that instance.
  *
@@ -41,25 +39,9 @@ export interface WatchTokensOptions {
  */
 export function watchTokens(auth: TokenAuthenticator, opts: WatchTokensOptions = {}): () => void {
   const file = opts.file ?? paths.tokens();
-  const name = basename(file);
-  const debounceMs = opts.debounceMs ?? DEBOUNCE_MS;
-  const pollMs = opts.pollMs ?? POLL_MS;
-
-  let timer: NodeJS.Timeout | null = null;
-  let watcher: FSWatcher | null = null;
-  const stamp = (): string => {
-    try {
-      const s = statSync(file);
-      return `${s.mtimeMs}:${s.size}:${s.ino}`;
-    } catch {
-      return "";
-    }
-  };
-  let lastStamp = stamp();
   let lastFingerprint = "";
 
   const reload = (): void => {
-    lastStamp = stamp();
     let next: TokenEntry[];
     try {
       next = loadTokens(file);
@@ -85,45 +67,10 @@ export function watchTokens(auth: TokenAuthenticator, opts: WatchTokensOptions =
     opts.onReload?.(next.map((t) => t.name));
   };
 
-  const schedule = (): void => {
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(reload, debounceMs);
-    timer.unref?.();
-  };
-
-  // The poll is the backstop fs.watch needs: it drops events under load, and a dropped one
-  // here is silent — the token exists on disk and the connector still 404s.
-  const poll = setInterval(() => {
-    if (stamp() !== lastStamp) schedule();
-  }, pollMs);
-  poll.unref?.();
-
-  try {
-    // The directory, not the file: writeTokens renames a temp file over the target, which
-    // swaps the inode out from under a file-level watcher.
-    watcher = watch(dirname(file), (_event, changed) => {
-      if (changed != null && basename(changed) !== name) return;
-      schedule();
-    });
-    watcher.on("error", (err) => opts.onError?.(err));
-    watcher.unref?.();
-  } catch (err) {
-    opts.onError?.(err);
-  }
-
-  // Adopt what is on disk RIGHT NOW, before waiting for a change.
-  //
-  // Without this, "watch this file" quietly means "watch changes made after this line": a file
-  // written a millisecond earlier is picked up only if fs.watch happens to deliver an event for
-  // it, and the poll cannot help — it compares against a stamp taken at construction, which
-  // already includes that write. In production the caller has just loaded the same file, so the
-  // gap is invisible; it surfaced as a CI-only test failure, which is the worst way to learn
-  // that a component depends on its caller having done something first.
-  reload();
-
-  return () => {
-    if (timer) clearTimeout(timer);
-    clearInterval(poll);
-    watcher?.close();
-  };
+  return watchFileForChanges(file, {
+    onChange: reload,
+    onError: opts.onError,
+    debounceMs: opts.debounceMs,
+    pollMs: opts.pollMs,
+  });
 }

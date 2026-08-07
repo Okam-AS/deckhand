@@ -37,6 +37,17 @@ a user's repo. (This is why the `web` type injects Vite's base/host/port as runt
 flags — zero source edits; frameworks that can't be configured at runtime are hosted via
 the wildcard-hostname model, see PLAN §2/§8, not by editing their config.)
 
+**The connector is public, the person is not** (PLAN §11.6). `/mcp` takes an
+`Authorization: Bearer` credential and never a path token: a connector URL added in a Claude
+organisation is visible to everyone in it, so the URL cannot be the secret. claude.ai gets a
+per-person OAuth grant, issued only after **Cloudflare Access** proves an email that is on
+`connector.allowedEmails` — checked at authorize, at redemption, and on every MCP call, so
+`deckhand allow rm` revokes without a restart. Access protects exactly one path,
+`/oauth/authorize`; widening it to `/oauth/*` or `/mcp` breaks the connector, because Claude's
+backend has no browser to redirect. An empty allowlist means nobody, and an unconfigured
+Access application makes authorize refuse everyone — both are `doctor` failures, not warnings.
+Claude Code on the machine uses a local `tokens.yaml` bearer token instead.
+
 **The GitHub access ladder** (PLAN §2/§6/§11.4): credentials resolve PAT → GitHub App →
 ambient `gh` CLI session (`githubAmbient`, default on) → anonymous git for public repos
 (gated on `allowPublicRepos`) → one-time PAT setup URL as last resort. Onboarding
@@ -105,7 +116,8 @@ Non-negotiables while implementing:
 - Keep it small. No database, no SPA framework beyond the single viewer page, no new
   dependencies without a strong reason. When in doubt, re-read PLAN.md §2.
 - Security invariants (PLAN.md §11) are acceptance criteria, not suggestions — especially:
-  loopback-only binding, no tokenless paths, no secrets through MCP, tokens never in
+  loopback-only binding, no credentialless path to a device or a repo (PLAN §11 item 1
+  names the four open-by-construction OAuth endpoints), no secrets through MCP, tokens never in
   argv/URLs/logs.
 - Structured, actionable MCP errors: the model relaying the error to a human must be able
   to say exactly what to do next.
@@ -335,15 +347,24 @@ deckhand is installed and *does nothing* until the connector is pasted into
 claude.ai. That is not one item in a list of five; it is the step. Say it first,
 in two lines:
 
-> Run `deckhand token` and paste the URL into claude.ai → Settings → Connectors.
+> Run `deckhand token` and paste the URL into claude.ai → Settings → Connectors,
+> then click Connect — Cloudflare emails you a one-time code.
 
 Then, if it is useful, what you did. Not before. A user who reads three lines and
 stops must still have the thing they need — and they will stop, because a numbered
 list of green ticks reads as "nothing left to do".
 
-**Their connector URL:** `deckhand token`. Creates one the first time, prints the
-same one after. NOT `token list`, which masks them by design. It is a credential —
-never repeat it back in chat, and never put it in a commit or a PR.
+**Their connector URL:** `deckhand token` — just `https://<their-host>/mcp`. It
+carries no secret, so relaying it in chat is fine. What keeps everyone else out is
+the email allowlist: `deckhand allow <email>`, enforced by a Cloudflare Access
+sign-in that emails a one-time code. On an install where the allowlist is empty or
+the Access application is missing, **nobody can connect** — `deckhand doctor` fails
+on both, and neither is a warning.
+
+Do not confuse that with `deckhand token add|url <name>`, which mints a LOCAL
+bearer credential for Claude Code on the machine. That one IS a password: never
+repeat it back in chat, never put it in a commit or a PR, and never in a URL.
+`token list` masks them by design.
 
 **Registering something to preview:**
 
@@ -374,6 +395,7 @@ from under a citation fails `docs.test.ts`.
 | `streaming.md` | `server/src/streaming/**` — the backend seam, loopback binds, helper ownership |
 | `engine.md` | `server/src/engine/**`, `server/src/devices/**` — detached spawns, ordering, borrow-never-own |
 | `share-proxy.md` | `server/src/share/**` — the public surface; both auth bypasses lived here |
+| `connector-auth.md` | `server/src/oauth/**`, `auth.ts` — who may drive this Mac; the connector URL is public |
 | `mcp-tools.md` | `server/src/mcp/**` — the agent-facing surface, where a description IS a prompt |
 | `tests.md` | every `*.test.ts` — see it fail first; fakes are complete or they lie |
 

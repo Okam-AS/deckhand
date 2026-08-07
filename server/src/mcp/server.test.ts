@@ -25,6 +25,7 @@ const config: Config = {
   githubApp: { appId: 1, privateKeyPath: "k.pem" },
   githubAmbient: true,
   allowPublicRepos: false,
+  connector: { allowedEmails: [] },
   limits: { maxDevicesPerPreview: 4, maxTotalDevices: 6, idleMinutes: 45, failedGraceMinutes: 15, stuckMinutes: 90, reuseDevices: false, disk: { watch: 50, pressure: 35, critical: 20 } },
 };
 
@@ -134,7 +135,13 @@ after(() => {
 
 async function client(token: string): Promise<Client> {
   const c = new Client({ name: "test", version: "0" });
-  await c.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp/${token}`)));
+  // The credential is a header, never a path segment: a connector URL added to a
+  // Claude organisation is visible to that whole organisation.
+  await c.connect(
+    new StreamableHTTPClientTransport(new URL(`${base}/mcp`), {
+      requestInit: { headers: { authorization: `Bearer ${token}` } },
+    }),
+  );
   return c;
 }
 
@@ -148,8 +155,35 @@ function parse(result: unknown): Record<string, unknown> {
 }
 
 describe("MCP server (end-to-end over HTTP)", () => {
-  it("rejects an unknown token with 404", async () => {
-    const res = await fetch(`${base}/mcp/${"z".repeat(64)}`, {
+  const call = (init: RequestInit): Promise<Response> =>
+    fetch(`${base}/mcp`, {
+      method: "POST",
+      ...init,
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        ...(init.headers as Record<string, string> | undefined),
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+
+  it("rejects an unknown bearer token with 401 and points at the metadata", async () => {
+    const res = await call({ headers: { authorization: `Bearer ${"z".repeat(64)}` } });
+    assert.equal(res.status, 401);
+    // The pointer is how an MCP client discovers where to authorize. A silent 404
+    // leaves it with nothing to do but report the server as broken.
+    assert.match(res.headers.get("www-authenticate") ?? "", /resource_metadata=".*\/\.well-known\/oauth-protected-resource"/);
+  });
+
+  it("rejects a request with no Authorization header at all", async () => {
+    assert.equal((await call({})).status, 401);
+  });
+
+  // THE regression this whole change exists for. The credential used to be a path
+  // segment, so a connector URL pasted into a Claude organisation handed every
+  // member of that organisation the credential along with the address.
+  it("refuses the legacy /mcp/<token> URL even when the token is valid", async () => {
+    const res = await fetch(`${base}/mcp/${ADMIN}`, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
@@ -158,7 +192,9 @@ describe("MCP server (end-to-end over HTTP)", () => {
   });
 
   it("rejects GET (stateless) with 405", async () => {
-    const res = await fetch(`${base}/mcp/${ADMIN}`, { headers: { accept: "text/event-stream" } });
+    const res = await fetch(`${base}/mcp`, {
+      headers: { accept: "text/event-stream", authorization: `Bearer ${ADMIN}` },
+    });
     assert.equal(res.status, 405);
   });
 
@@ -515,7 +551,11 @@ describe("MCP onboarding contract (add_app / empty state / setup URL)", () => {
 
   const oclient = async (token: string): Promise<Client> => {
     const c = new Client({ name: "test", version: "0" });
-    await c.connect(new StreamableHTTPClientTransport(new URL(`${obase}/mcp/${token}`)));
+    await c.connect(
+      new StreamableHTTPClientTransport(new URL(`${obase}/mcp`), {
+        requestInit: { headers: { authorization: `Bearer ${token}` } },
+      }),
+    );
     return c;
   };
 

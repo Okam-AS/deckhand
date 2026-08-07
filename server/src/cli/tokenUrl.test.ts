@@ -34,9 +34,12 @@ before(() => {
 after(() => rmSync(home, { recursive: true, force: true }));
 
 describe("deckhand token url", () => {
-  it("prints one token's full connector URL", () => {
-    const url = run("token", "url", "alice").trim();
-    assert.match(url, /^https:\/\/deckhand\.example\.com\/mcp\/[0-9a-f]{64}$/, "usable as-is, no assembly required");
+  it("prints one local credential in full, and never as a URL", () => {
+    const out = run("token", "url", "alice").trim();
+    assert.match(out, /^[0-9a-f]{64}$/, "the credential itself, ready to put in an Authorization header");
+    // A credential in a URL is what Claude Enterprise made unsafe: a connector URL
+    // is visible to the whole organisation, so a token embedded in one is too.
+    assert.doesNotMatch(out, /https:\/\/[^\s]*[0-9a-f]{64}/, "never hand it back as a pasteable URL");
   });
 
   it("prints a DIFFERENT url for a different token", () => {
@@ -116,33 +119,61 @@ describe("deckhand token rm", () => {
 });
 
 describe("deckhand token (no subcommand)", () => {
-  it("creates one on a fresh install and prints the URL", () => {
-    // More than one token is a CLIENT concept — a second one for another machine, which is what
-    // `list` shows. Nobody should have to learn that to answer "what do I paste into claude.ai".
+  // THE regression. This URL is pasted into claude.ai, and in an Enterprise
+  // organisation that makes it visible to every colleague. It used to carry a
+  // 64-hex credential as a path segment, which handed all of them the connector.
+  it("prints an endpoint with no credential in it", () => {
     const fresh = mkdtempSync(join(tmpdir(), "deckhand-tok1-"));
     const at = (...args: string[]): string =>
       execFileSync(process.execPath, [BIN, ...args], { encoding: "utf8", env: { ...process.env, DECKHAND_HOME: fresh } });
     try {
       at("init", "--hostname", "deckhand.example.com");
-      const first = at("token").trim();
-      assert.match(first, /https:\/\/deckhand\.example\.com\/mcp\/[0-9a-f]{64}$/m);
-      // Idempotent: running it again must not mint a second token and silently invalidate
-      // nothing — but it also must not create clutter the user then has to disambiguate.
-      assert.equal(at("token").trim(), first.split("\n").pop()!.trim(), "the same URL, not a new token");
+      const out = at("token").trim();
+      assert.equal(out, "https://deckhand.example.com/mcp");
+      assert.doesNotMatch(out, /[0-9a-f]{64}/, "no credential may appear in the URL people paste into a connector");
+      // And it stays the same however many local credentials exist — the endpoint
+      // is not per-client any more, so there is nothing to disambiguate.
+      at("token", "add", "alice");
+      at("token", "add", "bob");
+      assert.equal(at("token").trim(), out);
+    } finally {
+      rmSync(fresh, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("deckhand allow", () => {
+  it("is empty on a fresh install, because a visible URL must admit nobody by default", () => {
+    const fresh = mkdtempSync(join(tmpdir(), "deckhand-allow-"));
+    const at = (...args: string[]): string =>
+      execFileSync(process.execPath, [BIN, ...args], { encoding: "utf8", env: { ...process.env, DECKHAND_HOME: fresh } });
+    try {
+      at("init", "--hostname", "deckhand.example.com");
+      assert.match(at("allow"), /nobody may connect yet/);
+
+      at("allow", "Owner@Example.com");
+      assert.equal(at("allow").trim(), "owner@example.com", "lowercased, so one address cannot sit in the list twice");
+
+      at("allow", "owner@example.com"); // idempotent
+      assert.equal(at("allow").trim(), "owner@example.com");
+
+      at("allow", "rm", "owner@example.com");
+      assert.match(at("allow"), /nobody may connect yet/);
     } finally {
       rmSync(fresh, { recursive: true, force: true });
     }
   });
 
-  it("refuses to guess when several tokens exist", () => {
-    // Picking one at random would hand out a credential the caller did not mean.
-    assert.throws(
-      () => run("token"),
-      (e: Error & { stderr?: string }) => {
-        assert.match(`${e.stderr ?? ""}`, /2 tokens exist/);
-        assert.match(`${e.stderr ?? ""}`, /deckhand token url alice/, "and it names the exact commands");
-        return true;
-      },
-    );
+  it("refuses something that is not an address rather than writing it", () => {
+    const fresh = mkdtempSync(join(tmpdir(), "deckhand-allow2-"));
+    const at = (...args: string[]): string =>
+      execFileSync(process.execPath, [BIN, ...args], { encoding: "utf8", env: { ...process.env, DECKHAND_HOME: fresh } });
+    try {
+      at("init", "--hostname", "deckhand.example.com");
+      assert.throws(() => at("allow", "everyone"));
+      assert.match(at("allow"), /nobody may connect yet/, "and the allowlist is untouched");
+    } finally {
+      rmSync(fresh, { recursive: true, force: true });
+    }
   });
 });

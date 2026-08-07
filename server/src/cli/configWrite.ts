@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { writeFileSync, mkdirSync, renameSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { stringify as toYaml, parse as parseYaml } from "yaml";
-import { appSchema, appsSchema, tokenSchema, type App, type TokenEntry } from "../config.ts";
+import { appSchema, appsSchema, configSchema, tokenSchema, type App, type TokenEntry } from "../config.ts";
 import { parseEnvFile } from "../secrets.ts";
 import { paths } from "../paths.ts";
 
@@ -106,6 +106,78 @@ function atomicWrite(file: string, content: string, mode = 0o644): void {
 
 export function writeTokens(tokens: TokenEntry[]): void {
   atomicWrite(paths.tokens(), toYaml({ tokens }), 0o600);
+}
+
+/**
+ * Read config.yaml, apply a change, and write it back only if it still loads.
+ *
+ * Same contract as `writeApps` and for the same reason: the write path and the
+ * read path used to have no relationship, so a change the schema would later
+ * reject was written happily and surfaced as an unloadable config on the next
+ * boot — with the server down and nothing pointing at the command that did it.
+ *
+ * Comments and key order in the operator's file are NOT preserved; the yaml
+ * round-trip drops them. That is the accepted cost of validating before writing,
+ * and the reason this is used for the two connector fields rather than offered as
+ * a general "edit any setting" command.
+ */
+export function updateConfig(mutate: (config: Record<string, unknown>) => void): Record<string, unknown> {
+  const raw = parseYaml(readFileSync(paths.config(), "utf8")) as Record<string, unknown> | null;
+  const next = { ...(raw ?? {}) };
+  mutate(next);
+  const check = configSchema.safeParse(next);
+  if (!check.success) {
+    const first = check.error.issues[0];
+    throw new Error(
+      `refusing to write config.yaml: it would not load back (${first?.path.join(".") ?? "?"}: ` +
+        `${first?.message ?? "invalid"}). The existing file is unchanged.`,
+    );
+  }
+  atomicWrite(paths.config(), toYaml(next), 0o644);
+  return next;
+}
+
+/**
+ * Add an address to the connector allowlist. Idempotent, and lowercased on the
+ * way in so `Owner@x.com` and `owner@x.com` cannot both sit in the list looking
+ * like two decisions.
+ */
+export function allowEmail(email: string): { emails: string[]; added: boolean } {
+  const address = email.trim().toLowerCase();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(address)) throw new Error(`"${email}" does not look like an email address`);
+  let added = false;
+  const next = updateConfig((config) => {
+    const connector = (config.connector ?? {}) as { allowedEmails?: unknown };
+    const emails = Array.isArray(connector.allowedEmails) ? (connector.allowedEmails as string[]).map((e) => e.toLowerCase()) : [];
+    if (!emails.includes(address)) {
+      emails.push(address);
+      added = true;
+    }
+    config.connector = { ...connector, allowedEmails: emails };
+  });
+  return { emails: ((next.connector as { allowedEmails: string[] }).allowedEmails ?? []), added };
+}
+
+/** Remove an address from the allowlist. Its live grants stop working on the next MCP call. */
+export function disallowEmail(email: string): { emails: string[]; removed: boolean } {
+  const address = email.trim().toLowerCase();
+  let removed = false;
+  const next = updateConfig((config) => {
+    const connector = (config.connector ?? {}) as { allowedEmails?: unknown };
+    const emails = Array.isArray(connector.allowedEmails) ? (connector.allowedEmails as string[]).map((e) => e.toLowerCase()) : [];
+    const kept = emails.filter((e) => e !== address);
+    removed = kept.length !== emails.length;
+    config.connector = { ...connector, allowedEmails: kept };
+  });
+  return { emails: ((next.connector as { allowedEmails: string[] }).allowedEmails ?? []), removed };
+}
+
+/** Record the Cloudflare Access application that proves identity at `/oauth/authorize`. */
+export function setAccessApplication(input: { teamDomain: string; aud: string }): void {
+  updateConfig((config) => {
+    const connector = (config.connector ?? {}) as Record<string, unknown>;
+    config.connector = { ...connector, access: { teamDomain: input.teamDomain, aud: input.aud } };
+  });
 }
 
 /**
