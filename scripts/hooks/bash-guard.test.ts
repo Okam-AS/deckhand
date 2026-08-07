@@ -51,9 +51,18 @@ describe("a human opens the pull request", () => {
   // Quoting is not the only spelling a shell accepts. Each of these was run against a stub `gh`
   // on PATH and printed `pr create` — they are the command, spelt to miss a matcher.
   it("blocks the escaped spellings too", () => {
-    for (const cmd of [`gh $'pr' create`, "gh \\pr create", "gh pr cre\\ate"]) {
+    for (const cmd of [`gh $'pr' create`, "gh \\pr create", "gh pr cre\\ate", "gh pr \\\n  create", "gh${IFS}pr${IFS}create"]) {
       assert.match(blocked(cmd), /a human's call/);
     }
+  });
+
+  // Rule 1 has no override, so an over-block here has no way out but asking a person about
+  // something they did not need to be asked. `/pulls` opens one; `/pulls/12/...` is how you
+  // talk about one that already exists, which is what this repo's own review tooling does.
+  it("leaves the endpoints that talk about an existing PR alone", () => {
+    allowed("gh api repos/Okam-AS/deckhand/pulls/12/comments -f body=nit -f path=x.ts -f line=3");
+    allowed("gh api repos/Okam-AS/deckhand/pulls/12/reviews -X POST -f event=COMMENT -f body=ok");
+    allowed("gh api -X PATCH repos/Okam-AS/deckhand/pulls/12 -f title=x");
   });
 
   // Writing ABOUT the gate is routine — a commit message, a doc, a grep. Matching raw text
@@ -237,6 +246,25 @@ describe("nothing lands on main directly", () => {
     ]) {
       assert.match(blocked(cmd, "main"), /nothing lands there directly/);
     }
+  });
+
+  // Rule 1's spelling problem is rule 2's too, and it was worse here: every one of these landed
+  // a real commit on main against a throwaway bare remote while the guard said nothing.
+  it("blocks the landing verb however it is spelt", () => {
+    for (const cmd of [`git 'commit' -m x`, "git com'mit' -m x", "git \\commit -m x", `git "commit" -m x`]) {
+      assert.match(blocked(cmd, "main"), /nothing lands there directly/);
+    }
+    for (const cmd of [`git 'push'`, "git pu'sh'", "git \\push"]) {
+      assert.match(blocked(cmd, "main"), /pushes at `main`/);
+    }
+    // And the ref, which quoting used to hide from the push half.
+    for (const cmd of ["git push origin ma'in'", `git push origin ma"in"`, "git push origin \\main"]) {
+      assert.match(blocked(cmd, "feature/x"), /pushes at `main`/);
+    }
+  });
+
+  it("blocks a kickstart spelt with an escape", () => {
+    assert.match(blocked("launchctl \\kickstart -k gui/501/no.deckhand.server"), /EVERY booted simulator/);
   });
 
   it("blocks git am, which lands someone else's commit on the branch you are on", () => {

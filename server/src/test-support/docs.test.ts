@@ -203,7 +203,10 @@ describe("docs describe the code that exists", () => {
       // NUMBERS its steps ("   1.  deckhand token …"), which matched neither of the other two,
       // so a dead verb in the last thing an install prints stayed green.
       const shapes = [
-        /`deckhand ([a-z-]+)(?=`| <| --| [a-z-]+`)/g,
+        // The trailing alternative allows any number of words before the closing backtick:
+        // with only one, `deckhand token add me` — the instruction this branch prints from five
+        // places — was invisible, so a dead verb in the commonest command stayed green.
+        /`deckhand ([a-z-]+)(?=`| <| --|(?: [a-z-]+)+`)/g,
         /(?:^|\n) {2,4}deckhand ([a-z-]+)(?=\s|$)/g,
         // Unanchored, unlike the one above it: this output is written as `say("   1.  deckhand
         // …")`, so the "line" the check reads starts with the call, not with the indent.

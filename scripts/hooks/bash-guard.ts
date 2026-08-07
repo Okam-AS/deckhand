@@ -56,6 +56,25 @@ const gitBranch: BranchResolver = (dir) =>
  * command positions than a regex can enumerate. Blanking the quotes keeps the match permissive
  * where it should be and blind only where the text is data.
  */
+/**
+ * The spellings a shell accepts for one word, collapsed onto that word.
+ *
+ * A rule asking "does this RUN git commit" has to see `git 'commit'`, `git com'mit'`,
+ * `git \commit`, `git${IFS}commit` and a `git commit` split over a line continuation as the
+ * same command, because bash does. Each of those was a live bypass: quoting the verb walked
+ * past the commit-on-main rule, and `${IFS}` walked past the one rule with no override.
+ *
+ * Escaping is undone BEFORE quoted spans are considered, so `$'pr'` becomes `'pr'` and then
+ * `pr`. The blanking in {@link withoutQuotedText} still decides what is data.
+ */
+export function shellSpelling(cmd: string): string {
+  return cmd
+    .replace(/\\\n/g, " ") // a line continuation joins two words into one command
+    .replace(/\$\{IFS\}|\$IFS\b/g, " ") // the shell's own word separator, spelt as a variable
+    .replace(/\$(?=['"])/g, "") // ANSI-C quoting: $'pr' is 'pr'
+    .replace(/\\(?=\w)/g, ""); // \pr is pr
+}
+
 export function withoutQuotedText(cmd: string): string {
   return cmd
     .replace(/<<-?\s*(['"]?)(\w+)\1[\s\S]*?^\s*\2\s*$/gm, " ") // heredoc bodies
@@ -82,11 +101,7 @@ export function withoutQuotedText(cmd: string): string {
  * AGENTS.md, where it binds whether or not the regex matched.
  */
 export function opensAPullRequest(cmd: string): boolean {
-  // Quotes are not the only way to spell a word so a matcher misses it: `gh \pr create` and
-  // `gh $'pr' create` both run the command. A backslash before a word character and a `$`
-  // before a quote are removed BEFORE the quoted spans are handled, so all three spellings
-  // collapse onto the same text. Data is unaffected — a multi-word quoted span is still blanked.
-  const bare = withoutQuotedText(cmd.replace(/\$(?=['"])/g, "").replace(/\\(?=\w)/g, ""));
+  const bare = withoutQuotedText(shellSpelling(cmd));
   if (/\bgh\s+pr\s+create\b/.test(bare)) return true;
   // The GraphQL mutation. The mutation body is normally quoted, so it is matched raw — but
   // only when the blanked text shows a `gh … graphql` call standing by to send it. Matching
@@ -99,7 +114,11 @@ export function opensAPullRequest(cmd: string): boolean {
   // switches to POST on its own the moment any parameter flag is present, which is why `-f`,
   // `-F` and `--input` count as one.
   const posts = /(?:-X|--request)[= ]?\s*POST|--method[= ]\s*POST|(?:^|\s)-(?:f|F|d)\s|(?:^|\s)--(?:input|data\S*)\b/;
-  if (/\/pulls\b/.test(cmd) && /\b(?:gh\s+api|curl)\b/.test(bare) && posts.test(cmd)) return true;
+  // The COLLECTION, not a sub-resource: `/pulls` opens one, `/pulls/12/comments` and
+  // `/pulls/12/reviews` are how you talk about one that exists — including this repo's own
+  // review-comment path. Blocking those under a rule with no override is the one over-block
+  // this file cannot afford, since the way past it is meant to be asking a person.
+  if (/\/pulls(?![\w/])/.test(cmd) && /\b(?:gh\s+api|curl)\b/.test(bare) && posts.test(cmd)) return true;
   // One place quoted text is code rather than data: an interpreter standing by to run it —
   // whether the script arrives as an argument or down a pipe.
   const interpreter = /(?:^|\s)(?:(?:ba|z|k)?sh\s+-c|eval)\b|\|\s*(?:(?:ba|z|k)?sh|bash)\b/;
@@ -185,18 +204,24 @@ export function decide(cmd: string, resolveBranch: BranchResolver = gitBranch, r
   // raw line for those flags meant a commit MESSAGE mentioning `--dry-run` — which is exactly
   // what a commit about this guard says — switched the rule off, and `git merge --abort; git
   // commit -m x` exempted the commit with the merge's flag.
+  //
+  // Read from the same normalisation rule 1 uses, not from the raw line: `git 'commit'`,
+  // `git com'mit'` and `git \commit` all land a commit, verified against a throwaway remote,
+  // and every one of them was allowed while the plain spelling was blocked. Blanking still
+  // decides what is data, so a message or a heredoc quoting a command is still not one.
+  const text = withoutQuotedText(shellSpelling(cmd));
   const landingVerb = /\bgit\s+(?:-[cC]\s+\S+\s+|--\S+\s+)*?(?:-C\s+(\S+)\s+)?(?:-[cC]\s+\S+\s+|--\S+\s+)*(commit|merge|cherry-pick|revert|am)(?![-\w])/g;
-  for (const landing of cmd.matchAll(landingVerb)) {
+  for (const landing of text.matchAll(landingVerb)) {
     // The message is an ARGUMENT, never a flag: `git commit -m '--dry-run'` is one word, so
     // blanking multi-word quotes alone still let it exempt itself. Message payloads come out
     // before the flags are read — `-m x`, `-am x`, `--message=x`, `-F file`.
-    const segment = withoutQuotedText(cmd.slice(landing.index + landing[0].length).split(/[;&|]|\n/)[0] ?? "");
+    const segment = text.slice(landing.index + landing[0].length).split(/[;&|]|\n/)[0] ?? "";
     const rest = segment.replace(/(?:-[a-zA-Z]*[mF]|--(?:message|file))(?:=|\s+)\S+/g, " ");
     if (/--(?:abort|quit|skip|dry-run)(?![-\w])/.test(rest)) continue;
     // A `git switch main` earlier in the same command line moves the target before the verb
     // runs, so the branch we are on now is the wrong thing to ask about.
-    const switched = /(?:^|[;&|]\s*)git\s+(?:switch|checkout)\s+(?:-\S+\s+)*main(?:\s|$|[;&|])/.test(cmd.slice(0, landing.index));
-    const branch = switched ? "main" : resolveBranch(landing[1] ?? cdTarget(cmd, landing.index));
+    const switched = /(?:^|[;&|]\s*)git\s+(?:switch|checkout)\s+(?:-\S+\s+)*main(?:\s|$|[;&|])/.test(text.slice(0, landing.index));
+    const branch = switched ? "main" : resolveBranch(landing[1] ?? cdTarget(text, landing.index));
     if (branch === "main") {
       return {
         blocked: true,
@@ -209,29 +234,30 @@ export function decide(cmd: string, resolveBranch: BranchResolver = gitBranch, r
   // Pushing AT main from a feature branch is the same rule, one indirection along: it is how a
   // branch-first workflow gets bypassed without ever checking main out.
   //
-  // The ref is matched against the RAW text, quotes and all — `git push origin "main"` is the
-  // same push — but only within the SEGMENT that runs the push. Testing the whole line blocked
-  // `git push origin feature/x; git diff main`, where the two mentions of main have nothing to
-  // do with each other; over-blocking is acceptable for a quoted ref and not for a second
-  // command. `:main` counts: deleting main is not a gentler way of writing to it.
+  // Matched within the SEGMENT that runs the push, never across the line: testing the whole
+  // line blocked `git push origin feature/x; git diff main`, where the two mentions of main
+  // have nothing to do with each other. `git push origin "main"` and `git push origin ma'in'`
+  // are the same push, which is what the spelling normalisation above is for — quoting the ref
+  // used to be enough to get past this. `:main` counts: deleting main is not a gentler way of
+  // writing to it.
   //
   // Naming the ref is only the loud way to do it. `git push` with no refspec pushes the branch
   // you are ON, and `--all` / `--mirror` push main without mentioning it — three forms that
   // slipped past a rule stated as "whether by being on it or pushing at it", because the branch
   // resolver was consulted for the commit half and never for this one.
-  const pushesAtMain = cmd.split(/[;&|]|\n/).some((part) => {
+  const pushesAtMain = text.split(/[;&|]|\n/).some((part) => {
     if (!/\bgit\s+(?:-\S+(?:\s+\S+)?\s+)*push\b/.test(part)) return false;
-    if (/(?:^|\s|['":+])(?:HEAD:)?[+:]?(?:refs\/heads\/)?main(?::(?:refs\/heads\/)?\S+)?(?:\s|$|['"])/.test(part)) return true;
+    if (/(?:^|\s|[:+])(?:HEAD:)?[+:]?(?:refs\/heads\/)?main(?::(?:refs\/heads\/)?\S+)?(?:\s|$)/.test(part)) return true;
     if (/\s--(?:all|mirror)(?![-\w])/.test(part)) return true;
     // The first positional after `push` is the remote, the rest are refspecs. None — or one
-    // that only names the checked-out commit, `HEAD` or its synonym `@` — means "the current
+    // that only names the checked-out commit (`HEAD`, `@`, `@{u}`) — means "the current
     // branch", so the branch is what decides.
-    const words = withoutQuotedText(part).trim().split(/\s+/);
+    const words = part.trim().split(/\s+/);
     const positional = words.slice(words.indexOf("push") + 1).filter((w) => !w.startsWith("-"));
-    const refspecs = positional.slice(1).filter((r) => r !== "HEAD" && r !== "@");
+    const refspecs = positional.slice(1).filter((r) => !/^(?:HEAD|@|@\{u(?:pstream)?\})$/.test(r));
     if (refspecs.length > 0) return false;
     const at = /\bgit\s+(?:-\S+\s+)*?-C\s+(\S+)/.exec(part);
-    return resolveBranch(at?.[1] ?? cdTarget(cmd, cmd.indexOf(part))) === "main";
+    return resolveBranch(at?.[1] ?? cdTarget(text, text.indexOf(part))) === "main";
   });
   if (pushesAtMain) {
     return {
@@ -243,7 +269,7 @@ export function decide(cmd: string, resolveBranch: BranchResolver = gitBranch, r
   // 3. Restarting the server drops every booted simulator on the machine, so someone may be
   //    mid-test on a preview you cannot see. AGENTS.md says to say so before doing it; this is
   //    the part that makes "say so" happen, by making the agent stop and ask.
-  if (/launchctl\s+kickstart/.test(withoutQuotedText(cmd)) && /no\.deckhand\.server/.test(cmd)) {
+  if (/launchctl\s+kickstart/.test(text) && /no\.deckhand\.server/.test(text)) {
     return {
       blocked: true,
       reason:
