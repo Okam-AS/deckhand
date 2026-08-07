@@ -477,10 +477,10 @@ function gitHead(cwd: string): Promise<string | null> {
 /**
  * Can a new client be let in at all (PLAN §11.6)?
  *
- * There is no allowlist to be empty and no Access application to be missing — approval is a
- * live decision, so the only way this half breaks is the operator having no way to make it.
- * `deckhand approve` reaches the running server with a LOCAL credential, so no local
- * credential means no approvals, and the connector can never be authorized by anybody.
+ * There is no allowlist to be empty and no Access application to be missing — a client gets in
+ * on a code the operator mints, so the only way this half breaks is having no way to mint one.
+ * `deckhand pair` reaches the running server with a LOCAL credential, so no local credential
+ * means no codes, and the connector can never be authorized by anybody.
  *
  * Not a warning. A connector nobody can approve is an outage, and nothing else reports it.
  */
@@ -489,10 +489,10 @@ export function checkConnectorAuth(tokens: { name: string }[]): Check {
     return {
       name: "connector auth",
       ok: false,
-      detail: "no local credential, so `deckhand approve` cannot reach the server and nothing can be let in — `deckhand token add me`",
+      detail: "no local credential, so `deckhand pair` cannot reach the server and no client can ever be let in — `deckhand token add me`",
     };
   }
-  return { name: "connector auth", ok: true, detail: "approval is per request; `deckhand approve` lists what is waiting" };
+  return { name: "connector auth", ok: true, detail: "a client gets in only with a code from `deckhand pair`" };
 }
 
 export async function runDoctor(opts: { smoke?: boolean } = {}): Promise<{ checks: Check[]; ok: boolean }> {

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { PairingStore, CODE_TTL_MS, MAX_ATTEMPTS } from "./pairing.ts";
+import { PairingStore, CODE_TTL_MS, LOCKOUT_MS, MAX_ATTEMPTS } from "./pairing.ts";
 
 /** A clock the test moves by hand: waiting ten real minutes is not a test. */
 function clock(start = 1_000): { now: () => number; advance: (ms: number) => void } {
@@ -31,21 +31,38 @@ describe("the pairing code", () => {
 
   // The whole threat model: the URL is public, so anyone can submit. Guessing is the only move
   // left, and it has to be bounded or ~4.8e8 possibilities is just a slow afternoon.
-  it("destroys the code after a handful of wrong guesses", () => {
+  it("locks a source out after a handful of wrong guesses", () => {
     const store = new PairingStore();
     const { code } = store.mint();
-    for (let i = 0; i < MAX_ATTEMPTS; i++) assert.equal(store.claim("AAA-AAA"), false);
-    assert.equal(store.claim(code), false, "the real code must die too — otherwise the burst simply continues");
-    assert.equal(store.outstanding(), null);
+    for (let i = 0; i < MAX_ATTEMPTS; i++) assert.equal(store.claim("AAA-AAA", "1.2.3.4"), false);
+    assert.equal(store.claim(code, "1.2.3.4"), false, "even the right code, once that source has spent its tries");
   });
 
-  it("counts guesses against the code, so minting again gives a fresh budget", () => {
+  // Burning the CODE on wrong guesses was the first version, and it hands every stranger a way
+  // to destroy every code the operator mints, as fast as they can loop.
+  it("leaves the code usable by the person the operator is actually talking to", () => {
+    const store = new PairingStore();
+    const { code } = store.mint();
+    for (let i = 0; i < MAX_ATTEMPTS * 4; i++) store.claim("AAA-AAA", "attacker");
+    assert.ok(store.outstanding(), "a guesser must not be able to shred the operator's code");
+    assert.equal(store.claim(code, "the-visitor"), true);
+  });
+
+  it("gives each source its own budget, and a fresh mint a fresh start", () => {
     const store = new PairingStore();
     store.mint();
-    for (let i = 0; i < MAX_ATTEMPTS - 1; i++) store.claim("AAA-AAA");
+    for (let i = 0; i < MAX_ATTEMPTS; i++) store.claim("AAA-AAA", "attacker");
     const { code } = store.mint();
-    for (let i = 0; i < MAX_ATTEMPTS - 1; i++) store.claim("AAA-AAA");
-    assert.equal(store.claim(code), true, "a retry is not the previous attempt's leftovers");
+    assert.equal(store.claim(code, "attacker"), true, "the lockout belongs to the code it was earned against");
+  });
+
+  it("forgets the lockout once it has served its time", () => {
+    const c = clock();
+    const store = new PairingStore({ now: c.now });
+    const { code } = store.mint();
+    for (let i = 0; i < MAX_ATTEMPTS; i++) store.claim("AAA-AAA", "typo-prone");
+    c.advance(LOCKOUT_MS + 1);
+    assert.equal(store.claim(code, "typo-prone"), true, "somebody who really did mistype five times is not banned");
   });
 
   it("expires", () => {

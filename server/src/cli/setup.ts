@@ -244,8 +244,8 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
       ok(`wrote ${paths.config()}`);
     }
 
-    // Nothing here decides who may connect: nobody may, until the operator approves a
-    // request one at a time (`deckhand approve`). There is no list to seed and no
+    // Nothing here decides who may connect: nobody may, until the operator mints a code
+    // (`deckhand pair`) and somebody types it in. There is no list to seed and no
     // question to ask, which is why setup finishes on one answer.
     step("Local credential");
     const list = deckhandCli(["token", "list"]);
@@ -296,14 +296,14 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
     say("  └─────────────────────────────────────────────────────────────┘");
     say("");
     say(`   1.  Paste  https://${hostname}/mcp  into claude.ai → Settings → Connectors → Add`);
-    say("   2.  Click Connect. Claude shows a code — read it out and you are done.");
+    say("   2.  Click Connect. The page asks for a pairing code — run `deckhand pair` here");
+    say("       and give them the code it prints. They type it in.");
     say("");
     say("   The URL is not a password — share it with your organisation if you like.");
-    say("   Nothing connects until that code is approved here, one client at a time.");
+    say("   Nothing connects without a code minted on this Mac, one client at a time.");
     say("");
-    say("   AGENT: reply in TWO LINES — paste the URL, then ASK THEM FOR THE CODE it shows.");
-    say("   When they give it to you, run `deckhand approve <CODE>` yourself. Do not tell them");
-    say("   to run it: typing a command is your job, reading the code is theirs. Do not");
+    say("   AGENT: reply in TWO LINES — paste the URL, then run `deckhand pair` and give them");
+    say("   the code. Do not tell them to run it: typing a command is your job. Do not");
     say("   summarise this output or report status — they can see all of it above.");
   } catch (e) {
     if (e instanceof SetupError) {

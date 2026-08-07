@@ -16,7 +16,8 @@ import { randomInt, timingSafeEqual } from "node:crypto";
  * So nothing incoming is stored at all. The operator MINTS a code here (`deckhand pair`) and a
  * request completes only if it carries that code. A flood has nothing to fill: no list, no slot
  * to take, no request for the operator to pick out of a crowd. The only move left is guessing,
- * which is a number, and {@link MAX_ATTEMPTS} decides it.
+ * which is a number, and {@link MAX_ATTEMPTS} bounds it PER SOURCE — see there for why the
+ * budget cannot belong to the code.
  */
 
 /** How long a minted code stays usable. Long enough to get to the browser, short enough that a
@@ -24,15 +25,22 @@ import { randomInt, timingSafeEqual } from "node:crypto";
 export const CODE_TTL_MS = 10 * 60 * 1000;
 
 /**
- * Wrong guesses before the code is destroyed.
+ * Wrong guesses a single SOURCE gets before it is locked out for {@link LOCKOUT_MS}.
  *
- * The code is about 4.8e8 possibilities, which is only strong if guessing is bounded:
- * submitting is unauthenticated, so an attacker tries as fast as the network allows. Burning
- * the code after a handful of misses turns an online search into "make the operator mint
- * again", which they notice. Deliberately small — somebody typing off their own screen does not
- * need five tries, and being wrong costs one command.
+ * Not "wrong guesses before the code dies", which is what this was first. Submitting is
+ * unauthenticated, so destroying the code on five misses handed every stranger a way to burn
+ * every code the operator mints, as fast as they can loop — the operator would re-mint into a
+ * shredder, forever, and the earlier comment's "which they notice" badly understated it.
+ *
+ * Locking out the SOURCE keeps both properties: a guesser gets nowhere, and the code survives
+ * for the person the operator is actually talking to. The budget is per source and per code, so
+ * a fresh mint is a fresh start and one bad actor cannot spend somebody else's tries.
  */
 export const MAX_ATTEMPTS = 5;
+
+/** How long a source that has spent its guesses is refused. Long against a search, short
+ *  against a typo — and a person who really did mistype five times can be re-minted to. */
+export const LOCKOUT_MS = 60 * 1000;
 
 /** Letters that cannot be misread aloud or on a screen: no O/0, I/1, S/5, B/8. */
 const ALPHABET = "ACDEFGHJKLMNPQRTUVWXY2346789";
@@ -51,7 +59,7 @@ export interface PairingStoreOptions {
 }
 
 export class PairingStore {
-  private active: { code: string; expiresMs: number; attempts: number } | null = null;
+  private active: { code: string; expiresMs: number; attempts: Map<string, { count: number; until: number }> } | null = null;
   private readonly now: () => number;
   private readonly pick: (n: number) => number;
   private readonly ttlMs: number;
@@ -76,7 +84,7 @@ export class PairingStore {
     // Two groups: a single run of six is read back wrong often enough to matter when the whole
     // job of the string is surviving a trip between two screens.
     const code = `${take(3)}-${take(3)}`;
-    this.active = { code, expiresMs: this.now() + this.ttlMs, attempts: 0 };
+    this.active = { code, expiresMs: this.now() + this.ttlMs, attempts: new Map() };
     return { code, expiresMs: this.active.expiresMs };
   }
 
@@ -93,17 +101,21 @@ export class PairingStore {
    * constant time and case-insensitively — it crosses from one screen to another by hand, and
    * the comparison must not leak how much of a guess was right.
    */
-  claim(candidate: string): boolean {
+  claim(candidate: string, source = "unknown"): boolean {
     this.expire();
     if (!this.active) return false;
+    const record = this.active.attempts.get(source) ?? { count: 0, until: 0 };
+    if (record.until > this.now()) return false; // locked out: not even a correct code counts
     const want = Buffer.from(this.active.code, "utf8");
     const got = Buffer.from(String(candidate ?? "").trim().toUpperCase(), "utf8");
     if (got.length === want.length && timingSafeEqual(got, want)) {
       this.active = null;
       return true;
     }
-    // Counted before returning, so a burst of guesses cannot outrun the counter.
-    if (++this.active.attempts >= this.maxAttempts) this.active = null;
+    // Counted before returning, so a burst cannot outrun the counter.
+    record.count += 1;
+    if (record.count >= this.maxAttempts) record.until = this.now() + LOCKOUT_MS;
+    this.active.attempts.set(source, record);
     return false;
   }
 

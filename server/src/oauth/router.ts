@@ -7,14 +7,13 @@ import type { PairingStore } from "./pairing.ts";
 //
 // It exists for one reason: a connector URL added to a Claude organisation is
 // visible to that whole organisation, so the URL cannot be the credential. With
-// OAuth, every person authorizes individually — and nobody is authorized by
-// arriving here. `/oauth/authorize` PARKS the request and shows a code; the
-// operator approves it on the Mac with `deckhand approve`, matching that code.
+// OAuth, every client authorizes individually — and nobody is authorized by
+// arriving here. `/oauth/authorize` asks for a PAIRING CODE, and the only place one
+// exists is `deckhand pair` on the machine.
 //
 // So the check is not "who are you" — deckhand has no way to know and no list to
-// check you against — it is "did the person at the machine say yes to THIS
-// request". A colleague holding the same URL gets a parked request and a code
-// nobody will match.
+// check you against — it is "did the person at the machine hand you a code". A
+// colleague holding the same URL is asked for one they have not got.
 // ---------------------------------------------------------------------------
 
 export interface OAuthRouterDeps {
@@ -59,8 +58,10 @@ button{width:100%;margin-top:.9rem;padding:.8rem 1rem;font:inherit;font-weight:6
 button:hover{transform:translateY(-1px)}button:active{transform:scale(.985)}
 button[disabled]{opacity:.45;cursor:default;transform:none}
 .err{color:#c98b7f;font-size:.88rem;margin:.9rem 0 0}
-.hint{color:#8a8a86;font-size:.8rem;margin:1.1rem 0 0}
-</style></head><body><main class="card"><h1>${esc(title)}</h1>${sub ? `<p class="sub">${sub}</p>` : ""}${body}</main></body></html>`,
+.hint{color:#8a8a86;font-size:.8rem;margin:.6rem 0 0}
+.who{color:#c6c7c1;font-size:.85rem;margin:1.3rem 0 0;padding-top:1.1rem;border-top:1px solid #2a2a2a}
+.who strong{color:#fcfcf6;font-weight:600}.who span{color:#8a8a86;font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.8rem}
+</style></head><body><main class="card"><h1>${esc(title)}</h1>${sub ? `<p class="sub">${esc(sub)}</p>` : ""}${body}</main></body></html>`,
   );
 }
 
@@ -77,7 +78,7 @@ button[disabled]{opacity:.45;cursor:default;transform:none}
  */
 function codeForm(
   res: express.Response,
-  req: { clientId: string; redirectUri: string; state: string | null; challenge: string },
+  req: { clientId: string; redirectUri: string; state: string | null; challenge: string; clientName: string },
   error?: string,
 ): void {
   const hidden = (name: string, value: string): string => `<input type="hidden" name="${name}" value="${esc(value)}">`;
@@ -92,8 +93,12 @@ function codeForm(
               spellcheck="false" placeholder="XXX-XXX" maxlength="7" autofocus aria-label="Pairing code">
        <button id="b" type="submit" disabled>Connect</button>
        ${error ? `<p class="err">${esc(error)}</p>` : ""}
-       <p class="hint">Runs <code>deckhand pair</code> on the Mac to get one.</p>
      </form>
+     <!-- WHO is asking. A pairing code proves the operator meant to connect something; without
+          this it does not say WHAT, and a stranger can hand them a link to this very page on
+          their own trusted hostname and collect the grant. -->
+     <p class="who">Connecting <strong>${esc(req.clientName)}</strong><br><span>${esc(new URL(req.redirectUri).host)}</span></p>
+     <p class="hint">Run <code>deckhand pair</code> on the Mac to get a code.</p>
      <script>
        const c = document.getElementById("c"), b = document.getElementById("b");
        const format = (v) => {
@@ -125,6 +130,14 @@ const singleString = (v: unknown): string | null => (typeof v === "string" && v 
  */
 export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
   const router = express.Router();
+  /**
+   * Clients that have reached the authorize page and not finished.
+   *
+   * Bounded by the client cap itself and cleared on token exchange, so it cannot grow: this is
+   * a shield for the seconds between "the operator read me a code" and "the exchange landed",
+   * not a session store.
+   */
+  const inFlight = new Set<string>();
   router.use(express.json({ limit: "64kb" }));
   router.use(express.urlencoded({ extended: false, limit: "64kb" }));
 
@@ -142,12 +155,18 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
       oauthError(res, 400, "invalid_redirect_uri", "redirect_uris must be https");
       return;
     }
-    const client = deps.store.registerClient({
-      redirectUris: uris,
-      // Bounded: this name becomes the grant's label and the audit trail's actor, and it
-      // arrives from an unauthenticated endpoint.
-      name: (singleString(body.client_name) ?? "unnamed client").slice(0, 60),
-    });
+    const client = deps.store.registerClient(
+      {
+        redirectUris: uris,
+        // Bounded: this name becomes the grant's label and the audit trail's actor, and it
+        // arrives from an unauthenticated endpoint.
+        name: (singleString(body.client_name) ?? "unnamed client").slice(0, 60),
+      },
+      // Clients mid-flow are not idle, whatever the grant table says. Without this the cap is a
+      // weapon: register past it and the client currently completing a pairing is evicted, so
+      // its token exchange fails after the code was already spent.
+      inFlight,
+    );
     res.status(201).json({
       client_id: client.clientId,
       client_id_issued_at: Math.floor(client.createdMs / 1000),
@@ -161,7 +180,7 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
     });
   });
 
-  // -- Authorize: park the request, show the code, wait for the operator ------
+  // -- Authorize: ask for the code the operator minted ------------------------
   router.get("/authorize", (req, res) => {
     const q = req.query as Record<string, unknown>;
     const clientId = singleString(q.client_id);
@@ -205,7 +224,8 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
 
     // Nothing is stored and nothing waits. The request carries no authority; the CODE does,
     // and the operator minted it at the machine.
-    codeForm(res, { clientId: client.clientId, redirectUri, state, challenge });
+    inFlight.add(client.clientId);
+    codeForm(res, { clientId: client.clientId, redirectUri, state, challenge, clientName: client.name });
   });
 
   // -- The visitor submits the code the operator minted -----------------------
@@ -222,12 +242,17 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
       page(res, 400, "Cannot authorize that request", `<p>This form no longer matches a client deckhand knows.</p>`);
       return;
     }
-    if (!deps.pairing.claim(singleString(b.code) ?? "")) {
+    // Keyed by source so one guesser cannot spend the budget of the person the operator is
+    // actually talking to. Behind the tunnel this is Cloudflare's header; direct on loopback it
+    // is the socket. Spoofable only by something already inside, which has the token anyway.
+    const source = req.header("cf-connecting-ip") ?? req.ip ?? "unknown";
+    if (!deps.pairing.claim(singleString(b.code) ?? "", source)) {
       // Deliberately one message for wrong, expired, spent and never-minted. Telling them
       // apart tells an attacker whether a code exists to be guessed.
-      codeForm(res, { clientId, redirectUri, state, challenge }, "That code is not valid. Ask for a fresh one.");
+      codeForm(res, { clientId, redirectUri, state, challenge, clientName: client.name }, "That code is not valid. Ask for a fresh one.");
       return;
     }
+    inFlight.delete(clientId);
     const authCode = deps.store.mintCode({ clientId, redirectUri, label: client.name, codeChallenge: challenge });
     const url = new URL(redirectUri);
     url.searchParams.set("code", authCode);

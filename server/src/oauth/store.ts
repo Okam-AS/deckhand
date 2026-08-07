@@ -152,7 +152,7 @@ export class OAuthStore {
    *
    * `/oauth/register` is UNAUTHENTICATED, as RFC 7591 dynamic registration is — a client has
    * no credential yet, which is the point. Registering buys nothing on its own: a client_id
-   * still cannot obtain a grant until the operator approves the request it parks.
+   * still cannot obtain a grant until a pairing code the operator minted is spent on it.
    *
    * What it does buy is a row on disk, and an unbounded number of them is a disk-fill on a
    * machine whose whole job needs free space for simulators and builds. So the set is capped
@@ -177,11 +177,13 @@ export class OAuthStore {
   /**
    * `busy` names clients that must survive eviction beyond those holding a grant.
    *
-   * "Holds no grant" looked like "idle" and is not: a client is grant-less for the whole
-   * authorize → approve → resume → token window, which is exactly the human step this design is
-   * built around. Registration is unauthenticated, so a stranger could register past the cap and
-   * evict the operator's in-flight client — the operator then approves, the browser resumes, and
-   * the token exchange fails `invalid_client` with the approval already burned.
+   * "Holds no grant" looked like "idle" and is not: a client is grant-less from the moment it
+   * registers until its token exchange completes, which spans the whole human step — reading a
+   * code off one screen and typing it into another. Registration is unauthenticated, so a
+   * stranger can register past the cap and evict the client mid-flow: the pairing code is spent,
+   * the authorization code is issued, and `/token` then answers `invalid_client`. Reproduced
+   * end to end before this argument existed, and repeatable indefinitely, so pairing never
+   * completes.
    */
   private evictIdleClients(busy: ReadonlySet<string> = new Set()): void {
     if (this.clients.size <= MAX_CLIENTS) return;

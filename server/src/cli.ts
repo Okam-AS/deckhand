@@ -267,15 +267,15 @@ function cmdTokenList(): void {
  * The answer no longer contains a secret. The credential used to be a path segment in this
  * URL, which was safe only while the URL was, and a connector added in Claude Enterprise is
  * visible to the whole organisation. Now the URL names the endpoint and nothing else; who may
- * actually connects is decided one request at a time, by the operator, with `deckhand approve`.
+ * actually connects needs a pairing code minted here with `deckhand pair`.
  */
 function cmdTokenMine(): void {
   const hostname = tryHostname();
   if (!hostname) fail("no hostname in config.yaml — run `deckhand setup --hostname ...` first");
   console.log(`https://${hostname}/mcp`);
   console.error(`\nPaste that into claude.ai → Settings → Connectors → Add, then click Connect.`);
-  console.error(`Claude will show a code and wait. AGENT: ask the user for that code, then run`);
-  console.error(`\`deckhand approve <CODE>\` yourself — do not hand them the command.`);
+  console.error(`The page it opens asks for a pairing code. AGENT: run \`deckhand pair\` and give`);
+  console.error(`them the code it prints — do not hand them the command.`);
   console.error(`The URL itself is not a credential — sharing it with your organisation is fine,`);
   console.error(`because nothing connects until somebody at this Mac approves it.`);
 }
@@ -324,8 +324,6 @@ async function pairCall(path: string, body?: unknown): Promise<Record<string, un
   if (!res.ok) fail(typeof json.detail === "string" ? json.detail : `the server refused: ${res.status}`);
   return json;
 }
-
-const waited = (ms: number): string => (ms < 60_000 ? `${Math.round(ms / 1000)}s ago` : `${Math.round(ms / 60_000)}m ago`);
 
 /**
  * Mint a pairing code — the only way a new client gets in.

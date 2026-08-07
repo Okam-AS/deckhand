@@ -9,10 +9,10 @@ A connector added in a Claude team or Enterprise organisation is visible to ever
 nothing may depend on that URL staying private. It used to — the credential was a path segment
 in it, which handed the whole organisation a working connector.
 
-So the URL decides nothing and there is no list of who may connect. **The operator approves
-each client, once, at the machine.** `/oauth/authorize` parks the request and shows a code;
-`deckhand approve` matches that code and mints. The secret is a person's hand on their own
-Mac, which is the one secret a shared URL cannot leak.
+So the URL decides nothing and there is no list of who may connect. **The operator mints a
+pairing code at the machine and the visitor types it in.** `deckhand pair` mints;
+`/oauth/authorize` asks. The secret is a person's hand on their own Mac, which is the one
+secret a shared URL cannot leak.
 
 Hardest rules:
 
@@ -28,9 +28,17 @@ Hardest rules:
   unauthenticated, so a stranger parks faster than a person can walk to the Mac, and the
   operator's own request is gone before they read its code. Nothing incoming is stored now, so
   there is nothing to flood. → `oauth/pairing.test.ts`
-- **The code is single-use, replaced on re-mint, and dies after a few wrong guesses.** Guessing
-  is the only move a stranger has left, and ~4.8e8 possibilities is only strong while it is
-  bounded. → `oauth/pairing.test.ts` "destroys the code after a handful of wrong guesses"
+- **The code is single-use and replaced on re-mint, and the guess budget belongs to the SOURCE,
+  not to the code.** Guessing is the only move a stranger has left, and ~4.8e8 possibilities is
+  only strong while it is bounded — but burning the CODE on wrong guesses hands every stranger a
+  way to shred every code the operator mints, as fast as they can loop. → `oauth/pairing.test.ts` "leaves the code usable by the person the operator is actually talking to"
+- **The page says WHO is connecting.** A code proves the operator meant to connect something; it
+  does not say what. Registration is unauthenticated and any https redirect is accepted, so
+  without the client name and redirect host on the page, a stranger can hand the operator a link
+  to this very page on their own trusted hostname and collect the grant.
+- **A client mid-flow is not evictable.** The registry cap is otherwise a weapon: register past
+  it and the client currently completing a pairing is evicted, so its token exchange fails
+  `invalid_client` after the code was already spent — repeatable, so pairing never completes.
 - **Mint after claim, once.** `/oauth/authorize`'s POST is the only place an authorization code
   is minted, and it sits behind `pairing.claim`. A second mint is a second way in. → `oauth/router.test.ts` "mints only after the pairing code has been spent"
 - **The code lives in memory, never on disk.** It is worth minutes, and a code that survived a

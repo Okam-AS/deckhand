@@ -124,7 +124,7 @@ describe("checkConnectorAuth", () => {
   it("passes once there is a local credential to approve with", () => {
     const c = checkConnectorAuth([{ name: "me" }]);
     assert.equal(c.ok, true);
-    assert.match(String(c.detail), /per request/);
+    assert.match(String(c.detail), /deckhand pair/);
   });
 
   // An OUTAGE the operator has no other signal for: the connector URL still resolves, still

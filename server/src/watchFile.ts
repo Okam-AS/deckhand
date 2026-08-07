@@ -3,7 +3,7 @@ import { basename, dirname } from "node:path";
 
 // ---------------------------------------------------------------------------
 // "Notice when this file changes", with the three details that were each learned
-// from a bug — extracted here so a second watcher cannot learn them again.
+// from a bug — extracted here so the next watcher does not learn them again.
 //
 // It is deliberately dumb: it says WHEN, never what. Deciding whether a reload is
 // safe (keep the old list? honour an empty one?) belongs to the caller, because

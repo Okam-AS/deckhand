@@ -835,7 +835,7 @@ operator saying so, once, per client, at the Mac**:
   code and walk to the Mac. Bounding the queue does not help — anything a stranger can create,
   a stranger can create enough of. Storing nothing incoming removes the class.
 - The two halves are protected differently, and that asymmetry IS the design. The public half
-  (`/oauth/authorize`, `/oauth/pending`, `/oauth/resume`) proves nothing and needs nothing. The
+  (`/oauth/register`, `/oauth/authorize`) proves nothing and needs nothing. The
   deciding half (`/pair/*`) needs a `tokens.yaml` credential — obtainable only by being at the
   machine. An OAuth grant deliberately cannot approve, or one connector could wave the next one
   through.
