@@ -13,7 +13,7 @@ web/mobile/desktop, in Claude Code, in Claude Routines, or any MCP client — ca
 1. Boot iOS simulators and Android emulators running **any branch or PR** of pre-registered
    mobile-app repos (built locally on the mini from source).
 2. Reply to the user with a **link**: one calm browser page showing all requested devices
-   live, with full touch control, optionally password-protected.
+   live, with full touch control, optionally PIN-protected.
 3. See and drive the devices itself (`screenshot`, `describe`, `ui`) so it can verify the app
    is in the right state *before* handing over the link.
 
@@ -22,7 +22,7 @@ Claude calls `start_preview` with three devices, polls `preview_status`, navigat
 onboarding screen with `ui`/`describe`, verifies with `screenshot`, then answers with the
 viewer URL.
 
-Deckhand deliberately does **not** have: a dashboard SPA, user accounts/login, OAuth (v1),
+Deckhand deliberately does **not** have: a dashboard SPA, user accounts/login,
 webhooks, a database, CI integration, WebRTC/TURN infrastructure, or any arbitrary-command
 execution surface.
 
@@ -43,7 +43,7 @@ implementation:
 | MCP auth | An `Authorization: Bearer` credential at `/mcp` — **never a path segment**. Two ways to hold one, both per-person: an **OAuth grant** (the claude.ai path), or a local `tokens.yaml` token for a client on the machine that has no browser. Every credential is still the operator's, so authenticating IS authorizing and there are still no roles. **Superseded (2026-08-07): the path token, and the "no OAuth" decision with it.** `/mcp/<token>` was safe only while the connector URL was a secret, and it is not: a connector added in **Claude Enterprise is visible to the whole organisation**, so everyone in it could read the credential out of the URL and drive this Mac. OAuth is what makes each client authorize individually; completing it needs a pairing code the operator mints at the machine — `deckhand pair`, typed into the page `/oauth/authorize` serves (§11.6). The original worry — many people on one Mac's six device slots — is answered by that approval, not by hoping a URL stays private. |
 | GitHub access | **Minimal GitHub App** — permissions `Contents: Read-only` (optionally `Pull requests: Read-only`), **no webhooks, no OAuth, no callback URLs**. One App ID + private key PEM on the mini. Each repo org installs the app and picks repos. Hourly installation tokens, injected into git via ephemeral `GIT_ASKPASS`. The set of app installations *is* the repo allowlist. **Amended (2026-07-10):** a **fine-grained PAT** (`Contents: Read-only`, selected repos) is an equally supported auth mode — same tokenResolver seam, far less setup, and the mode agent-led onboarding (§6) walks new users through. The App remains the recommended path for multi-org installs. **Amended (2026-07-15): the access ladder.** Asking a user for a PAT when the machine can already read the repo is bad onboarding, so credentials resolve in order: PAT file → GitHub App → (if `githubAmbient`, default on) the deckhand user's **gh CLI session** (`gh auth token`, in-memory, same `GIT_ASKPASS` handling) → anonymous git (public repos; gated on `allowPublicRepos`) → the one-time setup URL as **last resort**. Explicit credentials always shadow ambient ones, so an App's installation set remains the allowlist. Before any of this, onboarding steers to a **local checkout** when one exists (§6). Ambient tradeoff recorded in §11.4. |
 | Multi-org / multi-dev | **Dropped (2026-08-05.)** One install, one operator, however many repo orgs their credential reaches. A second developer runs their own deckhand; a colleague who only needs to WATCH uses the share link, which needs no token. |
-| Viewer | One page (ours — not serve-sim's preview UI), multiple devices side by side, live video + **touch control on** (not view-only), public or password-protected share links. |
+| Viewer | One page (ours — not serve-sim's preview UI), multiple devices side by side, live video + **touch control on** (not view-only), public or PIN-protected share links. |
 | Setup story | Setup on the mini will be performed **by an AI over SSH**. `AGENTS.md`/`CLAUDE.md` must be an agent runbook; `deckhand init` must be idempotent/resumable with non-interactive flags; `deckhand doctor` must prove the install works end to end. Target: only 3 human questions (GitHub App ID + PEM, tunnel hostname, the token name). |
 | State | No database. `config.yaml`, `apps.yaml`, `tokens.yaml` + a small `state.json` (atomic writes) for restart recovery. Previews are ephemeral. |
 | Host | Apple Silicon Mac mini (serve-sim's helper binary is arm64-only). |
@@ -94,7 +94,10 @@ Node ≥ 22, TypeScript, ESM. Key deps: `@modelcontextprotocol/sdk`, `express`, 
 `yaml`, `ws` (proxy), `react`+`vite` (viewer only), `serve-sim` (pinned). **No database
 driver.** Keep the dependency list ruthlessly short.
 
-## 5. Configuration files (all under `~/.deckhand/`, created by `deckhand init`)
+## 5. Configuration files (all under `~/.deckhand/`)
+
+`deckhand init` writes `config.yaml`, plus empty `apps.yaml`/`tokens.yaml` if they are not
+there. `oauth.json` and `state.json` are the server's, written as it runs.
 
 ### config.yaml
 
@@ -188,7 +191,7 @@ Server: `@modelcontextprotocol/sdk` `McpServer` + `StreamableHTTPServerTransport
 (`{ok: false, error: {code, message, hint}}`) — never bare exceptions — so Claude can relay
 actionable messages ("missing credential for owner X — run `deckhand …` on the mini").
 
-### The onboarding contract (Phase 3)
+### The onboarding contract
 
 The MCP is **self-onboarding**: the agent connected to it must be able to take a
 brand-new user from empty install to first preview *without having read this plan*. The
@@ -226,7 +229,7 @@ doctor-builds, reports `ready` → agent offers the first `start_preview`.
 | Tool | Input → Output |
 |---|---|
 | `list_apps` | → apps with `{id, repo, type, defaultBranch, lastDoctor}` |
-| `list_devices` | → available iOS runtimes + device types (`simctl list -j`), Android API levels/system images (P2), connected PHYSICAL devices (`physical`: paired iOS hardware via `devicectl`, adb-connected Android — detection only, `server/src/devices/physical.ts`; `targetable` says whether start_preview can build to them, false until a later phase; `errors` marks a FAILED scan as distinct from a zero-device one), current capacity vs `limits` |
+| `list_devices` | → available iOS runtimes + device types (`simctl list -j`), Android API levels/system images, connected PHYSICAL devices (`physical`: paired iOS hardware via `devicectl`, adb-connected Android — detection only, `server/src/devices/physical.ts`; `targetable` says whether start_preview can build to them, and is always false — building to physical hardware is not implemented; `errors` marks a FAILED scan as distinct from a zero-device one), current capacity vs `limits` |
 | `start_preview` | `{app, ref?, pr?, devices?: [{platform: "ios"\|"android", runtime?, model?}], alongside?: [{app?\|ref?\|worktree?\|repo?}], items?, share: {access: "public"\|"pin", pin?}}` → `{previewId, url, source, alreadyRunning, alongside?, nextStep, devices: [...]}`. **Idempotent**: an equivalent live preview (same app+source(+ref)) is returned as-is with `alreadyRunning: true` — this is also how the agent answers "what's the link?". No ref/pr on a `path` app → local dev mode. Returns immediately; work continues async. **Amended (2026-07-31):** `alongside` puts extra sources on the SAME page — the page is a set of panes, so one link and one PIN cover however many sources. `{}` means the app's registered `migratesFrom`. Each `alongside` entry carries the pane's own `previewId` — panes are drivable, but ONLY by that id: a pane runs under a synthetic app id, so by-app lookups answer `app_is_a_pane` with the pane's previewId instead of a "boot one" hint, and a plain `start_preview` of an app already on a page as a pane returns `duplicatesPane` with a leading warning in `nextStep` (the duplicate's devices are invisible to whoever watches the page). See "One page, several sources" below. |
 | `restart_preview` | `{previewId?}` or `{app?}` → rebuild in place on the same booted devices, same shareId/URL. Local: re-run the livesync build (needed after native-level changes; ordinary edits livesync by themselves). Git: fetch the ref's new tip, reset the worktree, rebuild — the post-push step of the loop. |
 | `preview_status` | `{previewId?}` or `{app?}` → per-device `{phase, detail, error?, logTail?}`; overall `{ready, url, source}` |
@@ -277,13 +280,13 @@ translator. Three small additions close the gap:
 1. **`migratesFrom`** (apps.yaml field): the TARGET app declares the SOURCE app id it is
    migrating from. Cross-app-validated (source must exist, not self). Set via
    `deckhand app add … --migrates-from <source>` or `add_app`.
-2. **Paired side-by-side view**: `shareState` gains an optional `pairedWith` block (the live
-   source preview's shareId + sanitized devices) whenever a target's `migratesFrom` source
-   is running. The viewer renders a second column reusing `DeviceFrame` against the source's
-   shareId — **zero new proxy/stream code**; PIN caveat: v1 assumes the source preview is
-   public (no cross-share unlock). `start_preview`'s `alongside` was the eventual entry point
-   (named `_preview` — a migration spans many sessions, so it re-opens the paired preview
-   idempotently rather than "running" a one-shot migration).
+2. **Showing both apps at once.** This was FIRST built as a singular pair — `shareState`
+   carried one optional `pairedWith` block naming the source preview, and the viewer entered
+   a compare mode against it. That shape was replaced (see "One page, several sources"
+   below) for two reasons worth not rediscovering: with no cross-share unlock, a PIN on the
+   target could not cover the source, so the reference pane had to be **public by
+   construction**; and one slot cannot say "old app + `main` + this branch". The live shape
+   is `panes[]` plus `pairedShareIds()`.
 3. **Parity ledger**: an agent-maintained `deckhand.migration.yaml` in the TARGET repo root
    (`screens: [{name, status, note?}]`). Deckhand **reads** it from the target's checkout
    (bounded single-file read) and surfaces it as `shareState.ledger`; the viewer renders a
@@ -297,7 +300,7 @@ translator. Three small additions close the gap:
 
 **One page, several sources (amended 2026-07-31).** The above was built as a *pair*: one
 working preview plus one reference, on two URLs, the reference forced public because there
-was no cross-share unlock (the "PIN caveat" above). That shape could not say "old app +
+was no cross-share unlock (see item 2 above). That shape could not say "old app +
 `main` + this branch", and it made comparing a mode the viewer entered rather than something
 a page simply was. Generalised:
 
@@ -306,8 +309,8 @@ a page simply was. Generalised:
    preview has exactly one pane, so the viewer renders a list and never asks "is this a
    comparison?". `CompareView` is deleted; there is one stage.
 2. **One link, one PIN.** `pairedShareIds()` fans the unlock out over the whole set, so the
-   "PIN caveat" is closed and the public-by-construction reference is gone. Panes still
-   stream from **their own** shareIds — §8's proxy contract ("only for device IDs belonging
+   public-by-construction reference is gone. Panes still stream from **their own**
+   shareIds — §8's proxy contract ("only for device IDs belonging
    to that share's preview") and §11.6's narrow allow-list are untouched, so no new route is
    forwarded and the streaming seam did not change. The proxy's unlock minting did: it fans
    out from a single partner to the set, FORWARD ONLY — a pane never mints for the page
@@ -391,7 +394,7 @@ Key orchestration rules (rationale in `docs/reference/auto-mate-learnings.md`):
 
 ### Build recipes (initial set — exact commands, pitfalls in the learnings doc)
 
-| Type | iOS | Android (P2) | Launch |
+| Type | iOS | Android | Launch |
 |---|---|---|---|
 | **expo** | `npx expo run:ios --device <udid> --no-bundler` | `npx expo run:android --device <serial> --no-bundler` | Start Metro (`npx expo start --dev-client --localhost --port 8081`, **never `--clear`**), pre-approve URL scheme in sim plist, open `exp+<slug>://expo-development-client/?url=…&disableOnboarding=1` |
 | **react-native** (bare) | guarded `pod install` (skip when `Podfile.lock` == `Pods/Manifest.lock`), then `npx react-native run-ios --udid <udid> --mode Release --no-packager` | `npx react-native run-android --deviceId <serial>` | `simctl launch` (Release embeds the JS bundle; no Metro) |
@@ -410,7 +413,7 @@ env-signature; restart only when env changes or health (`GET /status`) fails. En
   `boot` + `bootstatus -b`. serve-sim attaches to any booted simulator. Naming and teardown
   follow the pooling rules below (a per-preview `deckhand-<previewId>-<n>` device, deleted on
   teardown, only when `limits.reuseDevices` is off).
-- **Android (P2)**: enumerate installed system images (`sdkmanager --list_installed`); create
+- **Android**: enumerate installed system images (`sdkmanager --list_installed`); create
   AVD via `avdmanager create avd --force --name Deckhand_<...> --package <sysimg>`; **deckhand
   boots the emulator itself**: `emulator -avd <name> -no-audio -no-boot-anim` (headless flags
   per the P2 evaluation; keep GPU on for rendering), wait for `adb wait-for-device` +
@@ -509,7 +512,7 @@ interface AttachedStream {
 }
 ```
 
-### iOS backend: serve-sim (Phase 1)
+### iOS backend: serve-sim
 
 Full API notes in `docs/reference/serve-sim-notes.md` — read them before implementing.
 Essentials:
@@ -568,7 +571,8 @@ the proxy is the sole path in, with share auth enforced at upgrade time.
 paths, unlike the four-subpath device allow-list), plus a WebSocket branch under the
 same base for Vite HMR (the `vite-hmr` subprotocol is echoed and forwarded). This
 deliberately **inverts** the device proxy's narrow-allow-list posture (§11.6): the whole
-dev-server origin is exposed, gated only by the 144-bit `shareId` (+ optional password).
+dev-server origin is exposed, gated only by the 144-bit `shareId` + the PIN a web share
+always carries (see §9).
 Every other invariant holds — the upstream is strictly **that share's own loopback
 dev-server port** (resolved via `findByShareId`; no SSRF to sibling ports, no path
 traversal), `X-Forwarded-Proto: https` is preserved (so Vite emits `wss://` HMR behind
@@ -580,11 +584,7 @@ dir is never touched).
 ### Share model
 
 - `start_preview` issues a `shareId` = `crypto.randomBytes(18).toString("base64url")`.
-- `access: "public"` → the 144-bit URL is the gate. `access: "password"` → deckhand
-  generates a human-friendly password (or accepts one), stores `scrypt(password, salt)`,
-  and the viewer shows a password gate; successful unlock sets an HMAC-signed, expiring
-  cookie scoped to `/s/<shareId>`. WS upgrades validate the same cookie (or `?password=`,
-  which is stripped before any proxying).
+- `access: "public"` → the 144-bit URL is the gate.
 - **Amended (2026-07-16): numeric PIN protection (shipped).** `share.access` on
   `start_preview` is `"public" | "pin"` and is **required** — the tool fails
   (`needs_access_choice`) until the agent has asked the user, so every link is a
@@ -672,7 +672,8 @@ change eases in/out — nothing snaps.
   routinely carries other services), `npm link` the `deckhand` command onto PATH, write
   `config.yaml`, mint the connector URL, install the launchd agents, run doctor.
   Idempotent by design, so it is also the repair tool.
-- `deckhand init` — writes `config.yaml` only. `setup` calls it; you rarely call it directly.
+- `deckhand init` — writes `config.yaml`, and empty `apps.yaml`/`tokens.yaml` if absent.
+  `setup` calls it; you rarely call it directly.
   Flags: `--hostname`, `--port`, and optionally `--github-app-id`/`--github-app-pem` (the App
   is optional — without it deckhand uses the ambient `gh` CLI session).
 - `deckhand pair` — **mint a pairing code** (§11.6), good for ten minutes and one use. It is
@@ -745,13 +746,14 @@ change eases in/out — nothing snaps.
    SSH CLI, or the one-time setup URL (§6 onboarding contract — 128-bit single-use nonce,
    short TTL, direct browser→mini). Both land as mode-0600 files; the MCP/agent side sees
    only "configured: yes/no".
-6. **Shares**: 144-bit IDs, scrypt passwords, signed unlock cookies, password stripped
-   before proxying, shares die with their preview. The proxy exposes only video+input for
-   the share's own devices — serve-sim's other endpoints (camera, devtools, exec) are never
+6. **Shares**: 144-bit IDs, scrypt-hashed PINs, HMAC-signed unlock cookies, the
+   `deck_unlock` cookie stripped before proxying so the HMAC never reaches the app,
+   shares die with their preview. The proxy exposes only video+input for the
+   share's own devices — serve-sim's other endpoints (camera, devtools, exec) are never
    forwarded. **Web previews (2026-07-15) are the deliberate exception:** a `web` app's
    share proxies the whole dev-server origin (a dev server serves arbitrary paths), so the
-   144-bit `shareId` (+ optional password) is the gate rather than a narrow allow-list. The
-   upstream is confined to that share's own loopback dev-server port (no SSRF/traversal),
+   144-bit `shareId` (+ the PIN a web share always carries) is the gate rather than a
+   narrow allow-list. The upstream is confined to that share's own loopback dev-server port (no SSRF/traversal),
    still binds `127.0.0.1`, and is still idle-reaped — see §8 "Web proxy".
 
    **Accepted risk — cookie isolation between web shares (2026-07-27).** The web proxy
