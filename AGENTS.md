@@ -139,10 +139,14 @@ you caught into a check that fires next time. Four of this repo's guardrails exi
 because that step was skipped and a user found the defect instead.
 
 **You do not open the pull request. A human does.** `gh pr create` is refused by the
-PreToolUse hook (`scripts/hooks/bash-guard.ts` rule 1), and unlike every other gate
-here it has **no override** — opening a PR is the point where the work stops being
-cheap to change, and that decision is reserved for a person. What you can do is earn
-the handover.
+PreToolUse hook (`scripts/hooks/bash-guard.ts`), and unlike every other gate here it
+has **no override** — opening a PR is the point where the work stops being cheap to
+change, and that decision is reserved for a person. What you can do is earn the
+handover. That is the hook's ONLY rule: it used to also refuse commits and pushes at
+`main` and a `launchctl kickstart`, and both were dropped because a text matcher over a
+shell cannot enumerate the spellings of a command — three review rounds in a row found
+another one. `main` is protected server-side, so a push at it is refused by GitHub
+whatever a hook thinks; the restart rule is prose below and nothing else.
 
 **Never commit to `main`.** Every change — including a one-line fix — goes:
 

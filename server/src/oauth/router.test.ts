@@ -260,6 +260,58 @@ describe("OAuth authorization server", () => {
     assert.ok(store.clientCount() <= 65, `expected the client set to stay bounded, got ${store.clientCount()}`);
   });
 
+  // The cap above is only a bound if it BINDS. A client mid-flow is deliberately unevictable,
+  // and what makes one "mid-flow" is a GET of the authorize page — which needs no credential.
+  // So two anonymous requests per client made the ceiling advisory: measured against this same
+  // router, 2000 clients and a 440 kB oauth.json in 1.4 seconds, each register rewriting the
+  // whole file. The flood in the test above never noticed, because it only ever registers, so
+  // eviction always had a candidate.
+  it("refuses to register past the cap rather than growing the file, when every client is mid-flow", async () => {
+    const { challenge } = pkce();
+    let refusals = 0;
+    for (let i = 0; i < 90; i++) {
+      const res = await fetch(`${base}/oauth/register`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ redirect_uris: [REDIRECT], client_name: "Claude" }),
+      });
+      if (res.status === 503) {
+        refusals += 1;
+        continue;
+      }
+      assert.equal(res.status, 201);
+      // Reaching the authorize page is what marks a client busy, and it is a plain GET.
+      await authorize(authorizeUrl(((await res.json()) as { client_id: string }).client_id, challenge));
+    }
+    assert.ok(refusals > 0, "the ceiling has to refuse someone, or it is not a ceiling");
+    assert.ok(store.clientCount() <= 65, `the registry must stay bounded, got ${store.clientCount()}`);
+  });
+
+  // Capacity, not a bad request: an operator reading a 400 goes looking for a mistake in the
+  // client, and this one clears itself when the in-flight entries lapse.
+  it("says the refusal is temporary, and does not disturb a client that is already mid-flow", async () => {
+    const { verifier, challenge } = pkce();
+    const mine = await register();
+    await authorize(authorizeUrl(mine, challenge));
+    let last: Response | null = null;
+    for (let i = 0; i < 90 && (last === null || last.status !== 503); i++) {
+      last = await fetch(`${base}/oauth/register`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ redirect_uris: [REDIRECT] }),
+      });
+      if (last.status === 201) await authorize(authorizeUrl(((await last.json()) as { client_id: string }).client_id, challenge));
+    }
+    assert.equal(last?.status, 503);
+    assert.equal(((await last!.json()) as { error: string }).error, "temporarily_unavailable");
+    // And the flood must not have cost the client that was pairing when it started.
+    const code = codeFrom(await submitCode(await authorize(authorizeUrl(mine, challenge)), mine, challenge))!;
+    assert.equal(
+      (await token({ grant_type: "authorization_code", client_id: mine, redirect_uri: REDIRECT, code, code_verifier: verifier })).status,
+      200,
+    );
+  });
+
   it("rejects an unknown client at the token endpoint", async () => {
     const res = await token({ grant_type: "refresh_token", client_id: "nope", refresh_token: "x" });
     assert.equal(res.status, 401);

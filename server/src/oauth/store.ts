@@ -28,6 +28,16 @@ const CODE_TTL_MS = 60 * 1000;
  * of clients one operator has.
  */
 const MAX_CLIENTS = 64;
+
+/**
+ * Every registered client is in use, so there is no room and nobody may be displaced. The
+ * caller answers 503: it is a capacity condition that clears on its own, not a bad request.
+ */
+export class RegistryFullError extends Error {
+  constructor() {
+    super("the client registry is full and every client is mid-flow or holds a grant");
+  }
+}
 /**
  * Ceiling on pending authorization codes, for the same reason: each authorize that reaches the
  * end mints one, and they only leave on redemption or TTL.
@@ -156,10 +166,16 @@ export class OAuthStore {
    *
    * What it does buy is a row on disk, and an unbounded number of them is a disk-fill on a
    * machine whose whole job needs free space for simulators and builds. So the set is capped
-   * and the oldest client holding no grant is evicted. Evicting a client with a live grant
-   * would log that person out, so those are kept; if every client is in use the cap is
-   * exceeded rather than someone being kicked, because a bounded overshoot is a smaller
-   * failure than a silent logout.
+   * and the oldest client holding no grant is evicted. Evicting a client with a live grant, or
+   * one mid-flow, would break that person's pairing — so those are kept, and when NONE is
+   * evictable the registration is REFUSED.
+   *
+   * Refused, not overshot. "Exceed the cap rather than kick someone" reads gentler and is not a
+   * bound at all: `busy` is filled by an unauthenticated GET of the authorize page, so two
+   * anonymous requests per client made the ceiling advisory — 2000 clients and a 440 kB
+   * oauth.json in 1.4 seconds, measured against the real router, each register rewriting the
+   * whole file. Refusing costs a stranger nothing they cannot already do by holding the in-flight
+   * slots, and that jam lapses on the in-flight TTL; the disk did not lapse.
    */
   registerClient(input: { redirectUris: string[]; name?: string }, busy: ReadonlySet<string> = new Set()): OAuthClient {
     const client: OAuthClient = {
@@ -170,6 +186,10 @@ export class OAuthStore {
     };
     this.clients.set(client.clientId, client);
     this.evictIdleClients(busy, client.clientId);
+    if (this.clients.size > MAX_CLIENTS) {
+      this.clients.delete(client.clientId);
+      throw new RegistryFullError();
+    }
     this.save();
     return client;
   }

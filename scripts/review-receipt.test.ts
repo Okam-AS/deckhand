@@ -334,39 +334,6 @@ describe("the hook is wired to the repo, not to the cwd", () => {
     // covered below, against a scratch repo, where the answer does not depend on this branch.
   });
 
-  // Rule 2 must keep resolving branches against the CALLER's directory: `git -C <relative>` and
-  // a preceding `cd` are relative to where the command will actually run. Pointing the whole
-  // process at the project dir to find the receipt re-based both — it allowed a commit landing
-  // on main from one worktree and blocked one on a feature branch from another.
-  it("still judges a commit against the branch of the directory the command runs in", () => {
-    const repo = process.cwd();
-    const make = (name: string, branch: string) => {
-      const path = join(dir, name);
-      mkdirSync(path);
-      for (const args of [
-        ["init", "-q", "-b", branch],
-        ["config", "user.email", "t@example.com"],
-        ["config", "user.name", "t"],
-      ]) {
-        spawnSync("git", args, { cwd: path });
-      }
-      return path;
-    };
-    const onMain = make("on-main", "main");
-    const onFeature = make("on-feature", "feature/y");
-
-    const guard = (cwd: string, project: string) =>
-      spawnSync("npx", ["tsx", join(repo, "scripts/hooks/bash-guard.ts")], {
-        cwd,
-        input: JSON.stringify({ tool_input: { command: `git commit -m x` } }),
-        env: { ...process.env, CLAUDE_PROJECT_DIR: project },
-        encoding: "utf8",
-      });
-
-    assert.equal(guard(onMain, onFeature).status, 2, "a commit in a main checkout must be blocked whatever the project dir says");
-    assert.equal(guard(onFeature, onMain).status, 0, "and one on a feature branch must not be");
-  });
-
   it("reads the review state of the project, not of the directory it was fired from", () => {
     const repo = process.cwd();
     const scratch = join(dir, "elsewhere");

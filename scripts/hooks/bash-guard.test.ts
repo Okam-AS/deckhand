@@ -7,16 +7,13 @@ const converged: ReviewStatus = () => ({ ok: true, detail: "the review has conve
 /** The review has not — the message should say why as well as refusing. */
 const unconverged: ReviewStatus = () => ({ ok: false, detail: "only 1 review round on record ([0])" });
 
-const onBranch = (name: string) => () => name;
-
-const verdict = (cmd: string, branch = "feature/x", review = converged) => decide(cmd, onBranch(branch), review);
-const blocked = (cmd: string, branch = "feature/x", review = converged): string => {
-  const v = verdict(cmd, branch, review);
+const blocked = (cmd: string, review = converged): string => {
+  const v = decide(cmd, review);
   assert.equal(v.blocked, true, `expected to be blocked: ${cmd}`);
   return v.blocked ? v.reason : "";
 };
-const allowed = (cmd: string, branch = "feature/x", review = converged): void => {
-  assert.equal(verdict(cmd, branch, review).blocked, false, `expected to be allowed: ${cmd}`);
+const allowed = (cmd: string, review = converged): void => {
+  assert.equal(decide(cmd, review).blocked, false, `expected to be allowed: ${cmd}`);
 };
 
 describe("a human opens the pull request", () => {
@@ -90,8 +87,8 @@ describe("a human opens the pull request", () => {
   });
 
   it("points at the handover when the review converged, and at the reason when it did not", () => {
-    assert.match(blocked("gh pr create", "feature/x", converged), /review:handover/);
-    const notReady = blocked("gh pr create", "feature/x", unconverged);
+    assert.match(blocked("gh pr create", converged), /review:handover/);
+    const notReady = blocked("gh pr create", unconverged);
     assert.match(notReady, /only 1 review round on record/);
     assert.doesNotMatch(notReady, /review:handover/, "do not offer a handover that would refuse to write anything");
   });
@@ -136,172 +133,13 @@ describe("a human opens the pull request", () => {
     const exploded: ReviewStatus = () => {
       throw new TypeError("receipt.waived?.map is not a function");
     };
-    const reason = blocked("gh pr create --base main", "feature/x", exploded);
+    const reason = blocked("gh pr create --base main", exploded);
     assert.match(reason, /a human's call/);
     assert.match(reason, /could not be read/);
   });
 });
 
-describe("nothing lands on main directly", () => {
-  it("blocks a commit made while on main", () => {
-    assert.match(blocked(`git commit -m "fix"`, "main"), /nothing lands there directly/);
-  });
-
-  it("allows the same commit on a feature branch", () => {
-    allowed(`git commit -m "fix"`, "feature/x");
-  });
-
-  // `git -C <dir>` and a preceding `cd` both change which branch the command runs against, so
-  // reading the hook's own cwd would miss both.
-  it("resolves the branch the command would actually run in", () => {
-    const resolver = (dir: string | undefined) => (dir === "/tmp/wt" ? "main" : "feature/x");
-    assert.equal(decide(`git -C /tmp/wt commit -m "x"`, resolver, converged).blocked, true);
-    assert.equal(decide(`cd /tmp/wt && git commit -m "x"`, resolver, converged).blocked, true);
-    assert.equal(decide(`cd /tmp/other && git commit -m "x"`, resolver, converged).blocked, false);
-  });
-
-  // A merge, a cherry-pick and a revert all land a commit. Blocking only `git commit` states
-  // the rule and enforces a third of it.
-  it("blocks the other verbs that land a commit on main", () => {
-    for (const cmd of ["git merge --no-ff feature/x", "git cherry-pick abc123", "git revert abc123", "git -c user.name=x commit -m y"]) {
-      assert.match(blocked(cmd, "main"), /nothing lands there directly/);
-    }
-  });
-
-  // The branch was resolved as of BEFORE the command ran, so switching to main inside the same
-  // line landed the commit exactly where the rule forbids.
-  it("blocks a commit that switches to main first", () => {
-    assert.match(blocked("git switch main && git commit -m y", "feature/x"), /nothing lands there directly/);
-    assert.match(blocked("git checkout main && git cherry-pick abc123", "feature/x"), /nothing lands there directly/);
-  });
-
-  it("blocks a push AT main from a feature branch", () => {
-    for (const cmd of [
-      "git push origin main",
-      "git push origin HEAD:main",
-      "git push origin HEAD:refs/heads/main",
-      // Quoting it is the same push. Rule 2 matches raw text for exactly this reason — the
-      // quote-blanking that rule 1 needs is what let these three through.
-      `git push origin "main"`,
-      `git push origin 'main'`,
-      "git push origin main:main",
-      "git push origin +main",
-    ]) {
-      assert.match(blocked(cmd), /pushes at `main`/);
-    }
-  });
-
-  it("blocks a push at main that hides behind a global git option, and a delete of it", () => {
-    for (const cmd of ["git -C /tmp/wt push origin main", "git --no-pager push origin main", "git push origin :main"]) {
-      assert.match(blocked(cmd), /pushes at `main`/);
-    }
-  });
-
-  it("allows pushing the feature branch itself, including one that merely contains the word", () => {
-    allowed("git push -u origin feature/x");
-    allowed("git push origin feature/mainline-cleanup");
-    allowed(`git commit -m "push origin main is blocked"`);
-    // Two commands on one line are not one command. The raw-text match is scoped to the
-    // segment that runs the push, or reading main alongside a push became a blocked act.
-    allowed("git push origin feature/x; git diff main");
-    allowed("git log main --oneline && git push origin feature/y");
-  });
-
-  // Blocking what the rule does not cover is how a guard gets uninstalled — and `git merge-base`
-  // is what this repo's own review receipt runs on every command.
-  it("leaves the git verbs that do not land a commit alone, even on main", () => {
-    for (const cmd of [
-      "git merge-base origin/main HEAD",
-      "git merge-tree a b",
-      "git commit-tree abc123",
-      "git merge --abort",
-      "git cherry-pick --abort",
-      "git revert --abort",
-      "git commit --dry-run",
-    ]) {
-      allowed(cmd, "main");
-    }
-  });
-
-  // `--continue` is the opposite case: it finishes the commit the conflict interrupted.
-  it("still blocks finishing an interrupted cherry-pick on main", () => {
-    assert.match(blocked("git cherry-pick --continue", "main"), /nothing lands there directly/);
-  });
-
-  // The exemption was read from the whole line, so a commit MESSAGE naming one of the flags
-  // switched the rule off — and a commit about this guard is exactly where that text appears.
-  it("does not let a commit message name its way out of the rule", () => {
-    for (const cmd of [
-      `git commit -m 'handle --dry-run properly'`,
-      `git commit -am "note: --dry-run is exempt"`,
-      `git commit -m 'x --abort'`,
-      // One word, so blanking multi-word quotes does not reach it — and unquoting a
-      // whitespace-free span (what rule 1 needs) hands the flag straight to this rule.
-      `git commit -m '--dry-run'`,
-      `git commit -m "--abort"`,
-      "git commit -m --abort",
-      `git commit --message='--skip'`,
-      // One line, two commands: the merge's flag is not the commit's.
-      "git merge --abort; git commit -m x",
-    ]) {
-      assert.match(blocked(cmd, "main"), /nothing lands there directly/);
-    }
-  });
-
-  // Rule 1's spelling problem is rule 2's too, and it was worse here: every one of these landed
-  // a real commit on main against a throwaway bare remote while the guard said nothing.
-  it("blocks the landing verb however it is spelt", () => {
-    for (const cmd of [`git 'commit' -m x`, "git com'mit' -m x", "git \\commit -m x", `git "commit" -m x`]) {
-      assert.match(blocked(cmd, "main"), /nothing lands there directly/);
-    }
-    for (const cmd of [`git 'push'`, "git pu'sh'", "git \\push"]) {
-      assert.match(blocked(cmd, "main"), /pushes at `main`/);
-    }
-    // And the ref, which quoting used to hide from the push half.
-    for (const cmd of ["git push origin ma'in'", `git push origin ma"in"`, "git push origin \\main"]) {
-      assert.match(blocked(cmd, "feature/x"), /pushes at `main`/);
-    }
-  });
-
-  it("blocks a kickstart spelt with an escape", () => {
-    assert.match(blocked("launchctl \\kickstart -k gui/501/no.deckhand.server"), /EVERY booted simulator/);
-  });
-
-  it("blocks git am, which lands someone else's commit on the branch you are on", () => {
-    assert.match(blocked("git am patch.mbox", "main"), /nothing lands there directly/);
-    allowed("git am --abort", "main");
-  });
-
-  // The forms that push main WITHOUT naming it. The rule is stated as "whether by being on it
-  // or pushing at it", and the branch resolver was only ever consulted for the commit half.
-  it("blocks the pushes that reach main without spelling it", () => {
-    for (const cmd of ["git push --all origin", "git push --mirror origin"]) {
-      assert.match(blocked(cmd, "feature/x"), /pushes at `main`/);
-    }
-    // `@` is git's own synonym for HEAD, verified against a real remote: on main it updates
-    // refs/heads/main exactly as a bare push does.
-    for (const cmd of ["git push", "git push --force-with-lease", "git push origin", "git push origin HEAD", "git push origin @"]) {
-      assert.match(blocked(cmd, "main"), /pushes at `main`/);
-      allowed(cmd, "feature/x");
-    }
-  });
-});
-
-describe("restarting the server is not a quiet operation", () => {
-  // It tears down every booted simulator on the machine, so someone may be mid-test on a
-  // preview the agent cannot see. AGENTS.md says to say so first; this makes that happen.
-  it("blocks a kickstart of the deckhand server and says what it costs", () => {
-    const reason = blocked("launchctl kickstart -k gui/501/no.deckhand.server");
-    assert.match(reason, /EVERY booted simulator/);
-  });
-
-  it("leaves other launchctl work alone", () => {
-    allowed("launchctl list | grep deckhand");
-    allowed("launchctl kickstart -k gui/501/com.example.other");
-  });
-});
-
-describe("the quote blanking the rules rest on", () => {
+describe("the quote blanking the rule rests on", () => {
   it("blanks heredoc bodies and both quote styles", () => {
     assert.doesNotMatch(withoutQuotedText(`echo "gh pr create"`), /pr create/);
     assert.doesNotMatch(withoutQuotedText(`echo 'gh pr create'`), /pr create/);

@@ -15,7 +15,7 @@ npm run review:check    # exactly what the gate will say
 ```
 
 **You cannot open the pull request.** `gh pr create` is refused by the PreToolUse hook
-(`scripts/hooks/bash-guard.ts` rule 1) and there is no override — opening a PR is a
+(`scripts/hooks/bash-guard.ts`, its one rule) and there is no override — opening a PR is a
 person's decision, and a gate you can talk your way past is not one. What you can do is
 earn the handover: review to convergence, run the gates on a clean checkout, then
 `npm run review:handover`, which writes the PR body **only if the gate passes** and
@@ -187,11 +187,11 @@ npm run review:handover --silent <<'BODY'
 BODY
 ```
 
-**If the hook blocks that command, read what it says before rewording anything.** Rules 2–3
-match the raw text of each line, so a body that *quotes* `git push origin main` is refused —
-accepted over-blocking, not a bug, and it costs you nothing: write the body to a file and pass
-the path (`npm run review:handover --silent < body.md`). Rule 1 is the one with no override,
-and it is about running the command, never about writing about it.
+**If the hook blocks that command, read what it says before rewording anything.** The hook has
+one rule and it is about RUNNING `gh pr create`, never about writing about it — quoted spans and
+heredoc bodies are blanked before it matches, so a body that quotes the command is fine. If it
+does refuse anyway, write the body to a file and pass the path
+(`npm run review:handover --silent < body.md`) rather than rewording the reasoning.
 
 It refuses unless `review:check` passes, writes `.claude/pr-body.md`, and prints the
 command. Then say, in **one line**, that the user needs to run it. Don't restate the diff

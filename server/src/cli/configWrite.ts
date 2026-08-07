@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { writeFileSync, mkdirSync, renameSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { stringify as toYaml, parse as parseYaml } from "yaml";
-import { appSchema, appsSchema, configSchema, tokenSchema, type App, type TokenEntry } from "../config.ts";
+import { appSchema, appsSchema, tokenSchema, type App, type TokenEntry } from "../config.ts";
 import { parseEnvFile } from "../secrets.ts";
 import { paths } from "../paths.ts";
 

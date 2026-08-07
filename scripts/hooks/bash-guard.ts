@@ -1,32 +1,27 @@
 /**
- * PreToolUse hook (Bash): the mechanical backstop for the rules AGENTS.md states in prose.
- * Exit 2 blocks the command and feeds stderr back to the agent; exit 0 allows.
+ * PreToolUse hook (Bash): ONE rule — a human opens the pull request.
  *
- *   1. A human opens the pull request. `gh pr create` is refused for the agent, and so are the
- *      other forms of the same act — a POST to the `pulls` endpoint via `gh api` or `curl`,
- *      the `createPullRequest` mutation — with NO override, and failing CLOSED if the guard
- *      itself throws. It does not claim to catch every route (see {@link opensAPullRequest});
- *      the rule is AGENTS.md's, and this is what makes reaching for the obvious tool fail.
- *      Everything before it — review to convergence, the gates on a clean checkout — is what
- *      earns the handover; the handover itself is a person's decision, and a gate the agent
- *      can talk its way past is not one.
- *   2. Never commit or push to `main`, whether by being on it or pushing at it
- *      (AGENTS.md § "How work lands here").
- *   3. `launchctl kickstart` of the deckhand server tears down every booted simulator on the
- *      machine, so it is not a thing to do mid-session without saying so first.
+ * Exit 2 blocks the command and feeds stderr back to the agent; exit 0 allows. `gh pr create`
+ * is refused, and so are the other forms of the same act — a POST to the `pulls` collection via
+ * `gh api` or `curl`, the `createPullRequest` mutation — with NO override, and failing CLOSED if
+ * the guard itself throws. Everything before it — review to convergence, the gates on a clean
+ * checkout — is what earns the handover; the handover itself is a person's decision, and a gate
+ * the agent can talk its way past is not one.
  *
- * Text matching over-blocks by design: a command that merely QUOTES a banned pattern (a
- * heredoc, a grep) may be stopped too. That fails safe — rephrase — and is the accepted cost
- * of a backstop with no shell parser. Rule 1 is the exception and pays for it in
- * {@link opensAPullRequest}: writing ABOUT the command is routine while working on this file,
- * so it has to tell running it from mentioning it.
+ * It deliberately guards nothing else. It used to also refuse commits and pushes at `main` and a
+ * `launchctl kickstart` of the server, and both were dropped: a text matcher over a shell cannot
+ * enumerate the spellings of a command, so each review round found another one and the file grew
+ * a regex per round. Those two rules are also enforced elsewhere — `main` is a protected branch
+ * server-side, so a push at it is refused by GitHub whatever this file thinks. What remains here
+ * is the one act with no other backstop, and it does not claim to catch every route either (see
+ * {@link opensAPullRequest}): the rule is AGENTS.md's, and this makes reaching for the obvious
+ * tool fail. The restart rule now lives only in AGENTS.md § "Deploy after merging, not before".
  *
  * The policy is {@link decide}, a pure function; the process plumbing at the bottom runs only
- * when this file is the entry point. That split exists so the rules are covered by
- * `bash-guard.test.ts` rather than by hand-run probes.
+ * when this file is the entry point, so the rule is covered by `bash-guard.test.ts` rather than
+ * by hand-run probes.
  */
 
-import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { currentBranch, diffHash, readReceipt, validate } from "../review-receipt.ts";
 
@@ -36,22 +31,12 @@ export type Verdict = { blocked: false } | { blocked: true; reason: string };
 const ALLOW: Verdict = { blocked: false };
 
 /**
- * Resolve the branch a `git` invocation would actually run against — `git -C <path>` wins,
- * else the last `cd <path>` before the git call, else the hook's cwd. Injected so the policy
- * is testable without a real repo.
- */
-export type BranchResolver = (dir: string | undefined) => string;
-
-const gitBranch: BranchResolver = (dir) =>
-  (spawnSync("git", [...(dir ? ["-C", dir] : []), "branch", "--show-current"], { encoding: "utf8" }).stdout ?? "").trim();
-
-/**
  * The command with quoted spans and heredoc bodies blanked out, so a rule can ask "does this
  * command RUN x" rather than "does this text mention x".
  *
- * Rules 2–3 match raw text and accept the false positives. Rule 1 cannot: writing about the
- * gate is routine while working on it, and matching raw text blocks a commit whose message
- * quotes the command. Anchoring to command position fixes that case and opens eight worse ones
+ * Matching raw text would block a commit whose MESSAGE quotes the command, and writing about
+ * this gate is routine while working on it. Anchoring to command position fixes that case and
+ * opens eight worse ones
  * — `(gh pr create)`, `env gh pr create`, `bash -c "…"`, a loop body — because a shell has more
  * command positions than a regex can enumerate. Blanking the quotes keeps the match permissive
  * where it should be and blind only where the text is data.
@@ -125,13 +110,6 @@ export function opensAPullRequest(cmd: string): boolean {
   return interpreter.test(cmd) && /\bgh\s+pr\s+create\b/.test(cmd);
 }
 
-/** The last `cd <dir>` before a command, if any — the worktree-per-branch flow uses it. */
-function cdTarget(cmd: string, before: number): string | undefined {
-  const prefix = cmd.slice(0, before);
-  const matches = [...prefix.matchAll(/(?:^|[;&|]\s*)cd\s+([^\s;&|]+)/g)];
-  return matches.at(-1)?.[1];
-}
-
 /** The state of the review, for the handover message. Injected so tests need no real receipt. */
 export type ReviewStatus = () => { ok: boolean; detail: string };
 
@@ -140,11 +118,8 @@ const receiptStatus: ReviewStatus = () => {
   // reading it from a hook fired elsewhere reported the review state of nowhere — telling an
   // agent whose review HAD converged to go and do one.
   //
-  // Scoped to this read, and restored, because rule 2 deliberately resolves branches against
-  // the CALLER's cwd: `git -C <relative>` and a preceding `cd` are relative to where the
-  // command will actually run. A process-wide chdir here silently re-based both, which
-  // false-allowed a commit onto main from one worktree while blocking one on a feature branch
-  // from another.
+  // Scoped to this read, and restored: a hook fires with the caller's cwd, and leaving the
+  // process chdir'd would silently re-base every relative path in the command about to run.
   const from = process.cwd();
   const project = process.env.CLAUDE_PROJECT_DIR;
   if (project && existsSync(project)) process.chdir(project);
@@ -156,8 +131,7 @@ const receiptStatus: ReviewStatus = () => {
   }
 };
 
-export function decide(cmd: string, resolveBranch: BranchResolver = gitBranch, reviewStatus: ReviewStatus = receiptStatus): Verdict {
-  // 1. A human opens the PR.
+export function decide(cmd: string, reviewStatus: ReviewStatus = receiptStatus): Verdict {
   //
   // No override, on purpose. Every other gate in this repo has one, because a gate with no way
   // past it gets switched off wholesale the first time it is wrong. This one is different in
@@ -184,98 +158,6 @@ export function decide(cmd: string, resolveBranch: BranchResolver = gitBranch, r
         `Blocked: opening a pull request is a human's call, not yours. There is no override for this rule.\n\n` +
         `${readiness}\n\n` +
         `Then say, in one line, that they need to run it. Do not restate the diff at them — they can read the PR.`,
-    };
-  }
-
-  // 2. Never commit or push to main — work lands via PRs from feature branches.
-  //
-  // "Commit" is every verb that LANDS one, not just `git commit`: a merge, a cherry-pick, a
-  // revert and `git am` all write to the branch, and blocking only the porcelain leaves the
-  // rule stating more than it enforces. Global options are skipped, `-C <dir>` is read too.
-  //
-  // `(?![-\w])` rather than `\b`, because `\b` matches before a hyphen: `git merge-base` is
-  // what THIS repo's own receipt runs, and blocking it would make the guard break the tooling
-  // it guards. The abort/skip flags are excluded for the same reason — they unwind a landing
-  // rather than perform one. `--continue` is deliberately NOT in that list: it finishes the
-  // commit.
-  //
-  // Every landing verb on the line is examined, not just the first, and the abort/skip
-  // exemption is read from the verb's OWN segment with quoted text blanked. Testing the whole
-  // raw line for those flags meant a commit MESSAGE mentioning `--dry-run` — which is exactly
-  // what a commit about this guard says — switched the rule off, and `git merge --abort; git
-  // commit -m x` exempted the commit with the merge's flag.
-  //
-  // Read from the same normalisation rule 1 uses, not from the raw line: `git 'commit'`,
-  // `git com'mit'` and `git \commit` all land a commit, verified against a throwaway remote,
-  // and every one of them was allowed while the plain spelling was blocked. Blanking still
-  // decides what is data, so a message or a heredoc quoting a command is still not one.
-  const text = withoutQuotedText(shellSpelling(cmd));
-  const landingVerb = /\bgit\s+(?:-[cC]\s+\S+\s+|--\S+\s+)*?(?:-C\s+(\S+)\s+)?(?:-[cC]\s+\S+\s+|--\S+\s+)*(commit|merge|cherry-pick|revert|am)(?![-\w])/g;
-  for (const landing of text.matchAll(landingVerb)) {
-    // The message is an ARGUMENT, never a flag: `git commit -m '--dry-run'` is one word, so
-    // blanking multi-word quotes alone still let it exempt itself. Message payloads come out
-    // before the flags are read — `-m x`, `-am x`, `--message=x`, `-F file`.
-    const segment = text.slice(landing.index + landing[0].length).split(/[;&|]|\n/)[0] ?? "";
-    const rest = segment.replace(/(?:-[a-zA-Z]*[mF]|--(?:message|file))(?:=|\s+)\S+/g, " ");
-    if (/--(?:abort|quit|skip|dry-run)(?![-\w])/.test(rest)) continue;
-    // A `git switch main` earlier in the same command line moves the target before the verb
-    // runs, so the branch we are on now is the wrong thing to ask about.
-    const switched = /(?:^|[;&|]\s*)git\s+(?:switch|checkout)\s+(?:-\S+\s+)*main(?:\s|$|[;&|])/.test(text.slice(0, landing.index));
-    const branch = switched ? "main" : resolveBranch(landing[1] ?? cdTarget(text, landing.index));
-    if (branch === "main") {
-      return {
-        blocked: true,
-        reason:
-          "Blocked: you are on `main`, and nothing lands there directly — not even a one-line fix " +
-          "(AGENTS.md § How work lands here). `git switch -c feature/<short-name>` first.",
-      };
-    }
-  }
-  // Pushing AT main from a feature branch is the same rule, one indirection along: it is how a
-  // branch-first workflow gets bypassed without ever checking main out.
-  //
-  // Matched within the SEGMENT that runs the push, never across the line: testing the whole
-  // line blocked `git push origin feature/x; git diff main`, where the two mentions of main
-  // have nothing to do with each other. `git push origin "main"` and `git push origin ma'in'`
-  // are the same push, which is what the spelling normalisation above is for — quoting the ref
-  // used to be enough to get past this. `:main` counts: deleting main is not a gentler way of
-  // writing to it.
-  //
-  // Naming the ref is only the loud way to do it. `git push` with no refspec pushes the branch
-  // you are ON, and `--all` / `--mirror` push main without mentioning it — three forms that
-  // slipped past a rule stated as "whether by being on it or pushing at it", because the branch
-  // resolver was consulted for the commit half and never for this one.
-  const pushesAtMain = text.split(/[;&|]|\n/).some((part) => {
-    if (!/\bgit\s+(?:-\S+(?:\s+\S+)?\s+)*push\b/.test(part)) return false;
-    if (/(?:^|\s|[:+])(?:HEAD:)?[+:]?(?:refs\/heads\/)?main(?::(?:refs\/heads\/)?\S+)?(?:\s|$)/.test(part)) return true;
-    if (/\s--(?:all|mirror)(?![-\w])/.test(part)) return true;
-    // The first positional after `push` is the remote, the rest are refspecs. None — or one
-    // that only names the checked-out commit (`HEAD`, `@`, `@{u}`) — means "the current
-    // branch", so the branch is what decides.
-    const words = part.trim().split(/\s+/);
-    const positional = words.slice(words.indexOf("push") + 1).filter((w) => !w.startsWith("-"));
-    const refspecs = positional.slice(1).filter((r) => !/^(?:HEAD|@|@\{u(?:pstream)?\})$/.test(r));
-    if (refspecs.length > 0) return false;
-    const at = /\bgit\s+(?:-\S+\s+)*?-C\s+(\S+)/.exec(part);
-    return resolveBranch(at?.[1] ?? cdTarget(text, text.indexOf(part))) === "main";
-  });
-  if (pushesAtMain) {
-    return {
-      blocked: true,
-      reason: "Blocked: this pushes at `main`. Work lands through a pull request from a feature branch (AGENTS.md § How work lands here).",
-    };
-  }
-
-  // 3. Restarting the server drops every booted simulator on the machine, so someone may be
-  //    mid-test on a preview you cannot see. AGENTS.md says to say so before doing it; this is
-  //    the part that makes "say so" happen, by making the agent stop and ask.
-  if (/launchctl\s+kickstart/.test(text) && /no\.deckhand\.server/.test(text)) {
-    return {
-      blocked: true,
-      reason:
-        "Blocked: `launchctl kickstart` of the deckhand server tears down EVERY booted simulator on this machine, " +
-        "so whoever is watching a preview loses it and pays several minutes of rebuilding. Ask the user first, " +
-        "then let them run it — or batch it with whatever else needs a restart.",
     };
   }
 

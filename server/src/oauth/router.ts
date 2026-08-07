@@ -1,5 +1,5 @@
 import express from "express";
-import type { OAuthStore } from "./store.ts";
+import { RegistryFullError, type OAuthClient, type OAuthStore } from "./store.ts";
 import type { PairingStore } from "./pairing.ts";
 
 // ---------------------------------------------------------------------------
@@ -167,18 +167,28 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
       oauthError(res, 400, "invalid_redirect_uri", "redirect_uris must be https");
       return;
     }
-    const client = deps.store.registerClient(
-      {
-        redirectUris: uris,
-        // Bounded: this name becomes the grant's label and the audit trail's actor, and it
-        // arrives from an unauthenticated endpoint.
-        name: (singleString(body.client_name) ?? "unnamed client").slice(0, 60),
-      },
-      // Clients mid-flow are not idle, whatever the grant table says. Without this the cap is a
-      // weapon: register past it and the client currently completing a pairing is evicted, so
-      // its token exchange fails after the code was already spent.
-      busyClients(),
-    );
+    let client: OAuthClient;
+    try {
+      client = deps.store.registerClient(
+        {
+          redirectUris: uris,
+          // Bounded: this name becomes the grant's label and the audit trail's actor, and it
+          // arrives from an unauthenticated endpoint.
+          name: (singleString(body.client_name) ?? "unnamed client").slice(0, 60),
+        },
+        // Clients mid-flow are not idle, whatever the grant table says. Without this the cap is a
+        // weapon: register past it and the client currently completing a pairing is evicted, so
+        // its token exchange fails after the code was already spent.
+        busyClients(),
+      );
+    } catch (e) {
+      if (!(e instanceof RegistryFullError)) throw e;
+      // Capacity, not a bad request — and it clears itself: every client holding a slot without
+      // finishing lapses on the in-flight TTL. The alternative was to accept the registration
+      // and let oauth.json grow without limit, which does not clear.
+      oauthError(res, 503, "temporarily_unavailable", "too many clients are mid-pairing right now — try again in a few minutes");
+      return;
+    }
     res.status(201).json({
       client_id: client.clientId,
       client_id_issued_at: Math.floor(client.createdMs / 1000),
