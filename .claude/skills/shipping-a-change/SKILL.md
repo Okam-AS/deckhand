@@ -187,6 +187,12 @@ npm run review:handover --silent <<'BODY'
 BODY
 ```
 
+**If the hook blocks that command, read what it says before rewording anything.** Rules 2–3
+match the raw text of each line, so a body that *quotes* `git push origin main` is refused —
+accepted over-blocking, not a bug, and it costs you nothing: write the body to a file and pass
+the path (`npm run review:handover --silent < body.md`). Rule 1 is the one with no override,
+and it is about running the command, never about writing about it.
+
 It refuses unless `review:check` passes, writes `.claude/pr-body.md`, and prints the
 command. Then say, in **one line**, that the user needs to run it. Don't restate the diff
 at them — they can read the PR.

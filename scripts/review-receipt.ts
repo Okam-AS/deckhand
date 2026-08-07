@@ -494,14 +494,28 @@ export function recordRound(input: RoundInput, hash: string, branch: string, dir
  * Fast, and explicitly NOT enough to satisfy the gate: see {@link validate}'s `clean` check.
  * It exists for the loop, where you want to know within a minute whether you broke something.
  */
+/**
+ * Does an in-place run leave an existing CLEAN result standing?
+ *
+ * A quick run must not downgrade a clean one for the same code. This is the loop command, so
+ * one sanity check after the expensive clean run would otherwise throw that run away and
+ * demand a full `npm ci` again — a cost with no information behind it, since the clean result
+ * is still true of this diff. A FAILURE is different: that is new information, and it stands.
+ */
+export function keepsCleanRun(base: Receipt, hash: string, passed: boolean): boolean {
+  return passed && base.gates?.clean === true && base.gates.diff === hash;
+}
+
 export function runGates(branch: string, dir = RECEIPT_DIR): Receipt {
   const proc = spawnSync(GATES_ARGV[0], GATES_ARGV.slice(1), { stdio: "inherit" });
   // Hashed AFTER the run: a build step can touch a tracked file, so a hash taken up front can
   // already be stale by the time the gates finish, and the receipt would attest to a diff that
   // no longer exists.
+  const hash = diffHash();
+  const base = loadOrCreate(branch, dir);
   const next: Receipt = {
-    ...loadOrCreate(branch, dir),
-    gates: { passed: proc.status === 0, command: GATES_COMMAND, diff: diffHash(), clean: false },
+    ...base,
+    gates: { passed: proc.status === 0, command: GATES_COMMAND, diff: hash, clean: keepsCleanRun(base, hash, proc.status === 0) },
   };
   writeReceipt(next, dir);
   return next;
@@ -518,19 +532,36 @@ export function runGates(branch: string, dir = RECEIPT_DIR): Receipt {
  *
  * Costs a full install, so it is the last thing you run rather than something in the loop.
  */
+/**
+ * Where the throwaway checkout goes: inside the repository's COMMON git dir.
+ *
+ * Not `<toplevel>/.git`, which is a FILE in a linked worktree — so `git worktree add` failed
+ * outright there, and the clean gate is the only one that satisfies the handover. Agents work
+ * in worktrees here (`.worktrees/` is gitignored for exactly that), so that was a whole
+ * working mode with no honest route to a PR.
+ */
+export function gatesWorktree(run: Run = runGit): string | null {
+  const gitDir = run(["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim();
+  return gitDir ? join(gitDir, "review-gates") : null;
+}
+
 export function runGatesClean(branch: string, dir = RECEIPT_DIR): Receipt | { dirty: string } {
   // A clean checkout of HEAD says nothing about uncommitted work, and reporting it as if it
   // did is the exact false confidence this exists to remove. CI tests what you push.
   const dirty = runGit(["status", "--porcelain"]).trim();
   if (dirty) return { dirty };
 
-  const root = runGit(["rev-parse", "--show-toplevel"]).trim();
-  if (!root) return { dirty: "not a git repository" };
-  const worktree = join(root, ".git", "review-gates");
+  const worktree = gatesWorktree();
+  if (!worktree) return { dirty: "not a git repository" };
   spawnSync("git", ["worktree", "remove", "--force", worktree]);
   const added = spawnSync("git", ["worktree", "add", "--detach", worktree, "HEAD"], { stdio: "inherit" });
   try {
-    if (added.status !== 0) throw new Error("could not create a clean worktree");
+    if (added.status !== 0) {
+      throw new Error(
+        `could not create a clean worktree at ${worktree} — git's output is above. ` +
+          `Until that is fixed the clean gate cannot run, and \`review:gates:quick\` does not substitute for it.`,
+      );
+    }
     const opts = { cwd: worktree, stdio: "inherit" as const };
     // `npm ci`, not `npm install`: it installs exactly the lockfile and fails if the two have
     // drifted, which is the drift this whole function exists to surface.
@@ -600,7 +631,16 @@ if (isEntryPoint) {
     // wants; the raw receipt after it, for the fingerprints a waiver has to quote.
     console.log(receipt ? `${summarize(receipt)}\n\n${JSON.stringify(receipt, null, 2)}` : `no receipt for ${branch}`);
   } else if (cmd === "gates" || cmd === "gates:quick") {
-    const next = cmd === "gates" ? runGatesClean(branch) : runGates(branch);
+    // The failure worth handling is git refusing the throwaway worktree. A stack trace there
+    // reads as a broken tool rather than as an environment to fix, and the agent is one step
+    // from a gate it cannot satisfy.
+    let next: Receipt | { dirty: string };
+    try {
+      next = cmd === "gates" ? runGatesClean(branch) : runGates(branch);
+    } catch (err) {
+      console.error(`✗ ${(err as Error).message}`);
+      process.exit(1);
+    }
     if ("dirty" in next) {
       console.error(
         `✗ the working tree is dirty, so a clean checkout of HEAD would not be the code you mean:\n${next.dirty}\n\n` +

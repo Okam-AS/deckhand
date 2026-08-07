@@ -1,15 +1,20 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   appendRound,
   diffHash,
   fingerprint,
+  gatesWorktree,
+  HANDOVER_FILE,
+  keepsCleanRun,
   handover,
   MIN_ROUNDS,
   readReceipt,
+  RECEIPT_DIR,
   receiptPath,
   recordRound,
   summarize,
@@ -279,6 +284,64 @@ describe("the handover to a human", () => {
 
   it("refuses an empty body, so the human is never handed a blank PR", () => {
     assert.equal(handover(converged(), HASH, "   \n", file()).ok, false);
+  });
+});
+
+// The comment on RECEIPT_DIR states this, and the whole mechanism rests on it: `diffHash`
+// folds the untracked-file list in, so a receipt git can see changes the diff it attests to.
+// Every round would be instantly stale and `review:gates` would call the tree dirty forever —
+// a wedge with no honest way out, and no red test to explain it.
+describe("the receipt must be invisible to git", () => {
+  it("keeps the receipt dir and the PR body ignored", () => {
+    for (const path of [`${RECEIPT_DIR}/feature-x.json`, HANDOVER_FILE]) {
+      const check = spawnSync("git", ["check-ignore", "-q", path], { cwd: process.cwd() });
+      assert.equal(check.status, 0, `${path} is not gitignored — writing one would change the diff it attests to`);
+    }
+  });
+});
+
+describe("what a quick gate run may overwrite", () => {
+  // The skill sells the quick run as the loop command. If one sanity check on unchanged code
+  // voided the expensive clean run, the honest path would cost a full `npm ci` again for no
+  // new information — and the gate would refuse until it was paid.
+  it("leaves a clean pass standing when it passes on the same diff", () => {
+    assert.equal(keepsCleanRun(converged(), HASH, true), true);
+  });
+
+  it("does not launder a clean pass on other code, or one that has just gone red", () => {
+    assert.equal(keepsCleanRun(converged(), OLD, true), false, "a clean run on another diff says nothing about this one");
+    assert.equal(keepsCleanRun(converged(), HASH, false), false, "a failure is new information and it stands");
+    assert.equal(keepsCleanRun(converged({ gates: undefined }), HASH, true), false, "nothing clean to keep");
+    const inPlace = converged({ gates: { passed: true, command: "npm run ci", diff: HASH, clean: false } });
+    assert.equal(keepsCleanRun(inPlace, HASH, true), false, "an in-place run cannot promote itself");
+  });
+});
+
+describe("where the clean gate runs", () => {
+  // In a LINKED worktree `<toplevel>/.git` is a file, so `git worktree add` under it fails and
+  // the clean gate — the only one that satisfies the handover — could not run at all. Agents
+  // work in worktrees here, so that was a working mode with no honest route to a PR. Built as
+  // a real repo with a real linked worktree, because the bug was in which git question is
+  // asked and a stubbed answer would have agreed with the wrong one.
+  it("puts the throwaway checkout in the common git dir, so it works from a linked worktree too", () => {
+    const git = (cwd: string, ...args: string[]) => spawnSync("git", args, { cwd, encoding: "utf8" });
+    const main = join(dir, "repo");
+    mkdirSync(main);
+    git(main, "init", "-q");
+    git(main, "config", "user.email", "t@example.com");
+    git(main, "config", "user.name", "t");
+    writeFileSync(join(main, "a.txt"), "a");
+    git(main, "add", "-A");
+    git(main, "commit", "-qm", "one");
+    const linked = join(dir, "linked");
+    assert.equal(git(main, "worktree", "add", "--detach", linked, "HEAD").status, 0);
+    assert.ok(statSync(join(linked, ".git")).isFile(), "a linked worktree's .git is a file — the premise of this test");
+
+    const inLinked = (args: string[]) => spawnSync("git", args, { cwd: linked, encoding: "utf8" }).stdout ?? "";
+    const target = gatesWorktree(inLinked)!;
+    assert.ok(statSync(dirname(target)).isDirectory(), `${dirname(target)} must be a directory git can create a worktree under`);
+    assert.equal(spawnSync("git", ["worktree", "add", "--detach", target, "HEAD"], { cwd: linked }).status, 0);
+    spawnSync("git", ["worktree", "remove", "--force", target], { cwd: linked });
   });
 });
 
