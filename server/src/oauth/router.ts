@@ -27,26 +27,40 @@ function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 }
 
-function page(res: express.Response, status: number, title: string, body: string): void {
+function page(res: express.Response, status: number, title: string, body: string, sub = ""): void {
   res.status(status).type("html").send(
     `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(title)} · deckhand</title>
 <style>
 /* The viewer's palette (viewer/src/global.css). Somebody meets this page and the device grid
-   minutes apart, so they are one surface: neutral dark, hue only where something failed. */
-body{font-family:"SF Pro Rounded",ui-rounded,system-ui,-apple-system,sans-serif;line-height:1.55;color:#fcfcf6;
-  background:#1e1e1e;max-width:34rem;margin:0 auto;padding:9vh 1.25rem;-webkit-font-smoothing:antialiased}
-h1{font-family:"New York","Iowan Old Style",Georgia,ui-serif,serif;font-weight:650;font-size:1.5rem;margin:0 0 .6rem}
-p{color:#c6c7c1}code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.9em;color:#fcfcf6}
-.codebox{display:flex;align-items:center;gap:.75rem;background:#121212;border:1px solid #3b3b3b;
-  border-radius:14px;padding:.7rem .7rem .7rem 1.1rem;margin:.6rem 0 1.1rem;max-width:22rem}
-.code{flex:1;font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:1.9rem;letter-spacing:.18em;color:#fcfcf6}
-button{font:inherit;font-weight:600;font-size:.85rem;border:0;border-radius:999px;padding:.5rem 1rem;
-  color:#141414;background:#fcfcf6;cursor:pointer;transition:transform .12s ease,opacity .12s ease}
-button:hover{transform:translateY(-1px)}button:active{transform:scale(.98)}
-.status{color:#8a8a86;font-size:.85rem}
-</style></head><body><h1>${esc(title)}</h1>${body}</body></html>`,
+   minutes apart, so they are one surface: neutral dark, hue only where something failed.
+   The panel is DARKER than the page — a well, not a card — which is the viewer's rule too. */
+*{box-sizing:border-box}
+body{margin:0;min-height:100dvh;display:grid;place-items:center;padding:1.25rem;
+  font-family:"SF Pro Rounded",ui-rounded,system-ui,-apple-system,sans-serif;line-height:1.5;
+  color:#fcfcf6;background:#1e1e1e;-webkit-font-smoothing:antialiased}
+.card{width:100%;max-width:23rem;background:#121212;border:1px solid #3b3b3b;border-radius:20px;
+  padding:2rem 1.75rem;box-shadow:0 28px 60px rgba(0,0,0,.45);text-align:center}
+h1{font-family:"New York","Iowan Old Style",Georgia,ui-serif,serif;font-weight:650;
+  font-size:1.35rem;letter-spacing:-.01em;margin:0 0 .4rem}
+.sub{color:#8a8a86;font-size:.9rem;margin:0 0 1.4rem}
+p{color:#c6c7c1;margin:0 0 1rem}
+code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;color:#fcfcf6}
+input{width:100%;padding:.85rem .5rem;text-align:center;background:#1a1a1a;color:#fcfcf6;
+  border:1px solid #3b3b3b;border-radius:14px;outline:none;caret-color:#fcfcf6;
+  font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:1.6rem;letter-spacing:.28em;
+  text-indent:.28em;transition:border-color .15s ease,box-shadow .15s ease}
+input::placeholder{color:#4a4a48;letter-spacing:.28em}
+input:focus{border-color:#8a8a86;box-shadow:0 0 0 4px rgba(252,252,246,.07)}
+button{width:100%;margin-top:.9rem;padding:.8rem 1rem;font:inherit;font-weight:600;font-size:.95rem;
+  border:0;border-radius:999px;color:#141414;background:#fcfcf6;cursor:pointer;
+  transition:transform .12s ease,opacity .12s ease}
+button:hover{transform:translateY(-1px)}button:active{transform:scale(.985)}
+button[disabled]{opacity:.45;cursor:default;transform:none}
+.err{color:#c98b7f;font-size:.88rem;margin:.9rem 0 0}
+.hint{color:#8a8a86;font-size:.8rem;margin:1.1rem 0 0}
+</style></head><body><main class="card"><h1>${esc(title)}</h1>${sub ? `<p class="sub">${sub}</p>` : ""}${body}</main></body></html>`,
   );
 }
 
@@ -56,6 +70,10 @@ button:hover{transform:translateY(-1px)}button:active{transform:scale(.98)}
  * No status, no polling, no waiting: the browser holds everything needed to finish, and the
  * only missing piece is a string that exists on the operator's machine. The form carries the
  * request's own parameters so the POST can re-validate them rather than trust a session.
+ *
+ * The input does the tidying a person should not have to: upper-cases, inserts the hyphen, and
+ * submits itself the moment six characters are in. Somebody is reading this off another screen
+ * — every keystroke of ceremony is a chance to mistype the one string that matters.
  */
 function codeForm(
   res: express.Response,
@@ -66,16 +84,31 @@ function codeForm(
   page(
     res,
     error ? 400 : 200,
-    "Enter the pairing code",
-    `<p>Ask whoever runs this deckhand for a pairing code — they run <code>deckhand pair</code>.</p>
-     ${error ? `<p class="err">${esc(error)}</p>` : ""}
-     <form method="post" action="/oauth/authorize">
+    "Pairing code",
+    `<form method="post" action="/oauth/authorize">
        ${hidden("client_id", req.clientId)}${hidden("redirect_uri", req.redirectUri)}
        ${hidden("code_challenge", req.challenge)}${req.state ? hidden("state", req.state) : ""}
-       <input class="code" name="code" autocomplete="off" autocapitalize="characters" spellcheck="false"
-              placeholder="ABC-123" maxlength="7" autofocus>
-       <button type="submit">Connect</button>
-     </form>`,
+       <input id="c" name="code" inputmode="text" autocomplete="one-time-code" autocapitalize="characters"
+              spellcheck="false" placeholder="XXX-XXX" maxlength="7" autofocus aria-label="Pairing code">
+       <button id="b" type="submit" disabled>Connect</button>
+       ${error ? `<p class="err">${esc(error)}</p>` : ""}
+       <p class="hint">Runs <code>deckhand pair</code> on the Mac to get one.</p>
+     </form>
+     <script>
+       const c = document.getElementById("c"), b = document.getElementById("b");
+       const format = (v) => {
+         const raw = v.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
+         return raw.length > 3 ? raw.slice(0, 3) + "-" + raw.slice(3) : raw;
+       };
+       c.addEventListener("input", () => {
+         c.value = format(c.value);
+         b.disabled = c.value.length !== 7;
+         // Submitting on completion, because the last thing between two screens should not be
+         // hunting for a button.
+         if (!b.disabled) c.form.requestSubmit();
+       });
+     </script>`,
+    "Ask whoever runs this deckhand for the code.",
   );
 }
 
