@@ -17,6 +17,7 @@ let base: string;
 let server: Server;
 let store: OAuthStore;
 let pairing: PairingStore;
+let routerNow: number;
 
 before(async () => {
   const app = express();
@@ -32,6 +33,8 @@ before(async () => {
       get pairing() {
         return pairing;
       },
+      // A test that needs to move the clock sets this; the rest read real time.
+      now: () => routerNow,
     }),
   );
   server = createServer(app);
@@ -43,6 +46,7 @@ after(() => server?.close());
 beforeEach(() => {
   store = new OAuthStore({ persist: false });
   pairing = new PairingStore();
+  routerNow = Date.now();
 });
 
 async function register(): Promise<string> {
@@ -316,6 +320,37 @@ describe("OAuth authorization server", () => {
       (await token({ grant_type: "authorization_code", client_id: mine, redirect_uri: REDIRECT, code, code_verifier: verifier })).status,
       200,
     );
+  });
+
+  // The in-flight set is bounded by TIME and nothing else — a visitor who closes the tab says
+  // nothing, so entries must lapse. Deleting the sweep left every test green while the router
+  // comment, `.claude/rules/connector-auth.md` and the 503 body all promise it: "a pairing attempt
+  // lapses within ten minutes, so try again then". Without this, that promise is prose.
+  it("lets the in-flight entries lapse, so a jam clears itself", async () => {
+    const { challenge } = pkce();
+    for (let i = 0; i < 90; i++) {
+      const res = await fetch(`${base}/oauth/register`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ redirect_uris: [REDIRECT] }),
+      });
+      if (res.status === 503) break;
+      await authorize(authorizeUrl(((await res.json()) as { client_id: string }).client_id, challenge));
+    }
+    const jammed = await fetch(`${base}/oauth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ redirect_uris: [REDIRECT] }),
+    });
+    assert.equal(jammed.status, 503, "the flood has to reach the cap or this proves nothing");
+
+    routerNow += 10 * 60 * 1000 + 1; // one tick past the in-flight TTL
+    const after = await fetch(`${base}/oauth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ redirect_uris: [REDIRECT] }),
+    });
+    assert.equal(after.status, 201, "an abandoned pairing attempt must stop protecting its client forever");
   });
 
   it("rejects an unknown client at the token endpoint", async () => {

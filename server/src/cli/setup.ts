@@ -3,6 +3,7 @@ import { existsSync, readFileSync, writeFileSync, copyFileSync, mkdirSync } from
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { paths } from "../paths.ts";
+import { loadTokens } from "../config.ts";
 import { mergeTunnelConfig, renderTunnelConfig, parseTunnelConfig, tunnelIdFor, needsLogin } from "./tunnelConfig.ts";
 import { checkPrereqs, humanInput, formatPrereqs, blocking, type Probe } from "./preflight.ts";
 
@@ -155,6 +156,25 @@ function ensureTunnelConfig(tunnelId: string, hostnames: string[], port: number)
   ok(`cloudflared config points ${hostnames.join(", ")} at 127.0.0.1:${port}`);
 }
 
+/**
+ * How many local credentials exist, from tokens.yaml itself.
+ *
+ * A missing file is zero. An unreadable one is NOT: minting into it would be writing over a file
+ * that would not load back, and reporting "a credential exists" would leave the operator with a
+ * setup that says it succeeded and a server nobody can pair with.
+ */
+export function credentialCount(): number {
+  if (!existsSync(paths.tokens())) return 0;
+  try {
+    return loadTokens().length;
+  } catch (e) {
+    throw new SetupError(
+      `${paths.tokens()} exists but would not load: ${e instanceof Error ? e.message : String(e)}`,
+      "Fix that file, then re-run — setup will not write over a credential list it cannot read.",
+    );
+  }
+}
+
 function deckhandCli(args: string[]): Run {
   // The same entry point the user would type, so setup cannot drift from it.
   const cli = join(dirname(new URL(import.meta.url).pathname), "..", "cli.ts");
@@ -248,14 +268,14 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
     // (`deckhand pair`) and somebody types it in. There is no list to seed and no
     // question to ask, which is why setup finishes on one answer.
     step("Local credential");
-    const list = deckhandCli(["token", "list"]);
-    // `token list` is NOT silent on an empty install — it prints "no tokens yet — create one
-    // with `deckhand token`", by design, because silence reads as a broken command. So a
-    // non-empty stdout is not the existence test: that version took the "already exists"
-    // branch on every fresh install, minted nothing, and ignored --token. Match the empty
-    // state itself. (The check before that grepped for the word "admin", which stopped
-    // meaning anything when roles went away — same class, twice.)
-    if (list.code === 0 && !/no tokens yet/.test(list.out)) {
+    // Read the FILE, never `token list`'s prose. Three versions of this check have now been
+    // broken by an unrelated edit to that output: it grepped for "admin" (which stopped meaning
+    // anything when roles went away), then for a non-empty stdout (which is always non-empty,
+    // because silence reads as a broken command), then for "no tokens yet" — a string renamed to
+    // "no credentials yet" one commit later. Each failure looked the same from here: setup takes
+    // the "already exists" branch on a fresh install, mints nothing, ignores --token, and the
+    // install ends with `deckhand pair` impossible and nobody able to connect at all.
+    if (credentialCount() > 0) {
       ok("a token already exists — `deckhand token` prints its connector URL");
     } else {
       const name = opts.tokenName ?? process.env.USER ?? "me";

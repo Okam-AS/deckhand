@@ -20,6 +20,12 @@ export interface OAuthRouterDeps {
   store: OAuthStore;
   /** Requests waiting for the operator. See `pairing.ts` for why the wait is the whole design. */
   pairing: PairingStore;
+  /**
+   * The clock the in-flight deadlines are read against. Injected only so a test can prove the
+   * TIME bound exists: the sweep could be deleted with every test still green, while the router
+   * comment, the connector-auth rule and the 503 body all promise it.
+   */
+  now?: () => number;
 }
 
 function esc(s: string): string {
@@ -145,8 +151,9 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
    */
   const inFlight = new Map<string, number>();
   const IN_FLIGHT_TTL_MS = 10 * 60 * 1000;
+  const clock = (): number => (deps.now ?? Date.now)();
   const busyClients = (): ReadonlySet<string> => {
-    const now = Date.now();
+    const now = clock();
     for (const [id, until] of inFlight) if (until <= now) inFlight.delete(id);
     return new Set(inFlight.keys());
   };
@@ -256,7 +263,7 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
 
     // Nothing is stored and nothing waits. The request carries no authority; the CODE does,
     // and the operator minted it at the machine.
-    inFlight.set(client.clientId, Date.now() + IN_FLIGHT_TTL_MS);
+    inFlight.set(client.clientId, clock() + IN_FLIGHT_TTL_MS);
     codeForm(res, { clientId: client.clientId, redirectUri, state, challenge, clientName: client.name });
   });
 
@@ -285,7 +292,7 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
       return;
     }
     // NOT cleared here: the exchange has not happened yet.
-    inFlight.set(clientId, Date.now() + IN_FLIGHT_TTL_MS);
+    inFlight.set(clientId, clock() + IN_FLIGHT_TTL_MS);
     const authCode = deps.store.mintCode({ clientId, redirectUri, label: client.name, codeChallenge: challenge });
     const url = new URL(redirectUri);
     url.searchParams.set("code", authCode);

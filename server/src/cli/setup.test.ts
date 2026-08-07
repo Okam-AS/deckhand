@@ -1,6 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { deckhandOnUserPath } from "./setup.ts";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { credentialCount, deckhandOnUserPath } from "./setup.ts";
 
 const REPO = "/Users/x/Repos/deckhand";
 
@@ -38,5 +41,55 @@ describe("whether `deckhand` is a command the user can type", () => {
 
   it("is not fooled by a repo-shaped prefix that is a different directory", () => {
     assert.equal(deckhandOnUserPath(REPO, which(`${REPO}-other/node_modules/.bin/deckhand`)), true);
+  });
+});
+
+/**
+ * Whether setup mints a credential is the difference between an install that works and one that
+ * finishes green and can never let anybody in — `deckhand pair` needs a local credential, and
+ * doctor calls its absence a hard failure. The decision used to read `token list`'s prose, which
+ * three unrelated edits have now broken.
+ */
+describe("whether a local credential already exists", () => {
+  const withHome = (dir: string, fn: () => void): void => {
+    const had = process.env.DECKHAND_HOME;
+    process.env.DECKHAND_HOME = dir;
+    try {
+      fn();
+    } finally {
+      if (had === undefined) delete process.env.DECKHAND_HOME;
+      else process.env.DECKHAND_HOME = had;
+    }
+  };
+
+  it("is zero on a fresh install, so setup mints one", () => {
+    const home = mkdtempSync(join(tmpdir(), "deckhand-setup0-"));
+    try {
+      withHome(home, () => assert.equal(credentialCount(), 0));
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("counts what is in the file, not what any message says", () => {
+    const home = mkdtempSync(join(tmpdir(), "deckhand-setup1-"));
+    try {
+      writeFileSync(join(home, "tokens.yaml"), "tokens:\n  - name: me\n    token: " + "a".repeat(64) + "\n");
+      withHome(home, () => assert.equal(credentialCount(), 1));
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  // Minting into a file that will not load back would destroy the credentials already in it, and
+  // reporting "one exists" would leave a green setup nobody can pair with.
+  it("refuses rather than guessing when the file will not load", () => {
+    const home = mkdtempSync(join(tmpdir(), "deckhand-setup2-"));
+    try {
+      writeFileSync(join(home, "tokens.yaml"), "tokens: [ this: is: not: yaml\n");
+      withHome(home, () => assert.throws(() => credentialCount(), /would not load/));
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

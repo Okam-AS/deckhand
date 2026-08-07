@@ -585,3 +585,41 @@ describe("source stays source", () => {
     }
   });
 });
+
+describe("setup decides on state, not on its own prose", () => {
+  // Three times now, a `setup` branch has been broken by an unrelated edit to a message it was
+  // grepping. It looked for "admin" (meaningless once roles went away), then for a non-empty
+  // stdout (always non-empty, because silence reads as a broken command), then for "no tokens
+  // yet" — renamed to "no credentials yet" one commit later, in a diff that touched no setup
+  // code and passed every test. Each time the symptom was the same and severe: setup takes the
+  // "already exists" branch on a FRESH install, mints nothing, ignores --token, and the install
+  // finishes green with `deckhand pair` impossible, so nobody can ever be let in.
+  //
+  // The output of `deckhand <verb>` is written for a person and is meant to be edited freely.
+  // So setup may PRINT it and may check an exit CODE, and may not branch on its text: the state
+  // it wants is in tokens.yaml, config.yaml and apps.yaml, which are typed and loaded.
+  it("never branches on the text of deckhand's own output", () => {
+    const src = read(join(SRC, "cli", "setup.ts"));
+    // The variables holding a deckhand invocation's result, e.g. `const list = deckhandCli([…])`.
+    const ours = [...src.matchAll(/(?:const|let)\s+(\w+)\s*=\s*deckhandCli\(/g)].map((m) => m[1]!);
+    assert.ok(ours.length > 0, "no `deckhandCli` result is captured — this check has lost its subject");
+    const offences: string[] = [];
+    for (const name of ours) {
+      // A regex tested against it, a substring search in it, or a comparison of it.
+      for (const pattern of [
+        new RegExp(`\\.test\\(\\s*${name}\\.out`),
+        new RegExp(`${name}\\.out\\s*\\.(?:includes|match|search|startsWith|endsWith)\\(`),
+        new RegExp(`${name}\\.out\\s*(?:===|!==|==|!=)`),
+      ]) {
+        if (pattern.test(src)) offences.push(`${name}.out`);
+      }
+    }
+    assert.deepEqual(
+      [...new Set(offences)],
+      [],
+      "setup.ts branches on the TEXT of a `deckhand` command's output. That text is written for a " +
+        "person and gets reworded; read the state instead (tokens.yaml/config.yaml via their " +
+        "loaders) or check the exit code. Printing it is fine.",
+    );
+  });
+});
