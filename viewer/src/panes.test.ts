@@ -123,7 +123,7 @@ describe("computeStage — which device each source shows", () => {
   it("lets each source choose its device independently", () => {
     // An earlier version made the other columns follow whichever platform you
     // last picked. It spent a click every time the guess was wrong, and which
-    // two things to hold up against each other is the user's call, not the
+    // devices to hold up against each other is the user's call, not the
     // stage's.
     const s = computeStage(twoSources, { isMobile: false, choices: { old: paneKey("old", "android-1") } });
     assert.deepEqual(

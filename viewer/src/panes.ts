@@ -157,8 +157,8 @@ export function computeStage(sharePanes: SharePane[], opts: StageOptions): Stage
  * Each column chooses INDEPENDENTLY. An earlier version had the other columns
  * follow whichever platform you last picked, on the theory that comparing
  * old-iOS against new-Android is rarely what you meant — but that spends a click
- * every time it guesses wrong, and guessing on the user's behalf about which two
- * things they want to hold up against each other is not the stage's business.
+ * every time it guesses wrong, and guessing on the user's behalf about which
+ * devices they want to hold up against each other is not the stage's business.
  *
  * Health matters because a group shows ONE device: picking positionally put a
  * "This device didn't start" frame on screen while a perfectly good one sat

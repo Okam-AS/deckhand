@@ -11,7 +11,7 @@ import type { ShareLedgerScreen, ShareTestRun } from "./api.ts";
  *     passed/failed and it ends with a verdict. Ephemeral.
  *   - the CHECKLIST — one row per screen/flow with a durable verdict
  *     (done / adjusted / regression). Survives many runs; only meaningful
- *     when the page has something to compare against.
+ *     when the page also shows the reference source the ledger judges against.
  *
  * The head is a sentence about the current state, not a label on a component:
  * a run in flight owns it (it's the thing actually changing) and the checklist
@@ -22,8 +22,9 @@ import type { ShareLedgerScreen, ShareTestRun } from "./api.ts";
  * about what they are.
  *
  * This replaced a button in the device control row. A per-device control was the
- * wrong home: the run belongs to the share, not to one simulator, so in a compare
- * it appeared once per working device and never on the reference side.
+ * wrong home: the run belongs to the share, not to one simulator, so on a page
+ * with several sources it appeared once per working device and never on the
+ * reference source.
  */
 export function ProgressBar({ testRun, screens }: { testRun?: ShareTestRun; screens?: ShareLedgerScreen[] }) {
   const [open, setOpen] = useState(false);

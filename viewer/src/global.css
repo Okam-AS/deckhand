@@ -148,7 +148,7 @@ body::before {
   left: 50%;
   transform: translateX(-50%);
 }
-/* Inline variant: a compare pane owns its own picker and sits it in that device's
+/* Inline variant: a source column owns its own picker and sits it in that device's
    control row, not fixed at the top of the window — two fixed pickers would land
    on top of each other. The menu is absolute to .picker either way, so only the
    anchor changes. */
@@ -348,7 +348,7 @@ body::before {
   animation: rise 0.6s cubic-bezier(0.2, 0.7, 0.2, 1) both;
   will-change: transform; /* FLIP moves the figure between layouts */
 }
-/* Any author `display` on .device (the mobile compare stage sets flex) beats the
+/* Any author `display` on .device (the mobile stage sets flex) beats the
    UA's [hidden]{display:none} — without this a non-shown device renders frozen
    beside the live one. */
 .device[hidden] {
@@ -1199,8 +1199,9 @@ figcaption {
 }
 
 /* ---- Progress bar: one collapsible bar at the top of every view, carrying the
-        test run and (in a compare) the parity checklist. Same position and
-        behaviour in single and compare, phone and desktop. ---- */
+        test run and (where there is a reference source) the parity checklist.
+        Same position and behaviour however many sources the page has, phone
+        and desktop. ---- */
 .pbar {
   --tr-pass: var(--sage);
   --tr-fail: var(--coral);
@@ -1586,7 +1587,7 @@ figcaption {
 .mig-dot--not-started {
   background: var(--ink-faint);
 }
-/* compare verdicts */
+/* parity-checklist verdicts */
 .mig-dot--done,
 .mig-dot--matches,
 .mig-dot--adjusted {

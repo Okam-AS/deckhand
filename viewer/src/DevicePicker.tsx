@@ -23,7 +23,7 @@ interface Props {
   /** Keys currently on screen. */
   visible: Set<string>;
   shownCount: number;
-  /** Layout section — omit both to hide it (a compare pane shows one device, so it has no layout choice). */
+  /** Layout section — omit both to hide it (a source column shows one device, so it has no layout choice). */
   mode?: ViewMode;
   onMode?: (mode: ViewMode) => void;
   onToggle: (id: string) => void;
@@ -31,15 +31,15 @@ interface Props {
   onOpenChange: (open: boolean) => void;
   /**
    * "multi" (default): checkboxes, any subset visible — the single-preview stage.
-   * "single": radios, exactly one — a compare pane, where two devices side by side
+   * "single": radios, exactly one — a source column, where two devices side by side
    * in one column would each be a sliver.
    */
   select?: "multi" | "single";
-  /** Position in flow instead of fixed top-center (for a compare pane header). */
+  /** Position in flow instead of fixed top-center (for a source column's header). */
   inline?: boolean;
   /**
    * Render the trigger as an icon-only button matching the device control row
-   * (Home/Rotate/Fullscreen), so a compare pane's device picker sits beside them
+   * (Home/Rotate/Fullscreen), so a source column's device picker sits beside them
    * as a peer instead of floating above the sim as a second, larger affordance.
    */
   compact?: boolean;

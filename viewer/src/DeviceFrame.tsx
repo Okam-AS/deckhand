@@ -37,14 +37,14 @@ interface Props {
   /** Report the cumulative rotation (deg) so app-level chrome can spin its icons to match. */
   onRotationChange?: (paneKey: string, deg: number) => void;
   /**
-   * Render but keep off screen. Used by the compare panes to show one device at a
+   * Render but keep off screen. Used by a source column to show one device at a
    * time without unmounting the others, so switching back doesn't rebuild the
    * canvas, the input socket or the control registration — only the video stream
    * is dropped while hidden and restarted on the way back.
    */
   hidden?: boolean;
   /**
-   * Extra control-row buttons, placed before Home. A compare pane puts its device
+   * Extra control-row buttons, placed before Home. A source column puts its device
    * picker here so it sits with Home/Rotate/Fullscreen rather than floating above
    * the sim as a separate, larger control.
    */
@@ -242,7 +242,7 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
     };
   }, [ready, shareId, device.deviceId, key, syncActive]);
 
-  // Showing/hiding a frame (compare pane device switch) starts or drops its
+  // Showing/hiding a frame (a source column switching device) starts or drops its
   // stream directly — the observer can't, since it ignores zero-area reports.
   // onScreenRef needs no forcing here: the zero-area guard means hiding never
   // set it false, so a false value predates the hide and is still correct.

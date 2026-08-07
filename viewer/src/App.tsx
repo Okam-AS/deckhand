@@ -246,7 +246,8 @@ export function App() {
   const focusedGroup = groups.find((g) => g.panes.some((p) => p.key === mobileFocus));
 
   // Each column chooses on its own. Making the others follow spent a click every
-  // time the guess was wrong, and which two things to compare is the user's call.
+  // time the guess was wrong, and which devices to hold up against each other is
+  // the user's call.
   const chooseInGroup = (group: StageGroup, key: string) =>
     setChoices((prev) => ({ ...prev, [group.shareId]: key }));
 
