@@ -1,7 +1,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -76,10 +76,76 @@ describe("deckhand token list", () => {
         encoding: "utf8",
         env: { ...process.env, DECKHAND_HOME: fresh },
       });
-      assert.match(out, /no tokens yet/, "silence reads as a broken command");
-      assert.match(out, /deckhand token/);
+      assert.match(out, /no credentials yet/, "silence reads as a broken command");
+      assert.match(out, /deckhand token add/, "and `deckhand token` alone mints nothing");
     } finally {
       rmSync(fresh, { recursive: true, force: true });
+    }
+  });
+
+  // The masked hint used to be rendered as `https://<host>/mcp/<prefix>…` — a URL shape this
+  // branch made 404, pointing at `token url` for "the full connector URL" it never prints.
+  it("shows no connector URL, because a credential is not one", () => {
+    const out = run("token", "list");
+    assert.doesNotMatch(out, /https:\/\//, "these are bearer tokens; a URL is what gets pasted somewhere public");
+  });
+});
+
+describe("deckhand token add", () => {
+  it("prints the credential, never a URL carrying it", () => {
+    const fresh = mkdtempSync(join(tmpdir(), "deckhand-tokadd-"));
+    try {
+      const at = (...args: string[]): string =>
+        execFileSync(process.execPath, [BIN, ...args], { encoding: "utf8", env: { ...process.env, DECKHAND_HOME: fresh } });
+      at("init", "--hostname", "deckhand.example.com");
+      const out = at("token", "add", "me");
+      assert.match(out, /[0-9a-f]{64}/, "the value has to be printed once or it is unusable");
+      // The old line was `connector URL:  https://<host>/mcp/<token>`: a dead route AND the one
+      // shape a bearer token must not take, since a URL is what gets pasted into a shared field.
+      assert.doesNotMatch(out, /https:\/\/[^\s]*[0-9a-f]{64}/, "never as a URL");
+    } finally {
+      rmSync(fresh, { recursive: true, force: true });
+    }
+  });
+
+  // Two commands, one state, two answers: `token rm` said "`deckhand token` mints a new one"
+  // (it mints nothing) while doctor called the same state a hard failure naming `token add`.
+  it("agrees with doctor about what to run when the last credential goes", () => {
+    const fresh = mkdtempSync(join(tmpdir(), "deckhand-toklast-"));
+    try {
+      const at = (...args: string[]): string =>
+        execFileSync(process.execPath, [BIN, ...args], { encoding: "utf8", env: { ...process.env, DECKHAND_HOME: fresh } });
+      at("init", "--hostname", "deckhand.example.com");
+      at("token", "add", "me");
+      const out = at("token", "rm", "me");
+      assert.match(out, /deckhand token add/);
+    } finally {
+      rmSync(fresh, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("an unreadable tokens.yaml", () => {
+  // A failed read became an empty list, so `pair` reported "no local credential yet — run
+  // `deckhand token add me`" and that command then refused to write over the broken file.
+  it("is not reported as having no credentials", () => {
+    const broken = mkdtempSync(join(tmpdir(), "deckhand-tokbad-"));
+    try {
+      const at = (...args: string[]): void => {
+        execFileSync(process.execPath, [BIN, ...args], { encoding: "utf8", env: { ...process.env, DECKHAND_HOME: broken } });
+      };
+      at("init", "--hostname", "deckhand.example.com");
+      writeFileSync(join(broken, "tokens.yaml"), "tokens: [ this: is: not: yaml\n");
+      assert.throws(
+        () => at("token", "list"),
+        (e: Error & { stderr?: string }) => {
+          assert.match(`${e.stderr ?? ""}`, /would not load/);
+          assert.doesNotMatch(`${e.stderr ?? ""}`, /no credentials yet/);
+          return true;
+        },
+      );
+    } finally {
+      rmSync(broken, { recursive: true, force: true });
     }
   });
 });

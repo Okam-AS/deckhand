@@ -149,9 +149,17 @@ describe("docs describe the code that exists", () => {
       // required `\S+\.test\.ts` followed by whitespace, so it matched none of the
       // backticked citations actually written here and the check was vacuous. It only
       // showed up under mutation — renaming a cited check produced no failure at all.
-      for (const m of src.matchAll(/→\s*`?\S*?\.test\.ts`?\s+"([^"]+)"/g)) {
-        const cited = m[1]!;
-        if (![...testNames].some((n) => n.startsWith(cited))) dangling.push(`${f}: "${cited}"`);
+      // Anchoring the whole citation to the arrow verified only the FIRST check after it, and
+      // one line here cites two — so renaming the second was silent, while AGENTS.md says a
+      // check renamed out from under a citation fails this test. The arrow marks where
+      // citations START; each `<file>.test.ts "<name>"` pair after it is one.
+      for (const line of src.split("\n")) {
+        const arrow = line.indexOf("→");
+        if (arrow < 0) continue;
+        for (const m of line.slice(arrow).matchAll(/`?\S*?\.test\.ts`?\s+"([^"]+)"/g)) {
+          const cited = m[1]!;
+          if (![...testNames].some((n) => n.startsWith(cited))) dangling.push(`${f}: "${cited}"`);
+        }
       }
     }
     assert.deepEqual(
@@ -193,7 +201,16 @@ describe("docs describe the code that exists", () => {
       // deeply-indented continuation line is prose ("…deckhand uses your gh CLI session").
       // `deckhand listening on …` is a log line, and a check that cannot tell those apart gets
       // deleted rather than obeyed.
-      const shapes = [/`deckhand ([a-z-]+)(?=`| <| --| [a-z-]+`)/g, /(?:^|\n) {2,4}deckhand ([a-z-]+)(?=\s|$)/g];
+      // The third shape is the one the motivating bug actually wore: setup's closing screen
+      // NUMBERS its steps ("   1.  deckhand token …"), which matched neither of the other two,
+      // so a dead verb in the last thing an install prints stayed green.
+      const shapes = [
+        /`deckhand ([a-z-]+)(?=`| <| --| [a-z-]+`)/g,
+        /(?:^|\n) {2,4}deckhand ([a-z-]+)(?=\s|$)/g,
+        // Unanchored, unlike the one above it: this output is written as `say("   1.  deckhand
+        // …")`, so the "line" the check reads starts with the call, not with the indent.
+        /\d+\.\s{1,4}deckhand ([a-z-]+)(?=\s|$)/g,
+      ];
       for (const m of shapes.flatMap((re) => [...body.matchAll(re)])) {
         const verb = m[1]!;
         if (!verbs.has(verb) && !subs.has(verb)) missing.push(`${name}: "deckhand ${verb}"`);

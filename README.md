@@ -166,8 +166,8 @@ deckhand token          # prints https://<your-hostname>/mcp
 
 **The URL is not a credential.** In a Claude team or Enterprise organisation a
 connector is visible to everyone in it, so deckhand puts no secret in the URL —
-and admits nobody because they have it. Clicking Connect shows a short code and
-waits. You let that one client in, from the Mac:
+and admits nobody because they have it. Clicking Connect opens a page that ASKS for a
+pairing code — and the only place one exists is your Mac:
 
 ```sh
 deckhand pair                      # mint a code; type it into the page Claude opens

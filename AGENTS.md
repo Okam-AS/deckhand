@@ -46,7 +46,8 @@ hand the code over, they type it in. A colleague holding the same URL is asked f
 have not got. The direction matters: the earlier design parked incoming requests for the
 operator to approve, and a stranger could park faster than a person can walk to the Mac, so the
 operator's own request was gone before they read it. Nothing incoming is stored now, so there is
-nothing to flood — only guessing, and a code dies after a few wrong tries. `deckhand revoke
+nothing to flood — only guessing, and a few wrong tries lock out the GUESSER, not the code: burning
+the code would hand a stranger a way to shred every code the operator mints. `deckhand revoke
 <client-id>` takes a client back, effective on its next call, no restart. Claude Code on the machine
 uses a local `tokens.yaml` bearer token instead and needs no approval.
 
@@ -384,7 +385,7 @@ claude.ai. That is not one item in a list of five; it is the step. Say it first,
 in two lines:
 
 > Run `deckhand token` and paste the URL into claude.ai → Settings → Connectors,
-> then click Connect — it shows a code; tell me the code and I approve it here.
+> then click Connect — the page asks for a pairing code. Here is one: `ABC-123`.
 
 Then, if it is useful, what you did. Not before. A user who reads three lines and
 stops must still have the thing they need — and they will stop, because a numbered

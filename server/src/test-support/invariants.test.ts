@@ -432,7 +432,7 @@ describe("the connector URL is public by construction", () => {
   });
 
   it("puts no approval path outside the credential the machine holds", () => {
-    // The public half of pairing parks requests and proves nothing; the deciding half needs
+    // The public half of pairing asks for a code and proves nothing; the minting half needs
     // tokens.yaml. If `pairRouter` ever stopped authenticating, the connector URL alone would
     // approve its own request — a total bypass with nothing else failing.
     const source = read(join(SRC, "oauth", "pairRouter.ts"));

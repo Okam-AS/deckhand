@@ -484,7 +484,17 @@ function gitHead(cwd: string): Promise<string | null> {
  *
  * Not a warning. A connector nobody can approve is an outage, and nothing else reports it.
  */
-export function checkConnectorAuth(tokens: { name: string }[]): Check {
+export function checkConnectorAuth(tokens: { name: string }[], unreadable?: string): Check {
+  // "Could not read the file" is not "there are none". The config-files check fails too, but it
+  // fails about apps.yaml or config.yaml just as readily, so this one has to say which — an
+  // operator told "no local credential" hand-writes a second one beside a broken file.
+  if (unreadable) {
+    return {
+      name: "connector auth",
+      ok: false,
+      detail: `tokens.yaml would not load (${unreadable}) — so this cannot say whether a credential exists. Fix the file, then re-run.`,
+    };
+  }
   if (tokens.length === 0) {
     return {
       name: "connector auth",
@@ -501,19 +511,27 @@ export async function runDoctor(opts: { smoke?: boolean } = {}): Promise<{ check
   let config: Config | null = null;
   let apps: App[] = [];
   let tokens: { name: string }[] = [];
+  // Read separately and remember WHICH one failed. One try block around all three left `tokens`
+  // empty whenever any of them threw, and the connector-auth check reads an empty list as "no
+  // credential exists" — a diagnosis nobody can act on when the file is merely malformed.
+  let tokensError: string | undefined;
   try {
     config = loadConfig();
     apps = loadApps();
-    tokens = loadTokens();
     checks.push({ name: "config files", ok: true, detail: `hostname ${config.hostname}` });
   } catch (e) {
     checks.push({ name: "config files", ok: false, detail: (e as Error).message });
+  }
+  try {
+    tokens = loadTokens();
+  } catch (e) {
+    tokensError = (e as Error).message;
   }
 
   checks.push(...(await checkToolchains()));
 
   if (config) {
-    checks.push(checkConnectorAuth(tokens));
+    checks.push(checkConnectorAuth(tokens, tokensError));
     checks.push(checkServeSim());
     checks.push(await checkServices());
     checks.push(await checkGitHub(config));

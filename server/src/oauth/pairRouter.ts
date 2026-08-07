@@ -8,8 +8,8 @@ import type { PairingStore } from "./pairing.ts";
  *
  * Reachable through the tunnel like everything else, so it is NOT protected by being loopback —
  * it is protected by `tokens.yaml`, the credential you can only get by being at the machine
- * (`deckhand token`). That asymmetry is the whole design: the public half asks for a code and
- * proves nothing, this half MINTS one and needs the local secret.
+ * (`deckhand token add <name>`). That asymmetry is the whole design: the public half asks for a code
+ * and proves nothing, this half MINTS one and needs the local secret.
  *
  * An OAuth grant deliberately cannot mint. A connector that talked its way in once would
  * otherwise be able to let the next one through, which turns one approval into a standing

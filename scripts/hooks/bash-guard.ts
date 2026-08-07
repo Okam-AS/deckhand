@@ -59,6 +59,12 @@ const gitBranch: BranchResolver = (dir) =>
 export function withoutQuotedText(cmd: string): string {
   return cmd
     .replace(/<<-?\s*(['"]?)(\w+)\1[\s\S]*?^\s*\2\s*$/gm, " ") // heredoc bodies
+    // A quoted span with no whitespace in it is shell ESCAPING, not data: `gh 'pr' create` and
+    // `gh pr crea'te'` run exactly what `gh pr create` runs, and blanking them let four
+    // spellings of the one rule with no override straight through. So those are unquoted, and
+    // only spans that cross a space — a message, a pattern, a body — are blanked.
+    .replace(/'([^'\s]*)'/g, "$1")
+    .replace(/"([^"\\\s]*)"/g, "$1")
     .replace(/'[^']*'/g, " ")
     .replace(/"(?:[^"\\]|\\.)*"/g, " ");
 }
@@ -160,21 +166,29 @@ export function decide(cmd: string, resolveBranch: BranchResolver = gitBranch, r
 
   // 2. Never commit or push to main — work lands via PRs from feature branches.
   //
-  // "Commit" is every verb that LANDS one, not just `git commit`: a merge, a cherry-pick and a
-  // revert all write to the branch, and blocking only the porcelain leaves the rule stating
-  // more than it enforces. Global options are skipped, `-C <dir>` is also read for the branch.
+  // "Commit" is every verb that LANDS one, not just `git commit`: a merge, a cherry-pick, a
+  // revert and `git am` all write to the branch, and blocking only the porcelain leaves the
+  // rule stating more than it enforces. Global options are skipped, `-C <dir>` is read too.
   //
   // `(?![-\w])` rather than `\b`, because `\b` matches before a hyphen: `git merge-base` is
   // what THIS repo's own receipt runs, and blocking it would make the guard break the tooling
   // it guards. The abort/skip flags are excluded for the same reason — they unwind a landing
   // rather than perform one. `--continue` is deliberately NOT in that list: it finishes the
   // commit.
-  const commit = /\bgit\s+(?:-[cC]\s+\S+\s+|--\S+\s+)*?(?:-C\s+(\S+)\s+)?(?:-[cC]\s+\S+\s+|--\S+\s+)*(commit|merge|cherry-pick|revert)(?![-\w])/.exec(cmd);
-  if (commit && !/--(?:abort|quit|skip|dry-run)\b/.test(cmd)) {
+  //
+  // Every landing verb on the line is examined, not just the first, and the abort/skip
+  // exemption is read from the verb's OWN segment with quoted text blanked. Testing the whole
+  // raw line for those flags meant a commit MESSAGE mentioning `--dry-run` — which is exactly
+  // what a commit about this guard says — switched the rule off, and `git merge --abort; git
+  // commit -m x` exempted the commit with the merge's flag.
+  const landingVerb = /\bgit\s+(?:-[cC]\s+\S+\s+|--\S+\s+)*?(?:-C\s+(\S+)\s+)?(?:-[cC]\s+\S+\s+|--\S+\s+)*(commit|merge|cherry-pick|revert|am)(?![-\w])/g;
+  for (const landing of cmd.matchAll(landingVerb)) {
+    const rest = cmd.slice(landing.index + landing[0].length).split(/[;&|]|\n/)[0] ?? "";
+    if (/--(?:abort|quit|skip|dry-run)(?![-\w])/.test(withoutQuotedText(rest))) continue;
     // A `git switch main` earlier in the same command line moves the target before the verb
     // runs, so the branch we are on now is the wrong thing to ask about.
-    const switched = /(?:^|[;&|]\s*)git\s+(?:switch|checkout)\s+(?:-\S+\s+)*main(?:\s|$|[;&|])/.test(cmd.slice(0, commit.index));
-    const branch = switched ? "main" : resolveBranch(commit[1] ?? cdTarget(cmd, commit.index));
+    const switched = /(?:^|[;&|]\s*)git\s+(?:switch|checkout)\s+(?:-\S+\s+)*main(?:\s|$|[;&|])/.test(cmd.slice(0, landing.index));
+    const branch = switched ? "main" : resolveBranch(landing[1] ?? cdTarget(cmd, landing.index));
     if (branch === "main") {
       return {
         blocked: true,
@@ -192,13 +206,24 @@ export function decide(cmd: string, resolveBranch: BranchResolver = gitBranch, r
   // `git push origin feature/x; git diff main`, where the two mentions of main have nothing to
   // do with each other; over-blocking is acceptable for a quoted ref and not for a second
   // command. `:main` counts: deleting main is not a gentler way of writing to it.
-  const pushesAtMain = cmd
-    .split(/[;&|]|\n/)
-    .some(
-      (part) =>
-        /\bgit\s+(?:-\S+(?:\s+\S+)?\s+)*push\b/.test(part) &&
-        /(?:^|\s|['":+])(?:HEAD:)?[+:]?(?:refs\/heads\/)?main(?::(?:refs\/heads\/)?\S+)?(?:\s|$|['"])/.test(part),
-    );
+  //
+  // Naming the ref is only the loud way to do it. `git push` with no refspec pushes the branch
+  // you are ON, and `--all` / `--mirror` push main without mentioning it — three forms that
+  // slipped past a rule stated as "whether by being on it or pushing at it", because the branch
+  // resolver was consulted for the commit half and never for this one.
+  const pushesAtMain = cmd.split(/[;&|]|\n/).some((part) => {
+    if (!/\bgit\s+(?:-\S+(?:\s+\S+)?\s+)*push\b/.test(part)) return false;
+    if (/(?:^|\s|['":+])(?:HEAD:)?[+:]?(?:refs\/heads\/)?main(?::(?:refs\/heads\/)?\S+)?(?:\s|$|['"])/.test(part)) return true;
+    if (/\s--(?:all|mirror)(?![-\w])/.test(part)) return true;
+    // The first positional after `push` is the remote, the rest are refspecs. None, or a bare
+    // `HEAD`, means "the current branch" — so the branch is what decides.
+    const words = withoutQuotedText(part).trim().split(/\s+/);
+    const positional = words.slice(words.indexOf("push") + 1).filter((w) => !w.startsWith("-"));
+    const refspecs = positional.slice(1).filter((r) => r !== "HEAD");
+    if (refspecs.length > 0) return false;
+    const at = /\bgit\s+(?:-\S+\s+)*?-C\s+(\S+)/.exec(part);
+    return resolveBranch(at?.[1] ?? cdTarget(cmd, cmd.indexOf(part))) === "main";
+  });
   if (pushesAtMain) {
     return {
       blocked: true,

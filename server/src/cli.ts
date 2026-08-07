@@ -212,23 +212,27 @@ function cmdInit(flags: Args["flags"]): void {
   if (!config.githubApp) {
     console.log("no GitHub App configured — deckhand will use your `gh` CLI session (githubAmbient) to read repos.");
   }
-  console.log("next: `deckhand token`, then set up the cloudflared tunnel (Phase 4 automates this).");
+  console.log("next: `deckhand token add me`, then `deckhand setup --hostname <host>` for the tunnel.");
 }
 
 function cmdTokenAdd(name: string | undefined): void {
   if (!name) fail("usage: deckhand token add <name>");
   const { tokens, created } = addTokenEntry(loadTokensForWrite(), { name: name! });
   writeTokens(tokens);
-  const hostname = tryHostname();
   console.log(`created token "${created.name}"`);
-  if (hostname) console.log(`connector URL:  https://${hostname}/mcp/${created.token}`);
-  else console.log(`token: ${created.token}`);
+  // The value, and no URL around it. This used to print `https://<host>/mcp/<token>`, which is
+  // both a 404 since the credential came out of the path and the one shape a bearer token must
+  // never take: a URL gets pasted into a connector field, a chat and a scrollback.
+  console.log(created.token);
+  console.error(`\nA LOCAL credential, for a client on this Mac: send it as \`Authorization: Bearer <token>\` to`);
+  console.error(`https://${tryHostname() ?? "<hostname>"}/mcp. Treat it like a password — never in a URL, never in chat.`);
+  console.error(`The connector URL for claude.ai carries no secret and comes from \`deckhand token\`.`);
 }
 
 /**
- * Revoke a credential. The connector URL carries the token as a path segment, so it lands in
- * every proxy log, screen share and scrollback it ever passes through — this is the way back
- * from that, and until it existed the answer was "hand-edit tokens.yaml".
+ * Revoke a credential. It is a bearer token with no expiry, held by whatever client was given
+ * it — this is the way back from one that leaked, and until it existed the answer was
+ * "hand-edit tokens.yaml".
  *
  * Takes effect immediately: the running server watches the file (`tokensWatcher.ts`) and the
  * watcher compares CONTENT, so rotating a value under the same name applies too.
@@ -242,23 +246,29 @@ function cmdTokenRm(name: string | undefined): void {
     fail(e instanceof Error ? e.message : String(e));
   }
   writeTokens(result.tokens);
-  console.log(`revoked "${result.removed.name}" — that connector URL stops working now.`);
-  if (result.tokens.length === 0) console.log("no tokens left; `deckhand token` mints a new one.");
+  console.log(`revoked "${result.removed.name}" — that credential stops working now.`);
+  // `deckhand token` prints the connector URL and mints nothing, and this is the state doctor
+  // calls a hard failure: with no local credential nothing can mint a pairing code, so no
+  // client can ever be let in. Both have to name the same command or one of them is wrong.
+  if (result.tokens.length === 0) {
+    console.log("no credentials left — nothing can mint a pairing code now: `deckhand token add me`.");
+  }
 }
 
 function cmdTokenList(): void {
   const tokens = loadTokensSafe();
-  const hostname = tryHostname();
   for (const t of tokens) {
     // Masked, not full. `list` is what you run to see WHO has access; printing every
     // credential in full to answer that puts them in a scrollback, a screen share and a
     // screenshot. The one you actually want goes through `token url <name>`, which is a
     // deliberate act rather than a side effect.
-    const hint = hostname ? `https://${hostname}/mcp/${t.token.slice(0, 6)}…` : `${t.token.slice(0, 6)}…`;
-    console.log(`${t.name}\t${hint}`);
+    //
+    // A prefix, not a URL: these are bearer tokens, and the URL shape they used to be printed
+    // in no longer routes at all.
+    console.log(`${t.name}\t${t.token.slice(0, 6)}…`);
   }
-  if (tokens.length) console.log(`\nFull connector URL for one of them:  deckhand token url <name>`);
-  else console.log(`no tokens yet — create one with \`deckhand token\``);
+  if (tokens.length) console.log(`\nThe credential itself, for a client on this Mac:  deckhand token url <name>`);
+  else console.log(`no credentials yet — create one with \`deckhand token add me\``);
 }
 
 /**
@@ -443,11 +453,24 @@ function cmdEnvSet(appId: string | undefined, assignment: string | undefined): v
 function str(v: string | boolean | undefined): string | undefined {
   return typeof v === "string" ? v : undefined;
 }
+/**
+ * The token list for a command that only READS it.
+ *
+ * A missing file is genuinely empty. An unreadable one is not: swallowing that error made
+ * `token list` show nothing and `pair` say "no local credential yet — run `deckhand token add
+ * me`", which then refused to write over the same broken file. Two commands, one lie, and the
+ * running server serving the last good list all the while (principle 3).
+ */
 function loadTokensSafe() {
+  if (!existsSync(paths.tokens())) return [];
   try {
     return loadTokens();
-  } catch {
-    return [];
+  } catch (e) {
+    fail(
+      `${e instanceof Error ? e.message : String(e)}\n` +
+        `${paths.tokens()} exists but would not load — fix the file. ` +
+        `The running server is still using the last good list, so credentials may work while this says nothing.`,
+    );
   }
 }
 

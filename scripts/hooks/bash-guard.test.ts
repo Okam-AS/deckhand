@@ -39,6 +39,15 @@ describe("a human opens the pull request", () => {
     }
   });
 
+  // The shell strips these quotes before `gh` ever sees them, so all four run the command —
+  // and blanking quoted spans wholesale allowed every one of them. A quoted span with no
+  // whitespace is escaping; only one that crosses a space is data.
+  it("blocks the command with its own words quoted", () => {
+    for (const cmd of [`gh 'pr' create --title x`, `gh pr 'create' --fill`, `gh "pr" "create"`, `gh pr crea'te'`]) {
+      assert.match(blocked(cmd), /a human's call/);
+    }
+  });
+
   // Writing ABOUT the gate is routine — a commit message, a doc, a grep. Matching raw text
   // blocked exactly that, which is how a guard teaches people to work around it.
   it("allows a command that merely mentions it", () => {
@@ -200,6 +209,37 @@ describe("nothing lands on main directly", () => {
   // `--continue` is the opposite case: it finishes the commit the conflict interrupted.
   it("still blocks finishing an interrupted cherry-pick on main", () => {
     assert.match(blocked("git cherry-pick --continue", "main"), /nothing lands there directly/);
+  });
+
+  // The exemption was read from the whole line, so a commit MESSAGE naming one of the flags
+  // switched the rule off — and a commit about this guard is exactly where that text appears.
+  it("does not let a commit message name its way out of the rule", () => {
+    for (const cmd of [
+      `git commit -m 'handle --dry-run properly'`,
+      `git commit -am "note: --dry-run is exempt"`,
+      `git commit -m 'x --abort'`,
+      // One line, two commands: the merge's flag is not the commit's.
+      "git merge --abort; git commit -m x",
+    ]) {
+      assert.match(blocked(cmd, "main"), /nothing lands there directly/);
+    }
+  });
+
+  it("blocks git am, which lands someone else's commit on the branch you are on", () => {
+    assert.match(blocked("git am patch.mbox", "main"), /nothing lands there directly/);
+    allowed("git am --abort", "main");
+  });
+
+  // The forms that push main WITHOUT naming it. The rule is stated as "whether by being on it
+  // or pushing at it", and the branch resolver was only ever consulted for the commit half.
+  it("blocks the pushes that reach main without spelling it", () => {
+    for (const cmd of ["git push --all origin", "git push --mirror origin"]) {
+      assert.match(blocked(cmd, "feature/x"), /pushes at `main`/);
+    }
+    for (const cmd of ["git push", "git push --force-with-lease", "git push origin", "git push origin HEAD"]) {
+      assert.match(blocked(cmd, "main"), /pushes at `main`/);
+      allowed(cmd, "feature/x");
+    }
   });
 });
 

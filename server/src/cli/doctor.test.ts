@@ -136,6 +136,17 @@ describe("checkConnectorAuth", () => {
     assert.equal(c.warn, undefined, "a connector nobody can approve is not an advisory");
     assert.match(String(c.detail), /deckhand token add/);
   });
+
+  // `runDoctor` loaded tokens.yaml inside the same try as config.yaml and apps.yaml, so ANY of
+  // the three throwing left the list empty — and an empty list is a diagnosis: "no local
+  // credential". The operator writes a second credential beside a file that is merely
+  // malformed, while the running server serves the last good list.
+  it("does not read an unreadable tokens.yaml as an empty one", () => {
+    const c = checkConnectorAuth([], "bad indentation at line 3");
+    assert.equal(c.ok, false);
+    assert.match(String(c.detail), /would not load/);
+    assert.doesNotMatch(String(c.detail), /no local credential/, "that is a different fault with a different fix");
+  });
 });
 
 describe("checkPublicUrl", () => {
