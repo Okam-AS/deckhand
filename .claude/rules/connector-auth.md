@@ -32,6 +32,14 @@ Hardest rules:
   not to the code.** Guessing is the only move a stranger has left, and ~3.9e8 possibilities (27 characters over six positions) is
   only strong while it is bounded — but burning the CODE on wrong guesses hands every stranger a
   way to shred every code the operator mints, as fast as they can loop. → `oauth/pairing.test.ts` "leaves the code usable by the person the operator is actually talking to"
+- **An email allowlist is not the answer, and was tried.** Until 2026-08-07 this was Cloudflare
+  Access plus a `connector.allowedEmails` list in config, and both were removed. They worked — the
+  objection was the price. Standing up an Access application needs a Cloudflare API token with
+  `Access: Edit`, a credential with a far wider blast radius than the tunnel's, held forever to
+  save one dashboard visit, so a from-scratch install stopped dead on an errand deckhand could not
+  run. Pairing needs no second account, no list to maintain and no answer at setup time, and it is
+  strictly narrower: an allowlist admitted an address forever, a pairing code admits one client
+  once.
 - **The page says WHO is connecting.** A code proves the operator meant to connect something; it
   does not say what. Registration is unauthenticated and any https redirect is accepted, so
   without the client name and redirect host on the page, a stranger can hand the operator a link

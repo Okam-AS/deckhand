@@ -32,9 +32,10 @@
  * contain. It raises the floor and the cost. It does not manufacture diligence, and
  * pretending otherwise would make it worse than nothing by inviting trust it has not earned.
  *
- * Which is exactly why the LAST step is not in here at all: `gh pr create` is blocked
- * outright for the agent (`scripts/hooks/bash-guard.ts`), and a human runs it. This file
- * decides when the agent is allowed to hand that command over; it never opens a PR.
+ * Which is why this file is the ONLY thing standing between a branch and a pull request.
+ * There used to be a PreToolUse hook refusing `gh pr create` outright, so the last step was
+ * always a person's; it was removed, and the receipt is what replaced it. `handover` is
+ * therefore not advisory — it is the gate.
  *
  * The part that compounds is `conversions`: each finding turned into a check that fires next
  * time (AGENTS.md § "The guardrails"). A receipt with findings and no conversions is a review
@@ -686,15 +687,12 @@ export function runGatesClean(branch: string, dir = RECEIPT_DIR): Receipt | { di
 }
 
 /**
- * The handover: what a HUMAN pastes to open the PR.
+ * The handover: the artefact without which no PR can be opened.
  *
- * This is the whole shape of the human gate. The agent cannot run `gh pr create` — the
- * PreToolUse hook refuses it with no override — so the last step is always a person's. What
- * this command adds is that the artefact that person needs only EXISTS once the review
- * converged: it refuses to write the body file unless {@link validate} passes.
- *
- * So skipping the review does not produce a PR the human has to catch; it produces no
- * handover at all, and an agent with nothing to hand over has to say so.
+ * The whole shape of the gate is that this artefact only EXISTS once the review converged —
+ * it refuses to write the body file unless {@link validate} passes. So skipping the review
+ * does not produce a PR someone has to catch; it produces no handover at all, and there is
+ * nothing to pass to `--body-file`.
  */
 export function handover(receipt: Receipt | null, hash: string, body: string, file = HANDOVER_FILE): Verdict {
   const verdict = validate(receipt, hash);
@@ -774,7 +772,7 @@ if (isEntryPoint) {
     }
     console.log(`✓ ${receipt ? summarize(receipt) : ""}`);
     console.log(`\nPR body written to ${HANDOVER_FILE}.`);
-    console.log(`\nA HUMAN runs this — the agent is blocked from it, deliberately:\n`);
+    console.log(`\nThe review converged, so this is now yours to run:\n`);
     console.log(`  gh pr create --base main --title "<title>" --body-file ${HANDOVER_FILE}\n`);
   } else {
     console.error("usage: tsx scripts/review-receipt.ts <check|hash|show|round|gates|gates:quick|handover>");

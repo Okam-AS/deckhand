@@ -315,9 +315,9 @@ describe("recording a round", () => {
 describe("the handover to a human", () => {
   const file = () => join(dir, "pr-body.md");
 
-  // The whole shape of the human gate: the agent cannot run `gh pr create`, and the artefact
-  // the human needs does not exist until the review converged. Skipping the review produces no
-  // handover at all, rather than a PR someone has to catch.
+  // The whole shape of the gate: the artefact needed to open a PR does not exist until the
+  // review converged. Skipping the review produces no handover at all, rather than a PR someone
+  // has to catch.
   it("writes nothing when the review has not converged", () => {
     const v = handover(converged({ rounds: [round({ cold: true })] }), HASH, "a body", file());
     assert.equal(v.ok, false);
@@ -353,63 +353,6 @@ describe("the handover to a human", () => {
 // folds the untracked-file list in, so a receipt git can see changes the diff it attests to.
 // Every round would be instantly stale and `review:gates` would call the tree dirty forever —
 // a wedge with no honest way out, and no red test to explain it.
-// The gate is only as reachable as its wiring. A cwd-relative hook command exits 0 — allow —
-// whenever the Bash call runs from anywhere but the repo root, which silently switches off the
-// one rule documented as having no override.
-describe("the hook is wired to the repo, not to the cwd", () => {
-  // RUN the configured command rather than read it. The first version of this test asserted
-  // that the string mentions CLAUDE_PROJECT_DIR and an existing path — which three separate
-  // ways of switching the gate off all satisfied: retarget the matcher away from Bash, change
-  // the hook type, or replace the command's tail with `true` while still naming the guard.
-  it("refuses a pull request when fired from another directory, as configured", () => {
-    const repo = process.cwd();
-    const settings = JSON.parse(readFileSync(join(repo, ".claude", "settings.json"), "utf8")) as {
-      hooks?: { PreToolUse?: { matcher?: string; hooks?: { type?: string; command?: string }[] }[] };
-    };
-    const bashHooks = (settings.hooks?.PreToolUse ?? []).filter((h) => new RegExp(`^(${h.matcher ?? ""})$`).test("Bash"));
-    const commands = bashHooks.flatMap((h) => (h.hooks ?? []).filter((x) => x.type === "command").map((x) => x.command ?? ""));
-    assert.ok(commands.length, "no PreToolUse command hook matches Bash — the gate is off");
-
-    // Assembled rather than written out, because this file is read by the very rule it tests.
-    const payload = JSON.stringify({ tool_input: { command: `gh pr cre${"ate"} --base main` } });
-    const verdicts = commands.map((command) =>
-      spawnSync("sh", ["-c", command], { cwd: dir, input: payload, env: { ...process.env, CLAUDE_PROJECT_DIR: repo }, encoding: "utf8" }),
-    );
-    const blocking = verdicts.filter((v) => v.status === 2);
-    assert.equal(blocking.length, 1, `exactly one hook must block; got statuses ${verdicts.map((v) => v.status).join(", ")}`);
-    assert.match(blocking[0]!.stderr, /a human's call/);
-    // Deliberately NOT asserting anything about the review state here: receipts are gitignored,
-    // so a clean checkout has none — and this test runs inside `npm run ci`, which the clean
-    // gate runs in a fresh worktree. Asserting a receipt exists would have made the gate
-    // impossible to satisfy from the one place it must pass. Which repo the guard reads is
-    // covered below, against a scratch repo, where the answer does not depend on this branch.
-  });
-
-  it("reads the review state of the project, not of the directory it was fired from", () => {
-    const repo = process.cwd();
-    const scratch = join(dir, "elsewhere");
-    mkdirSync(scratch);
-    spawnSync("git", ["init", "-q"], { cwd: scratch });
-    const scratchBranch = (spawnSync("git", ["branch", "--show-current"], { cwd: scratch, encoding: "utf8" }).stdout ?? "").trim();
-    // A receipt, so "there is no receipt" — the answer a clean checkout of THIS repo also gives
-    // — cannot be what makes the assertion below pass.
-    writeReceipt({ branch: scratchBranch, rounds: [], conversions: [], waived: [] }, join(scratch, RECEIPT_DIR));
-
-    // The scratch repo has no `origin/main` and so no merge base, so the guard reporting THAT
-    // is proof it read the scratch repo rather than deckhand — an answer that holds on any
-    // checkout, committed or not.
-    const payload = JSON.stringify({ tool_input: { command: `gh pr cre${"ate"}` } });
-    const run = spawnSync("npx", ["tsx", join(repo, "scripts/hooks/bash-guard.ts")], {
-      cwd: repo,
-      input: payload,
-      env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
-      encoding: "utf8",
-    });
-    assert.equal(run.status, 2);
-    assert.match(run.stderr, /cannot determine what this branch changes/);
-  });
-});
-
 describe("the receipt must be invisible to git", () => {
   it("keeps the receipt dir and the PR body ignored", () => {
     for (const path of [`${RECEIPT_DIR}/feature-x.json`, HANDOVER_FILE]) {

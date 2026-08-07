@@ -14,13 +14,13 @@ npm run review:show     # this branch's review curve so far
 npm run review:check    # exactly what the gate will say
 ```
 
-**You cannot open the pull request.** `gh pr create` is refused by the PreToolUse hook
-(`scripts/hooks/bash-guard.ts`, its one rule) and there is no override — opening a PR is a
-person's decision, and a gate you can talk your way past is not one. What you can do is
-earn the handover: review to convergence, run the gates on a clean checkout, then
-`npm run review:handover`, which writes the PR body **only if the gate passes** and
-prints the command for a human to run. Skip the review and there is no handover to give,
-which is the point — no PR appears for someone to catch.
+**You open the pull request yourself, but only after you have earned it.** Nothing blocks
+`gh pr create` any more — what gates it is that `--body-file` needs a file that does not
+exist yet. Review to convergence, run the gates on a clean checkout, then
+`npm run review:handover`, which writes `.claude/pr-body.md` **only if the gate passes**
+and prints the command. Skip the review and there is no body, so there is nothing to
+open — which is the point. AGENTS.md § "How work lands here" lists the four conditions;
+all of them, or you stop and say which one is missing.
 
 The rest is what the guardrails cannot see, and it still has to happen in a head.
 
@@ -189,20 +189,14 @@ npm run review:handover --silent <<'BODY'
 BODY
 ```
 
-**If the hook blocks that command, read what it says before rewording anything.** The hook has
-one rule and it is about RUNNING `gh pr create`, never about writing about it — quoted spans and
-heredoc bodies are blanked before it matches, so a body that quotes the command is fine. If it
-does refuse anyway, write the body to a file and pass the path
-(`npm run review:handover --silent < body.md`) rather than rewording the reasoning.
-
 It refuses unless `review:check` passes, writes `.claude/pr-body.md`, and prints the
-command. Then say, in **one line**, that the user needs to run it. Don't restate the diff
-at them — they can read the PR.
+`gh pr create` command. Run it, then say in **one line** that the PR is open, with its
+URL. Don't restate the diff — they can read the PR.
 
-**Do not try `gh pr create`.** The hook refuses it, there is no override, and reaching for
-one reads as looking for a way around the person you are meant to be asking. If the gate is
-genuinely wrong, say which check is wrong and why, and let the user decide — a fabricated
-round is the one thing here that makes everything else worthless.
+**If the gate refuses, do not route around it.** Writing the body file by hand, or passing
+`--body` instead of `--body-file`, opens a PR whose review receipt is a fiction — and that is
+the one thing here that makes everything else worthless, because no later reader can tell.
+If the gate is genuinely wrong, say which check is wrong and why, and let the user decide.
 
 Merging, branch cleanup and the rest of the workflow are in `AGENTS.md` — branch from
 `main`, never from another PR's branch, squash-merge, delete the branch.

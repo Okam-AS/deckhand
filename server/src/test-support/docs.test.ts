@@ -132,12 +132,17 @@ describe("docs describe the code that exists", () => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
         const full = join(dir, entry.name);
         if (entry.isDirectory()) walk(full);
-        else if (entry.name.endsWith(".test.ts")) {
-          for (const m of readFileSync(full, "utf8").matchAll(/\bit\(\s*"([^"]+)"/g)) testNames.add(m[1]!);
+        else if (entry.name.endsWith(".test.ts") || entry.name.endsWith(".test.tsx")) {
+          // `test("…")` as well as `it("…")`. The viewer and landing workspaces write the flat
+          // form, so a rule scoped to either could only ever cite a check this scan calls
+          // dangling — which pushes the next author to drop the citation rather than write one.
+          for (const m of readFileSync(full, "utf8").matchAll(/\b(?:it|test)\(\s*"([^"]+)"/g)) testNames.add(m[1]!);
         }
       }
     };
-    walk(SRC);
+    // Every workspace, because `.claude/rules/` is scoped by path and those paths are not all
+    // under `server/`. A rule for `landing/**` citing a landing check must be checkable.
+    for (const ws of [SRC, join(REPO, "viewer", "src"), join(REPO, "landing", "src")]) if (existsSync(ws)) walk(ws);
     assert.ok(testNames.size > 5, "no guardrail test names parsed — the `it(\"...\")` pattern changed");
 
     const dangling: string[] = [];
@@ -223,6 +228,12 @@ describe("docs describe the code that exists", () => {
       ["AGENTS.md", AGENTS],
       ["CONSTITUTION.md", readFileSync(join(REPO, "CONSTITUTION.md"), "utf8")],
       ["README.md", readFileSync(join(REPO, "README.md"), "utf8")],
+      // PLAN was the one document exempt from this check, and it is the document AGENTS.md
+      // orders read END TO END. It named `deckhand service install|status|restart` — a verb that
+      // has never existed — plus `app remove` and `env unset`, for as long as anyone can tell.
+      // The check that exists precisely because "an instruction that cannot be followed is worse
+      // than none" was not applied to the file most likely to be followed.
+      ["PLAN.md", PLAN],
     ] as const) {
       // Only where the doc is telling someone to TYPE something: inside backticks or a
       // fenced block. "deckhand can read repos" is English, not an instruction, and a check
@@ -233,13 +244,19 @@ describe("docs describe the code that exists", () => {
         // architecture diagram contains the words "deckhand server (loopback only)".
         ...[...body.matchAll(/```(?:sh|bash|console)\n([\s\S]*?)```/g)].map((m) => m[1]!),
       ].join("\n");
-      for (const m of code.matchAll(/\bdeckhand ([a-z-]+)(?: ([a-z-]+))?/g)) {
+      // The alternation is part of the capture, because docs write a command family as
+      // `deckhand app add|remove|list`. With `([a-z-]+)` alone the second word ended at the
+      // first `|`, so `add` was checked and `remove` — which does not exist — was not text the
+      // check could see at all. Every branch of the alternation is an instruction to type
+      // something, so every branch is checked.
+      for (const m of code.matchAll(/\bdeckhand ([a-z-]+)(?: ([a-z-]+(?:\|[a-z-]+)*))?/g)) {
         const verb = m[1]!;
         if (verb === "setup" || verbs.has(verb)) {
           // A second word is only a subcommand for the verbs that take one.
-          const sub = m[2];
-          if (sub && ["token", "app", "env"].includes(verb) && !subs.has(sub) && !/^</.test(sub)) {
-            missing.push(`${name}: "deckhand ${verb} ${sub}"`);
+          for (const sub of m[2]?.split("|") ?? []) {
+            if (sub && ["token", "app", "env"].includes(verb) && !subs.has(sub) && !/^</.test(sub)) {
+              missing.push(`${name}: "deckhand ${verb} ${sub}"`);
+            }
           }
           continue;
         }
@@ -300,6 +317,48 @@ describe("docs describe the code that exists", () => {
     }
   });
 
+  it("holds docs/ and .claude/ to the same claims as the root documents", () => {
+    // Every check in this file took a hardcoded list of root-level documents, and `docs/**` was
+    // on none of them. So the reference notes drifted invisibly for as long as they existed:
+    // one of them stated a REJECTED design — "Deckhand's decision (locked): WebRTC + TURN" — as
+    // the current locked decision, in a file AGENTS.md orders read before touching streaming
+    // code. A document an agent is told to read is agent-facing whatever directory it sits in.
+    const docs: [string, string][] = [];
+    const collect = (dir: string): void => {
+      if (!existsSync(dir)) return;
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        if (e.isDirectory()) collect(join(dir, e.name));
+        else if (e.name.endsWith(".md")) docs.push([join(dir, e.name).slice(REPO.length + 1), readFileSync(join(dir, e.name), "utf8")]);
+      }
+    };
+    collect(join(REPO, "docs"));
+    collect(join(REPO, ".claude"));
+    assert.ok(docs.length > 3, `only ${docs.length} docs found — the walk is wrong, fix this check`);
+
+    const cli = readFileSync(join(SRC, "cli.ts"), "utf8");
+    const verbs = new Set([...cli.matchAll(/case "([a-z-]+)":/g)].map((m) => m[1]!));
+    const subs = new Set([...cli.matchAll(/sub === "([a-z-]+)"/g)].map((m) => m[1]!));
+    const wrong: string[] = [];
+    for (const [name, body] of docs) {
+      // Same scoping as the root check: only where the doc tells someone to TYPE something.
+      const code = [
+        ...[...body.matchAll(/`([^`\n]+)`/g)].map((m) => m[1]!),
+        ...[...body.matchAll(/```(?:sh|bash|console)\n([\s\S]*?)```/g)].map((m) => m[1]!),
+      ].join("\n");
+      for (const m of code.matchAll(/\bdeckhand ([a-z-]+)(?: ([a-z-]+(?:\|[a-z-]+)*))?/g)) {
+        const verb = m[1]!;
+        if (verb !== "setup" && !verbs.has(verb)) wrong.push(`${name}: "deckhand ${verb}"`);
+        else for (const sub of m[2]?.split("|") ?? []) {
+          if (sub && ["token", "app", "env"].includes(verb) && !subs.has(sub) && !/^</.test(sub)) wrong.push(`${name}: "deckhand ${verb} ${sub}"`);
+        }
+      }
+      for (const m of body.matchAll(/`((?:server|viewer|landing|ops|patches|docs|scripts)\/[A-Za-z0-9_\-./]+\.(?:ts|tsx|md|json|sh|yml))`/g)) {
+        if (!existsSync(join(REPO, m[1]!))) wrong.push(`${name}: ${m[1]!}`);
+      }
+    }
+    assert.deepEqual([...new Set(wrong)], [], "a file under docs/ or .claude/ names a command or a source file that does not exist");
+  });
+
   it("references only skills that exist", () => {
     // AGENTS and CONSTITUTION now make `shipping-a-change` mandatory before every PR. A
     // mandatory procedure that points at a directory nobody wrote is worse than no procedure:
@@ -331,6 +390,16 @@ describe("docs describe the code that exists", () => {
       for (const m of doc.matchAll(/`((?:server|viewer|landing|ops|patches|docs|scripts)\/[A-Za-z0-9_\-./]+\.(?:ts|tsx|md|json|sh|yml))`/g)) {
         const path = m[1]!;
         if (!existsSync(join(REPO, path))) missing.push(path);
+      }
+      // DIRECTORIES and globs, which the extension requirement above could never see. PLAN's
+      // repo tree named `server/test/` and `fixtures/expo-smoke/` — neither has ever existed —
+      // and pointed `mcp/` at a `tools/*.ts` that is one file. A reader goes looking for a
+      // directory exactly as readily as for a file, and `doctor --smoke` was documented in terms
+      // of the fixture directory. A glob is checked by its own directory: the claim "there are
+      // files of this shape in here" is false the moment the directory is not there.
+      for (const m of doc.matchAll(/`((?:server|viewer|landing|ops|patches|docs|scripts|fixtures)\/[A-Za-z0-9_\-./]*?)(?:\*[A-Za-z0-9_\-.*]*)?\/?`/g)) {
+        const path = m[1]!.replace(/\/$/, "");
+        if (path && !path.includes(".") && !existsSync(join(REPO, path))) missing.push(`${path}/`);
       }
     }
     // Bare module names too — `janitor.ts` and `scrcpy.ts` sat in PLAN for months naming

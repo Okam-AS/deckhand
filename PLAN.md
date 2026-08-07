@@ -1,9 +1,8 @@
 # Deckhand — Implementation Plan
 
-> **Status: Phase 0 done (scaffold + green CI). This document is the single source of truth
-> for building Deckhand.** It is written to be self-contained: an implementing agent should
-> be able to build the whole product from this plan plus the reference docs in
-> `docs/reference/`.
+> **This document is the single source of truth for what Deckhand IS** — locked decisions,
+> architecture, the MCP surface, the streaming seam, the security model. It is not a build
+> order. Read it with the reference docs in `docs/reference/`.
 
 ## 1. Vision
 
@@ -36,7 +35,7 @@ implementation:
 |---|---|
 | Streaming (iOS) | **[serve-sim](https://github.com/EvanBacon/serve-sim)** (Apache-2.0, npm) — H.264-over-WebSocket decoded with WebCodecs, automatic MJPEG-over-HTTP fallback, input + accessibility tree + logs over the same helper. Free, no relay infrastructure, rides the tunnel as plain WSS/HTTPS. Captures via `simctl io` (a public Apple interface — survives new iOS runtimes as long as simctl does). Pin the npm version. |
 | Streaming (Android) | **adb-based**, not scrcpy. The decision gate (ws-scrcpy vs embedded scrcpy-server) resolved against both: scrcpy's raw H.264 wire protocol is version-specific and needs extensive on-device iteration, which cannot be validated without a live emulator. Shipped: `screencap` MJPEG plus on-device `screenrecord` H.264, behind the same `StreamingBackend` seam — see §8 for the full outcome. A scrcpy upgrade remains possible behind that seam; it is not planned. |
-| NOT WebRTC/TURN, NOT SimDeck | An earlier revision of this plan used SimDeck + WebRTC relayed through Cloudflare TURN. **Rejected (2026-07-09):** TURN costs $0.05/GB and adds a credential/relay subsystem; SimDeck removed its WS transport (v0.1.31) and its display bridge rides private CoreSimulator APIs (unhedgeable risk against future Xcode); most of the predecessor project's operational scar tissue (display-heal ladder, daemon port cleanup, token discovery) was SimDeck-specific pathology. WS-carried H.264 has none of these problems: free, and exactly as firewall-proof as claude.ai itself. `docs/reference/simdeck-notes.md` is retained as historical context only. |
+| NOT WebRTC/TURN, NOT SimDeck | An earlier revision of this plan used SimDeck + WebRTC relayed through Cloudflare TURN. **Rejected (2026-07-09):** TURN costs $0.05/GB and adds a credential/relay subsystem; SimDeck removed its WS transport (v0.1.31) and its display bridge rides private CoreSimulator APIs (unhedgeable risk against future Xcode); most of the predecessor project's operational scar tissue (display-heal ladder, daemon port cleanup, token discovery) was SimDeck-specific pathology. WS-carried H.264 has none of these problems: free, and exactly as firewall-proof as claude.ai itself. What SimDeck IS used for, since 2026-07-17, is its control/inspection REST surface behind `describe` and `ui` — see `.claude/rules/testing-control.md`. |
 | App types (day one) | React Native (Expo **and** bare) + NativeScript. Flutter / plain-Xcode later. **Amended (2026-07-15): `web`.** A fourth app type hosts a **frontend web project** (a Vite dev server). It is unlike the mobile types: no device/simulator, **local-`path` only** (registered on the machine via `deckhand app add <id> --path <dir> --type web`, never over MCP), and the "preview" IS the running dev server — `start_preview` starts `npm run dev` as a long-lived process (reusing `DevProcessManager`, like NativeScript livesync) on a loopback port and reverse-proxies it through the share URL. Ready = the dev server answers HTTP 200 (no first-frame/screenshot; `screenshot` returns a clear error for web). The dev server is started with Vite's `--base=/s/<shareId>/web/ --host 127.0.0.1 --port <p>` so every asset URL (and HMR) sits under the share path. Vite-first; Next.js/others and git-based web previews are follow-ups. |
 | Build strategy | Build locally on the mini: git worktree → install deps → native build. No CI artifacts. |
 | Local dev mode + daily-loop contract | **Amended (2026-07-15):** an app may declare a local `path` (instead of, or alongside, `repo`). Local previews build **in place** in the developer's working copy — no worktree, no push — and NativeScript runs as a long-lived **livesync** process (`ns run --no-hmr`, watch on, HMR off — NS HMR is unreliable) so file saves reach the running sim with no tool calls. The loop rides in the tools themselves: `start_preview` is **idempotent** per (app, source, ref), share ids are **stable per app** (persisted; a bookmarked viewer URL never rots), and `restart_preview` rebuilds in place (git: fetch new tip + reset worktree; local: re-run) on the same booted devices. Consequence: named branches/PRs now **always fetch** (the old local-first shortcut served stale commits; SHAs remain local-first). Local previews trade snapshot determinism for the loop — the build mirrors whatever is on disk; the source dir is borrowed, never wiped (`npm ci` guarded) and never removed. Local apps are registered on the machine itself (`deckhand app add <id> --path <dir>`), not over MCP. |
@@ -84,67 +83,14 @@ reachable from outside the machine. **All video and input is plain HTTP/WebSocke
 tunnel** — if a network can reach claude.ai, it can view and control a preview. No STUN, no
 TURN, no media leaving through any side channel.
 
-## 4. Repository layout
+## 4. Stack
 
-```
-deckhand/
-├── PLAN.md                      # this file
-├── README.md                    # human quickstart
-├── AGENTS.md / CLAUDE.md        # agent guide (Phase 4 turns this into the setup runbook)
-├── package.json                 # workspaces: server, viewer   (DONE — Phase 0)
-├── server/
-│   ├── src/
-│   │   ├── cli.ts               # `deckhand` CLI entry: init, doctor, serve, token, pair/connections/revoke, app, env
-│   │   ├── server.ts            # express app wiring: /mcp, /oauth, /s, health
-│   │   ├── config.ts            # load/validate config.yaml, apps.yaml, tokens.yaml (zod)
-│   │   ├── oauth/               # the authorization server + the approval a person gives
-│   │   ├── auth.ts              # token lookup (sha256 map, timingSafeEqual) → the operator
-│   │   ├── audit.ts             # append-only JSONL audit log
-│   │   ├── mcp/
-│   │   │   ├── index.ts         # McpServer + StreamableHTTPServerTransport (stateless)
-│   │   │   └── tools/*.ts       # one file per tool
-│   │   ├── engine/
-│   │   │   ├── preview.ts       # Preview + PreviewDevice state machines, orchestration
-│   │   │   ├── recipes.ts       # per-app-type command builders (expo / rn / nativescript)
-│   │   │   ├── detect.ts        # app type + bundle id detection
-│   │   │   ├── metro.ts         # Metro/Expo dev-server lifecycle (port 8081, env-signature keyed)
-│   │   │   ├── worktree.ts      # clone, fetch ref/PR, detached worktrees, local-first resolution
-│   │   │   ├── procs.ts         # spawn helpers: logging, idle watchdogs, kill trees
-│   │   │   ├── devProcess.ts   # long-lived dev runs (NativeScript livesync, web dev servers)
-│   │   │   └── reaper.ts       # orphan sims/AVDs/processes, by env marker and name
-│   │   ├── devices/
-│   │   │   ├── ios.ts           # simctl: runtimes, create, boot(status), install, launch, delete
-│   │   │   ├── android.ts       # (P2) sdkmanager/avdmanager, emulator boot, adb, pm path verify
-│   │   │   └── toolEnv.ts       # JAVA_HOME / ANDROID_HOME / PATH resolution (see learnings doc)
-│   │   ├── streaming/
-│   │   │   ├── backend.ts       # the swappable interface (see §8)
-│   │   │   ├── serveSim.ts      # iOS backend: spawn/track/kill serve-sim helpers, endpoints
-│   │   │   ├── androidAdb.ts    # Android backend: per-device helper, adb screencap
-│   │   │   ├── androidH264.ts   # Android H.264 via on-device screenrecord
-│   │   │   └── web.ts           # web backend: proxy to a local dev server
-│   │   ├── cli/
-│   │   │   ├── setup.ts        # `deckhand setup`: preflight → tunnel → config → services
-│   │   │   ├── preflight.ts    # what is missing, and WHO can fix it (agent vs human)
-│   │   │   ├── tunnelConfig.ts # merge ~/.cloudflared/config.yml, never generate it
-│   │   │   ├── doctor.ts       # the verification loop + the device gate's exit code
-│   │   │   └── configWrite.ts  # config/token/app writers (validate before writing)
-│   │   ├── version.ts          # "am I running the latest?" — the version IS the commit
-│   │   ├── github/
-│   │   │   └── appAuth.ts       # App JWT → installation tokens (cache ~55m), askpass injection
-│   │   ├── share/
-│   │   │   ├── shares.ts        # shareId issuance, scrypt password, expiry, unlock cookies
-│   │   │   └── proxy.ts         # scoped HTTP+WS proxy /s/:shareId/dev/:deviceId/* → helper
-│   │   └── state.ts             # state.json atomic read/write, restart reconciliation
-│   └── test/                    # node:test unit tests colocated by module
-├── viewer/                      # Vite + React (scaffolded in Phase 0)
-│   └── src/                     # single page: device grid, stream client, touch input, password gate
-├── docs/reference/              # serve-sim-notes.md, auto-mate-learnings.md, simdeck-notes.md (historical)
-├── fixtures/
-│   └── expo-smoke/              # tiny Expo app used by doctor + integration tests
-└── scripts/                     # dev/build helpers
-```
+*(There is deliberately no repository tree here. One lived in this section and rotted three
+times — it named a server test directory and an Expo fixture app, neither of which ever
+existed, and a path written inside a fenced block is invisible to the guardrail that polices
+PLAN's paths. Read the directories; git keeps them current for free.)*
 
-Stack: Node ≥ 22, TypeScript, ESM. Key deps: `@modelcontextprotocol/sdk`, `express`, `zod`,
+Node ≥ 22, TypeScript, ESM. Key deps: `@modelcontextprotocol/sdk`, `express`, `zod`,
 `yaml`, `ws` (proxy), `react`+`vite` (viewer only), `serve-sim` (pinned). **No database
 driver.** Keep the dependency list ruthlessly short.
 
@@ -512,9 +458,11 @@ Two holes followed, and both were observed on the dev Mac (4 booted simulators, 
 
 The contract now:
 
-- **Reap on boot** (`engine/reaper.ts`, called from `listen()` before binding): deckhand binds
-  a single loopback port, so exactly one server runs at a time and every `deckhand-…` device on
-  the machine at startup is by definition an orphan. Helpers are killed first (`serve-sim <udid>`;
+- **Reap on boot** (`engine/reaper.ts`, called from `listen()` immediately AFTER the port is
+  bound — the bind is what proves only one server is running, so a second `deckhand serve` dies
+  on `EADDRINUSE` before it can delete the live server's sims and AVDs): deckhand binds a single
+  loopback port, so exactly one server runs at a time and every `deckhand-…` device on the
+  machine at startup is by definition an orphan. Helpers are killed first (`serve-sim <udid>`;
   emulators by their `-avd` argument, since orphans collide on console port 5554), then the
   device is shut down. Devices the developer created themselves are never touched.
 - **Pooled devices** (`limits.reuseDevices`, default on) are named by *shape*, not by preview:
@@ -739,15 +687,16 @@ change eases in/out — nothing snaps.
   server (the watcher compares content, so rotating a value under the same name applies too).
   There are no roles: every credential is the operator's (CONSTITUTION §"Who it is for").
 - `deckhand doctor` — the verification loop, each check independently reportable:
-  toolchains present (xcodebuild, simctl, node; P2: java, sdkmanager, adb, emulator),
-  serve-sim helper spawns for a booted sim + **stream WS upgrades + a first frame decodes**
-  (the real "will video work" check), GitHub App JWT mints and each installation returns a
-  token, tunnel answers **from the public hostname**, disk tier, and a full smoke test:
-  boot a sim, build+install `fixtures/expo-smoke`, screenshot, teardown. Exit non-zero on
-  any failure.
+  toolchains present (xcodebuild, simctl, node; java, sdkmanager, adb, emulator for Android),
+  serve-sim helper spawns for a booted sim + **a first frame decodes** (the real "will video
+  work" check), GitHub App JWT mints and each installation returns a token, tunnel answers
+  **from the public hostname**, and disk tier. Exit non-zero on any failure.
+  `--smoke` adds the hardware pass: it creates a simulator and an emulator and checks boot,
+  first frame and describe on each — six independent checks, no fixture app and no build.
+  `--device-only` runs that pass alone, and its exit code covers only the device checks.
 - `deckhand serve` — run the server (what launchd invokes).
-- `deckhand token add|rm|list|url`, `deckhand app add|remove|list`,
-  `deckhand env set|unset <appId> KEY[=VALUE]`, `deckhand service install|status|restart`.
+- `deckhand token add|rm|list|url`, `deckhand app add|list`,
+  `deckhand env set <appId> KEY=VALUE`.
 
 ## 11. Security model (recap, enforced in code)
 
@@ -896,8 +845,6 @@ booted simulator on the machine. The tool reports; the human decides.
   predecessor project (build recipes, 14 concrete pitfalls, transport-agnostic stream-client
   behaviors, share/proxy patterns, git/worktree mechanics). **Read before implementing the
   engine or the viewer.**
-- `docs/reference/simdeck-notes.md` — **historical only**: notes on SimDeck, the previously
-  planned device layer, kept for context on why it was rejected.
 - serve-sim source: `git clone --depth 1 https://github.com/EvanBacon/serve-sim.git` —
   especially `packages/serve-sim/src/client/` (stream client to vendor) and
   `packages/serve-sim/README.md` (embedding, proxy, X-Forwarded-Proto).

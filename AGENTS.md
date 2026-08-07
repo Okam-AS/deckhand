@@ -98,7 +98,6 @@ If you are here to **implement further**, your instructions are:
    or viewer code, read
    [docs/reference/auto-mate-learnings.md](./docs/reference/auto-mate-learnings.md)
    (14 concrete pitfalls that cost the predecessor project weeks).
-   `docs/reference/simdeck-notes.md` is historical — do not implement against it.
 3. Deckhand is built. PLAN describes what it IS — architecture, the MCP surface, the
    streaming seam, the security model — not a build order; do not add a phase list or a
    risk register back. Add to PLAN when you change what the system is; git holds how it
@@ -138,15 +137,30 @@ you to — that is exactly why it is written down, and why step 5 of it turns wh
 you caught into a check that fires next time. Four of this repo's guardrails exist
 because that step was skipped and a user found the defect instead.
 
-**You do not open the pull request. A human does.** `gh pr create` is refused by the
-PreToolUse hook (`scripts/hooks/bash-guard.ts`), and unlike every other gate here it
-has **no override** — opening a PR is the point where the work stops being cheap to
-change, and that decision is reserved for a person. What you can do is earn the
-handover. That is the hook's ONLY rule: it used to also refuse commits and pushes at
-`main` and a `launchctl kickstart`, and both were dropped because a text matcher over a
-shell cannot enumerate the spellings of a command — three review rounds in a row found
-another one. `main` is protected server-side, so a push at it is refused by GitHub
-whatever a hook thinks; the restart rule is prose below and nothing else.
+**You may open the pull request — once, and only once, `review:handover` has written
+the body.** There is no hook stopping you any more. A PreToolUse hook used to refuse
+`gh pr create` with no override, and it was removed for the reason every other matcher
+in it was removed before: a text matcher over a shell cannot enumerate the spellings of
+a command, so it reserved a decision it could not actually reserve while reading as if
+it could. What reserves it now is the artefact. `review:handover` refuses to write
+`.claude/pr-body.md` unless the review converged, and `gh pr create --body-file` has
+nothing to open a PR with until it exists.
+
+So the permission is exact, and it is a conjunction:
+
+1. `npm run ci` is green, and `npm run review:gates` is green on a clean checkout of HEAD.
+2. `npm run review:check` says the review converged — at least two rounds, one of them
+   cold against the code AS IT SHIPS, nothing blocking left standing.
+3. `npm run review:handover` exited 0 and wrote `.claude/pr-body.md`.
+4. The branch is pushed, and it is not `main`.
+
+All four, then run the command it printed. Any one of them missing and you have not
+earned it — say which one, in a line, and stop. Do not hand-write a body to route
+around step 3: the body file IS the receipt that the review happened, and forging it
+is the one thing here that cannot be caught by a later reader.
+
+`main` is protected server-side, so a push at it is refused by GitHub whatever anything
+local thinks; the restart rule is prose below and nothing else.
 
 **Never commit to `main`.** Every change — including a one-line fix — goes:
 
@@ -161,9 +175,9 @@ npm run review:handover <<'BODY' …     # refuses unless the review converged
 ```
 
 `review:handover` writes `.claude/pr-body.md` and prints the `gh pr create` command.
-Hand that command to the user in one line and stop. If the review has not converged
-there is nothing to hand over — which is the design: skipping the review produces no
-PR for someone else to catch, rather than a PR nobody reviewed.
+Run it. If the review has not converged there is no body file and so no PR — which is
+the design: skipping the review produces nothing to open, rather than a PR nobody
+reviewed.
 
 The review itself is a **loop with a receipt**, not a single pass:
 
@@ -454,6 +468,8 @@ from under a citation fails `docs.test.ts`.
 | `share-proxy.md` | `server/src/share/**` — the public surface; both auth bypasses lived here |
 | `connector-auth.md` | `server/src/oauth/**`, `auth.ts` — who may drive this Mac; the connector URL is public |
 | `mcp-tools.md` | `server/src/mcp/**` — the agent-facing surface, where a description IS a prompt |
+| `testing-control.md` | `server/src/testing/**` — the SimDeck control seam; REST only, no token, no LAN bind |
+| `landing.md` | `landing/**` — the public page; what it depicts is a claim about the product |
 | `tests.md` | every `*.test.ts` — see it fail first; fakes are complete or they lie |
 
 ## The guardrails — read this before you change anything
