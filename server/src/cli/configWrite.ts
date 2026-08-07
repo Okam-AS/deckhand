@@ -109,35 +109,6 @@ export function writeTokens(tokens: TokenEntry[]): void {
 }
 
 /**
- * Read config.yaml, apply a change, and write it back only if it still loads.
- *
- * Same contract as `writeApps` and for the same reason: the write path and the
- * read path used to have no relationship, so a change the schema would later
- * reject was written happily and surfaced as an unloadable config on the next
- * boot — with the server down and nothing pointing at the command that did it.
- *
- * Comments and key order in the operator's file are NOT preserved; the yaml
- * round-trip drops them. That is the accepted cost of validating before writing,
- * and the reason this is used for the two connector fields rather than offered as
- * a general "edit any setting" command.
- */
-export function updateConfig(mutate: (config: Record<string, unknown>) => void): Record<string, unknown> {
-  const raw = parseYaml(readFileSync(paths.config(), "utf8")) as Record<string, unknown> | null;
-  const next = { ...(raw ?? {}) };
-  mutate(next);
-  const check = configSchema.safeParse(next);
-  if (!check.success) {
-    const first = check.error.issues[0];
-    throw new Error(
-      `refusing to write config.yaml: it would not load back (${first?.path.join(".") ?? "?"}: ` +
-        `${first?.message ?? "invalid"}). The existing file is unchanged.`,
-    );
-  }
-  atomicWrite(paths.config(), toYaml(next), 0o644);
-  return next;
-}
-
-/**
  * Write apps.yaml, having first confirmed it can be read back.
  *
  * The write path and the read path had no relationship: anything that produced an in-memory

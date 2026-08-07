@@ -122,6 +122,12 @@ export class PairingStore {
     return parked;
   }
 
+  /** Clients with a request still waiting. They are mid-flow, so nothing may evict them. */
+  busyClientIds(): ReadonlySet<string> {
+    this.sweep();
+    return new Set(this.pendingOnly().map((p) => p.clientId));
+  }
+
   /** What the operator sees on the Mac. No id, no redirect URI, no challenge — nothing that
    *  would let a shoulder-surfing screenshot stand in for being at the machine. */
   pending(): PendingSummary[] {

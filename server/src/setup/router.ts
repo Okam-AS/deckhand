@@ -76,8 +76,8 @@ ol{padding-left:1.2rem;color:var(--ink-soft)}ol li{margin:.35rem 0}
 code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.85em;color:var(--ink)}
 a{color:var(--ink)}
 .btn-link{display:inline-block;margin:.6rem 0;padding:.6rem 1rem;font-weight:600;text-decoration:none;color:var(--ink);
-  border:1px solid color-mix(in srgb,var(--amber) 34%,transparent);border-radius:11px;
-  background:linear-gradient(135deg,color-mix(in srgb,var(--amber) 16%,transparent),color-mix(in srgb,var(--coral) 10%,transparent));
+  border:1px solid var(--hairline);border-radius:11px;
+  background:var(--panel-2);
   transition:transform .15s ease}
 .btn-link:hover{transform:translateY(-1px)}
 </style></head><body>${body}</body></html>`;

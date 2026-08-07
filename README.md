@@ -171,7 +171,7 @@ waits. You let that one client in, from the Mac:
 
 ```sh
 deckhand approve                   # what is waiting, with its code
-deckhand approve RED-42            # let that one in — match YOUR browser's code
+deckhand approve RED-4W7           # let that one in — match YOUR browser's code
 deckhand connections               # who holds a grant now
 deckhand revoke <client-id>        # take it back, effective next call, no restart
 ```

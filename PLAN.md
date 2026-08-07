@@ -94,7 +94,7 @@ deckhand/
 ├── package.json                 # workspaces: server, viewer   (DONE — Phase 0)
 ├── server/
 │   ├── src/
-│   │   ├── cli.ts               # `deckhand` CLI entry: init, doctor, serve, token, app, env
+│   │   ├── cli.ts               # `deckhand` CLI entry: init, doctor, serve, token, approve/deny/connections/revoke, app, env
 │   │   ├── server.ts            # express app wiring: /mcp, /oauth, /s, health
 │   │   ├── config.ts            # load/validate config.yaml, apps.yaml, tokens.yaml (zod)
 │   │   ├── oauth/               # the authorization server + the approval a person gives
@@ -844,8 +844,11 @@ operator saying so, once, per client, at the Mac**:
   It is also strictly narrower: an allowlist admits an address forever, an approval admits one
   client once.
 - Parked requests live **in memory**, capped, and expire in minutes. Surviving a restart would
-  let an approval outlive the browser that asked for it. The cap refuses the overflow rather
-  than evicting, so a flood cannot push the operator's own request off the list.
+  let an approval outlive the browser that asked for it. A full queue **evicts the oldest**, so
+  the newest request always fits — and the newest is the operator's, because they just made it.
+  Refusing the newcomer instead reads safer and inverts: hold every slot and refresh them, and
+  the operator can never park a request again, a lockout a stranger can mount with no
+  credential.
 - Revocation is `deckhand revoke <client-id>`, keyed by client because a client is what was
   approved. Effective on that client's next call, with no restart — a restart tears down every
   booted simulator on the machine, so it can never be the price of taking access away.

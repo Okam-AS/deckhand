@@ -407,6 +407,15 @@ describe("the connector URL is public by construction", () => {
     for (const file of ["oauth/router.ts", "setup/router.ts", "share/proxy.ts"]) {
       const source = read(join(SRC, ...file.split("/")));
       for (const hex of RETIRED) if (source.includes(hex)) offenders.push(`${file}: ${hex}`);
+      // A USED custom property that nobody defines is the palette bug the hex list cannot see:
+      // `color-mix(in srgb, var(--gone) …)` is invalid at computed-value time, so the whole
+      // declaration drops and the element loses its border and background silently. That is how
+      // the setup page's one call-to-action rendered as bare text after this very change.
+      const defined = new Set([...source.matchAll(/(--[a-z0-9-]+)\s*:/g)].map((m) => m[1]!));
+      for (const m of source.matchAll(/var\((--[a-z0-9-]+)\)/g)) {
+        const used = m[1]!;
+        if (!defined.has(used)) offenders.push(`${file}: var(${used}) is used but never defined`);
+      }
     }
     assert.deepEqual(offenders, [], "these pages must use viewer/src/global.css's tokens — see its header for why the warm palette went");
   });

@@ -69,6 +69,10 @@ function waitingPage(res: express.Response, id: string, code: string): void {
      <noscript><meta http-equiv="refresh" content="5"><p>Reload this page once it has been approved.</p></noscript>
      <script>
        const id = ${JSON.stringify(id)};
+       // Absolute, not relative: express also serves this page at /oauth/authorize/, and from
+       // that base a relative poll targets /oauth/authorize/pending/... — a 404 the retry loop
+       // reads as a dropped connection, so the page says "Waiting…" forever after approval.
+       const BASE = "/oauth";
        const say = (t) => { document.getElementById("s").textContent = t; };
        const btn = document.getElementById("c");
        btn.onclick = async () => {
@@ -78,9 +82,9 @@ function waitingPage(res: express.Response, id: string, code: string): void {
        };
        const tick = async () => {
          try {
-           const r = await fetch("pending/" + encodeURIComponent(id), { headers: { accept: "application/json" } });
+           const r = await fetch(BASE + "/pending/" + encodeURIComponent(id), { headers: { accept: "application/json" } });
            const { status } = await r.json();
-           if (status === "approved") { location.href = "resume/" + encodeURIComponent(id); return; }
+           if (status === "approved") { location.href = BASE + "/resume/" + encodeURIComponent(id); return; }
            if (status === "denied") { say("Refused. Nothing was connected."); return; }
            if (status === "expired") { say("This request expired. Start again from Claude."); return; }
          } catch { /* a dropped poll is not a verdict — keep asking */ }
@@ -121,7 +125,12 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
       oauthError(res, 400, "invalid_redirect_uri", "redirect_uris must be https");
       return;
     }
-    const client = deps.store.registerClient({ redirectUris: uris, name: singleString(body.client_name) ?? "unnamed client" });
+    // The clients of requests already waiting for the operator are not idle, whatever the grant
+    // table says — see `evictIdleClients`.
+    const client = deps.store.registerClient(
+      { redirectUris: uris, name: (singleString(body.client_name) ?? "unnamed client").slice(0, 60) },
+      deps.pairing.busyClientIds(),
+    );
     res.status(201).json({
       client_id: client.clientId,
       client_id_issued_at: Math.floor(client.createdMs / 1000),
@@ -156,12 +165,14 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
       return;
     }
 
+    // Errors are RENDERED, never redirected. The spec prefers a redirect, and the premise it
+    // rests on does not hold here: registration is unauthenticated, so "a registered
+    // redirect_uri" is any https URI a stranger asked for two requests ago. Redirecting to it
+    // turns this hostname into a general-purpose open redirector that echoes an
+    // attacker-chosen `state`. Deckhand serves one operator; a page costs a client a clearer
+    // error and costs an abuser the whole trick.
     const fail = (error: string, description: string): void => {
-      const url = new URL(redirectUri);
-      url.searchParams.set("error", error);
-      url.searchParams.set("error_description", description);
-      if (state) url.searchParams.set("state", state);
-      res.redirect(302, url.toString());
+      page(res, 400, "Cannot authorize that request", `<p>${esc(description)}</p><p><code>${esc(error)}</code></p>`);
     };
 
     if (singleString(q.response_type) !== "code") {

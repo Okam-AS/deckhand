@@ -383,7 +383,7 @@ claude.ai. That is not one item in a list of five; it is the step. Say it first,
 in two lines:
 
 > Run `deckhand token` and paste the URL into claude.ai → Settings → Connectors,
-> then click Connect — Cloudflare emails you a one-time code.
+> then click Connect — it shows a code; tell me the code and I approve it here.
 
 Then, if it is useful, what you did. Not before. A user who reads three lines and
 stops must still have the thing they need — and they will stop, because a numbered

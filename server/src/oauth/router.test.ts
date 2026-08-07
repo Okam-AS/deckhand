@@ -140,9 +140,25 @@ describe("OAuth authorization server", () => {
     const clientId = await register();
     const { challenge } = pkce();
     const plain = await authorize(authorizeUrl(clientId, challenge, { code_challenge_method: "plain" }));
-    assert.equal(plain.status, 302);
-    assert.equal(new URL(plain.headers.get("location")!).searchParams.get("error"), "invalid_request");
-    assert.equal(codeFrom(plain), null);
+    assert.equal(plain.status, 400);
+    assert.match(await plain.text(), /invalid_request/);
+    assert.equal(plain.headers.get("location"), null);
+  });
+
+  // "Registered" is not a trust boundary: registration is unauthenticated, so any https URI a
+  // stranger asked for is registered. Redirecting an error to it made this hostname a general
+  // open redirector that echoed an attacker-chosen `state`.
+  it("renders errors instead of redirecting them, even to a registered uri", async () => {
+    const res = await fetch(`${base}/oauth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ redirect_uris: ["https://evil.example/phish"], client_name: "x" }),
+    });
+    const evil = ((await res.json()) as { client_id: string }).client_id;
+    const q = new URLSearchParams({ response_type: "bogus", client_id: evil, redirect_uri: "https://evil.example/phish", state: "s" });
+    const out = await fetch(`${base}/oauth/authorize?${q}`, { redirect: "manual" });
+    assert.equal(out.status, 400);
+    assert.equal(out.headers.get("location"), null, "deckhand must never bounce a browser to an origin a stranger named");
   });
 
   it("rejects a code redeemed with the wrong verifier, and burns it in the process", async () => {

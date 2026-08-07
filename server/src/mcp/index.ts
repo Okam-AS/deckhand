@@ -18,9 +18,8 @@ export interface McpRouterDeps {
   auth: TokenAuthenticator;
   persistApps?: (apps: App[]) => void;
   setup?: SetupStore;
-  /** Per-person OAuth grants. Absent only in tests that exercise the local credential alone. */
+  /** Per-CLIENT OAuth grants. Absent only in tests that exercise the local credential alone. */
   oauth?: OAuthStore;
-  /** Is this address still allowed to connect? Consulted on EVERY request, so removing an address revokes at once. */
   /** Public origin, for the `WWW-Authenticate` pointer that starts the OAuth flow. */
   baseUrl?: string;
 }

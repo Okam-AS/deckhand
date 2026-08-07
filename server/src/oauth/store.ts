@@ -161,7 +161,7 @@ export class OAuthStore {
    * exceeded rather than someone being kicked, because a bounded overshoot is a smaller
    * failure than a silent logout.
    */
-  registerClient(input: { redirectUris: string[]; name?: string }): OAuthClient {
+  registerClient(input: { redirectUris: string[]; name?: string }, busy: ReadonlySet<string> = new Set()): OAuthClient {
     const client: OAuthClient = {
       clientId: this.genToken(),
       redirectUris: [...input.redirectUris],
@@ -169,14 +169,23 @@ export class OAuthStore {
       createdMs: this.now(),
     };
     this.clients.set(client.clientId, client);
-    this.evictIdleClients();
+    this.evictIdleClients(busy);
     this.save();
     return client;
   }
 
-  private evictIdleClients(): void {
+  /**
+   * `busy` names clients that must survive eviction beyond those holding a grant.
+   *
+   * "Holds no grant" looked like "idle" and is not: a client is grant-less for the whole
+   * authorize → approve → resume → token window, which is exactly the human step this design is
+   * built around. Registration is unauthenticated, so a stranger could register past the cap and
+   * evict the operator's in-flight client — the operator then approves, the browser resumes, and
+   * the token exchange fails `invalid_client` with the approval already burned.
+   */
+  private evictIdleClients(busy: ReadonlySet<string> = new Set()): void {
     if (this.clients.size <= MAX_CLIENTS) return;
-    const inUse = new Set(this.grants.map((g) => g.clientId));
+    const inUse = new Set([...this.grants.map((g) => g.clientId), ...busy]);
     const evictable = [...this.clients.values()].filter((c) => !inUse.has(c.clientId)).sort((a, b) => a.createdMs - b.createdMs);
     for (const c of evictable) {
       if (this.clients.size <= MAX_CLIENTS) return;
