@@ -10,64 +10,39 @@ checkout is gone.
 
 ## 1. Driving the SimDeck daemon
 
-- Start: `simdeck daemon start --port 4310 --bind 127.0.0.1 --video-codec software
-  --stream-quality balanced --local-stream-fps 60`. Always `daemon stop` first. On
-  `EADDRINUSE`: `lsof -tiTCP:4310 -sTCP:LISTEN`, kill **only** PIDs whose command matches
-  `simdeck`/`SimDeck` (SIGTERM→SIGKILL), clean both 4310 and 4311, retry once.
+- Auto-mate started the daemon with a long option string. Deckhand does not: it runs
+  `simdeck -p <port>` (default 4310), which starts-or-reuses the local service and returns —
+  see `server/src/testing/simdeck.ts`. On `EADDRINUSE`: `lsof -tiTCP:4310 -sTCP:LISTEN`, kill
+  **only** PIDs whose command matches `simdeck`/`SimDeck` (SIGTERM→SIGKILL), clean both 4310
+  and 4311, retry once.
 - Readiness: poll `GET /api/health` every 250 ms, ≤15 s.
 - Health gate before streaming: require software codec active, a stream-quality profile,
   and fps > 0. Auto-mate hard-required the **software (x264) encoder** for realtime
   previews — the hardware encoder stalled under multi-stream load. (SimDeck now handles
   hardware/software failover in `auto` mode; still verify under 3+ concurrent streams.)
-- Auth: token discovered from `/api/health` (Set-Cookie `simdeck_token=…` or a
-  `?simdeckToken=` URL inside the body), then sent as `X-SimDeck-Token`.
 - Cheap pre-flight worth copying: before showing a viewer, open the upstream stream WS
   with a 1.5 s timeout to confirm it upgrades; cache the verdict (60 s ok / 15 s fail).
-- iOS: auto-mate created/booted sims itself via `simctl`; SimDeck merely attaches display.
-  Android: **SimDeck owns boot** — `POST /api/simulators/android:<avdName>/boot`, then poll
-  `GET /api/simulators` until `isBooted && android.serial && privateDisplay.displayReady`.
-  The adb serial must always be read from SimDeck's simulator object, never guessed.
+- iOS: auto-mate created/booted sims itself via `simctl`; SimDeck merely attached display.
+  Android: auto-mate let **SimDeck own boot** and read the adb serial back off SimDeck's
+  simulator object. Deckhand does neither — it creates the AVD and boots the emulator itself
+  via avdmanager/emulator/adb (`server/src/devices/android.ts`) on a fixed console port, so
+  the serial is `emulator-<port>` and is derived rather than discovered. The durable lesson
+  is only the negative one: never guess an adb serial.
 - Useful simulator-object fields: `udid`, `platform` (`ios-simulator`|`android-emulator`),
   `isBooted`, `android.{avdName,serial,grpcPort}`,
   `privateDisplay.{displayReady,displayStatus,displayWidth,displayHeight,rotationQuarterTurns}`.
 
-## 2. Browser streaming client (legacy H.264-over-WS "SDH1" protocol + behaviors)
+## 2. Browser streaming client
 
-> **Transport note (updated 2026-07-09):** Deckhand streams **H.264 over WebSocket via
-> serve-sim** (PLAN.md §8–9) — the same *transport family* as this section, but a
-> **different wire format**: vendor serve-sim's own client parsing (`avcc-codec.ts`,
-> `mjpeg-frame-parser.ts`), do NOT implement the SDH1 framing below (it was SimDeck's,
-> removed upstream in v0.1.31; kept only as historical reference). The **client behaviors**
-> in this section (IDR gating, monotonic timestamps, backlog reset, rAF single-frame paint,
-> visibility gating, bounded recovery, letterbox-corrected input) are transport-agnostic
-> and apply **directly** to Deckhand's viewer.
+Auto-mate decoded H.264 with **WebCodecs `VideoDecoder`** onto a 2D canvas. That decode
+model is what Deckhand kept; the wire format underneath it is not. Auto-mate's framing was
+SimDeck's "SDH1" protocol, which was removed upstream and is deliberately **not** documented
+here — nothing should be implemented against it. Deckhand vendors serve-sim's own parsing
+instead (`viewer/src/stream/avcc.ts`, `viewer/src/stream/mjpeg.ts`).
 
-Auto-mate streamed via SimDeck's H.264-over-WebSocket endpoint decoded with **WebCodecs
-`VideoDecoder`** onto a 2D canvas. The behaviors below are the durable lessons; the framing
-spec is historical.
-
-### SDH1 binary framing (one WS binary message = one frame)
-
-40-byte big-endian header:
-
-| Offset | Size | Field |
-|---|---|---|
-| 0 | 4 | magic `0x53444831` ("SDH1") |
-| 4 | 1 | version = 1 |
-| 5 | 1 | flags: bit0 keyframe, bit1 config-present |
-| 6 | 2 | headerBytes (u16) |
-| 8 | 8 | sequence (u64) |
-| 16 | 8 | timestampUs (u64) |
-| 24 | 4 | width (u32) |
-| 28 | 4 | height (u32) |
-| 32 | 4 | configBytes (u32) |
-| 36 | 4 | payloadBytes (u32) |
-
-Layout: `[header][avcC config if flag][payload]`. Codec string: `avc1.<PP><LL><MM>` from
-avcC bytes 1–3 (fallback `avc1.42E01F`). Decoder config:
-`{codec, codedWidth, codedHeight, hardwareAcceleration: "prefer-hardware",
-optimizeForLatency: true, description: avcC}`. Canvas:
-`getContext("2d", {alpha: false, desynchronized: true})`.
+The **client behaviors** below are the durable lessons. They are transport-agnostic — IDR
+gating, monotonic timestamps, backlog reset, rAF single-frame paint, visibility gating,
+bounded recovery, letterbox-corrected input — and apply directly to Deckhand's viewer.
 
 ### Client behaviors that made it reliable (transport-agnostic — port all of these)
 
@@ -176,9 +151,11 @@ optimizeForLatency: true, description: avcC}`. Canvas:
 - AVD creation: pick device profile + system image from available options, install images
   on demand (`yes | sdkmanager --licenses; sdkmanager "platforms;android-<api>" "<image>"`),
   then `avdmanager create avd --force --name <Name> --package <sysimg> --device <profile>`.
-  After creating an AVD, tell SimDeck to rescan.
-- Boot via SimDeck; poll ≤240 s for `isBooted && android.serial`; screenshots via
-  `adb -s <serial> exec-out screencap -p`; launch via SimDeck's launch endpoint.
+- Auto-mate booted and launched through SimDeck, polling ≤240 s for `isBooted &&
+  android.serial`. Deckhand owns that itself: it starts the emulator on a fixed console
+  port and waits on adb (`server/src/devices/android.ts`), so nothing has to be discovered
+  from a daemon. What carried over unchanged is the ~240 s patience budget for a cold
+  emulator, and `adb -s <serial> exec-out screencap -p` for a still frame.
 - Tooling env is fiddly on macOS: resolve `JAVA_HOME` (Temurin 17/21 — reject broken
   Homebrew symlinks), `ANDROID_HOME`, and prepend
   `platform-tools`/`emulator`/`cmdline-tools/latest/bin` to PATH. Provide both an
@@ -205,7 +182,7 @@ optimizeForLatency: true, description: avcC}`. Canvas:
   (c) SimDeck daemon restart — **rate-limited to 1/60 s globally** (it's host-wide;
   concurrent previews must not stampede it). Never hand out a "ready" device without a
   display-health check.
-- **Warm pool** (Phase 5 in deckhand): pre-created+booted bare devices pay the ~40 s boot
+- **Warm pool**: pre-created+booted bare devices pay the ~40 s boot
   ahead of demand; adopt into a preview on request; erase back to bare on release so app A
   never leaks into preview B. Leases carried a token + TTL backstop, but the real reclaim
   signal was **heartbeat staleness** (bumped on observable progress), not TTL.

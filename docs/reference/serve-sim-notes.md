@@ -14,8 +14,9 @@ repo source on 2026-07-09. Where a detail matters for implementation, **read the
 
 - **Explicitly built for our topology**: "host on a remote mac and tunnel anywhere".
 - Full 60 FPS stream; codec `auto` = **H.264 when the browser can decode it (WebCodecs)**,
-  `mjpeg` forces software JPEG (e.g. VMs without H.264 encode). So: H.264-over-WS primary,
-  MJPEG-over-HTTP built-in fallback — no WebRTC, no TURN, no ICE anywhere in the codebase
+  `mjpeg` forces software JPEG (e.g. VMs without H.264 encode). Both ride **HTTP**, not a
+  WebSocket (see the endpoint table below); the WebSocket carries input only. So: H.264
+  primary, MJPEG fallback — no WebRTC, no TURN, no ICE anywhere in the codebase
   (verified: zero hits for webrtc/turn/stun/RTCPeerConnection outside the lockfile).
 - Input: touch/gestures/keyboard forwarded over a WS control channel; swipe-home, pinch
   (option key), CMD+SHIFT+H, etc.
@@ -67,8 +68,11 @@ Per-device helper routes are served under `{base}/helper/<udid>/` (in-process fr
 | `/helper/<udid>/ws` | WebSocket (binary frames) | HID input (touch/keyboard) |
 | `/helper/<udid>/ax` | SSE | accessibility tree → `describe` |
 
-**Correction to any earlier note:** the H.264 path is **`stream.avcc` over a long-lived
-chunked HTTP response**, not a WebSocket. Framing (`client/avcc-codec.ts`): repeating
+The H.264 path is **`stream.avcc` over a long-lived chunked HTTP response**, not a
+WebSocket — the only WebSocket here is `/ws`, and it carries input. (The pinned version
+Deckhand ships does not serve `stream.avcc` at all, so MJPEG is the live iOS path today;
+`serveSim.ts` probes avcc first anyway, so a serve-sim that gains it needs no change.)
+Framing (`client/avcc-codec.ts`): repeating
 `[len:u32-be][tag:u8][payload]` where `len = payload.length + 1`. Tags: `0x01` description
 (avcC SPS/PPS → decoder config), `0x02` keyframe (IDR), `0x03` delta (P-frame), `0x04` seed
 (a JPEG painted before the first IDR decodes). Codec string from avcC bytes 1-3
@@ -94,40 +98,23 @@ serve-sim's client input code rather than re-deriving it. `exec-ws.ts` is a **se
 `/exec-ws` channel (shell exec + settings + SSE mux, token-gated) that Deckhand must **never**
 expose through the tunnel/proxy.
 
-### Embedding vs per-device spawn — Deckhand's choice
+### How Deckhand drives it
 
-`simMiddleware(options)` (`middleware.ts:1235`) is a Node HTTP middleware that serves all the
-routes above **in-process** via the native addon; `startDeviceInProcess(udid, port, base)`
-(`middleware.ts:721`) boots a sim and registers it. So serve-sim's own model is now
-in-process capture, not a separate helper daemon. Two integration options for Deckhand
-(pick in Phase 1, revisit if the native addon proves unstable):
+Deckhand spawns one **detached daemon per device** — `serve-sim --detach -p <port> <udid>`,
+against a simulator it created and booted itself — parses the JSON the CLI prints for the
+stream/input URLs, and reverse-proxies only those helper endpoints. Preview mode was not
+taken: its device stream is lazy and browser-driven, so it never attaches to a headless
+`simctl`-booted sim. The code and its reasoning are `server/src/streaming/serveSim.ts`; the
+trap that `-p` is a request rather than an instruction is recorded once, in
+`.claude/rules/streaming.md`, and is not repeated here.
 
-1. **Spawn `serve-sim <udid> -p <port> -q` per device** as a child process on a loopback
-   port; Deckhand creates+boots the sim first (its own runtime choice), then points serve-sim
-   at the udid (its boot is idempotent); reverse-proxy only `/helper/<udid>/{stream.avcc,
-   stream.mjpeg,ws,ax}`. Deckhand owns the pid and reaps it; janitor uses `serve-sim
-   --list`/`--kill` + a pid table for orphans. **Best process isolation** (a crashed capture
-   kills one device, not Deckhand) — matches the "no global daemon" property. Preferred.
-2. **Embed `simMiddleware` in Deckhand's Express server.** Fewer processes, but pulls
-   serve-sim's whole surface (incl. `/exec`, grid api) into Deckhand's process and couples
-   its stability to the native addon. Only if option 1 has problems.
-- **Embedding API**: serve-sim exports middleware usable inside your own HTTP server, with
-  a `proxyHelpers` option; you must wire the HTTP `upgrade` event yourself:
-  `server.on("upgrade", (req, socket, head) => middleware.handleUpgrade(req, socket, head))`.
-  README warns: with `proxyHelpers` but no `upgrade` wiring, video-over-HTTP still works but
-  **simulator input and DevTools die** (their sockets never reach the proxy).
+**Only** the video + input endpoints are exposed through the share proxy — never the preview
+UI, camera, exec, or DevTools routes.
+
 - **TLS/proxy note (critical for the tunnel)**: "When terminating TLS at a reverse proxy,
   forward `X-Forwarded-Proto` so the helper URLs use `https`/`wss` and avoid mixed-content
   blocks." cloudflared terminates TLS at Cloudflare's edge → Deckhand's proxy must forward
   this header.
-- Two integration shapes for Deckhand (implementer picks in Phase 1):
-  1. Spawn `serve-sim --no-preview -q -p <port> <udid>` per device and reverse-proxy the
-     helper endpoints under `/s/:shareId/dev/:deviceId/*` (Deckhand owns the child pid —
-     simplest lifecycle).
-  2. Embed the middleware in Deckhand's express server and let it proxy helpers (fewer
-     moving parts in the request path; lifecycle via the state file).
-  Either way, **only** the video + input endpoints are exposed through the share proxy —
-  never the preview UI, camera, exec, or DevTools routes.
 
 ## Client code to vendor (Apache-2.0, keep attribution)
 
@@ -160,17 +147,25 @@ their parsing code over re-implementing it.
                                └──────────────────┘
 ```
 
-Key property vs the rejected SimDeck design: **no global daemon** — one small helper per
+Key property vs SimDeck's video design, which was rejected for video (SimDeck is still used,
+control-only, for `describe`/`ui`): **no global daemon** — one small helper per
 device, spawned/killed by Deckhand. A sick stream is fixed by killing and respawning one
 process; there is no shared-daemon state to heal and no host-wide restart that can stampede
 other previews.
 
 ## Risk notes
 
-- Young project: pin the exact npm version in `config.yaml`; `deckhand doctor` verifies
-  helper spawn + WS upgrade + first decoded frame on the pinned version. Apache-2.0 and
-  small → vendor/fork is a real escape hatch.
+- Young project: the exact npm version is pinned in `server/package.json`, and
+  `server/src/test-support/invariants.test.ts` fails the build on a range or on a patch file
+  that no longer matches the pin — the pin is a security control, because `patch-package`
+  strips serve-sim's `/exec` routes. `deckhand doctor` verifies helper spawn plus a first
+  frame on that pinned copy. Apache-2.0 and small → vendor/fork is a real escape hatch.
 - Rides `simctl io` (public interface) — materially safer against new Xcode/iOS-runtime
   releases than private-framework bridges, but still verify early on beta Xcode.
-- iOS-only. Android is a separate backend (scrcpy-based, Phase 2) behind the same
-  `StreamingBackend` seam.
+- iOS-only. Android is a separate backend behind the same `StreamingBackend` seam, and it is
+  **adb-based**: on-device `screenrecord` repackaged to AVCC for H.264
+  (`server/src/streaming/androidH264.ts`), with `screencap` MJPEG as the fallback
+  (`server/src/streaming/androidAdb.ts`). scrcpy was evaluated for that role and **rejected**
+  — its raw H.264 wire protocol is version-specific and needs on-device iteration that could
+  not be validated at decision time (PLAN §8). Do not reach for it now; the seam is where a
+  future scrcpy upgrade would go if anyone ever wanted one.
