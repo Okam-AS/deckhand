@@ -69,11 +69,16 @@ describe("the client registry's ceiling", () => {
     const ids = seed(64);
     const store = new OAuthStore({ file, now: () => 9_000 });
     const busy = new Set(ids);
-    const before = statSync(file).mtimeMs;
+    const before = statSync(file);
     for (let i = 0; i < 5; i++) {
       assert.throws(() => store.registerClient({ redirectUris: ["https://claude.ai/cb"] }, busy), RegistryFullError);
     }
-    assert.equal(statSync(file).mtimeMs, before, "a refusal that changed nothing must not touch the disk");
+    const after = statSync(file);
+    // The inode, not only the timestamp: `save` writes a tmp file and renames it, so a write
+    // always replaces the inode. mtime alone would pass on a filesystem whose timestamps are
+    // coarser than the loop above — the assertion would then hold with the fix removed.
+    assert.equal(after.ino, before.ino, "a save renames a new file into place, so the inode would change");
+    assert.equal(after.mtimeMs, before.mtimeMs, "a refusal that changed nothing must not touch the disk");
   });
 
   // The other half of the same path: when an idle client CAN be evicted, the registration

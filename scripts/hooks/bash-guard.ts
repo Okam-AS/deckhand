@@ -35,8 +35,9 @@ const ALLOW: Verdict = { blocked: false };
  *
  * A rule asking "does this RUN git commit" has to see `git 'commit'`, `git com'mit'`,
  * `git \commit`, `git${IFS}commit` and a `git commit` split over a line continuation as the
- * same command, because bash does. Each of those was a live bypass: quoting the verb walked
- * past the rule that used to block a commit on `main`, and `${IFS}` walks past this one.
+ * same command, because bash does. Every one of them WAS a live bypass before this existed:
+ * quoting the verb walked past the rule that used to block a commit on `main`, and `${IFS}` walked
+ * past this one, verified against a stub `gh` on PATH.
  *
  * Escaping is undone BEFORE quoted spans are considered, so `$'pr'` becomes `'pr'` and then
  * `pr`. The blanking in {@link withoutQuotedText} still decides what is data.
