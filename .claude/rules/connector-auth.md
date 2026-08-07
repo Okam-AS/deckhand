@@ -27,8 +27,13 @@ Hardest rules:
   client" hands a grant to whoever holds the URL — the exact thing parking exists to prevent.
   Enforced at the SOURCE level, because a runtime test only proves today's code parks. → `oauth/router.test.ts` "never mints a code from the public authorize endpoint"
 - **Bare `deckhand approve` lists; it never approves.** Approving whatever happens to be waiting
-  is the mistake the mechanism exists to prevent: the operator must match the code against their
-  own browser, or a colleague's request is indistinguishable from theirs.
+  is the mistake the mechanism exists to prevent: the code has to be matched against the browser
+  that is waiting, or a colleague's request is indistinguishable from the operator's.
+- **A code the user READ is the approval; the command is the agent's to type.** An agent driving
+  a setup asks for the code and runs `deckhand approve <CODE>` itself. That keeps the human step
+  the one only a human can do — reading their own screen — instead of making them a typist for a
+  command the agent could run. It does not weaken the gate: the agent has the machine's
+  credential either way, and what it cannot do is invent a code nobody saw.
 - **Refusing the overflow, never evicting.** The URL is public, so anyone holding it can make
   this Mac show a prompt. Evicting the oldest to make room would drop the request the operator
   is looking at — which is precisely when people start approving without reading. → `oauth/pairing.test.ts` "refuses the overflow rather than dropping a request the operator may be reading"

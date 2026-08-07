@@ -278,7 +278,8 @@ function cmdTokenMine(): void {
   if (!hostname) fail("no hostname in config.yaml — run `deckhand setup --hostname ...` first");
   console.log(`https://${hostname}/mcp`);
   console.error(`\nPaste that into claude.ai → Settings → Connectors → Add, then click Connect.`);
-  console.error(`Claude will show a code and wait. Run \`deckhand approve\` here and match it.`);
+  console.error(`Claude will show a code and wait. AGENT: ask the user for that code, then run`);
+  console.error(`\`deckhand approve <CODE>\` yourself — do not hand them the command.`);
   console.error(`The URL itself is not a credential — sharing it with your organisation is fine,`);
   console.error(`because nothing connects until somebody at this Mac approves it.`);
 }

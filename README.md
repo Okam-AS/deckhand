@@ -134,6 +134,9 @@ npx tsx server/src/cli.ts setup \
   and will hang you forever.
 - Install what it says you can install. Then ask the user for a hostname on a
   domain they have on Cloudflare, and run `setup --hostname <that>`.
+- At the end, ask the user for the code Claude shows on Connect and run
+  `deckhand approve <CODE>` yourself. Do not tell them to run it — reading the code
+  is theirs to do, typing the command is yours.
 - Xcode is a ~10 GB App Store download needing an Apple ID and a `sudo` licence
   accept. Ask; do not claim to have done it.
 - Android is optional. Without it, iOS previews work and Android does not —

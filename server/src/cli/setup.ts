@@ -296,15 +296,15 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
     say("  └─────────────────────────────────────────────────────────────┘");
     say("");
     say(`   1.  Paste  https://${hostname}/mcp  into claude.ai → Settings → Connectors → Add`);
-    say("   2.  Click Connect. Claude shows a code and waits.");
-    say("   3.  Run `deckhand approve` here and approve THAT code.");
+    say("   2.  Click Connect. Claude shows a code — read it out and you are done.");
     say("");
     say("   The URL is not a password — share it with your organisation if you like.");
-    say("   Nothing connects until somebody at this Mac approves it, one client at a time.");
+    say("   Nothing connects until that code is approved here, one client at a time.");
     say("");
-    say("   AGENT: reply in TWO LINES — paste the URL, then approve the code it shows.");
-    say("   Do not summarise this output, list what was installed, or report status: they can");
-    say("   see all of it above. Anything you add pushes the only instruction out of view.");
+    say("   AGENT: reply in TWO LINES — paste the URL, then ASK THEM FOR THE CODE it shows.");
+    say("   When they give it to you, run `deckhand approve <CODE>` yourself. Do not tell them");
+    say("   to run it: typing a command is your job, reading the code is theirs. Do not");
+    say("   summarise this output or report status — they can see all of it above.");
   } catch (e) {
     if (e instanceof SetupError) {
       console.error(`\n✗ ${e.message}\n\n  ${e.fix}\n`);

@@ -43,8 +43,9 @@ organisation is visible to everyone in it, so the URL cannot be the secret. Noth
 advance who may use it. `/oauth/authorize` **parks** the request and shows a short code, and
 `deckhand approve` — which needs a local `tokens.yaml` credential, so it needs the machine —
 admits that one client. A colleague holding the same URL gets a parked request nobody matches.
-Bare `deckhand approve` LISTS rather than approving: the operator has to compare the code with
-their own browser, or their request and a stranger's look identical. `deckhand revoke
+Bare `deckhand approve` LISTS rather than approving: the code has to be matched against the
+browser that is waiting, or that request and a stranger's look identical. An agent gets the code
+by ASKING the user for it, then runs `deckhand approve <CODE>` itself. `deckhand revoke
 <client-id>` takes one back, effective on its next call, no restart. Claude Code on the machine
 uses a local `tokens.yaml` bearer token instead and needs no approval.
 
@@ -390,11 +391,12 @@ list of green ticks reads as "nothing left to do".
 
 **Their connector URL:** `deckhand token` — just `https://<their-host>/mcp`. It
 carries no secret, so relaying it in chat is fine. What keeps everyone else out is
-that Claude parks and waits: it shows a code, and the user runs `deckhand approve`
-on the Mac to match it. Tell them that in the same breath as the URL — a connector
-that sits at "connecting" with no explanation reads as broken. With no local
-credential nothing can ever be approved; `deckhand doctor` fails on that, and it is
-not a warning.
+that Claude parks and waits: it shows a short code, and that code has to be approved
+here. **Ask them for it, then run `deckhand approve <CODE>` yourself** — do not hand
+them the command. Reading the code off their own screen is the part only they can
+do; typing a command is yours. Say so in the same breath as the URL, or a connector
+that sits at "connecting" reads as broken. With no local credential nothing can ever
+be approved; `deckhand doctor` fails on that, and it is not a warning.
 
 Do not confuse that with `deckhand token add|url <name>`, which mints a LOCAL
 bearer credential for Claude Code on the machine. That one IS a password: never

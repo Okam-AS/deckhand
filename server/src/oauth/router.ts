@@ -55,10 +55,10 @@ function waitingPage(res: express.Response, id: string, code: string): void {
     res,
     200,
     "Waiting for approval",
-    `<p>Ask whoever runs this deckhand to approve this code on their Mac:</p>
+    `<p>Read this code out to whoever is setting up this deckhand:</p>
      <p class="code">${esc(code)}</p>
-     <p>They run <code>deckhand approve</code> and confirm this code. Nothing connects until they do,
-        and the request expires in a few minutes.</p>
+     <p>They approve it on the Mac — nothing connects until they do, and the request expires in a
+        few minutes. If you did not start this, say nothing: the code is all that lets it through.</p>
      <p id="s">Waiting…</p>
      <noscript><meta http-equiv="refresh" content="5"><p>Reload this page once it has been approved.</p></noscript>
      <script>
