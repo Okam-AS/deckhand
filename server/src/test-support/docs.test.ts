@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { registeredTools, registerToolCallCount } from "./toolNames.ts";
+import { registeredTools, registerToolCallCount, schemaFieldNames, stringLiterals } from "./toolNames.ts";
 
 /**
  * PLAN.md and AGENTS.md, checked against the code they claim to describe.
@@ -111,6 +111,46 @@ describe("docs describe the code that exists", () => {
       [...new Set(ghostsInSource)],
       [],
       `tools.ts mentions a tool-shaped name that is not registered — an agent reading that description will try to call it`,
+    );
+  });
+
+  it("keeps dead parameter names out of agent-facing text", () => {
+    // The sibling check above catches a dead TOOL name. It cannot catch a dead PARAMETER, and
+    // that is the worse of the two: `compare` was deleted and three of its error strings kept
+    // telling the caller to `pass against: { repo, ref }`. A model reading that sends an
+    // argument the schema does not have, gets a validation rejection, and the message that was
+    // supposed to unstick it is the thing that stuck it.
+    //
+    // Two shapes, each chosen because it is a name the text is telling the model to TYPE, not
+    // a word it happens to use:
+    //
+    //  1. `pass X: {` / `use X: [` — an argument being demonstrated. The leading verb is what
+    //     keeps English out: "not at the top level: {…}" is prose, and a bare `X:\s*[[{]`
+    //     pattern reads `level` as a parameter.
+    //  2. `X.y` where `y` IS a real field — "parameter dot subfield". `against.worktree` is
+    //     caught because `worktree` is real and `against` is not, while `physical.targetable`
+    //     (a RESPONSE field named in list_devices' description) is left alone because
+    //     `targetable` is not an input field either. Descriptions legitimately name response
+    //     shapes, so a rule demanding every dotted owner be a parameter would be false.
+    //
+    // Fields are collected at every nesting depth and across all tools, so a real name in the
+    // wrong tool still passes — the check is "this name exists", not "this name belongs here".
+    // Tightening it needs a real schema walk, not a wider regex.
+    const fields = schemaFieldNames(TOOLS);
+    assert.ok(fields.size > 20, `only ${fields.size} zod fields parsed — the schema style changed, fix this check`);
+    const ghosts = new Set<string>();
+    for (const text of stringLiterals(TOOLS)) {
+      for (const m of text.matchAll(/\b(?:pass|use|with|set) ([a-z][A-Za-z0-9]*)\s*:\s*[[{]/g)) {
+        if (!fields.has(m[1]!)) ghosts.add(`${m[1]}: {…}`);
+      }
+      for (const m of text.matchAll(/\b([a-z][A-Za-z0-9]+)\.([a-z][A-Za-z0-9]*)\b/g)) {
+        if (fields.has(m[2]!) && !fields.has(m[1]!)) ghosts.add(`${m[1]}.${m[2]}`);
+      }
+    }
+    assert.deepEqual(
+      [...ghosts],
+      [],
+      `tools.ts tells the caller to pass an argument no tool's schema declares — the call it describes fails validation`,
     );
   });
 

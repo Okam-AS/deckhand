@@ -631,7 +631,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             (refs.length
               ? ` It shows ${refs.length + 1} sources side by side under this one link. Drive a pane with describe/ui/screenshot using ITS OWN previewId from \`alongside\` — ${refs
                   .map((r) => `"${r.previewId}"`)
-                  .join(", ")} — with the same deviceIds (ios-0, android-1). A pane is NOT reachable by the source app's id: preview_status/parity_status/ui by that app id will say it isn't running, because a pane runs under a synthetic id. Never call start_preview on the source app to get a handle — that boots a second set of devices on a second link and the page keeps streaming the pane; re-read the pane ids with parity_status on THIS previewId instead. Judge each item yourself and record the verdict with parity_set (done / adjusted / regression). The checklist is local to this session — keep the project plan in your task tracker.`
+                  .join(", ")} — with the same deviceIds (ios-0, android-1). A pane is NOT reachable by the source app's id: preview_status/parity_status by that app id will say it isn't running, because a pane runs under a synthetic id (and describe/ui/screenshot take no app id at all). Never call start_preview on the source app to get a handle — that boots a second set of devices on a second link and the page keeps streaming the pane; re-read the pane ids with parity_status on THIS previewId instead. Judge each item yourself and record the verdict with parity_set (done / adjusted / regression). The checklist is local to this session — keep the project plan in your task tracker.`
               : "") +
             protectionNote,
         });
@@ -686,7 +686,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       spec = source === "git" ? parseRefSpec({ ref: base.defaultBranch }) : undefined;
       key = `app:${resolved.id}`;
     } else if (a.worktree) {
-      if (!a.worktree.startsWith("/")) return fail("bad_request", "against.worktree must be an absolute path");
+      if (!a.worktree.startsWith("/")) return fail("bad_request", "an alongside worktree must be an absolute path");
       base = { ...workingApp, path: a.worktree, repo: undefined };
       source = "local";
       key = `worktree:${a.worktree}`;
@@ -694,8 +694,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       if (!a.ref) {
         return fail(
           "needs_ref",
-          `against.repo "${a.repo}" needs a ref — that repo's default branch is unknown`,
-          'pass against: { repo, ref } — e.g. ref: "main".',
+          `alongside repo "${a.repo}" needs a ref — that repo's default branch is unknown`,
+          'pass alongside: [{ repo, ref }] — e.g. ref: "main".',
         );
       }
       // An arbitrary repo reaches PAST the registered set and runs that repo's
@@ -720,8 +720,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       if (!workingApp.repo) {
         return fail(
           "local_only_app",
-          `app "${workingApp.id}" has no repo — an against.ref needs a git repo`,
-          "use against: { worktree: <abs path> } to compare against another local checkout instead",
+          `app "${workingApp.id}" has no repo — an alongside ref needs a git repo`,
+          "pass alongside: [{ worktree: <abs path> }] to show another local checkout instead",
         );
       }
       base = workingApp;
@@ -963,7 +963,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Describe the screen (accessibility tree)",
       description:
-        "Read the on-screen UI as a structured accessibility tree — the agent's eyes for driving the app. Use interactiveOnly for a compact, actionable list, and drive actions by #id/text/label selectors (the positional @e# refs are unstable across snapshots). Pair with `ui` to act and `screenshot` to eyeball. In a test loop, describe once to understand a new screen — then verify with `ui` waitFor/assert, not repeated full dumps. Needs the SimDeck testing backend on the deckhand machine.",
+        "Read the on-screen UI as a structured accessibility tree — the agent's eyes for driving the app. Call it with just previewId/deviceId: that snapshot is already the compact, actionable one. Drive actions by #id/text/label selectors (the positional @e# refs are unstable across snapshots). Pair with `ui` to act and `screenshot` to eyeball. In a test loop, describe once to understand a new screen — then verify with `ui` waitFor/assert, not repeated full dumps. Needs the SimDeck testing backend on the deckhand machine.",
       inputSchema: {
         previewId: z.string(),
         deviceId: z.string(),
@@ -971,7 +971,10 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           .string()
           .optional()
           .describe("auto (default), native-ax, nativescript, react-native, flutter, uikit, android-uiautomator"),
-        interactiveOnly: z.boolean().optional().describe("prune to tappable elements + ancestors (recommended in a loop)"),
+        interactiveOnly: z
+          .boolean()
+          .optional()
+          .describe("prune to tappable elements + ancestors — only has an effect alongside source or maxDepth; on its own the default snapshot is already smaller"),
         maxDepth: z.number().int().positive().optional(),
       },
     },
@@ -1374,7 +1377,10 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           .enum(["expo", "react-native", "nativescript"])
           .optional()
           .describe("override auto-detection if it can't tell"),
-        branch: z.string().optional().describe("default branch to build (default: main)"),
+        branch: z
+          .string()
+          .optional()
+          .describe("pin the branch to build — omit it and deckhand detects the repo's own default branch (master, develop, …), falling back to main"),
         bundleId: z.string().optional().describe("iOS bundle id / Android package, if auto-detection can't find it"),
         migratesFrom: z
           .string()

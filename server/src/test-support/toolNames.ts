@@ -29,3 +29,61 @@ export function registerToolCallCount(toolsSrc: string): number {
 export function auditedTools(toolsSrc: string): Set<string> {
   return new Set([...toolsSrc.matchAll(AUDITED_CALL_RE)].map((m) => m[2]!));
 }
+
+/** Every zod field name declared anywhere in the file, at any nesting depth (`share.pin` counts as `pin`). */
+export function schemaFieldNames(toolsSrc: string): Set<string> {
+  return new Set([...toolsSrc.matchAll(/([A-Za-z][A-Za-z0-9]*)\s*:\s*z\b/g)].map((m) => m[1]!));
+}
+
+/**
+ * The text of every string literal, with comments dropped and `${…}` blanked.
+ *
+ * A regex cannot do this: the file is full of apostrophes inside double quotes
+ * ("that repo's default branch"), and a `'…'` pattern pairs them across the real code
+ * in between — which drags identifiers like `args.previewId` into what is supposed to
+ * be a scan of PROSE. Reading the quotes as a lexer does is the only way the result
+ * means what the check claims it means.
+ */
+export function stringLiterals(src: string): string[] {
+  const out: string[] = [];
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i]!;
+    if (c === "/" && src[i + 1] === "/") {
+      while (i < src.length && src[i] !== "\n") i++;
+    } else if (c === "/" && src[i + 1] === "*") {
+      const end = src.indexOf("*/", i + 2);
+      i = end < 0 ? src.length : end + 2;
+    } else if (c === '"' || c === "'" || c === "`") {
+      const quote = c;
+      let buf = "";
+      i++;
+      while (i < src.length) {
+        const d = src[i]!;
+        if (d === "\\") {
+          i += 2;
+          continue;
+        }
+        if (quote === "`" && d === "$" && src[i + 1] === "{") {
+          let depth = 1;
+          i += 2;
+          while (i < src.length && depth > 0) {
+            if (src[i] === "{") depth++;
+            else if (src[i] === "}") depth--;
+            i++;
+          }
+          buf += " ";
+          continue;
+        }
+        if (d === quote) {
+          i++;
+          break;
+        }
+        buf += d;
+        i++;
+      }
+      out.push(buf);
+    } else i++;
+  }
+  return out;
+}
