@@ -30,8 +30,10 @@ const CODE_TTL_MS = 60 * 1000;
 const MAX_CLIENTS = 64;
 
 /**
- * Every registered client is in use, so there is no room and nobody may be displaced. The
- * caller answers 503: it is a capacity condition that clears on its own, not a bad request.
+ * Every registered client is in use, so there is no room and nobody may be displaced. The caller
+ * answers 503: a capacity condition, not a bad request. It clears on its own when the clients
+ * holding slots are mid-pairing — and does NOT if they hold grants, since a grant has no expiry
+ * (the refresh token outlives the access token by design). So the message names both ways out.
  */
 export class RegistryFullError extends Error {
   constructor() {
@@ -174,8 +176,16 @@ export class OAuthStore {
    * bound at all: `busy` is filled by an unauthenticated GET of the authorize page, so two
    * anonymous requests per client made the ceiling advisory — 2000 clients and a 440 kB
    * oauth.json in 1.4 seconds, measured against the real router, each register rewriting the
-   * whole file. Refusing costs a stranger nothing they cannot already do by holding the in-flight
-   * slots, and that jam lapses on the in-flight TTL; the disk did not lapse.
+   * whole file.
+   *
+   * **The cost of refusing, stated plainly, because it is a real one:** a stranger who holds
+   * every slot with credential-free register+authorize pairs now stops LEGITIMATE registrations
+   * too, and each GET renews that client's deadline, so the jam is renewable at 64 requests per
+   * ten minutes. Overshooting did not do that. Three properties are wanted here — a bounded
+   * file, no eviction of a client mid-pairing, and no way to block a newcomer — and on an
+   * unauthenticated endpoint you may have two. This picks the two that fail LOUDLY and clear on
+   * their own: a refused registration says so and lapses, where a filled disk says nothing and
+   * stays, and an eviction mid-pairing spends someone's code and then fails their exchange.
    */
   registerClient(input: { redirectUris: string[]; name?: string }, busy: ReadonlySet<string> = new Set()): OAuthClient {
     const client: OAuthClient = {
@@ -188,6 +198,11 @@ export class OAuthStore {
     this.evictIdleClients(busy, client.clientId);
     if (this.clients.size > MAX_CLIENTS) {
       this.clients.delete(client.clientId);
+      // Persist anyway: the eviction pass above may have dropped idle clients from memory, and
+      // throwing before the write left those gone in memory and present on disk — so a dropped
+      // client answered "unknown client" until a restart brought it back, and an oversized file
+      // was never trimmed by this path.
+      this.save();
       throw new RegistryFullError();
     }
     this.save();

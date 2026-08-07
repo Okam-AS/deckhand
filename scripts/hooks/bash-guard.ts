@@ -90,8 +90,8 @@ export function opensAPullRequest(cmd: string): boolean {
   if (/\bgh\s+pr\s+create\b/.test(bare)) return true;
   // The GraphQL mutation. The mutation body is normally quoted, so it is matched raw — but
   // only when the blanked text shows a `gh … graphql` call standing by to send it. Matching
-  // the name alone blocked this file's own review notes, which is the failure mode the header
-  // reserves for rules 2–3 and not for this one.
+  // the name alone blocked this file's own review notes — data, not a command, and this rule has
+  // no override to fall back on when it is wrong.
   if (/\bgh\b/.test(bare) && /\bgraphql\b/i.test(bare) && /\bcreatePullRequest\b/.test(cmd)) return true;
   // The endpoint is matched against the RAW command: quoting a URL is the ordinary way to
   // write one, so blanking it here would hide the target rather than the mention. A POST
@@ -175,13 +175,12 @@ if (isEntryPoint) {
   } catch {
     // Unparseable input means the harness changed shape. Allow rather than block every Bash
     // call in the session: a guard that fails closed on its own plumbing is a guard that gets
-    // uninstalled, and rule 1 is also stated in AGENTS.md.
+    // uninstalled, and the rule is also stated in AGENTS.md.
     process.exit(0);
   }
   // A crash anywhere in the policy exits non-2, which the harness reads as "the hook errored"
-  // and runs the command. That is tolerable for rules 2–3, where the cost is a commit the
-  // author can undo — and not for rule 1, whose whole value is that it cannot be got past. So
-  // the fallback is per-rule: fail CLOSED on the pull request, open on everything else.
+  // and runs the command — so the one rule here would be switched off by its own bug. Fail
+  // CLOSED on the pull request, and open on anything this guard does not claim.
   let verdict: Verdict;
   try {
     verdict = decide(command);

@@ -183,10 +183,17 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
       );
     } catch (e) {
       if (!(e instanceof RegistryFullError)) throw e;
-      // Capacity, not a bad request — and it clears itself: every client holding a slot without
-      // finishing lapses on the in-flight TTL. The alternative was to accept the registration
-      // and let oauth.json grow without limit, which does not clear.
-      oauthError(res, 503, "temporarily_unavailable", "too many clients are mid-pairing right now — try again in a few minutes");
+      // Capacity, not a bad request. It clears itself when the slots are held by clients
+      // mid-pairing, and it does NOT when they are held by approved ones: a grant has no expiry,
+      // so 64 real clients fill the registry permanently. Saying only "try again" there sends the
+      // operator to wait for something that will not happen, so the message names the repair too.
+      oauthError(
+        res,
+        503,
+        "temporarily_unavailable",
+        "the client registry is full: every client is mid-pairing or holds a grant. Pairing attempts lapse within ten minutes — " +
+          "if this persists, `deckhand connections` lists who holds a grant and `deckhand revoke <client-id>` frees a slot.",
+      );
       return;
     }
     res.status(201).json({

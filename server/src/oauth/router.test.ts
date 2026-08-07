@@ -303,7 +303,13 @@ describe("OAuth authorization server", () => {
       if (last.status === 201) await authorize(authorizeUrl(((await last.json()) as { client_id: string }).client_id, challenge));
     }
     assert.equal(last?.status, 503);
-    assert.equal(((await last!.json()) as { error: string }).error, "temporarily_unavailable");
+    const body = (await last!.json()) as { error: string; error_description: string };
+    assert.equal(body.error, "temporarily_unavailable");
+    // "Try again in a few minutes" is true only while the slots are held by clients mid-pairing.
+    // A grant has no expiry — the refresh token outlives the access token by design — so 64
+    // approved clients fill the registry permanently, and an operator told only to wait is
+    // waiting for something that will not happen.
+    assert.match(body.error_description, /deckhand revoke/, "the message must name the repair, not only the wait");
     // And the flood must not have cost the client that was pairing when it started.
     const code = codeFrom(await submitCode(await authorize(authorizeUrl(mine, challenge)), mine, challenge))!;
     assert.equal(
