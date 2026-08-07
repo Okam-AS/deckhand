@@ -18,8 +18,11 @@ detection (Expo/RN/NativeScript, iOS + Android), iOS simctl control, Android dev
 (avdmanager/emulator/adb, uiautomator describe, toolEnv), the streaming router (serve-sim
 for iOS, H.264/screencap backend for Android), the preview engine (**platform-grouped,
 build-once-install-many, parallel boots/installs**), the MCP server (token auth) + scoped
-share proxy, and the CLI. The viewer is the calm WebCodecs page (reused for Android via
-multipart-PNG).
+share proxy, and the CLI. The viewer is one calm page with no platform switch: it asks
+every device for `stream.avcc` (H.264 decoded with WebCodecs) and falls back to
+`stream.mjpeg` on a 404 — boundary-framed JPEG on iOS, `adb screencap` PNG on Android,
+both painted through an `<img>`. Android's primary path is the WebCodecs one; the PNG
+stream is its fallback, not its normal route.
 
 **The daily dev loop:** apps can have a local `path` (built in place — no worktree, no
 push; NativeScript runs as a long-lived livesync process, HMR off), `start_preview` is
