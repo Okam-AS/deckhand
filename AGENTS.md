@@ -123,14 +123,48 @@ you to — that is exactly why it is written down, and why step 5 of it turns wh
 you caught into a check that fires next time. Four of this repo's guardrails exist
 because that step was skipped and a user found the defect instead.
 
+**You do not open the pull request. A human does.** `gh pr create` is refused by the
+PreToolUse hook (`scripts/hooks/bash-guard.ts` rule 1), and unlike every other gate
+here it has **no override** — opening a PR is the point where the work stops being
+cheap to change, and that decision is reserved for a person. What you can do is earn
+the handover.
+
 **Never commit to `main`.** Every change — including a one-line fix — goes:
 
 ```
 git switch -c feature/<short-name>     # branch first, always
 … work, committing as you go …
 npm run ci                             # exactly what CI runs; must be green
-# ← run the shipping-a-change skill HERE, before the next line
-gh pr create --base main               # PR, with the reasoning in the body
+# ← run the shipping-a-change skill HERE: review to convergence, record each round
+npm run review:gates                   # the same gates on a clean checkout of HEAD
+git push -u origin feature/<name>
+npm run review:handover <<'BODY' …     # refuses unless the review converged
+```
+
+`review:handover` writes `.claude/pr-body.md` and prints the `gh pr create` command.
+Hand that command to the user in one line and stop. If the review has not converged
+there is nothing to hand over — which is the design: skipping the review produces no
+PR for someone else to catch, rather than a PR nobody reviewed.
+
+The review itself is a **loop with a receipt**, not a single pass:
+
+```
+npm run review:show      # this branch's curve: rounds → 4 · 1 · 0
+npm run review:check     # exactly what the handover gate will say
+npm run review:round     # record one round (JSON on stdin; see the skill)
+```
+
+The receipt records the SHAPE of what the review found over rounds — `[7, 3, 1, 0]` is
+a converged review, `[0]` is one reviewer's first impression — and requires at least
+two rounds, the last finding nothing new and nothing blocking left standing, at least
+one round **cold** (a reviewer starting from the diff alone), and `npm run ci` green on
+a clean checkout. It cannot tell a review from a claim about one; what it buys is that
+the claim is explicit, attributable and readable afterwards. Details and the honest
+limits: `scripts/review-receipt.ts`.
+
+Merging is still yours once the PR exists:
+
+```
 gh pr merge <n> --squash --delete-branch
 ```
 

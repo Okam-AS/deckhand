@@ -14,8 +14,16 @@
     "landing"
   ],
   "scripts": {
-    "test": "npm run test --workspaces --if-present",
-    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present && npm run test:scripts",
+    "test:scripts": "tsx --test scripts/review-receipt.test.ts scripts/hooks/bash-guard.test.ts",
+    "typecheck": "npm run typecheck --workspaces --if-present && tsc --noEmit -p scripts/tsconfig.json",
+    "review:check": "tsx scripts/review-receipt.ts check",
+    "review:hash": "tsx scripts/review-receipt.ts hash",
+    "review:show": "tsx scripts/review-receipt.ts show",
+    "review:round": "tsx scripts/review-receipt.ts round",
+    "review:gates": "tsx scripts/review-receipt.ts gates",
+    "review:gates:quick": "tsx scripts/review-receipt.ts gates:quick",
+    "review:handover": "tsx scripts/review-receipt.ts handover",
     "build": "npm run build --workspace @deckhand/viewer && npm run build --workspace @deckhand/landing -- --outDir ../dist && node landing/scripts/prepare-hosting.mjs",
     "dev": "npm run dev --workspace @deckhand/server",
     "postinstall": "patch-package",
@@ -24,6 +32,8 @@
     "ci": "npm run typecheck && npm test && npm run build"
   },
   "devDependencies": {
-    "patch-package": "^8.0.1"
+    "patch-package": "^8.0.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
   }
 }
