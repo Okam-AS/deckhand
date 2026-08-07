@@ -11,9 +11,16 @@ function clock(start = 1_000): { now: () => number; advance: (ms: number) => voi
 describe("the pairing code", () => {
   it("mints a code a person can read off one screen and type on another", () => {
     const { code, expiresMs } = new PairingStore({ now: () => 1_000 }).mint();
-    assert.match(code, /^[ACDEFGHJKLMNPQRTUVWXY2346789]{3}-[ACDEFGHJKLMNPQRTUVWXY2346789]{3}$/);
-    assert.doesNotMatch(code, /[O0I1S5B8]/, "characters that get misread cost a retry the operator cannot diagnose");
+    assert.match(code, /^[ACDEFGHJKLMNPQRTUVWXY234679]{3}-[ACDEFGHJKLMNPQRTUVWXY234679]{3}$/);
     assert.equal(expiresMs, 1_000 + CODE_TTL_MS);
+    // One code samples six characters out of the alphabet, so asserting on a single mint made
+    // this a COIN FLIP: `8` sat in the alphabet while the rule below forbade it, and `npm run
+    // ci` went red about one run in five — the shape of flake that gets a test deleted rather
+    // than believed. Enough mints to see every character, so a confusable one fails every time.
+    const store = new PairingStore({ now: () => 1_000 });
+    for (let i = 0; i < 400; i += 1) {
+      assert.doesNotMatch(store.mint().code, /[O0I1S5B8]/, "characters that get misread cost a retry the operator cannot diagnose");
+    }
   });
 
   it("accepts the code once and never again", () => {

@@ -43,7 +43,7 @@ export const MAX_ATTEMPTS = 5;
 export const LOCKOUT_MS = 60 * 1000;
 
 /** Letters that cannot be misread aloud or on a screen: no O/0, I/1, S/5, B/8. */
-const ALPHABET = "ACDEFGHJKLMNPQRTUVWXY2346789";
+const ALPHABET = "ACDEFGHJKLMNPQRTUVWXY234679";
 
 export interface MintedCode {
   code: string;

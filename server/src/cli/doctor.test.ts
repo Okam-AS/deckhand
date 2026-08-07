@@ -1,7 +1,9 @@
 import { describe, it } from "node:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import assert from "node:assert/strict";
-import { checkConnectorAuth, checkPublicUrl, deviceGateExit, freshnessVerdict, type Check } from "./doctor.ts";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { checkConnectorAuth, checkPublicUrl, deviceGateExit, freshnessVerdict, readTokens, type Check } from "./doctor.ts";
 import type { Config } from "../config.ts";
 
 /**
@@ -146,6 +148,48 @@ describe("checkConnectorAuth", () => {
     assert.equal(c.ok, false);
     assert.match(String(c.detail), /would not load/);
     assert.doesNotMatch(String(c.detail), /no local credential/, "that is a different fault with a different fix");
+  });
+});
+
+describe("readTokens", () => {
+  const withHome = (dir: string, fn: () => void): void => {
+    const had = process.env.DECKHAND_HOME;
+    process.env.DECKHAND_HOME = dir;
+    try {
+      fn();
+    } finally {
+      if (had === undefined) delete process.env.DECKHAND_HOME;
+      else process.env.DECKHAND_HOME = had;
+    }
+  };
+
+  // `loadTokens` throws on ENOENT as readily as on bad YAML, so treating every throw as
+  // "unreadable" sent a FRESH install to repair a file that `token add` would have created.
+  it("reports a missing file as empty, not as unreadable", () => {
+    const home = mkdtempSync(join(tmpdir(), "deckhand-doc0-"));
+    try {
+      withHome(home, () => {
+        const r = readTokens();
+        assert.deepEqual(r.tokens, []);
+        assert.equal(r.unreadable, undefined, "there is nothing to fix — the file has not been created yet");
+      });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a malformed file as unreadable, not as empty", () => {
+    const home = mkdtempSync(join(tmpdir(), "deckhand-docbad-"));
+    try {
+      writeFileSync(join(home, "tokens.yaml"), "tokens: [ this: is: not: yaml\n");
+      withHome(home, () => {
+        const r = readTokens();
+        assert.equal(r.tokens.length, 0);
+        assert.ok(r.unreadable, "an empty list here is a diagnosis the operator cannot act on");
+      });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 

@@ -48,6 +48,14 @@ describe("a human opens the pull request", () => {
     }
   });
 
+  // Quoting is not the only spelling a shell accepts. Each of these was run against a stub `gh`
+  // on PATH and printed `pr create` — they are the command, spelt to miss a matcher.
+  it("blocks the escaped spellings too", () => {
+    for (const cmd of [`gh $'pr' create`, "gh \\pr create", "gh pr cre\\ate"]) {
+      assert.match(blocked(cmd), /a human's call/);
+    }
+  });
+
   // Writing ABOUT the gate is routine — a commit message, a doc, a grep. Matching raw text
   // blocked exactly that, which is how a guard teaches people to work around it.
   it("allows a command that merely mentions it", () => {
@@ -218,6 +226,12 @@ describe("nothing lands on main directly", () => {
       `git commit -m 'handle --dry-run properly'`,
       `git commit -am "note: --dry-run is exempt"`,
       `git commit -m 'x --abort'`,
+      // One word, so blanking multi-word quotes does not reach it — and unquoting a
+      // whitespace-free span (what rule 1 needs) hands the flag straight to this rule.
+      `git commit -m '--dry-run'`,
+      `git commit -m "--abort"`,
+      "git commit -m --abort",
+      `git commit --message='--skip'`,
       // One line, two commands: the merge's flag is not the commit's.
       "git merge --abort; git commit -m x",
     ]) {
@@ -236,7 +250,9 @@ describe("nothing lands on main directly", () => {
     for (const cmd of ["git push --all origin", "git push --mirror origin"]) {
       assert.match(blocked(cmd, "feature/x"), /pushes at `main`/);
     }
-    for (const cmd of ["git push", "git push --force-with-lease", "git push origin", "git push origin HEAD"]) {
+    // `@` is git's own synonym for HEAD, verified against a real remote: on main it updates
+    // refs/heads/main exactly as a bare push does.
+    for (const cmd of ["git push", "git push --force-with-lease", "git push origin", "git push origin HEAD", "git push origin @"]) {
       assert.match(blocked(cmd, "main"), /pushes at `main`/);
       allowed(cmd, "feature/x");
     }

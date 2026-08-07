@@ -152,11 +152,9 @@ describe("docs describe the code that exists", () => {
       // Anchoring the whole citation to the arrow verified only the FIRST check after it, and
       // one line here cites two — so renaming the second was silent, while AGENTS.md says a
       // check renamed out from under a citation fails this test. The arrow marks where
-      // citations START; each `<file>.test.ts "<name>"` pair after it is one.
-      for (const line of src.split("\n")) {
-        const arrow = line.indexOf("→");
-        if (arrow < 0) continue;
-        for (const m of line.slice(arrow).matchAll(/`?\S*?\.test\.ts`?\s+"([^"]+)"/g)) {
+      // citations START; each `<file>.test.ts "<name>"` pair after it is one, wrapped or not.
+      for (const chunk of src.split("→").slice(1)) {
+        for (const m of chunk.matchAll(/`?\S*?\.test\.ts`?\s+"([^"]+)"/g)) {
           const cited = m[1]!;
           if (![...testNames].some((n) => n.startsWith(cited))) dangling.push(`${f}: "${cited}"`);
         }

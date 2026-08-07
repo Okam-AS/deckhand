@@ -82,7 +82,11 @@ export function withoutQuotedText(cmd: string): string {
  * AGENTS.md, where it binds whether or not the regex matched.
  */
 export function opensAPullRequest(cmd: string): boolean {
-  const bare = withoutQuotedText(cmd);
+  // Quotes are not the only way to spell a word so a matcher misses it: `gh \pr create` and
+  // `gh $'pr' create` both run the command. A backslash before a word character and a `$`
+  // before a quote are removed BEFORE the quoted spans are handled, so all three spellings
+  // collapse onto the same text. Data is unaffected — a multi-word quoted span is still blanked.
+  const bare = withoutQuotedText(cmd.replace(/\$(?=['"])/g, "").replace(/\\(?=\w)/g, ""));
   if (/\bgh\s+pr\s+create\b/.test(bare)) return true;
   // The GraphQL mutation. The mutation body is normally quoted, so it is matched raw — but
   // only when the blanked text shows a `gh … graphql` call standing by to send it. Matching
@@ -183,8 +187,12 @@ export function decide(cmd: string, resolveBranch: BranchResolver = gitBranch, r
   // commit -m x` exempted the commit with the merge's flag.
   const landingVerb = /\bgit\s+(?:-[cC]\s+\S+\s+|--\S+\s+)*?(?:-C\s+(\S+)\s+)?(?:-[cC]\s+\S+\s+|--\S+\s+)*(commit|merge|cherry-pick|revert|am)(?![-\w])/g;
   for (const landing of cmd.matchAll(landingVerb)) {
-    const rest = cmd.slice(landing.index + landing[0].length).split(/[;&|]|\n/)[0] ?? "";
-    if (/--(?:abort|quit|skip|dry-run)(?![-\w])/.test(withoutQuotedText(rest))) continue;
+    // The message is an ARGUMENT, never a flag: `git commit -m '--dry-run'` is one word, so
+    // blanking multi-word quotes alone still let it exempt itself. Message payloads come out
+    // before the flags are read — `-m x`, `-am x`, `--message=x`, `-F file`.
+    const segment = withoutQuotedText(cmd.slice(landing.index + landing[0].length).split(/[;&|]|\n/)[0] ?? "");
+    const rest = segment.replace(/(?:-[a-zA-Z]*[mF]|--(?:message|file))(?:=|\s+)\S+/g, " ");
+    if (/--(?:abort|quit|skip|dry-run)(?![-\w])/.test(rest)) continue;
     // A `git switch main` earlier in the same command line moves the target before the verb
     // runs, so the branch we are on now is the wrong thing to ask about.
     const switched = /(?:^|[;&|]\s*)git\s+(?:switch|checkout)\s+(?:-\S+\s+)*main(?:\s|$|[;&|])/.test(cmd.slice(0, landing.index));
@@ -215,11 +223,12 @@ export function decide(cmd: string, resolveBranch: BranchResolver = gitBranch, r
     if (!/\bgit\s+(?:-\S+(?:\s+\S+)?\s+)*push\b/.test(part)) return false;
     if (/(?:^|\s|['":+])(?:HEAD:)?[+:]?(?:refs\/heads\/)?main(?::(?:refs\/heads\/)?\S+)?(?:\s|$|['"])/.test(part)) return true;
     if (/\s--(?:all|mirror)(?![-\w])/.test(part)) return true;
-    // The first positional after `push` is the remote, the rest are refspecs. None, or a bare
-    // `HEAD`, means "the current branch" — so the branch is what decides.
+    // The first positional after `push` is the remote, the rest are refspecs. None — or one
+    // that only names the checked-out commit, `HEAD` or its synonym `@` — means "the current
+    // branch", so the branch is what decides.
     const words = withoutQuotedText(part).trim().split(/\s+/);
     const positional = words.slice(words.indexOf("push") + 1).filter((w) => !w.startsWith("-"));
-    const refspecs = positional.slice(1).filter((r) => r !== "HEAD");
+    const refspecs = positional.slice(1).filter((r) => r !== "HEAD" && r !== "@");
     if (refspecs.length > 0) return false;
     const at = /\bgit\s+(?:-\S+\s+)*?-C\s+(\S+)/.exec(part);
     return resolveBranch(at?.[1] ?? cdTarget(cmd, cmd.indexOf(part))) === "main";

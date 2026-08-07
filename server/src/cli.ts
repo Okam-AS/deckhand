@@ -477,13 +477,10 @@ function loadTokensSafe() {
 /**
  * The token list for a command that WRITES it back.
  *
- * `loadTokensSafe` answers "" with an empty list, which is right for a read-only view and wrong
- * here twice over: `token add` would write a file containing only the new entry, silently
- * destroying every other credential (principle 2), and `token rm` would report `no token named
- * X` for a credential that is still live in the running server (principle 3 — a failed lookup
- * and an empty result must not be the same value). A missing file is genuinely empty; an
- * unreadable one is an error the operator has to see, because the watcher keeps serving the old
- * set either way.
+ * Same refusal as `loadTokensSafe`, for a sharper reason: writing back from a list that failed
+ * to load would leave a file containing only the new entry, silently destroying every other
+ * credential (principle 2). A missing file is genuinely empty; an unreadable one is an error the
+ * operator has to see, because the watcher keeps serving the old set either way.
  */
 function loadTokensForWrite() {
   if (!existsSync(paths.tokens())) return [];

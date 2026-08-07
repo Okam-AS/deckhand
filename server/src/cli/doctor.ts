@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import { createPrivateKey } from "node:crypto";
 import { join, dirname } from "node:path";
+import { paths } from "../paths.ts";
 import { loadConfig, loadApps, loadTokens, githubPatPath, githubPrivateKeyPath, publicBaseUrl, type App, type Config } from "../config.ts";
 import { GitHubAppAuth } from "../github/appAuth.ts";
 import { ghCliToken } from "../github/credentials.ts";
@@ -505,27 +506,37 @@ export function checkConnectorAuth(tokens: { name: string }[], unreadable?: stri
   return { name: "connector auth", ok: true, detail: "a client gets in only with a code from `deckhand pair`" };
 }
 
+/**
+ * tokens.yaml, with "not there yet" kept apart from "will not load".
+ *
+ * `loadTokens` throws on ENOENT as readily as on bad YAML, so a fresh install was told to fix a
+ * file that does not exist — and, before that, ANY of config/apps/tokens throwing left this
+ * empty, which `checkConnectorAuth` reads as the diagnosis "no local credential".
+ */
+export function readTokens(): { tokens: { name: string }[]; unreadable?: string } {
+  if (!existsSync(paths.tokens())) return { tokens: [] };
+  try {
+    return { tokens: loadTokens() };
+  } catch (e) {
+    return { tokens: [], unreadable: (e as Error).message };
+  }
+}
+
 export async function runDoctor(opts: { smoke?: boolean } = {}): Promise<{ checks: Check[]; ok: boolean }> {
   const checks: Check[] = [];
 
   let config: Config | null = null;
   let apps: App[] = [];
-  let tokens: { name: string }[] = [];
-  // Read separately and remember WHICH one failed. One try block around all three left `tokens`
+  // Read apart from config.yaml and apps.yaml. One try block around all three left `tokens`
   // empty whenever any of them threw, and the connector-auth check reads an empty list as "no
   // credential exists" — a diagnosis nobody can act on when the file is merely malformed.
-  let tokensError: string | undefined;
+  const { tokens, unreadable: tokensError } = readTokens();
   try {
     config = loadConfig();
     apps = loadApps();
     checks.push({ name: "config files", ok: true, detail: `hostname ${config.hostname}` });
   } catch (e) {
     checks.push({ name: "config files", ok: false, detail: (e as Error).message });
-  }
-  try {
-    tokens = loadTokens();
-  } catch (e) {
-    tokensError = (e as Error).message;
   }
 
   checks.push(...(await checkToolchains()));
