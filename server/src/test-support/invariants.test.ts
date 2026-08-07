@@ -599,24 +599,74 @@ describe("setup decides on state, not on its own prose", () => {
   // So setup may PRINT it and may check an exit CODE, and may not branch on its text: the state
   // it wants is in tokens.yaml, config.yaml and apps.yaml, which are typed and loaded.
   it("never branches on the text of deckhand's own output", () => {
-    const src = read(join(SRC, "cli", "setup.ts"));
-    // An ALLOW-list, not a list of banned methods. The first version of this banned `.test()`,
-    // `.includes()` and `===` — and `out.trim() !== ""` walked straight past it, which is the
-    // exact shape of failure #2 above. A deny-list here is a guessing game against a language:
-    // `indexOf`, an intermediate variable, an inline call with nothing captured, a `switch`. So
-    // the rule is inverted. The output may go to the screen or into an error message; every other
-    // mention of it is a finding.
-    const ours = [...src.matchAll(/(?:const|let)\s+(\w+)\s*=\s*deckhandCli\(/g)].map((m) => m[1]!);
-    assert.ok(ours.length > 0, "no `deckhandCli` result is captured — this check has lost its subject");
-    const sink = /\b(?:say|info|ok|step|console\.(?:log|error))\(|new SetupError\(/;
-    const mentions = new RegExp(`(?:${[...ours, "deckhandCli\\([^)]*\\)"].join("|")})\\.out\\b`);
-    const offences = src
-      .split("\n")
-      .map((line, i) => ({ code: line.replace(/\/\/.*$/, ""), n: i + 1 }))
-      .filter(({ code }) => mentions.test(code) && !sink.test(code))
-      .map(({ n }) => `setup.ts:${n}`);
+    const src = read(join(SRC, "cli", "setup.ts"))
+      .replace(/\/\/[^\n]*/g, "")
+      // Quoted message text is blanked so an ordinary "…?" cannot read as a ternary below.
+      .replace(/'[^'\n]*'|"[^"\n]*"/g, (q) => " ".repeat(q.length));
+    // An ALLOW-list, and scoped to ARGUMENT POSITION rather than to the line. Two earlier versions
+    // of this check were weaker in opposite directions. A deny-list of string operations
+    // (`.test()`, `.includes()`, `===`) missed `out.trim() !== ""` — the exact shape of failure #2
+    // above. Then "a sink anywhere on the line" missed `if (t.out.includes(…)) ok(…)`, which is
+    // this file's dominant style AND all three historical shapes, while refusing an ordinary
+    // multi-line `say(` or `SetupError(` that setup.ts already writes elsewhere.
+    //
+    // So: the output may be an ARGUMENT to something that shows it. Anywhere else — a condition, a
+    // comparison, an intermediate variable, a ternary — is a finding, however it is spelt or
+    // wrapped across lines.
+    const captures = [...src.matchAll(/(?:const|let)\s+(\w+)\s*=\s*deckhandCli\(/g)].map((m) => ({ name: m[1]!, at: m.index }));
+    assert.ok(captures.length > 0, "no `deckhandCli` result is captured — this check has lost its subject");
+    const SINK = /(?:say|info|ok|step|console\.(?:log|error)|process\.stdout\.write|new\s+SetupError)\s*$/;
+
+    /** Is this offset inside the argument list of something that only displays its argument? */
+    const shownNotRead = (at: number): boolean => {
+      let depth = 0;
+      for (let i = at; i > 0; i--) {
+        const ch = src[i]!;
+        if (ch === ")") depth += 1;
+        else if (ch === "(") {
+          if (depth > 0) {
+            depth -= 1;
+            continue;
+          }
+          // An unclosed `(` to our left: whatever is called here encloses us.
+          if (SINK.test(src.slice(Math.max(0, i - 40), i))) return true;
+        } else if (ch === ";" || ch === "}") break; // left the statement without meeting a sink
+      }
+      return false;
+    };
+
+    /**
+     * Argument position is necessary and not sufficient: `say(out.includes("x") ? "a" : "b")` is
+     * inside a sink and still decides something from the text. So the mention must also not feed a
+     * comparison or a ternary before its statement ends.
+     */
+    const displayed = (at: number): boolean => {
+      if (!shownNotRead(at)) return false;
+      const rest = src.slice(at, at + 240).split(";")[0]!;
+      return !/\?(?![.?])|===|!==|&&|\|\|/.test(rest);
+    };
+
+    const offences: string[] = [];
+    const lineOf = (at: number): number => src.slice(0, at).split("\n").length;
+    // Destructuring detaches the text from the call it came from, so nothing downstream can tell
+    // it apart from any other string — the rule cannot follow it. Keep the result whole.
+    for (const m of src.matchAll(/(?:const|let)\s*\{[^}]*\bout\b[^}]*\}\s*=\s*deckhandCli\(/g)) {
+      offences.push(`setup.ts:${lineOf(m.index)}`);
+    }
+    for (const m of src.matchAll(/(\w+)\.out\b/g)) {
+      const name = m[1]!;
+      // Only OUR results: `list` also names a `cloudflared tunnel list` result in this file, and
+      // flagging that would blame deckhand's output for a third party's.
+      const capture = captures.find((c) => c.name === name && c.at < m.index);
+      if (!capture) continue;
+      if (!displayed(m.index)) offences.push(`setup.ts:${lineOf(m.index)}`);
+    }
+    // An inline `deckhandCli([...]).out` captures nothing, so the loop above cannot see it.
+    for (const m of src.matchAll(/deckhandCli\([^)]*\)\s*\.out\b/g)) {
+      if (!displayed(m.index)) offences.push(`setup.ts:${lineOf(m.index)}`);
+    }
     assert.deepEqual(
-      offences,
+      offences.sort(),
       [],
       "setup.ts uses the TEXT of a `deckhand` command's output for something other than showing it. " +
         "That text is written for a person and gets reworded — three setup branches have already " +

@@ -125,7 +125,7 @@ describe("docs describe the code that exists", () => {
     const testNames = new Set<string>();
     // EVERY test file, not just test-support. A rule for an area cites the check that
     // enforces it, and for a security invariant that is often the area's own regression
-    // test — `oauth/router.test.ts` proves authorize refuses an address off the allowlist,
+    // test — `oauth/router.test.ts` proves a client mid-pairing survives a registration flood,
     // and no repo-wide guardrail can. Scanning only test-support made those citations
     // dangle, which pushes the next author to drop the citation rather than fix it.
     const walk = (dir: string): void => {
