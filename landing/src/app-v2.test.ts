@@ -36,6 +36,6 @@ test("trial actions open an honest GitHub request flow", () => {
   const markup = renderToStaticMarkup(createElement(App));
 
   assert.match(markup, /Request a trial key/);
-  assert.match(markup, /github\.com\/ainfrastructure\/deckhand\/issues\/new\?/);
+  assert.match(markup, /github\.com\/Okam-AS\/deckhand\/issues\/new\?/);
   assert.match(markup, /Trial\+access\+request/);
 });

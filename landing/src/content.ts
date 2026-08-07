@@ -68,7 +68,7 @@ export const runTargets: readonly RunTarget[] = [
     label: "iOS simulator",
     target: "iPhone 17 Pro · iOS 26",
     phases: ["Build reused", "Booted", "Installed", "Stream ready"],
-    proof: "H.264 stream · touch + keyboard",
+    proof: "Live stream · touch + keyboard",
   },
   {
     id: "android",
@@ -145,5 +145,5 @@ export function buildTrialRequestHref(plan: string): string {
     title: `Trial access request · ${plan}`,
     body: `I'd like to request Deckhand trial access for the ${plan} plan.`,
   });
-  return `https://github.com/ainfrastructure/deckhand/issues/new?${query.toString()}`;
+  return `https://github.com/Okam-AS/deckhand/issues/new?${query.toString()}`;
 }

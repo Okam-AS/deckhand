@@ -48,6 +48,6 @@ test("local-first product claims stay precise", () => {
 
 test("trial requests use the verified GitHub issue composer", () => {
   const href = content.buildTrialRequestHref("Team");
-  assert.match(href, /^https:\/\/github\.com\/ainfrastructure\/deckhand\/issues\/new\?/);
+  assert.match(href, /^https:\/\/github\.com\/Okam-AS\/deckhand\/issues\/new\?/);
   assert.match(href, /Team/);
 });
