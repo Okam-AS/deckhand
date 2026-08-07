@@ -6,9 +6,10 @@
  *      other forms of the same act — a POST to the `pulls` endpoint via `gh api` or `curl`,
  *      the `createPullRequest` mutation — with NO override, and failing CLOSED if the guard
  *      itself throws. It does not claim to catch every route (see {@link opensAPullRequest});
- *      the rule is AGENTS.md's, and this is what makes reaching for the obvious tool fail. Everything before it (review to convergence, the
- *      gates on a clean checkout) is what earns the handover; the handover itself is a
- *      person's decision, and a gate the agent can talk its way past is not one.
+ *      the rule is AGENTS.md's, and this is what makes reaching for the obvious tool fail.
+ *      Everything before it — review to convergence, the gates on a clean checkout — is what
+ *      earns the handover; the handover itself is a person's decision, and a gate the agent
+ *      can talk its way past is not one.
  *   2. Never commit or push to `main`, whether by being on it or pushing at it
  *      (AGENTS.md § "How work lands here").
  *   3. `launchctl kickstart` of the deckhand server tears down every booted simulator on the
@@ -26,6 +27,7 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { currentBranch, diffHash, readReceipt, validate } from "../review-receipt.ts";
 
 /** What the hook should do with a command. */
@@ -222,6 +224,13 @@ if (isEntryPoint) {
   // and runs the command. That is tolerable for rules 2–3, where the cost is a commit the
   // author can undo — and not for rule 1, whose whole value is that it cannot be got past. So
   // the fallback is per-rule: fail CLOSED on the pull request, open on everything else.
+  // The receipt lives at a path relative to the repo, and the branch comes from `git` in the
+  // cwd — so a hook fired from anywhere else read the review state of nowhere and told an
+  // agent whose review HAD converged to go and do one. Blocking was never in question; being
+  // right about why was.
+  const projectDir = process.env.CLAUDE_PROJECT_DIR;
+  if (projectDir && existsSync(projectDir)) process.chdir(projectDir);
+
   let verdict: Verdict;
   try {
     verdict = decide(command);

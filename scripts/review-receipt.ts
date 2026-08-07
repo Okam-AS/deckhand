@@ -43,7 +43,7 @@
 
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 /**
@@ -540,6 +540,62 @@ export function runGates(branch: string, dir = RECEIPT_DIR): Receipt {
 }
 
 /**
+ * Where the throwaway checkout goes: inside the repository's COMMON git dir, under a name
+ * derived from the CALLER's worktree.
+ *
+ * Not `<toplevel>/.git`, which is a FILE in a linked worktree — so `git worktree add` failed
+ * outright there, and the clean gate is the only one that satisfies the handover. Agents work
+ * in worktrees here (`.worktrees/` is gitignored for exactly that), so that was a whole
+ * working mode with no honest route to a PR.
+ *
+ * The common dir is shared by every linked worktree by definition, and a run's first act is
+ * `worktree remove --force` — so one shared name means two agents delete each other's checkout
+ * mid-`npm ci`. The digest is of the caller's own toplevel: stable across that caller's runs,
+ * which is what lets the next run reclaim the last one's leftovers, and different between
+ * callers, which is what keeps them apart. {@link reclaimAbandonedGates} covers the rest.
+ */
+export function gatesWorktree(run: Run = runGit): string | null {
+  const gitDir = run(["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim();
+  if (!gitDir) return null;
+  const here = run(["rev-parse", "--path-format=absolute", "--show-toplevel"]).trim();
+  return join(gitDir, `review-gates-${createHash("sha256").update(here).digest("hex").slice(0, 12)}`);
+}
+
+/** Names the worktree that owns a gates checkout, so an abandoned one can be identified. */
+const OWNER_FILE = ".review-gates-owner";
+
+/**
+ * Remove gates checkouts whose OWNER is gone.
+ *
+ * Per-caller names fixed one leak and opened another: a run killed before its cleanup (Ctrl-C
+ * during `npm ci` takes the parent with it) leaves a registered worktree and a full
+ * `node_modules` under the common git dir, and only a later run from the SAME toplevel would
+ * ever clear it — while `.worktrees/` agent worktrees are exactly the paths that get deleted
+ * and never reused. `git worktree prune` does not help: the leftover is perfectly valid.
+ *
+ * Only an owner that no longer EXISTS is reclaimed, never a live one — a concurrent run in
+ * another worktree is the case the per-caller name exists to protect.
+ */
+export function reclaimAbandonedGates(gitDir: string, remove: (path: string) => void = removeWorktree): void {
+  if (!existsSync(gitDir)) return;
+  for (const entry of readdirSync(gitDir, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith("review-gates-")) continue;
+    const path = join(gitDir, entry.name);
+    const ownerFile = join(path, OWNER_FILE);
+    // No marker means a run from before this existed, or one killed between `add` and the
+    // write. Neither has an owner to check, and leaving it would leak forever.
+    const owner = existsSync(ownerFile) ? readFileSync(ownerFile, "utf8").trim() : "";
+    if (owner && existsSync(owner)) continue;
+    remove(path);
+  }
+}
+
+function removeWorktree(path: string): void {
+  spawnSync("git", ["worktree", "remove", "--force", path]);
+  rmSync(path, { recursive: true, force: true });
+}
+
+/**
  * Run the gates the way CI will: a throwaway worktree at `HEAD`, dependencies from the
  * committed lockfile, nothing from this machine.
  *
@@ -550,25 +606,6 @@ export function runGates(branch: string, dir = RECEIPT_DIR): Receipt {
  *
  * Costs a full install, so it is the last thing you run rather than something in the loop.
  */
-/**
- * Where the throwaway checkout goes: inside the repository's COMMON git dir.
- *
- * Not `<toplevel>/.git`, which is a FILE in a linked worktree — so `git worktree add` failed
- * outright there, and the clean gate is the only one that satisfies the handover. Agents work
- * in worktrees here (`.worktrees/` is gitignored for exactly that), so that was a whole
- * working mode with no honest route to a PR.
- */
-export function gatesWorktree(run: Run = runGit): string | null {
-  const gitDir = run(["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim();
-  if (!gitDir) return null;
-  // One name per CALLER, not one per repo. The common dir is shared by every linked worktree
-  // by definition, and the first thing a run does is `worktree remove --force` — so two agents
-  // in two worktrees would delete each other's checkout mid-`npm ci`. The caller's own
-  // worktree path is the thing that differs, so it is what names the directory.
-  const here = run(["rev-parse", "--path-format=absolute", "--show-toplevel"]).trim();
-  return join(gitDir, `review-gates-${createHash("sha256").update(here).digest("hex").slice(0, 12)}`);
-}
-
 export function runGatesClean(branch: string, dir = RECEIPT_DIR): Receipt | { dirty: string } {
   // A clean checkout of HEAD says nothing about uncommitted work, and reporting it as if it
   // did is the exact false confidence this exists to remove. CI tests what you push.
@@ -577,7 +614,8 @@ export function runGatesClean(branch: string, dir = RECEIPT_DIR): Receipt | { di
 
   const worktree = gatesWorktree();
   if (!worktree) return { dirty: "not a git repository" };
-  spawnSync("git", ["worktree", "remove", "--force", worktree]);
+  reclaimAbandonedGates(dirname(worktree));
+  removeWorktree(worktree);
   const added = spawnSync("git", ["worktree", "add", "--detach", worktree, "HEAD"], { stdio: "inherit" });
   try {
     if (added.status !== 0) {
@@ -586,6 +624,10 @@ export function runGatesClean(branch: string, dir = RECEIPT_DIR): Receipt | { di
           `Until that is fixed the clean gate cannot run, and \`review:gates:quick\` does not substitute for it.`,
       );
     }
+    // Written BEFORE the long-running install: the whole point of the marker is to identify a
+    // checkout abandoned during it, and a marker written afterwards names only the runs that
+    // finished — the ones that clean up after themselves anyway.
+    writeFileSync(join(worktree, OWNER_FILE), `${runGit(["rev-parse", "--path-format=absolute", "--show-toplevel"]).trim()}\n`);
     const opts = { cwd: worktree, stdio: "inherit" as const };
     // `npm ci`, not `npm install`: it installs exactly the lockfile and fails if the two have
     // drifted, which is the drift this whole function exists to surface.
@@ -599,11 +641,10 @@ export function runGatesClean(branch: string, dir = RECEIPT_DIR): Receipt | { di
     writeReceipt(next, dir);
     return next;
   } finally {
-    spawnSync("git", ["worktree", "remove", "--force", worktree]);
     // `worktree remove` leaves the directory behind if the install wrote files git does not
     // know about, which is every run — node_modules. Otherwise the next run's `worktree add`
     // fails on a path that already exists, and the gate becomes "it worked once".
-    rmSync(worktree, { recursive: true, force: true });
+    removeWorktree(worktree);
   }
 }
 

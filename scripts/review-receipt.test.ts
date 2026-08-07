@@ -14,6 +14,7 @@ import {
   handover,
   MIN_ROUNDS,
   readReceipt,
+  reclaimAbandonedGates,
   RECEIPT_DIR,
   receiptPath,
   recordRound,
@@ -305,17 +306,30 @@ describe("the handover to a human", () => {
 // whenever the Bash call runs from anywhere but the repo root, which silently switches off the
 // one rule documented as having no override.
 describe("the hook is wired to the repo, not to the cwd", () => {
-  it("resolves the guard through CLAUDE_PROJECT_DIR, and names a file that exists", () => {
-    const settings = JSON.parse(readFileSync(join(process.cwd(), ".claude", "settings.json"), "utf8")) as {
-      hooks?: { PreToolUse?: { matcher?: string; hooks?: { command?: string }[] }[] };
+  // RUN the configured command rather than read it. The first version of this test asserted
+  // that the string mentions CLAUDE_PROJECT_DIR and an existing path — which three separate
+  // ways of switching the gate off all satisfied: retarget the matcher away from Bash, change
+  // the hook type, or replace the command's tail with `true` while still naming the guard.
+  it("refuses a pull request when fired from another directory, as configured", () => {
+    const repo = process.cwd();
+    const settings = JSON.parse(readFileSync(join(repo, ".claude", "settings.json"), "utf8")) as {
+      hooks?: { PreToolUse?: { matcher?: string; hooks?: { type?: string; command?: string }[] }[] };
     };
-    const commands = (settings.hooks?.PreToolUse ?? []).flatMap((h) => (h.hooks ?? []).map((x) => x.command ?? ""));
-    const guard = commands.find((c) => c.includes("bash-guard.ts"));
-    assert.ok(guard, "no PreToolUse hook runs bash-guard.ts — the gate is off");
-    assert.match(guard, /CLAUDE_PROJECT_DIR/, "a cwd-relative hook allows everything from any other directory");
-    for (const path of guard.match(/[\w./-]*scripts\/[\w./-]+\.ts/g) ?? []) {
-      assert.ok(existsSync(join(process.cwd(), path.replace(/^.*scripts\//, "scripts/"))), `${path} does not exist`);
-    }
+    const bashHooks = (settings.hooks?.PreToolUse ?? []).filter((h) => new RegExp(`^(${h.matcher ?? ""})$`).test("Bash"));
+    const commands = bashHooks.flatMap((h) => (h.hooks ?? []).filter((x) => x.type === "command").map((x) => x.command ?? ""));
+    assert.ok(commands.length, "no PreToolUse command hook matches Bash — the gate is off");
+
+    // Assembled rather than written out, because this file is read by the very rule it tests.
+    const payload = JSON.stringify({ tool_input: { command: `gh pr cre${"ate"} --base main` } });
+    const verdicts = commands.map((command) =>
+      spawnSync("sh", ["-c", command], { cwd: dir, input: payload, env: { ...process.env, CLAUDE_PROJECT_DIR: repo }, encoding: "utf8" }),
+    );
+    const blocking = verdicts.filter((v) => v.status === 2);
+    assert.equal(blocking.length, 1, `exactly one hook must block; got statuses ${verdicts.map((v) => v.status).join(", ")}`);
+    assert.match(blocking[0]!.stderr, /a human's call/);
+    // …and it must know WHICH repo it is talking about, or it tells an agent whose review has
+    // converged to go and do one.
+    assert.doesNotMatch(blocking[0]!.stderr, /no review receipt for this branch/, "the guard read the review state of the wrong directory");
   });
 });
 
@@ -382,6 +396,8 @@ describe("where the clean gate runs", () => {
     // …and one NAME per caller, not per repo. The common dir is shared by every linked
     // worktree, and a run's first act is `worktree remove --force` on that path — so with one
     // shared name a second agent deletes the first's checkout mid-`npm ci`.
+    assert.equal(gatesWorktree(inLinked), target, "stable per caller — the next run reclaims the last one's leftovers by name");
+
     const inMain = (args: string[]) => spawnSync("git", args, { cwd: main, encoding: "utf8" }).stdout ?? "";
     const fromMain = gatesWorktree(inMain)!;
     assert.equal(dirname(fromMain), dirname(target), "both still live under the shared common git dir");
@@ -394,6 +410,37 @@ describe("where the clean gate runs", () => {
     ] as const) {
       spawnSync("git", ["worktree", "remove", "--force", path], { cwd });
     }
+  });
+});
+
+// Per-caller names fixed one leak and opened another: a run killed during `npm ci` leaves a
+// registered worktree and a full node_modules that only a later run from the SAME path would
+// clear — and `.worktrees/` paths are exactly the ones that get deleted and never reused.
+describe("gates checkouts left behind by a killed run", () => {
+  const plant = (name: string, owner?: string) => {
+    const path = join(dir, name);
+    mkdirSync(path);
+    if (owner !== undefined) writeFileSync(join(path, ".review-gates-owner"), `${owner}\n`);
+    return path;
+  };
+
+  it("reclaims one whose owner is gone, and leaves a live one alone", () => {
+    const live = plant("review-gates-live", dir);
+    const dead = plant("review-gates-dead", join(dir, "worktree-that-was-deleted"));
+    const unmarked = plant("review-gates-unmarked");
+    const other = plant("node_modules");
+
+    const removed: string[] = [];
+    reclaimAbandonedGates(dir, (p) => removed.push(p));
+    assert.deepEqual(removed.sort(), [dead, unmarked].sort());
+    assert.ok(!removed.includes(live), "a concurrent run in another worktree is the case per-caller names exist to protect");
+    assert.ok(!removed.includes(other), "only this function's own directories");
+  });
+
+  it("does nothing when the git dir does not exist", () => {
+    const removed: string[] = [];
+    reclaimAbandonedGates(join(dir, "nope"), (p) => removed.push(p));
+    assert.deepEqual(removed, []);
   });
 });
 
