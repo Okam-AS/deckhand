@@ -1,7 +1,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,9 +34,12 @@ before(() => {
 after(() => rmSync(home, { recursive: true, force: true }));
 
 describe("deckhand token url", () => {
-  it("prints one token's full connector URL", () => {
-    const url = run("token", "url", "alice").trim();
-    assert.match(url, /^https:\/\/deckhand\.example\.com\/mcp\/[0-9a-f]{64}$/, "usable as-is, no assembly required");
+  it("prints one local credential in full, and never as a URL", () => {
+    const out = run("token", "url", "alice").trim();
+    assert.match(out, /^[0-9a-f]{64}$/, "the credential itself, ready to put in an Authorization header");
+    // A credential in a URL is what Claude Enterprise made unsafe: a connector URL
+    // is visible to the whole organisation, so a token embedded in one is too.
+    assert.doesNotMatch(out, /https:\/\/[^\s]*[0-9a-f]{64}/, "never hand it back as a pasteable URL");
   });
 
   it("prints a DIFFERENT url for a different token", () => {
@@ -73,10 +76,76 @@ describe("deckhand token list", () => {
         encoding: "utf8",
         env: { ...process.env, DECKHAND_HOME: fresh },
       });
-      assert.match(out, /no tokens yet/, "silence reads as a broken command");
-      assert.match(out, /deckhand token/);
+      assert.match(out, /no credentials yet/, "silence reads as a broken command");
+      assert.match(out, /deckhand token add/, "and `deckhand token` alone mints nothing");
     } finally {
       rmSync(fresh, { recursive: true, force: true });
+    }
+  });
+
+  // The masked hint used to be rendered as `https://<host>/mcp/<prefix>…` — a URL shape this
+  // branch made 404, pointing at `token url` for "the full connector URL" it never prints.
+  it("shows no connector URL, because a credential is not one", () => {
+    const out = run("token", "list");
+    assert.doesNotMatch(out, /https:\/\//, "these are bearer tokens; a URL is what gets pasted somewhere public");
+  });
+});
+
+describe("deckhand token add", () => {
+  it("prints the credential, never a URL carrying it", () => {
+    const fresh = mkdtempSync(join(tmpdir(), "deckhand-tokadd-"));
+    try {
+      const at = (...args: string[]): string =>
+        execFileSync(process.execPath, [BIN, ...args], { encoding: "utf8", env: { ...process.env, DECKHAND_HOME: fresh } });
+      at("init", "--hostname", "deckhand.example.com");
+      const out = at("token", "add", "me");
+      assert.match(out, /[0-9a-f]{64}/, "the value has to be printed once or it is unusable");
+      // The old line was `connector URL:  https://<host>/mcp/<token>`: a dead route AND the one
+      // shape a bearer token must not take, since a URL is what gets pasted into a shared field.
+      assert.doesNotMatch(out, /https:\/\/[^\s]*[0-9a-f]{64}/, "never as a URL");
+    } finally {
+      rmSync(fresh, { recursive: true, force: true });
+    }
+  });
+
+  // Two commands, one state, two answers: `token rm` said "`deckhand token` mints a new one"
+  // (it mints nothing) while doctor called the same state a hard failure naming `token add`.
+  it("agrees with doctor about what to run when the last credential goes", () => {
+    const fresh = mkdtempSync(join(tmpdir(), "deckhand-toklast-"));
+    try {
+      const at = (...args: string[]): string =>
+        execFileSync(process.execPath, [BIN, ...args], { encoding: "utf8", env: { ...process.env, DECKHAND_HOME: fresh } });
+      at("init", "--hostname", "deckhand.example.com");
+      at("token", "add", "me");
+      const out = at("token", "rm", "me");
+      assert.match(out, /deckhand token add/);
+    } finally {
+      rmSync(fresh, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("an unreadable tokens.yaml", () => {
+  // A failed read became an empty list, so `pair` reported "no local credential yet — run
+  // `deckhand token add me`" and that command then refused to write over the broken file.
+  it("is not reported as having no credentials", () => {
+    const broken = mkdtempSync(join(tmpdir(), "deckhand-tokbad-"));
+    try {
+      const at = (...args: string[]): void => {
+        execFileSync(process.execPath, [BIN, ...args], { encoding: "utf8", env: { ...process.env, DECKHAND_HOME: broken } });
+      };
+      at("init", "--hostname", "deckhand.example.com");
+      writeFileSync(join(broken, "tokens.yaml"), "tokens: [ this: is: not: yaml\n");
+      assert.throws(
+        () => at("token", "list"),
+        (e: Error & { stderr?: string }) => {
+          assert.match(`${e.stderr ?? ""}`, /would not load/);
+          assert.doesNotMatch(`${e.stderr ?? ""}`, /no credentials yet/);
+          return true;
+        },
+      );
+    } finally {
+      rmSync(broken, { recursive: true, force: true });
     }
   });
 });
@@ -116,33 +185,70 @@ describe("deckhand token rm", () => {
 });
 
 describe("deckhand token (no subcommand)", () => {
-  it("creates one on a fresh install and prints the URL", () => {
-    // More than one token is a CLIENT concept — a second one for another machine, which is what
-    // `list` shows. Nobody should have to learn that to answer "what do I paste into claude.ai".
+  // THE regression. This URL is pasted into claude.ai, and in an Enterprise
+  // organisation that makes it visible to every colleague. It used to carry a
+  // 64-hex credential as a path segment, which handed all of them the connector.
+  it("prints an endpoint with no credential in it", () => {
     const fresh = mkdtempSync(join(tmpdir(), "deckhand-tok1-"));
     const at = (...args: string[]): string =>
       execFileSync(process.execPath, [BIN, ...args], { encoding: "utf8", env: { ...process.env, DECKHAND_HOME: fresh } });
     try {
       at("init", "--hostname", "deckhand.example.com");
-      const first = at("token").trim();
-      assert.match(first, /https:\/\/deckhand\.example\.com\/mcp\/[0-9a-f]{64}$/m);
-      // Idempotent: running it again must not mint a second token and silently invalidate
-      // nothing — but it also must not create clutter the user then has to disambiguate.
-      assert.equal(at("token").trim(), first.split("\n").pop()!.trim(), "the same URL, not a new token");
+      const out = at("token").trim();
+      assert.equal(out, "https://deckhand.example.com/mcp");
+      assert.doesNotMatch(out, /[0-9a-f]{64}/, "no credential may appear in the URL people paste into a connector");
+      // And it stays the same however many local credentials exist — the endpoint
+      // is not per-client any more, so there is nothing to disambiguate.
+      at("token", "add", "alice");
+      at("token", "add", "bob");
+      assert.equal(at("token").trim(), out);
+    } finally {
+      rmSync(fresh, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("deckhand pair", () => {
+  // Minting needs the running server — the code lives in memory there, deliberately. What is
+  // testable without one is the refusal: it must name the reason rather than crash, because
+  // "the server is down" and "you have no credential" send the operator opposite ways.
+  it("says the server is not answering rather than throwing", () => {
+    const fresh = mkdtempSync(join(tmpdir(), "deckhand-approve-"));
+    const at = (...args: string[]): string =>
+      execFileSync(process.execPath, [BIN, ...args], { encoding: "utf8", env: { ...process.env, DECKHAND_HOME: fresh } });
+    try {
+      at("init", "--hostname", "deckhand.example.com", "--port", "4399");
+      at("token", "add", "me");
+      let stderr = "";
+      try {
+        at("pair");
+      } catch (e) {
+        stderr = String((e as { stderr?: Buffer }).stderr ?? "");
+      }
+      assert.match(stderr, /not answering on 127\.0\.0\.1:4399/);
     } finally {
       rmSync(fresh, { recursive: true, force: true });
     }
   });
 
-  it("refuses to guess when several tokens exist", () => {
-    // Picking one at random would hand out a credential the caller did not mean.
-    assert.throws(
-      () => run("token"),
-      (e: Error & { stderr?: string }) => {
-        assert.match(`${e.stderr ?? ""}`, /2 tokens exist/);
-        assert.match(`${e.stderr ?? ""}`, /deckhand token url alice/, "and it names the exact commands");
-        return true;
-      },
-    );
+  // The credential is how the CLI reaches the server, so its absence is the FIRST thing to
+  // say — chasing a connection error when there is nothing to authenticate with wastes the
+  // one debugging step an operator has.
+  it("names the missing local credential before anything else", () => {
+    const fresh = mkdtempSync(join(tmpdir(), "deckhand-approve2-"));
+    const at = (...args: string[]): string =>
+      execFileSync(process.execPath, [BIN, ...args], { encoding: "utf8", env: { ...process.env, DECKHAND_HOME: fresh } });
+    try {
+      at("init", "--hostname", "deckhand.example.com");
+      let stderr = "";
+      try {
+        at("pair");
+      } catch (e) {
+        stderr = String((e as { stderr?: Buffer }).stderr ?? "");
+      }
+      assert.match(stderr, /no local credential yet/);
+    } finally {
+      rmSync(fresh, { recursive: true, force: true });
+    }
   });
 });

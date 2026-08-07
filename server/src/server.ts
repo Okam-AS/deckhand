@@ -3,7 +3,16 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import express from "express";
 import { WebSocketServer } from "ws";
-import { loadConfig, loadAppsForBoot, loadTokens, githubPatPath, resolveShareSecret, type App, type Config } from "./config.ts";
+import {
+  loadConfig,
+  loadAppsForBoot,
+  loadTokens,
+  githubPatPath,
+  resolveShareSecret,
+  publicBaseUrl,
+  type App,
+  type Config,
+} from "./config.ts";
 import { watchApps } from "./appsWatcher.ts";
 import { watchTokens } from "./tokensWatcher.ts";
 import { TokenAuthenticator } from "./auth.ts";
@@ -32,6 +41,10 @@ import {
 } from "./share/proxy.ts";
 import { SetupStore } from "./setup/setupStore.ts";
 import { createSetupRouter } from "./setup/router.ts";
+import { OAuthStore } from "./oauth/store.ts";
+import { PairingStore } from "./oauth/pairing.ts";
+import { createPairRouter } from "./oauth/pairRouter.ts";
+import { createOAuthRouter, createOAuthMetadataRouter } from "./oauth/router.ts";
 import { writeApps } from "./cli/configWrite.ts";
 import { serverInfo } from "./meta.ts";
 
@@ -48,6 +61,8 @@ export interface AppDeps {
   persistApps?: (apps: App[]) => void;
   /** Credential onboarding: shared nonce store + PAT destination path. */
   setup?: { store: SetupStore; patPath: string };
+  /** Connector grants, and the requests waiting for the operator to approve them. */
+  connector?: { store: OAuthStore; pairing: PairingStore; baseUrl: string };
 }
 
 /** Build the Express app (no listener). Split out so tests can inject deps. */
@@ -81,6 +96,12 @@ export function createApp(deps: AppDeps): express.Application {
   // Viewer static assets (Vite emits absolute /assets/... URLs).
   if (deps.viewerDist) app.use(express.static(deps.viewerDist, { index: false }));
 
+  if (deps.connector) {
+    app.use(createOAuthMetadataRouter(deps.connector.baseUrl));
+    app.use("/oauth", createOAuthRouter({ store: deps.connector.store, pairing: deps.connector.pairing }));
+    app.use("/pair", createPairRouter({ store: deps.connector.store, pairing: deps.connector.pairing, auth: deps.auth }));
+  }
+
   app.use(
     "/mcp",
     createMcpRouter({
@@ -91,6 +112,8 @@ export function createApp(deps: AppDeps): express.Application {
       auth: deps.auth,
       persistApps: deps.persistApps,
       setup: deps.setup?.store,
+      oauth: deps.connector?.store,
+      baseUrl: deps.connector?.baseUrl,
     }),
   );
   app.use("/s", createShareRouter({ engine: deps.engine, pinGate: deps.pinGate, viewerDist: deps.viewerDist }));
@@ -191,6 +214,7 @@ export function createServer(): DeckhandServer {
     viewerDist,
     persistApps: writeApps,
     setup: { store: new SetupStore(), patPath: githubPatPath(config) },
+    connector: { store: new OAuthStore(), pairing: new PairingStore(), baseUrl: publicBaseUrl(config) },
   });
   const httpServer = createHttpServer(app);
   attachUpgrade(httpServer, engine, pinGate);

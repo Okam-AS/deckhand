@@ -2,12 +2,16 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import type { TokenEntry } from "./config.ts";
 
 /**
- * Authenticated caller derived from a valid `/mcp/<token>` path segment.
+ * Authenticated caller behind an `Authorization: Bearer` credential.
  *
- * A name and nothing else: deckhand serves ONE operator's devices on ONE Mac,
- * so every token that authenticates is that operator's, and there is no second
- * party to hold a lesser one back from. The name exists for the audit trail —
- * which credential acted — not as an identity to authorize against.
+ * There is no authorization step past this point: deckhand serves ONE operator's
+ * devices on ONE Mac, so anything that authenticates is that operator. What the
+ * fields carry is the audit trail's answer to "which credential acted".
+ *
+ * `name` is all there is, because deckhand learns no more: an OAuth grant names the CLIENT the
+ * operator approved, and a local tokens.yaml credential names itself. There is deliberately no
+ * address field — nothing in the flow proves one, so carrying it would invite a check that
+ * cannot hold.
  */
 export interface Principal {
   name: string;
@@ -18,11 +22,24 @@ function sha256(s: string): Buffer {
 }
 
 /**
+ * The `Authorization: Bearer <token>` value, or null.
+ *
+ * The scheme is matched case-insensitively because RFC 7235 says it is — and
+ * because the share gate already paid for assuming otherwise (see the `i`-flag
+ * guardrail in `test-support/`).
+ */
+export function bearerToken(header: string | undefined): string | null {
+  if (typeof header !== "string") return null;
+  const m = /^bearer\s+(\S+)$/i.exec(header.trim());
+  return m ? m[1]! : null;
+}
+
+/**
  * Constant-time token authenticator. Builds a sha256(token) → entry map at
  * construction, and looks a candidate up by hashing it and comparing against
  * every entry with `timingSafeEqual` (comparing hashes keeps it constant-time
  * even across differing token lengths). An unknown token returns null — the
- * caller turns that into a 404, indistinguishable from a wrong path.
+ * caller turns that into a 401 carrying the pointer an MCP client needs to authorize.
  */
 export class TokenAuthenticator {
   private entries: { hash: Buffer; principal: Principal }[];
@@ -40,7 +57,7 @@ export class TokenAuthenticator {
    *
    * `createApp` closes over this instance, so a reload has to mutate rather than rebuild.
    * Used by `watchTokens`: tokens.yaml was read once at boot, which meant the token `setup`
-   * mints was invisible to the server it had just started — the connector 404'd and claude.ai
+   * mints was invisible to the server it had just started — the connector was refused and claude.ai
    * blamed OAuth.
    */
   replace(tokens: TokenEntry[]): void {

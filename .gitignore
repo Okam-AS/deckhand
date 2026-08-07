@@ -18,3 +18,7 @@ build/
 
 # isolated Codex feature worktrees
 .worktrees/
+
+# Review receipts attest to a diff, so committing one would change that diff.
+.claude/review-receipts/
+.claude/pr-body.md

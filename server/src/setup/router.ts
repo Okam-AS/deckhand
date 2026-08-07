@@ -39,12 +39,13 @@ function page(title: string, body: string): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(title)} · deckhand</title>
 <style>
-/* auto-mate "Warm Dusk Lounge" palette (dark-only, warm). */
+/* The viewer's palette (viewer/src/global.css), because a user meets these pages and the
+   device grid in one sitting: neutral dark, no warm cast, hue reserved for failure. */
 :root{
-  --bg:#241b20;--bg-3:#31242a;--panel-2:#2c2025;
-  --line:rgba(242,232,220,0.09);--line-strong:rgba(242,232,220,0.14);
-  --ink:#f2e8dc;--ink-soft:#c9baae;--ink-faint:#9a8b82;
-  --amber:#e0a971;--coral:#d98873;--gold:#e8b86d;
+  --bg:#1e1e1e;--bg-3:#202020;--panel-2:#151515;
+  --line:rgba(252,252,246,0.06);--line-strong:rgba(252,252,246,0.12);
+  --ink:#fcfcf6;--ink-soft:#c6c7c1;--ink-faint:#8a8a86;
+  --accent:#fcfcf6;--coral:#c98b7f;--hairline:#3b3b3b;
   color-scheme:dark;
 }
 *{box-sizing:border-box}
@@ -54,33 +55,29 @@ body{
   max-width:34rem;margin:0 auto;padding:9vh 1.25rem 4rem;min-height:100%;
   background:var(--bg);-webkit-font-smoothing:antialiased;
 }
-body::before{content:"";position:fixed;inset:0;z-index:-1;
-  background:radial-gradient(60% 55% at 12% -5%,rgba(224,169,113,0.12),transparent 60%),
-    radial-gradient(55% 50% at 105% 105%,rgba(217,136,115,0.10),transparent 62%),
-    linear-gradient(165deg,var(--bg-3),var(--bg));}
+body::before{content:"";position:fixed;inset:0;z-index:-1;background:var(--bg);}
 h1{position:relative;display:inline-block;
   font-family:"New York","Iowan Old Style",Georgia,ui-serif,serif;font-weight:650;
   font-size:1.5rem;letter-spacing:-0.01em;margin:0 0 .6rem;padding-bottom:8px;}
-h1::after{content:"";position:absolute;left:0;right:0;bottom:0;height:2px;border-radius:999px;
-  background:linear-gradient(90deg,var(--gold),transparent);}
+h1::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1px;background:var(--hairline);}
 .muted{color:var(--ink-soft);font-size:.92rem}
 label{display:block;font-weight:600;margin:1.4rem 0 .4rem;font-size:.8rem;
   text-transform:uppercase;letter-spacing:.14em;color:var(--ink-faint)}
 input[type=password]{width:100%;padding:.7rem .8rem;font:inherit;color:var(--ink);
   border:1px solid var(--line-strong);border-radius:11px;background:var(--panel-2);outline:none}
-input[type=password]:focus{border-color:color-mix(in srgb,var(--amber) 60%,transparent)}
+input[type=password]:focus{border-color:color-mix(in srgb,var(--ink) 35%,transparent)}
 button{margin-top:1.5rem;padding:.7rem 1.3rem;font:inherit;font-weight:600;border:0;border-radius:999px;
-  color:#2a1c16;cursor:pointer;background:linear-gradient(150deg,var(--amber),var(--coral));
-  box-shadow:0 8px 22px rgba(217,136,115,0.22);transition:transform .15s ease}
+  color:#141414;cursor:pointer;background:var(--ink);
+  box-shadow:0 8px 22px rgba(0,0,0,0.35);transition:transform .15s ease}
 button:hover{transform:translateY(-1px)}
 button:active{transform:scale(.98)}
 .err{color:var(--coral);font-size:.9rem;margin-top:.6rem}
 ol{padding-left:1.2rem;color:var(--ink-soft)}ol li{margin:.35rem 0}
 code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.85em;color:var(--ink)}
-a{color:var(--amber)}
+a{color:var(--ink)}
 .btn-link{display:inline-block;margin:.6rem 0;padding:.6rem 1rem;font-weight:600;text-decoration:none;color:var(--ink);
-  border:1px solid color-mix(in srgb,var(--amber) 34%,transparent);border-radius:11px;
-  background:linear-gradient(135deg,color-mix(in srgb,var(--amber) 16%,transparent),color-mix(in srgb,var(--coral) 10%,transparent));
+  border:1px solid var(--hairline);border-radius:11px;
+  background:var(--panel-2);
   transition:transform .15s ease}
 .btn-link:hover{transform:translateY(-1px)}
 </style></head><body>${body}</body></html>`;

@@ -1,8 +1,9 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, copyFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { paths } from "../paths.ts";
+import { loadTokens } from "../config.ts";
 import { mergeTunnelConfig, renderTunnelConfig, parseTunnelConfig, tunnelIdFor, needsLogin } from "./tunnelConfig.ts";
 import { checkPrereqs, humanInput, formatPrereqs, blocking, type Probe } from "./preflight.ts";
 
@@ -28,6 +29,27 @@ const TUNNEL_NAME = "deckhand";
 interface Run {
   code: number;
   out: string;
+}
+
+/**
+ * Is `deckhand` a command the USER can type, as opposed to one this process can see?
+ *
+ * Setup runs under `npx`, which prepends the repo's `node_modules/.bin` to PATH — and npm puts
+ * a `deckhand` shim there for the workspace. So plain `which deckhand` succeeds inside setup
+ * and fails in the user's shell: setup reported "`deckhand` is on your PATH", skipped the link,
+ * and left every documented `deckhand <verb>` broken on a green install.
+ *
+ * Two narrowings, both load-bearing. The exit code decides, not the output, because `run`
+ * folds stderr into stdout and a `which` that explains itself would read as a path. And a hit
+ * inside this repo does not count: that is the npx shim, visible only to processes npm
+ * launched from here.
+ */
+export function deckhandOnUserPath(repoRoot: string, exec: (cmd: string, args: string[]) => Run = run): boolean {
+  const found = exec("which", ["deckhand"]);
+  if (found.code !== 0) return false;
+  const path = found.out.split("\n")[0]?.trim() ?? "";
+  if (!path.startsWith("/")) return false;
+  return !resolve(path).startsWith(`${resolve(repoRoot)}/`);
 }
 
 function run(cmd: string, args: string[]): Run {
@@ -134,6 +156,25 @@ function ensureTunnelConfig(tunnelId: string, hostnames: string[], port: number)
   ok(`cloudflared config points ${hostnames.join(", ")} at 127.0.0.1:${port}`);
 }
 
+/**
+ * How many local credentials exist, from tokens.yaml itself.
+ *
+ * A missing file is zero. An unreadable one is NOT: minting into it would be writing over a file
+ * that would not load back, and reporting "a credential exists" would leave the operator with a
+ * setup that says it succeeded and a server nobody can pair with.
+ */
+export function credentialCount(): number {
+  if (!existsSync(paths.tokens())) return 0;
+  try {
+    return loadTokens().length;
+  } catch (e) {
+    throw new SetupError(
+      `${paths.tokens()} exists but would not load: ${e instanceof Error ? e.message : String(e)}`,
+      "Fix that file, then re-run — setup will not write over a credential list it cannot read.",
+    );
+  }
+}
+
 function deckhandCli(args: string[]): Run {
   // The same entry point the user would type, so setup cannot drift from it.
   const cli = join(dirname(new URL(import.meta.url).pathname), "..", "cli.ts");
@@ -199,17 +240,19 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
     ensureTunnelConfig(tunnelId, hostnames, port);
 
     step("The `deckhand` command");
-    if (run("which", ["deckhand"]).out.trim()) {
-      ok("`deckhand` is on your PATH");
-    } else {
-      // Every document in this repo tells people to type `deckhand <something>`, and until
-      // there was a bin entry no such command existed. `npm link` puts it in the same prefix
-      // npm/npx already use, so it needs no sudo and no PATH edit; undo with `npm unlink -g
-      // @deckhand/server`.
+    {
       const repoRoot = join(dirname(new URL(import.meta.url).pathname), "..", "..", "..");
-      const linked = spawnSync("npm", ["link", "--workspace", "@deckhand/server"], { cwd: repoRoot, encoding: "utf8" });
-      if ((linked.status ?? 1) === 0 && run("which", ["deckhand"]).out.trim()) ok("linked `deckhand` onto your PATH");
-      else info(`could not link it — keep using \`npx tsx ${join(repoRoot, "server/src/cli.ts")}\`, or add server/bin to PATH.`);
+      if (deckhandOnUserPath(repoRoot)) {
+        ok("`deckhand` is on your PATH");
+      } else {
+        // Every document in this repo tells people to type `deckhand <something>`, and until
+        // there was a bin entry no such command existed. `npm link` puts it in the same prefix
+        // npm/npx already use, so it needs no sudo and no PATH edit; undo with `npm unlink -g
+        // @deckhand/server`.
+        const linked = spawnSync("npm", ["link", "--workspace", "@deckhand/server"], { cwd: repoRoot, encoding: "utf8" });
+        if ((linked.status ?? 1) === 0 && deckhandOnUserPath(repoRoot)) ok("linked `deckhand` onto your PATH");
+        else info(`could not link it — keep using \`npx tsx ${join(repoRoot, "server/src/cli.ts")}\`, or add server/bin to PATH.`);
+      }
     }
 
     step("deckhand config");
@@ -221,15 +264,18 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
       ok(`wrote ${paths.config()}`);
     }
 
-    step("Connector token");
-    const list = deckhandCli(["token", "list"]);
-    // `token list` is NOT silent on an empty install — it prints "no tokens yet — create one
-    // with `deckhand token`", by design, because silence reads as a broken command. So a
-    // non-empty stdout is not the existence test: that version took the "already exists"
-    // branch on every fresh install, minted nothing, and ignored --token. Match the empty
-    // state itself. (The check before that grepped for the word "admin", which stopped
-    // meaning anything when roles went away — same class, twice.)
-    if (list.code === 0 && !/no tokens yet/.test(list.out)) {
+    // Nothing here decides who may connect: nobody may, until the operator mints a code
+    // (`deckhand pair`) and somebody types it in. There is no list to seed and no
+    // question to ask, which is why setup finishes on one answer.
+    step("Local credential");
+    // Read the FILE, never `token list`'s prose. Three versions of this check have now been
+    // broken by an unrelated edit to that output: it grepped for "admin" (which stopped meaning
+    // anything when roles went away), then for a non-empty stdout (which is always non-empty,
+    // because silence reads as a broken command), then for "no tokens yet" — a string renamed to
+    // "no credentials yet" one commit later. Each failure looked the same from here: setup takes
+    // the "already exists" branch on a fresh install, mints nothing, ignores --token, and the
+    // install ends with `deckhand pair` impossible and nobody able to connect at all.
+    if (credentialCount() > 0) {
       ok("a token already exists — `deckhand token` prints its connector URL");
     } else {
       const name = opts.tokenName ?? process.env.USER ?? "me";
@@ -237,8 +283,9 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
       if (added.code !== 0) throw new SetupError(`could not create a token: ${added.out}`, "Fix the above, then re-run.");
       // Only the name. The URL is a credential and belongs in exactly one place: the single
       // step at the end, which the user is about to run deliberately.
-      say(`  ✓ created a token for "${name}"`);
+      say(`  ✓ created a local credential for "${name}"`);
     }
+    info("that one is for Claude Code on this Mac; claude.ai asks for approval instead");
 
     if (!opts.noServices) {
       step("Keep it running (LaunchAgents)");
@@ -268,13 +315,16 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
     say("  │  ONE THING LEFT — deckhand does nothing until you do it.     │");
     say("  └─────────────────────────────────────────────────────────────┘");
     say("");
-    say("   1.  deckhand token          ← prints your connector URL");
-    say("   2.  Paste it into claude.ai → Settings → Connectors → Add");
+    say(`   1.  Paste  https://${hostname}/mcp  into claude.ai → Settings → Connectors → Add`);
+    say("   2.  Click Connect. The page asks for a pairing code — run `deckhand pair` here");
+    say("       and give them the code it prints. They type it in.");
     say("");
-    say("   It is a password. Do not paste it into a chat or a commit.");
+    say("   The URL is not a password — share it with your organisation if you like.");
+    say("   Nothing connects without a code minted on this Mac, one client at a time.");
     say("");
-    say("   After that: `deckhand app add <id> --path /path/to/a/checkout`,");
-    say("   then ask Claude for a preview.");
+    say("   AGENT: reply in TWO LINES — paste the URL, then run `deckhand pair` and give them");
+    say("   the code. Do not tell them to run it: typing a command is your job. Do not");
+    say("   summarise this output or report status — they can see all of it above.");
   } catch (e) {
     if (e instanceof SetupError) {
       console.error(`\n✗ ${e.message}\n\n  ${e.fix}\n`);

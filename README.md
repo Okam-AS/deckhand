@@ -36,7 +36,8 @@ the machine.
                             │
 ┌───────────────────────────▼── deckhand server (loopback only) ──┐
 │                                                                 │
-│  /mcp/<token>            MCP tools, the operator's token        │
+│  /mcp                    MCP tools, bearer-authenticated       │
+│  /oauth/*                per-client sign-in (you approve each one) │
 │  /s/<shareId>            viewer page (device grid + controls)   │
 │  /s/<shareId>/dev/<id>/* scoped proxy → that device's stream    │
 │                                                                 │
@@ -47,7 +48,7 @@ the machine.
 │                                                (Android)        │
 └─────────────────────────────────────────────────────────────────┘
 
- on-disk: ~/.deckhand/{config.yaml, apps.yaml, tokens.yaml, state.json, audit.jsonl}
+ on-disk: ~/.deckhand/{config.yaml, apps.yaml, tokens.yaml, oauth.json, state.json, audit.jsonl}
 ```
 
 ## Building blocks
@@ -78,7 +79,12 @@ viewer page, a ruthlessly short dependency list.
 ## Security model
 
 - Everything binds **loopback**; the only way in is the Cloudflare named tunnel.
-- No tokenless paths: the operator's MCP token, per-app share links (optionally PIN-gated).
+- Nothing that touches a device or a repo is reachable without a credential: a
+  per-client MCP credential (an OAuth grant you approved at the machine, or a local
+  bearer token), per-app share links (optionally PIN-gated). The OAuth discovery,
+  registration and sign-in endpoints are open by construction — a client with no
+  credential has to start somewhere — and grant nothing on their own: a request that
+  reaches them needs a pairing code minted on the Mac with `deckhand pair`.
 - The MCP surface is capability-bounded — no arbitrary commands, only pre-registered
   apps and their repos' refs. Every call lands in an append-only audit log.
 - Secrets never travel through MCP; tokens never appear in argv, URLs, or logs.
@@ -114,8 +120,11 @@ With no arguments, `setup` checks the machine and prints exactly what is missing
 and **who can fix it** — the things it can install itself, and the things it
 needs you for. Do those, then run it again with your hostname:
 
+If the preflight asked for `cloudflared tunnel login`, run that yourself first — it
+opens a browser and needs your own Cloudflare account, so it is the one step nothing
+here can do for you. Then:
+
 ```sh
-cloudflared tunnel login                        # you: opens a browser, once
 npx tsx server/src/cli.ts setup \
   --hostname deckhand.yourdomain.com \
   --web-host previews.yourdomain.com            # optional, for web previews
@@ -128,6 +137,9 @@ npx tsx server/src/cli.ts setup \
   and will hang you forever.
 - Install what it says you can install. Then ask the user for a hostname on a
   domain they have on Cloudflare, and run `setup --hostname <that>`.
+- At the end, run `deckhand pair` yourself and give the user the code it prints;
+  they type it into the page Claude opens. Typing the command is yours, typing the
+  code into their own browser is theirs.
 - Xcode is a ~10 GB App Store download needing an Apple ID and a `sudo` licence
   accept. Ask; do not claim to have done it.
 - Android is optional. Without it, iOS previews work and Android does not —
@@ -152,10 +164,26 @@ deckhand doctor --device-only                            # boots a real sim + em
 Then paste your connector URL into claude.ai → Settings → Connectors:
 
 ```sh
-deckhand token          # prints your URL (creates one the first time)
+deckhand token          # prints https://<your-hostname>/mcp
 ```
 
-It is a credential — treat it like a password. If it leaks, `deckhand token rm <name>`
-kills it on the running server. `deckhand token list` shows which credentials exist,
-with the URLs masked; `deckhand token url <name>` prints one in
-full.
+**The URL is not a credential.** In a Claude team or Enterprise organisation a
+connector is visible to everyone in it, so deckhand puts no secret in the URL —
+and admits nobody because they have it. Clicking Connect opens a page that ASKS for a
+pairing code — and the only place one exists is your Mac:
+
+```sh
+deckhand pair                      # mint a code; type it into the page Claude opens
+deckhand connections               # who holds a grant now
+deckhand revoke <client-id>        # take it back, effective next call, no restart
+```
+
+A colleague who pastes the same URL is asked for a code they do not have. Nothing
+waits, nothing queues, and there is no list for a stranger to fill — the code exists
+only on your machine, for ten minutes, for one use.
+
+Claude Code on the same Mac has no browser to sign in with, so it uses a local
+credential instead: `deckhand token add <name>`, sent as an
+`Authorization: Bearer` header. That one *is* a password — `token list` shows
+which exist with the values masked, `token url <name>` prints one in full, and
+`token rm <name>` revokes it on the running server.

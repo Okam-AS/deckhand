@@ -37,6 +37,20 @@ a user's repo. (This is why the `web` type injects Vite's base/host/port as runt
 flags — zero source edits; frameworks that can't be configured at runtime are hosted via
 the wildcard-hostname model, see PLAN §2/§8, not by editing their config.)
 
+**The connector is public; the approval is not** (PLAN §11.6). `/mcp` takes an
+`Authorization: Bearer` credential and never a path token: a connector URL added in a Claude
+organisation is visible to everyone in it, so the URL cannot be the secret. Nothing decides in
+advance who may use it. `/oauth/authorize` asks for a **pairing code**, and the only place one
+exists is `deckhand pair` on the machine — it needs the local `tokens.yaml` credential. Mint,
+hand the code over, they type it in. A colleague holding the same URL is asked for a code they
+have not got. The direction matters: the earlier design parked incoming requests for the
+operator to approve, and a stranger could park faster than a person can walk to the Mac, so the
+operator's own request was gone before they read it. Nothing incoming is stored now, so there is
+nothing to flood — only guessing, and a few wrong tries lock out the GUESSER, not the code: burning
+the code would hand a stranger a way to shred every code the operator mints. `deckhand revoke
+<client-id>` takes a client back, effective on its next call, no restart. Claude Code on the machine
+uses a local `tokens.yaml` bearer token instead and needs no approval.
+
 **The GitHub access ladder** (PLAN §2/§6/§11.4): credentials resolve PAT → GitHub App →
 ambient `gh` CLI session (`githubAmbient`, default on) → anonymous git for public repos
 (gated on `allowPublicRepos`) → one-time PAT setup URL as last resort. Onboarding
@@ -105,7 +119,8 @@ Non-negotiables while implementing:
 - Keep it small. No database, no SPA framework beyond the single viewer page, no new
   dependencies without a strong reason. When in doubt, re-read PLAN.md §2.
 - Security invariants (PLAN.md §11) are acceptance criteria, not suggestions — especially:
-  loopback-only binding, no tokenless paths, no secrets through MCP, tokens never in
+  loopback-only binding, no credentialless path to a device or a repo (PLAN §11 item 1
+  names the four open-by-construction OAuth endpoints), no secrets through MCP, tokens never in
   argv/URLs/logs.
 - Structured, actionable MCP errors: the model relaying the error to a human must be able
   to say exactly what to do next.
@@ -123,14 +138,67 @@ you to — that is exactly why it is written down, and why step 5 of it turns wh
 you caught into a check that fires next time. Four of this repo's guardrails exist
 because that step was skipped and a user found the defect instead.
 
+**You do not open the pull request. A human does.** `gh pr create` is refused by the
+PreToolUse hook (`scripts/hooks/bash-guard.ts`), and unlike every other gate here it
+has **no override** — opening a PR is the point where the work stops being cheap to
+change, and that decision is reserved for a person. What you can do is earn the
+handover. That is the hook's ONLY rule: it used to also refuse commits and pushes at
+`main` and a `launchctl kickstart`, and both were dropped because a text matcher over a
+shell cannot enumerate the spellings of a command — three review rounds in a row found
+another one. `main` is protected server-side, so a push at it is refused by GitHub
+whatever a hook thinks; the restart rule is prose below and nothing else.
+
 **Never commit to `main`.** Every change — including a one-line fix — goes:
 
 ```
 git switch -c feature/<short-name>     # branch first, always
 … work, committing as you go …
 npm run ci                             # exactly what CI runs; must be green
-# ← run the shipping-a-change skill HERE, before the next line
-gh pr create --base main               # PR, with the reasoning in the body
+# ← run the shipping-a-change skill HERE: review to convergence, record each round
+npm run review:gates                   # the same gates on a clean checkout of HEAD
+git push -u origin feature/<name>
+npm run review:handover <<'BODY' …     # refuses unless the review converged
+```
+
+`review:handover` writes `.claude/pr-body.md` and prints the `gh pr create` command.
+Hand that command to the user in one line and stop. If the review has not converged
+there is nothing to hand over — which is the design: skipping the review produces no
+PR for someone else to catch, rather than a PR nobody reviewed.
+
+The review itself is a **loop with a receipt**, not a single pass:
+
+```
+npm run review:show      # this branch's curve, one entry per round: "cold-subagent (cold): 4 · inline: 0"
+npm run review:check     # exactly what the handover gate will say
+npm run review:round     # record one round (JSON on stdin; see the skill)
+```
+
+The receipt records the SHAPE of what the review found over rounds — `[7, 3, 1, 0]` is
+a converged review, `[0]` is one reviewer's first impression — and requires at least
+two rounds, the last finding nothing new and nothing blocking left standing, at least
+one round **cold** (a reviewer starting from the diff alone), and `npm run ci` green on
+a clean checkout. It cannot tell a review from a claim about one; what it buys is that
+the claim is explicit, attributable and readable afterwards. Details and the honest
+limits: `scripts/review-receipt.ts`.
+
+Two things it enforces that cost a round if you learn them late:
+
+- **The cold round must have read the code AS IT SHIPS.** A cold round against an
+  older diff does not count, so `cold → fix → inline` is refused: fixing moves the
+  hash. In practice the converging round is itself a cold one, so budget for that —
+  the shape is `cold → fix → cold`, not two rounds and done. (Accepting a stale cold
+  round made the cheapest compliant path "one cold round early, then change whatever
+  you like", with nothing cold having read what ships.)
+- **A blocking finding leaves the record two ways: fixed, or waived with a reason.**
+  `waived` takes the fingerprint from `review:show` and a sentence saying why it
+  cannot be mechanised or why it is acceptable — at least 20 characters, because
+  waiving used to cost nothing while reporting demanded evidence, which made
+  dismissing a bug cheaper than raising one. A finding nobody mentions again stays
+  open: silence is not a resolution.
+
+Merging is still yours once the PR exists:
+
+```
 gh pr merge <n> --squash --delete-branch
 ```
 
@@ -335,15 +403,25 @@ deckhand is installed and *does nothing* until the connector is pasted into
 claude.ai. That is not one item in a list of five; it is the step. Say it first,
 in two lines:
 
-> Run `deckhand token` and paste the URL into claude.ai → Settings → Connectors.
+> Run `deckhand token` and paste the URL into claude.ai → Settings → Connectors,
+> then click Connect — the page asks for a pairing code. Here is one: `ABC-123`.
 
 Then, if it is useful, what you did. Not before. A user who reads three lines and
 stops must still have the thing they need — and they will stop, because a numbered
 list of green ticks reads as "nothing left to do".
 
-**Their connector URL:** `deckhand token`. Creates one the first time, prints the
-same one after. NOT `token list`, which masks them by design. It is a credential —
-never repeat it back in chat, and never put it in a commit or a PR.
+**Their connector URL:** `deckhand token` — just `https://<their-host>/mcp`. It
+carries no secret, so relaying it in chat is fine. What keeps everyone else out is
+that Claude's page asks for a pairing code that exists only here. **Run `deckhand
+pair` yourself and give them the code** — they type it into their browser. Say so in
+the same breath as the URL, or a page asking for a code they have never heard of
+reads as broken. With no local credential nothing can ever be minted; `deckhand
+doctor` fails on that, and it is not a warning.
+
+Do not confuse that with `deckhand token add|url <name>`, which mints a LOCAL
+bearer credential for Claude Code on the machine. That one IS a password: never
+repeat it back in chat, never put it in a commit or a PR, and never in a URL.
+`token list` masks them by design.
 
 **Registering something to preview:**
 
@@ -374,6 +452,7 @@ from under a citation fails `docs.test.ts`.
 | `streaming.md` | `server/src/streaming/**` — the backend seam, loopback binds, helper ownership |
 | `engine.md` | `server/src/engine/**`, `server/src/devices/**` — detached spawns, ordering, borrow-never-own |
 | `share-proxy.md` | `server/src/share/**` — the public surface; both auth bypasses lived here |
+| `connector-auth.md` | `server/src/oauth/**`, `auth.ts` — who may drive this Mac; the connector URL is public |
 | `mcp-tools.md` | `server/src/mcp/**` — the agent-facing surface, where a description IS a prompt |
 | `tests.md` | every `*.test.ts` — see it fail first; fakes are complete or they lie |
 

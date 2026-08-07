@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import { createPrivateKey } from "node:crypto";
 import { join, dirname } from "node:path";
+import { paths } from "../paths.ts";
 import { loadConfig, loadApps, loadTokens, githubPatPath, githubPrivateKeyPath, publicBaseUrl, type App, type Config } from "../config.ts";
 import { GitHubAppAuth } from "../github/appAuth.ts";
 import { ghCliToken } from "../github/credentials.ts";
@@ -474,15 +475,65 @@ function gitHead(cwd: string): Promise<string | null> {
   });
 }
 
+/**
+ * Can a new client be let in at all (PLAN §11.6)?
+ *
+ * There is no allowlist to be empty and no Access application to be missing — a client gets in
+ * on a code the operator mints, so the only way this half breaks is having no way to mint one.
+ * `deckhand pair` reaches the running server with a LOCAL credential, so no local credential
+ * means no codes, and the connector can never be authorized by anybody.
+ *
+ * Not a warning. A connector nobody can approve is an outage, and nothing else reports it.
+ */
+export function checkConnectorAuth(tokens: { name: string }[], unreadable?: string): Check {
+  // "Could not read the file" is not "there are none". The config-files check fails too, but it
+  // fails about apps.yaml or config.yaml just as readily, so this one has to say which — an
+  // operator told "no local credential" hand-writes a second one beside a broken file.
+  if (unreadable) {
+    return {
+      name: "connector auth",
+      ok: false,
+      detail: `tokens.yaml would not load (${unreadable}) — so this cannot say whether a credential exists. Fix the file, then re-run.`,
+    };
+  }
+  if (tokens.length === 0) {
+    return {
+      name: "connector auth",
+      ok: false,
+      detail: "no local credential, so `deckhand pair` cannot reach the server and no client can ever be let in — `deckhand token add me`",
+    };
+  }
+  return { name: "connector auth", ok: true, detail: "a client gets in only with a code from `deckhand pair`" };
+}
+
+/**
+ * tokens.yaml, with "not there yet" kept apart from "will not load".
+ *
+ * `loadTokens` throws on ENOENT as readily as on bad YAML, so a fresh install was told to fix a
+ * file that does not exist — and, before that, ANY of config/apps/tokens throwing left this
+ * empty, which `checkConnectorAuth` reads as the diagnosis "no local credential".
+ */
+export function readTokens(): { tokens: { name: string }[]; unreadable?: string } {
+  if (!existsSync(paths.tokens())) return { tokens: [] };
+  try {
+    return { tokens: loadTokens() };
+  } catch (e) {
+    return { tokens: [], unreadable: (e as Error).message };
+  }
+}
+
 export async function runDoctor(opts: { smoke?: boolean } = {}): Promise<{ checks: Check[]; ok: boolean }> {
   const checks: Check[] = [];
 
   let config: Config | null = null;
   let apps: App[] = [];
+  // Read apart from config.yaml and apps.yaml. One try block around all three left `tokens`
+  // empty whenever any of them threw, and the connector-auth check reads an empty list as "no
+  // credential exists" — a diagnosis nobody can act on when the file is merely malformed.
+  const { tokens, unreadable: tokensError } = readTokens();
   try {
     config = loadConfig();
     apps = loadApps();
-    loadTokens();
     checks.push({ name: "config files", ok: true, detail: `hostname ${config.hostname}` });
   } catch (e) {
     checks.push({ name: "config files", ok: false, detail: (e as Error).message });
@@ -491,6 +542,7 @@ export async function runDoctor(opts: { smoke?: boolean } = {}): Promise<{ check
   checks.push(...(await checkToolchains()));
 
   if (config) {
+    checks.push(checkConnectorAuth(tokens, tokensError));
     checks.push(checkServeSim());
     checks.push(await checkServices());
     checks.push(await checkGitHub(config));

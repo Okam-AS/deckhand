@@ -56,15 +56,18 @@ New here? One command does the whole install:
 
 Everything else, for when you already know what you want:
   deckhand serve                                   run the server
-  deckhand doctor [--smoke]                        verify the install
+  deckhand doctor [--smoke | --device-only]        verify the install
   deckhand init --hostname H [--github-app-id N --github-app-pem P] [--port 4300]
                                                    the App is optional: without it
                                                    deckhand uses your gh CLI session
-  deckhand token add <name>                        another credential for yourself (a second client)
-  deckhand token                                   your connector URL (creates one if needed)
-  deckhand token list                              the credentials that exist (URLs masked)
+  deckhand pair                                    mint a pairing code to let one client in
+  deckhand connections                             clients that hold a grant now
+  deckhand revoke <client-id>                      take a client's access away
+  deckhand token add <name>                        another LOCAL credential (Claude Code on this Mac)
+  deckhand token                                   your connector URL
+  deckhand token list                              the local credentials that exist (values masked)
   deckhand token rm <name>                         revoke one, effective immediately
-  deckhand token url <name>                        print one connector URL in full
+  deckhand token url <name>                        print one local credential in full
   deckhand app add <id> <repo> --type expo|react-native|nativescript [--branch main] [--bundle-id ID]
   deckhand app add <id> --path /abs/dir [--repo owner/name] [--type ...]   local dev mode (type auto-detected)
   deckhand app add <id> --path /abs/dir --type web                        local web dev server (Vite)
@@ -146,15 +149,23 @@ async function main(): Promise<void> {
       });
     }
 
+    case "pair":
+      return cmdPair();
+
+    case "connections":
+      return cmdConnections();
+
+    case "revoke":
+      return cmdRevoke(sub);
+
     case "init":
       return cmdInit(flags);
 
     case "token":
-      // Bare `deckhand token` is the answer to "what do I paste into claude.ai". More than one
-      // token is a CLIENT concept — a second one for the desktop app or another machine, which
-      // is what `list` shows — and nobody should have to learn that to get their URL. So the
-      // no-argument form does the obvious thing: print yours, creating one if there is none.
-      if (!sub) return cmdTokenMine(flags);
+      // Bare `deckhand token` is the answer to "what do I paste into claude.ai" — now just the
+      // endpoint, since the credential left the URL. The subcommands manage LOCAL credentials
+      // for clients on this Mac that cannot run a browser sign-in.
+      if (!sub) return cmdTokenMine();
       if (sub === "add") return cmdTokenAdd(_[2]);
       if (sub === "rm") return cmdTokenRm(_[2]);
       if (sub === "list") return cmdTokenList();
@@ -201,23 +212,27 @@ function cmdInit(flags: Args["flags"]): void {
   if (!config.githubApp) {
     console.log("no GitHub App configured — deckhand will use your `gh` CLI session (githubAmbient) to read repos.");
   }
-  console.log("next: `deckhand token`, then set up the cloudflared tunnel (Phase 4 automates this).");
+  console.log("next: `deckhand token add me`, then `deckhand setup --hostname <host>` for the tunnel.");
 }
 
 function cmdTokenAdd(name: string | undefined): void {
   if (!name) fail("usage: deckhand token add <name>");
   const { tokens, created } = addTokenEntry(loadTokensForWrite(), { name: name! });
   writeTokens(tokens);
-  const hostname = tryHostname();
   console.log(`created token "${created.name}"`);
-  if (hostname) console.log(`connector URL:  https://${hostname}/mcp/${created.token}`);
-  else console.log(`token: ${created.token}`);
+  // The value, and no URL around it. This used to print `https://<host>/mcp/<token>`, which is
+  // both a 404 since the credential came out of the path and the one shape a bearer token must
+  // never take: a URL gets pasted into a connector field, a chat and a scrollback.
+  console.log(created.token);
+  console.error(`\nA LOCAL credential, for a client on this Mac: send it as \`Authorization: Bearer <token>\` to`);
+  console.error(`https://${tryHostname() ?? "<hostname>"}/mcp. Treat it like a password — never in a URL, never in chat.`);
+  console.error(`The connector URL for claude.ai carries no secret and comes from \`deckhand token\`.`);
 }
 
 /**
- * Revoke a credential. The connector URL carries the token as a path segment, so it lands in
- * every proxy log, screen share and scrollback it ever passes through — this is the way back
- * from that, and until it existed the answer was "hand-edit tokens.yaml".
+ * Revoke a credential. It is a bearer token with no expiry, held by whatever client was given
+ * it — this is the way back from one that leaked, and until it existed the answer was
+ * "hand-edit tokens.yaml".
  *
  * Takes effect immediately: the running server watches the file (`tokensWatcher.ts`) and the
  * watcher compares CONTENT, so rotating a value under the same name applies too.
@@ -231,71 +246,127 @@ function cmdTokenRm(name: string | undefined): void {
     fail(e instanceof Error ? e.message : String(e));
   }
   writeTokens(result.tokens);
-  console.log(`revoked "${result.removed.name}" — that connector URL stops working now.`);
-  if (result.tokens.length === 0) console.log("no tokens left; `deckhand token` mints a new one.");
+  console.log(`revoked "${result.removed.name}" — that credential stops working now.`);
+  // `deckhand token` prints the connector URL and mints nothing, and this is the state doctor
+  // calls a hard failure: with no local credential nothing can mint a pairing code, so no
+  // client can ever be let in. Both have to name the same command or one of them is wrong.
+  if (result.tokens.length === 0) {
+    console.log("no credentials left — nothing can mint a pairing code now: `deckhand token add me`.");
+  }
 }
 
 function cmdTokenList(): void {
   const tokens = loadTokensSafe();
-  const hostname = tryHostname();
   for (const t of tokens) {
     // Masked, not full. `list` is what you run to see WHO has access; printing every
     // credential in full to answer that puts them in a scrollback, a screen share and a
     // screenshot. The one you actually want goes through `token url <name>`, which is a
     // deliberate act rather than a side effect.
-    const hint = hostname ? `https://${hostname}/mcp/${t.token.slice(0, 6)}…` : `${t.token.slice(0, 6)}…`;
-    console.log(`${t.name}\t${hint}`);
+    //
+    // A prefix, not a URL: these are bearer tokens, and the URL shape they used to be printed
+    // in no longer routes at all.
+    console.log(`${t.name}\t${t.token.slice(0, 6)}…`);
   }
-  if (tokens.length) console.log(`\nFull connector URL for one of them:  deckhand token url <name>`);
-  else console.log(`no tokens yet — create one with \`deckhand token\``);
+  if (tokens.length) console.log(`\nThe credential itself, for a client on this Mac:  deckhand token url <name>`);
+  else console.log(`no credentials yet — create one with \`deckhand token add me\``);
 }
 
 /**
- * "Give me my connector URL" — the only token command most installs ever need.
+ * "What do I paste into claude.ai" — the only token command most installs need.
  *
- * Creates one on first use, prints the existing one after that, and when there are several
- * (one per client — claude.ai, the desktop app, a second machine) says so and points at the
- * explicit commands rather than guessing which one the caller meant.
+ * The answer no longer contains a secret. The credential used to be a path segment in this
+ * URL, which was safe only while the URL was, and a connector added in Claude Enterprise is
+ * visible to the whole organisation. Now the URL names the endpoint and nothing else; who may
+ * actually connects needs a pairing code minted here with `deckhand pair`.
  */
-function cmdTokenMine(flags: Args["flags"]): void {
-  const tokens = loadTokensForWrite();
-  if (tokens.length === 1) return printConnector(tokens[0]!);
-  if (tokens.length > 1) {
-    console.error(`${tokens.length} tokens exist — say which one:`);
-    for (const t of tokens) console.error(`  deckhand token url ${t.name}`);
-    process.exit(1);
-  }
-  const name = str(flags.name) ?? process.env.USER ?? "me";
-  const { tokens: next, created } = addTokenEntry(tokens, { name });
-  writeTokens(next);
-  console.log(`created a token for "${created.name}".`);
-  printConnector(created);
-}
-
-function printConnector(t: { name: string; token: string }): void {
+function cmdTokenMine(): void {
   const hostname = tryHostname();
-  if (!hostname) {
-    console.log(t.token);
-    console.error(`(no hostname in config.yaml — run \`deckhand setup --hostname ...\` to get a full URL)`);
-    return;
-  }
-  console.log(`https://${hostname}/mcp/${t.token}`);
-  console.error(`\nPaste that into claude.ai → Settings → Connectors. It is a credential: treat it like a password.`);
+  if (!hostname) fail("no hostname in config.yaml — run `deckhand setup --hostname ...` first");
+  console.log(`https://${hostname}/mcp`);
+  console.error(`\nPaste that into claude.ai → Settings → Connectors → Add, then click Connect.`);
+  console.error(`The page it opens asks for a pairing code. AGENT: run \`deckhand pair\` and give`);
+  console.error(`them the code it prints — do not hand them the command.`);
+  console.error(`The URL itself is not a credential — sharing it with your organisation is fine,`);
+  console.error(`because nothing connects until somebody at this Mac approves it.`);
 }
 
 /**
- * Print one token's connector URL in full.
+ * Print one LOCAL credential in full.
  *
- * Until this existed a token was UNRECOVERABLE: `token add` printed the URL once and `token
- * list` showed only names, so losing the scrollback meant minting a new token and updating
- * every client — or reading tokens.yaml by hand, which is what people actually did.
+ * Local means a client on this Mac with no browser to wait in — Claude Code, a script.
+ * It is a bearer token: it goes in an `Authorization: Bearer` header, never in a URL, and
+ * never into a connector anyone else can see.
  */
 function cmdTokenUrl(name: string | undefined): void {
   if (!name) fail("usage: deckhand token url <name>   (see `deckhand token list`)");
   const found = loadTokensSafe().find((t) => t.name === name);
   if (!found) fail(`no token named "${name}" — \`deckhand token list\` shows them`);
-  const hostname = tryHostname();
-  printConnector(found!);
+  console.log(found!.token);
+  console.error(`\nA LOCAL credential, for a client on this Mac: send it as \`Authorization: Bearer <token>\` to`);
+  console.error(`https://${tryHostname() ?? "<hostname>"}/mcp. Treat it like a password — it needs no approval.`);
+}
+
+// --- who may connect -------------------------------------------------------
+
+/**
+ * Talk to the running server with this machine's own credential.
+ *
+ * Pairing state is in memory in the server, not on disk, so the CLI cannot answer these
+ * questions by reading a file the way `token list` does — and should not: a pending request is
+ * worth seconds, and a file would make an approval outlive the browser waiting for it.
+ */
+async function pairCall(path: string, body?: unknown): Promise<Record<string, unknown>> {
+  const token = loadTokensSafe()[0]?.token;
+  if (!token) fail("no local credential yet — run `deckhand token add me` first");
+  const port = tryPort() ?? 4300;
+  let res: Response;
+  try {
+    res = await fetch(`http://127.0.0.1:${port}/pair/${path}`, {
+      method: body === undefined ? "GET" : "POST",
+      headers: { authorization: `Bearer ${token!}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  } catch {
+    fail(`the deckhand server is not answering on 127.0.0.1:${port} — \`deckhand doctor\` says why`);
+    throw new Error("unreachable");
+  }
+  const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!res.ok) fail(typeof json.detail === "string" ? json.detail : `the server refused: ${res.status}`);
+  return json;
+}
+
+/**
+ * Mint a pairing code — the only way a new client gets in.
+ *
+ * The operator mints; the browser types it. The other direction (park the request, let the
+ * operator approve it from a list) reads friendlier and collapses under a flood: parking is
+ * unauthenticated, so a stranger fills the list faster than a person can walk to the Mac.
+ * Nothing incoming is stored now, so there is nothing to flood.
+ */
+async function cmdPair(): Promise<void> {
+  const { code, expiresMs } = (await pairCall("code", {})) as { code: string; expiresMs: number };
+  console.log(code);
+  const minutes = Math.max(1, Math.round((expiresMs - Date.now()) / 60_000));
+  console.error(`\nType it into the deckhand page in the browser. Good for ~${minutes} min, one use.`);
+  console.error(`Nobody can connect without it, so do not paste it anywhere you would not paste a password.`);
+}
+
+async function cmdConnections(): Promise<void> {
+  const { connections } = (await pairCall("connections")) as { connections: { clientId: string; label: string }[] };
+  if (!connections.length) {
+    console.log("no client holds a grant. Local credentials are separate — `deckhand token list`.");
+    return;
+  }
+  for (const c of connections) console.log(`${c.clientId}   ${c.label}`);
+  console.error(`\nTake one away with \`deckhand revoke <client-id>\`.`);
+}
+
+async function cmdRevoke(clientId: string | undefined): Promise<void> {
+  if (!clientId) fail("usage: deckhand revoke <client-id>   (`deckhand connections` lists them)");
+  const { revoked } = (await pairCall("revoke", { clientId: clientId! })) as { revoked: number };
+  // No restart and no waiting for expiry: the grant is gone, so the next call fails.
+  if (!revoked) fail(`no grant for "${clientId}" — \`deckhand connections\` shows them`);
+  console.log(`revoked ${revoked} grant${revoked === 1 ? "" : "s"} — that client is out as of its next call.`);
 }
 
 async function cmdAppAdd(id: string | undefined, repo: string | undefined, flags: Args["flags"]): Promise<void> {
@@ -382,24 +453,34 @@ function cmdEnvSet(appId: string | undefined, assignment: string | undefined): v
 function str(v: string | boolean | undefined): string | undefined {
   return typeof v === "string" ? v : undefined;
 }
+/**
+ * The token list for a command that only READS it.
+ *
+ * A missing file is genuinely empty. An unreadable one is not: swallowing that error made
+ * `token list` show nothing and `pair` say "no local credential yet — run `deckhand token add
+ * me`", which then refused to write over the same broken file. Two commands, one lie, and the
+ * running server serving the last good list all the while (principle 3).
+ */
 function loadTokensSafe() {
+  if (!existsSync(paths.tokens())) return [];
   try {
     return loadTokens();
-  } catch {
-    return [];
+  } catch (e) {
+    fail(
+      `${e instanceof Error ? e.message : String(e)}\n` +
+        `${paths.tokens()} exists but would not load — fix the file. ` +
+        `The running server is still using the last good list, so credentials may work while this says nothing.`,
+    );
   }
 }
 
 /**
  * The token list for a command that WRITES it back.
  *
- * `loadTokensSafe` answers "" with an empty list, which is right for a read-only view and wrong
- * here twice over: `token add` would write a file containing only the new entry, silently
- * destroying every other credential (principle 2), and `token rm` would report `no token named
- * X` for a credential that is still live in the running server (principle 3 — a failed lookup
- * and an empty result must not be the same value). A missing file is genuinely empty; an
- * unreadable one is an error the operator has to see, because the watcher keeps serving the old
- * set either way.
+ * Same refusal as `loadTokensSafe`, for a sharper reason: writing back from a list that failed
+ * to load would leave a file containing only the new entry, silently destroying every other
+ * credential (principle 2). A missing file is genuinely empty; an unreadable one is an error the
+ * operator has to see, because the watcher keeps serving the old set either way.
  */
 function loadTokensForWrite() {
   if (!existsSync(paths.tokens())) return [];
@@ -450,6 +531,15 @@ function loadAppsForWrite() {
 function tryHostname(): string | null {
   try {
     return loadConfig().hostname;
+  } catch {
+    return null;
+  }
+}
+
+/** The port the server is on, or null when there is no readable config to say. */
+function tryPort(): number | null {
+  try {
+    return loadConfig().port;
   } catch {
     return null;
   }

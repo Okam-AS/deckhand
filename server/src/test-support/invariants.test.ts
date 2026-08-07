@@ -367,6 +367,81 @@ describe("deckhand ships nothing about one particular install", () => {
   });
 });
 
+describe("the connector URL is public by construction", () => {
+  // The premise: a connector added in a Claude team or Enterprise organisation is visible to
+  // everyone in it. The credential used to be a path segment in that URL — `/mcp/<token>` —
+  // which handed every colleague a working connector to this Mac. Both checks below guard the
+  // two ways that could come back, and neither is visible to a type, a lint, or a unit test.
+
+  it("puts no credential in an MCP route path", () => {
+    // A `:token`-shaped path parameter on the MCP router is the old design returning. The
+    // legacy 404 catch-all is allowed precisely because it authenticates nothing.
+    const router = read(join(SRC, "mcp", "index.ts"));
+    const offenders: string[] = [];
+    for (const m of router.matchAll(/router\.(get|post|delete|put|all)\(\s*"([^"]*)"/g)) {
+      const path = m[2]!;
+      if (!path.includes(":")) continue;
+      // The one exemption, by path and reason: it exists to REFUSE the old URL.
+      if (path === "/:legacyToken") continue;
+      offenders.push(`router.${m[1]} "${path}"`);
+    }
+    assert.deepEqual(
+      offenders,
+      [],
+      "an MCP route may not take a path parameter: a URL carrying a credential gets pasted into a shared connector, " +
+        "a screenshot and a log. The credential belongs in an Authorization header.",
+    );
+  });
+
+  // Written, tested, and never called is this repo's most expensive shape — it cost the orphan
+  // sweep, and it cost this: a stray regex during a refactor deleted the whole `if
+  // (deps.connector)` block, every unit test stayed green because they build the routers
+  // directly, and the connector answered 404 to claude.ai's very first request. A user found
+  // it, which is exactly who this check exists to spare.
+  // A user meets these three pages and the device grid within minutes of each other, so they
+  // are one surface or they look broken. The viewer was re-paletted to neutral dark and the
+  // server-rendered pages were left warm — brown auth pages in front of a grey app.
+  it("renders every server-side page in the viewer's palette, not the retired warm one", () => {
+    const RETIRED = ["#241b20", "#2c2025", "#31242a", "#f2e8dc", "#c9baae", "#e0a971", "#d98873", "#e8b86d", "242,232,220"];
+    const offenders: string[] = [];
+    for (const file of ["oauth/router.ts", "setup/router.ts", "share/proxy.ts"]) {
+      const source = read(join(SRC, ...file.split("/")));
+      for (const hex of RETIRED) if (source.includes(hex)) offenders.push(`${file}: ${hex}`);
+      // A USED custom property that nobody defines is the palette bug the hex list cannot see:
+      // `color-mix(in srgb, var(--gone) …)` is invalid at computed-value time, so the whole
+      // declaration drops and the element loses its border and background silently. That is how
+      // the setup page's one call-to-action rendered as bare text after this very change.
+      const defined = new Set([...source.matchAll(/(--[a-z0-9-]+)\s*:/g)].map((m) => m[1]!));
+      for (const m of source.matchAll(/var\((--[a-z0-9-]+)\)/g)) {
+        const used = m[1]!;
+        if (!defined.has(used)) offenders.push(`${file}: var(${used}) is used but never defined`);
+      }
+    }
+    assert.deepEqual(offenders, [], "these pages must use viewer/src/global.css's tokens — see its header for why the warm palette went");
+  });
+
+  it("mounts the routers a connector needs, not merely defines them", () => {
+    const server = read(join(SRC, "server.ts"));
+    for (const [what, call] of [
+      ["the OAuth discovery documents", /app\.use\(createOAuthMetadataRouter\(/],
+      ["/oauth", /app\.use\("\/oauth", createOAuthRouter\(/],
+      ["/pair", /app\.use\("\/pair", createPairRouter\(/],
+    ] as const) {
+      assert.match(server, call, `${what} must be mounted in server.ts — a router nobody mounts is a 404 with passing tests`);
+    }
+  });
+
+  it("puts no approval path outside the credential the machine holds", () => {
+    // The public half of pairing asks for a code and proves nothing; the minting half needs
+    // tokens.yaml. If `pairRouter` ever stopped authenticating, the connector URL alone would
+    // approve its own request — a total bypass with nothing else failing.
+    const source = read(join(SRC, "oauth", "pairRouter.ts"));
+    assert.match(source, /bearerToken\(/, "pairRouter must authenticate every call");
+    assert.match(source, /deps\.auth\.authenticate\(/, "…against tokens.yaml, not against an OAuth grant");
+    assert.doesNotMatch(source, /oauth\?\.authenticate|store\.authenticate\(/, "an OAuth grant must not be able to approve the next one");
+  });
+});
+
 describe("config that changes at runtime is watched", () => {
   it("watches tokens.yaml as well as apps.yaml", () => {
     // tokens.yaml was read once at boot. `setup` starts the server and THEN mints the admin
@@ -508,5 +583,95 @@ describe("source stays source", () => {
           `hand-rolled byte separator.`,
       );
     }
+  });
+});
+
+describe("setup decides on state, not on its own prose", () => {
+  // Three times now, a `setup` branch has been broken by an unrelated edit to a message it was
+  // grepping. It looked for "admin" (meaningless once roles went away), then for a non-empty
+  // stdout (always non-empty, because silence reads as a broken command), then for "no tokens
+  // yet" — renamed to "no credentials yet" one commit later, in a diff that touched no setup
+  // code and passed every test. Each time the symptom was the same and severe: setup takes the
+  // "already exists" branch on a FRESH install, mints nothing, ignores --token, and the install
+  // finishes green with `deckhand pair` impossible, so nobody can ever be let in.
+  //
+  // The output of `deckhand <verb>` is written for a person and is meant to be edited freely.
+  // So setup may PRINT it and may check an exit CODE, and may not branch on its text: the state
+  // it wants is in tokens.yaml, config.yaml and apps.yaml, which are typed and loaded.
+  it("never branches on the text of deckhand's own output", () => {
+    const src = read(join(SRC, "cli", "setup.ts"))
+      .replace(/\/\/[^\n]*/g, "")
+      // Quoted message text is blanked so an ordinary "…?" cannot read as a ternary below.
+      .replace(/'[^'\n]*'|"[^"\n]*"/g, (q) => " ".repeat(q.length));
+    // An ALLOW-list, and scoped to ARGUMENT POSITION rather than to the line. Two earlier versions
+    // of this check were weaker in opposite directions. A deny-list of string operations
+    // (`.test()`, `.includes()`, `===`) missed `out.trim() !== ""` — the exact shape of failure #2
+    // above. Then "a sink anywhere on the line" missed `if (t.out.includes(…)) ok(…)`, which is
+    // this file's dominant style AND all three historical shapes, while refusing an ordinary
+    // multi-line `say(` or `SetupError(` that setup.ts already writes elsewhere.
+    //
+    // So: the output may be an ARGUMENT to something that shows it. Anywhere else — a condition, a
+    // comparison, an intermediate variable, a ternary — is a finding, however it is spelt or
+    // wrapped across lines.
+    const captures = [...src.matchAll(/(?:const|let)\s+(\w+)\s*=\s*deckhandCli\(/g)].map((m) => ({ name: m[1]!, at: m.index }));
+    assert.ok(captures.length > 0, "no `deckhandCli` result is captured — this check has lost its subject");
+    const SINK = /(?:say|info|ok|step|console\.(?:log|error)|process\.stdout\.write|new\s+SetupError)\s*$/;
+
+    /** Is this offset inside the argument list of something that only displays its argument? */
+    const shownNotRead = (at: number): boolean => {
+      let depth = 0;
+      for (let i = at; i > 0; i--) {
+        const ch = src[i]!;
+        if (ch === ")") depth += 1;
+        else if (ch === "(") {
+          if (depth > 0) {
+            depth -= 1;
+            continue;
+          }
+          // An unclosed `(` to our left: whatever is called here encloses us.
+          if (SINK.test(src.slice(Math.max(0, i - 40), i))) return true;
+        } else if (ch === ";" || ch === "}") break; // left the statement without meeting a sink
+      }
+      return false;
+    };
+
+    /**
+     * Argument position is necessary and not sufficient: `say(out.includes("x") ? "a" : "b")` is
+     * inside a sink and still decides something from the text. So the mention must also not feed a
+     * comparison or a ternary before its statement ends.
+     */
+    const displayed = (at: number): boolean => {
+      if (!shownNotRead(at)) return false;
+      const rest = src.slice(at, at + 240).split(";")[0]!;
+      return !/\?(?![.?])|===|!==|&&|\|\|/.test(rest);
+    };
+
+    const offences: string[] = [];
+    const lineOf = (at: number): number => src.slice(0, at).split("\n").length;
+    // Destructuring detaches the text from the call it came from, so nothing downstream can tell
+    // it apart from any other string — the rule cannot follow it. Keep the result whole.
+    for (const m of src.matchAll(/(?:const|let)\s*\{[^}]*\bout\b[^}]*\}\s*=\s*deckhandCli\(/g)) {
+      offences.push(`setup.ts:${lineOf(m.index)}`);
+    }
+    for (const m of src.matchAll(/(\w+)\.out\b/g)) {
+      const name = m[1]!;
+      // Only OUR results: `list` also names a `cloudflared tunnel list` result in this file, and
+      // flagging that would blame deckhand's output for a third party's.
+      const capture = captures.find((c) => c.name === name && c.at < m.index);
+      if (!capture) continue;
+      if (!displayed(m.index)) offences.push(`setup.ts:${lineOf(m.index)}`);
+    }
+    // An inline `deckhandCli([...]).out` captures nothing, so the loop above cannot see it.
+    for (const m of src.matchAll(/deckhandCli\([^)]*\)\s*\.out\b/g)) {
+      if (!displayed(m.index)) offences.push(`setup.ts:${lineOf(m.index)}`);
+    }
+    assert.deepEqual(
+      offences.sort(),
+      [],
+      "setup.ts uses the TEXT of a `deckhand` command's output for something other than showing it. " +
+        "That text is written for a person and gets reworded — three setup branches have already " +
+        "been broken that way. Read the state instead (tokens.yaml/config.yaml via their loaders), " +
+        "or check the exit code. Printing it, or quoting it in a SetupError, is fine.",
+    );
   });
 });

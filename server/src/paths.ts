@@ -31,6 +31,8 @@ export const paths = {
   apps: () => join(deckhandHome(), "apps.yaml"),
   tokens: () => join(deckhandHome(), "tokens.yaml"),
   state: () => join(deckhandHome(), "state.json"),
+  /** OAuth clients and per-person connector grants (hashes only, mode 0600). */
+  oauth: () => join(deckhandHome(), "oauth.json"),
   audit: () => join(deckhandHome(), "audit.jsonl"),
   /** HMAC key for signing share unlock cookies (auto-generated on first boot if absent). */
   shareSecret: () => join(deckhandHome(), "share-secret"),

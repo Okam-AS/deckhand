@@ -342,15 +342,15 @@ function pinPadPage(length: number): string {
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Enter PIN</title><style>
 :root{color-scheme:dark}*{box-sizing:border-box}
-body{margin:0;height:100dvh;display:grid;place-items:center;background:radial-gradient(120% 120% at 50% 0,#2c2025,#1a1218);color:#f2e8dc;font:16px/1.4 system-ui,-apple-system,sans-serif}
-.card{display:flex;flex-direction:column;align-items:center;gap:22px;padding:34px 30px;border-radius:22px;background:linear-gradient(165deg,#33262c,#2c2025);box-shadow:0 28px 60px rgba(0,0,0,.42);border:1px solid rgba(242,232,220,.08);animation:rise .5s cubic-bezier(.2,.7,.2,1) both}
-h1{margin:0;font-size:15px;font-weight:500;letter-spacing:.02em;color:#c9bcae}
-.dots{display:flex;gap:14px;height:16px}.dot{width:14px;height:14px;border-radius:50%;border:1.5px solid rgba(242,232,220,.28);transition:.18s}.dot.on{background:linear-gradient(150deg,#e0a971,#d98873);border-color:transparent}
+body{margin:0;height:100dvh;display:grid;place-items:center;background:#1e1e1e;color:#fcfcf6;font:16px/1.4 system-ui,-apple-system,sans-serif}
+.card{display:flex;flex-direction:column;align-items:center;gap:22px;padding:34px 30px;border-radius:22px;background:#121212;box-shadow:0 28px 60px rgba(0,0,0,.45);border:1px solid #3b3b3b;animation:rise .5s cubic-bezier(.2,.7,.2,1) both}
+h1{margin:0;font-size:15px;font-weight:500;letter-spacing:.02em;color:#c6c7c1}
+.dots{display:flex;gap:14px;height:16px}.dot{width:14px;height:14px;border-radius:50%;border:1.5px solid rgba(252,252,246,.28);transition:.18s}.dot.on{background:#fcfcf6;border-color:transparent}
 .dots.err{animation:shake .4s}
 .pad{display:grid;grid-template-columns:repeat(3,72px);gap:12px}
-.key{height:64px;border:0;border-radius:16px;background:rgba(242,232,220,.06);color:#f2e8dc;font:300 26px system-ui;cursor:pointer;transition:.12s;backdrop-filter:blur(6px)}
-.key:hover{background:rgba(242,232,220,.11)}.key:active{transform:scale(.94)}.key.blank{background:transparent;pointer-events:none}
-.msg{min-height:18px;font-size:13px;color:#d98873;opacity:0;transition:.2s}.msg.show{opacity:1}
+.key{height:64px;border:0;border-radius:16px;background:rgba(252,252,246,.06);color:#fcfcf6;font:300 26px system-ui;cursor:pointer;transition:.12s;backdrop-filter:blur(6px)}
+.key:hover{background:rgba(252,252,246,.11)}.key:active{transform:scale(.94)}.key.blank{background:transparent;pointer-events:none}
+.msg{min-height:18px;font-size:13px;color:#c98b7f;opacity:0;transition:.2s}.msg.show{opacity:1}
 @keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
 @keyframes shake{10%,90%{transform:translateX(-2px)}30%,70%{transform:translateX(5px)}50%{transform:translateX(-8px)}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}

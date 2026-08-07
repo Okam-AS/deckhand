@@ -123,12 +123,21 @@ describe("docs describe the code that exists", () => {
     // exist, one layer up.
     const rulesDir = join(REPO, ".claude", "rules");
     const testNames = new Set<string>();
-    for (const f of readdirSync(join(SRC, "test-support"))) {
-      if (!f.endsWith(".test.ts")) continue;
-      for (const m of readFileSync(join(SRC, "test-support", f), "utf8").matchAll(/\bit\(\s*"([^"]+)"/g)) {
-        testNames.add(m[1]!);
+    // EVERY test file, not just test-support. A rule for an area cites the check that
+    // enforces it, and for a security invariant that is often the area's own regression
+    // test — `oauth/router.test.ts` proves a client mid-pairing survives a registration flood,
+    // and no repo-wide guardrail can. Scanning only test-support made those citations
+    // dangle, which pushes the next author to drop the citation rather than fix it.
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.name.endsWith(".test.ts")) {
+          for (const m of readFileSync(full, "utf8").matchAll(/\bit\(\s*"([^"]+)"/g)) testNames.add(m[1]!);
+        }
       }
-    }
+    };
+    walk(SRC);
     assert.ok(testNames.size > 5, "no guardrail test names parsed — the `it(\"...\")` pattern changed");
 
     const dangling: string[] = [];
@@ -140,9 +149,17 @@ describe("docs describe the code that exists", () => {
       // required `\S+\.test\.ts` followed by whitespace, so it matched none of the
       // backticked citations actually written here and the check was vacuous. It only
       // showed up under mutation — renaming a cited check produced no failure at all.
-      for (const m of src.matchAll(/→\s*`?\S*?\.test\.ts`?\s+"([^"]+)"/g)) {
-        const cited = m[1]!;
-        if (![...testNames].some((n) => n.startsWith(cited))) dangling.push(`${f}: "${cited}"`);
+      // Anchoring the whole citation to the arrow verified only the FIRST check after it, and
+      // one line here cites two — so renaming the second was silent, while AGENTS.md says a
+      // check renamed out from under a citation fails this test. The arrow marks where
+      // citations START; each `<file>.test.ts "<name>"` pair after it is one, wrapped or not.
+      for (const chunk of src.split("→").slice(1)) {
+        for (const m of chunk.matchAll(/`?\S*?\.test\.ts`?\s+"([^"]+)"/g)) {
+          // Collapse the wrap. A citation may run onto the next line — one does — and comparing
+          // the raw capture then looks for a test name containing a newline and two spaces.
+          const cited = m[1]!.replace(/\s+/g, " ").trim();
+          if (![...testNames].some((n) => n.startsWith(cited))) dangling.push(`${f}: "${cited}"`);
+        }
       }
     }
     assert.deepEqual(
@@ -167,6 +184,41 @@ describe("docs describe the code that exists", () => {
     assert.ok(verbs.size > 4, `only ${verbs.size} cli verbs parsed — the switch changed, fix this check`);
 
     const missing: string[] = [];
+    // The CLI's OWN output is checked too, and it is the harder half: a dead command hidden in
+    // a `console.log` is invisible to every markdown guardrail, and it is read by the person
+    // being onboarded at the exact moment they cannot tell a broken instruction from their own
+    // mistake. Three commands this branch deleted survived in setup's closing screen, in
+    // `deckhand token`, and in doctor — all of them green.
+    for (const [name, body] of [
+      ["cli.ts", cli],
+      ["cli/setup.ts", readFileSync(join(SRC, "cli", "setup.ts"), "utf8")],
+      ["cli/doctor.ts", readFileSync(join(SRC, "cli", "doctor.ts"), "utf8")],
+    ] as const) {
+      // Two shapes, because the biggest piece of CLI output is not backticked at all: the
+      // usage screen, which is the first thing a lost user reads. So a verb counts when it is
+      // quoted as a command AND when it is laid out as one — `deckhand pair` in prose, and
+      // "  deckhand pair    mint a code" in the help — at the help's own indent, since a
+      // deeply-indented continuation line is prose ("…deckhand uses your gh CLI session").
+      // `deckhand listening on …` is a log line, and a check that cannot tell those apart gets
+      // deleted rather than obeyed.
+      // The third shape is the one the motivating bug actually wore: setup's closing screen
+      // NUMBERS its steps ("   1.  deckhand token …"), which matched neither of the other two,
+      // so a dead verb in the last thing an install prints stayed green.
+      const shapes = [
+        // The trailing alternative allows any number of words before the closing backtick:
+        // with only one, `deckhand token add me` — the instruction this branch prints from five
+        // places — was invisible, so a dead verb in the commonest command stayed green.
+        /`deckhand ([a-z-]+)(?=`| <| --|(?: [a-z-]+)+`)/g,
+        /(?:^|\n) {2,4}deckhand ([a-z-]+)(?=\s|$)/g,
+        // Unanchored, unlike the one above it: this output is written as `say("   1.  deckhand
+        // …")`, so the "line" the check reads starts with the call, not with the indent.
+        /\d+\.\s{1,4}deckhand ([a-z-]+)(?=\s|$)/g,
+      ];
+      for (const m of shapes.flatMap((re) => [...body.matchAll(re)])) {
+        const verb = m[1]!;
+        if (!verbs.has(verb) && !subs.has(verb)) missing.push(`${name}: "deckhand ${verb}"`);
+      }
+    }
     for (const [name, body] of [
       ["AGENTS.md", AGENTS],
       ["CONSTITUTION.md", readFileSync(join(REPO, "CONSTITUTION.md"), "utf8")],
@@ -204,17 +256,23 @@ describe("docs describe the code that exists", () => {
     // entirely — the agent runs it and hangs on a prompt nobody sees.
     //
     // AGENTS.md had exactly that, one day after the section was written, because it restated
-    // the flow instead of pointing at the command that cannot drift.
+    // the flow instead of pointing at the command that cannot drift. README then had it too,
+    // eight lines above its own "do not attempt those steps" — the check was scoped to one file
+    // while the class belongs to every document an agent is pointed at.
     const HUMAN_ONLY = [/cloudflared tunnel login/];
-    const agentFacing = readFileSync(join(REPO, "AGENTS.md"), "utf8");
-    const shellBlocks = [...agentFacing.matchAll(/```(?:sh|bash|console)\n([\s\S]*?)```/g)].map((m) => m[1]!);
+    // PLAN.md is included because AGENTS.md orders an agent to read it end to end, and the skills
+    // because a slash command runs them — "every document an agent is pointed at" has to mean all
+    // of them, or the sentence is the same kind of claim this file exists to catch.
+    const shellBlocks = ["AGENTS.md", "README.md", "CONSTITUTION.md", "PLAN.md", ".claude/skills/shipping-a-change/SKILL.md", ".claude/skills/reviewing-deckhand/SKILL.md"].flatMap((doc) =>
+      [...readFileSync(join(REPO, doc), "utf8").matchAll(/```(?:sh|bash|console)\n([\s\S]*?)```/g)].map((m) => `${doc}: ${m[1]!}`),
+    );
     for (const block of shellBlocks) {
       for (const banned of HUMAN_ONLY) {
         assert.doesNotMatch(
           block,
           banned,
-          `AGENTS.md puts a human-only command in a runnable block. Describe it in prose as ` +
-            `something to ASK for, or let \`deckhand setup\` report it — it already does.`,
+          `${block.split(":")[0]} puts a human-only command in a runnable block. Describe it in prose ` +
+            `as something to ASK for, or let \`deckhand setup\` report it — it already does.`,
         );
       }
     }
@@ -270,7 +328,7 @@ describe("docs describe the code that exists", () => {
     // fixture directory that was never created.
     const missing: string[] = [];
     for (const doc of [PLAN, AGENTS]) {
-      for (const m of doc.matchAll(/`((?:server|viewer|landing|ops|patches|docs)\/[A-Za-z0-9_\-./]+\.(?:ts|tsx|md|json|sh|yml))`/g)) {
+      for (const m of doc.matchAll(/`((?:server|viewer|landing|ops|patches|docs|scripts)\/[A-Za-z0-9_\-./]+\.(?:ts|tsx|md|json|sh|yml))`/g)) {
         const path = m[1]!;
         if (!existsSync(join(REPO, path))) missing.push(path);
       }
@@ -289,6 +347,9 @@ describe("docs describe the code that exists", () => {
       }
     };
     for (const ws of ["server", "viewer", "landing"]) walk(join(REPO, ws, "src"));
+    // `scripts/` is not a workspace, but AGENTS.md now cites files there by path — and this
+    // check's own comment lists `scripts/` among the phantom paths it was written to catch.
+    walk(join(REPO, "scripts"));
     for (const doc of [PLAN, AGENTS]) {
       for (const m of doc.matchAll(/(?:`|\s)([a-zA-Z][A-Za-z0-9_-]*\.tsx?)\b/g)) {
         const name = m[1]!;

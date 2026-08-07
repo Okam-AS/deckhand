@@ -7,9 +7,22 @@ description: Run this before opening ANY pull request in deckhand. The mandatory
 
 **Run this before every PR. Every one, including the one-line fix.**
 
-There is no CI job that can force you to. That is the point of writing it down: the
-guardrails catch what a skipped review would have missed *mechanically*, and this
-skill is the part that has to happen in a head.
+Two things are now mechanical, so start by knowing where you stand:
+
+```sh
+npm run review:show     # this branch's review curve so far
+npm run review:check    # exactly what the gate will say
+```
+
+**You cannot open the pull request.** `gh pr create` is refused by the PreToolUse hook
+(`scripts/hooks/bash-guard.ts`, its one rule) and there is no override — opening a PR is a
+person's decision, and a gate you can talk your way past is not one. What you can do is
+earn the handover: review to convergence, run the gates on a clean checkout, then
+`npm run review:handover`, which writes the PR body **only if the gate passes** and
+prints the command for a human to run. Skip the review and there is no handover to give,
+which is the point — no PR appears for someone to catch.
+
+The rest is what the guardrails cannot see, and it still has to happen in a head.
 
 ## Why it is mandatory, in evidence
 
@@ -102,11 +115,94 @@ Today's guardrails were all born this way:
 If you cannot make it mechanical, say so in the PR and add it to the rules file for
 the area, so the next reader is told what the next test cannot be.
 
-## 6. The PR
+## 6. Review until it stops finding things — one round is not a review
 
-Body carries the reasoning, not a changelog: what was wrong, why this is the fix,
-what you verified, and **what you did not**. Name which check covers which half when
-a fix has two.
+A single pass reports what the first lens happened to catch. Run rounds until one
+surfaces **no blocking finding an earlier round hadn't already reported**.
 
-Then the workflow in `AGENTS.md` — branch from `main`, never from another PR's
-branch, squash-merge, delete the branch.
+1. Run steps 3–5, then record the round — **every** finding, with its severity. The test
+   for severity is: *would I merge this as it stands?* If yes it's a `nit`.
+
+   ```sh
+   echo '{"lens":"shipping-a-change:inline","cold":false,"findings":[
+       {"file":"server/src/server.ts","claim":"the allowlist is read per call but never watched",
+        "severity":"must","evidence":"server.ts:102 reads config loaded once at boot; no watchAllowlist call"},
+       {"file":"server/src/auth.ts","claim":"stale 404 in the comment","severity":"nit"}],
+     "conversions":[{"finding":"server/src/server.ts::the allowlist is read per call but never watched",
+        "check":"invariants.test.ts watches tokens.yaml as well as apps.yaml"}]}' \
+     | npm run review:round --silent
+   ```
+
+   It prints how many were new and whether the gate is satisfied yet.
+   **`evidence` is required for anything blocking** — a `file:line`, or the command output
+   that shows it. A finding that costs a round has to be checkable, and having to produce
+   the evidence is what separates reading the code from recalling it.
+
+2. **Nits don't hold the gate open, and they don't converge it either.** Only `must` and
+   `should` count: a reviewer can always find one more naming quibble, and if those counted
+   the curve would never reach zero. Record them anyway — they stay visible in
+   `review:show`, so a round that is mostly quibbles reads as one. Severity defaults to
+   `should`, so the lazy path is the safe one, and a nit a later round raises to `should`
+   **does** count as new — filing something small to defuse it doesn't work.
+3. **Don't count "new" yourself.** `review:round` deduplicates against every earlier round,
+   including rounds recorded in sessions you never saw. That is the number the gate rests
+   on, so it is computed, not asserted.
+4. If the round found something new, **change the lens** and go again: a different pass
+   emphasis, a fresh subagent with no session context, a different model. Repeating one
+   lens re-finds one lens's bugs.
+5. **At least one round must be cold, and it must have read the code as it SHIPS** — a
+   reviewer starting from the diff alone, carrying none of the context this code was written
+   in. A cold round against an older diff does not count, because fixing something moves the
+   hash: `cold → fix → inline` is refused, and the shape that passes is `cold → fix → cold`. Your own session has the blind spot built
+   in, so re-reading your work is never a cold round however carefully you do it. A fresh
+   session, a colleague, or a subagent spawned for exactly this all qualify; say which.
+   When you spawn one, give it the diff and **nothing else** — no summary of your reasoning,
+   or you have handed it your blind spot along with the code. Never mark your own re-read as
+   cold.
+6. The curve accumulates on disk, so a later session extends it rather than starting over.
+
+## 7. The gates, last
+
+```sh
+npm run review:gates          # a throwaway worktree at HEAD + `npm ci` — what CI does
+npm run review:gates:quick    # the same gates in place: faster, does NOT satisfy the gate
+```
+
+**Run `review:gates` after the final commit.** It doesn't take your word for `npm run ci`
+— it runs it and records the exit code, stamped with this diff, so any later edit voids it.
+
+The throwaway worktree is the whole point. Green locally and red in CI is not bad luck:
+your disk has files git has never seen, a `node_modules` that may have drifted from the
+lockfile, and build output nobody committed. `npm run ci` in place cannot see any of that
+because all of it is present. It refuses to run on a dirty tree for the same reason — CI
+tests what you push.
+
+## 8. The handover — a human opens the PR
+
+Body carries the reasoning, not a changelog: what was wrong, why this is the fix, what you
+verified, and **what you did not**. Name which check covers which half when a fix has two.
+
+```sh
+npm run review:handover --silent <<'BODY'
+## What was wrong
+…
+BODY
+```
+
+**If the hook blocks that command, read what it says before rewording anything.** The hook has
+one rule and it is about RUNNING `gh pr create`, never about writing about it — quoted spans and
+heredoc bodies are blanked before it matches, so a body that quotes the command is fine. If it
+does refuse anyway, write the body to a file and pass the path
+(`npm run review:handover --silent < body.md`) rather than rewording the reasoning.
+
+It refuses unless `review:check` passes, writes `.claude/pr-body.md`, and prints the
+command. Then say, in **one line**, that the user needs to run it. Don't restate the diff
+at them — they can read the PR.
+
+**Do not try `gh pr create`.** The hook refuses it, there is no override, and reaching for
+one reads as looking for a way around the person you are meant to be asking. If the gate is
+genuinely wrong, say which check is wrong and why, and let the user decide — a fabricated
+round is the one thing here that makes everything else worthless.
+
+Merging, branch cleanup and the rest of the workflow are in `AGENTS.md` — branch from
+`main`, never from another PR's branch, squash-merge, delete the branch.
