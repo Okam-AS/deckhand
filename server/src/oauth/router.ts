@@ -185,15 +185,14 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
       codeChallenge: challenge,
     });
     if (!parked) {
-      // Refusing the overflow rather than evicting: see MAX_PENDING. This is a
-      // page, not a redirect, because the visitor can act on it — wait and retry —
-      // and handing it back to the client shows up as an opaque connector failure.
+      // A full queue evicts rather than refuses (see MAX_PENDING), so the only way here is the
+      // code draw failing to find a free code — vanishingly unlikely, and still not a reason to
+      // hand the client an opaque failure. A page, because the visitor can act on it: retry.
       page(
         res,
         503,
-        "Too many requests waiting",
-        `<p>This deckhand already has as many connection requests waiting as it will hold, so yours was not added.</p>
-         <p>Try again in a few minutes. If that keeps happening, the operator should check what is asking.</p>`,
+        "Could not start that request",
+        `<p>deckhand could not allocate a code for this request. Try again.</p>`,
       );
       return;
     }

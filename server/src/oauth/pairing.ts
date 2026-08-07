@@ -22,13 +22,22 @@ import { randomBytes, randomInt } from "node:crypto";
 export const PENDING_TTL_MS = 5 * 60 * 1000;
 
 /**
- * How many requests may wait at once.
+ * How many requests may wait at once, and what happens to the surplus.
  *
  * The URL is public, so anyone who has it can make this machine show a prompt. Uncapped, that
  * is a nuisance channel: fill the list and the operator cannot find their own request among
- * the noise, which is precisely when people start approving without reading. Refusing the
- * OVERFLOW rather than evicting the oldest keeps the request the operator is looking at from
- * vanishing underneath them.
+ * the noise, which is precisely when people start approving without reading.
+ *
+ * The full queue EVICTS THE OLDEST rather than refusing the newcomer. Refusing was the first
+ * instinct — don't let a flood push away the request the operator is reading — and it inverts
+ * into something worse: hold five slots and refresh them, and the operator can never park a
+ * request of their own again. That is a lockout of the one person the mechanism is for, caused
+ * by strangers, and it needs no credential to mount.
+ *
+ * Evicting the oldest keeps the newest request always parkable, which is the operator's:
+ * theirs is the one just created, by the person standing at the machine. A flood loses its own
+ * stale entries first. The operator's request can still be evicted — but only by five newer
+ * arrivals, and a code they cannot match is one they must not approve anyway.
  */
 export const MAX_PENDING = 5;
 
@@ -92,14 +101,17 @@ export class PairingStore {
   }
 
   /**
-   * Park a request, or refuse when too many are already waiting.
+   * Park a request, evicting the oldest if the queue is full (see {@link MAX_PENDING}).
    *
-   * Returns `null` for the refusal rather than throwing: a full queue is an ordinary state
-   * this endpoint is expected to render, not an error in the server.
+   * Returns `null` only when no distinct code could be drawn — a state this endpoint renders
+   * rather than throwing on, because a full queue is ordinary and a server error is not.
    */
   park(req: Omit<PendingRequest, "id" | "code" | "createdMs" | "status" | "authCode">): PendingRequest | null {
     this.sweep();
-    if (this.pendingOnly().length >= this.maxPending) return null;
+    while (this.pendingOnly().length >= this.maxPending) {
+      const oldest = this.pendingOnly().sort((a, b) => a.createdMs - b.createdMs)[0]!;
+      this.requests.delete(oldest.id);
+    }
     let code = humanCode(this.pick);
     // A duplicate code would make the operator's "which one is mine" question unanswerable,
     // which is the entire job of the code.

@@ -78,27 +78,40 @@ describe("requests waiting for the operator", () => {
     assert.equal(store.approve(parked.code, () => "nope"), null);
   });
 
-  // The URL is public, so anyone holding it can make this Mac show a prompt. Dropping the
-  // oldest to make room would remove the request the operator is looking at — which is exactly
-  // when people start approving without reading.
-  it("refuses the overflow rather than dropping a request the operator may be reading", () => {
-    const store = new PairingStore();
-    const first = store.park(REQ)!;
-    for (let i = 1; i < MAX_PENDING; i++) assert.ok(store.park(REQ));
-    assert.equal(store.park(REQ), null, "the request that does not fit is the one refused");
-    assert.equal(store.pending().length, MAX_PENDING);
+  // The URL is public, so anyone holding it can make this Mac show a prompt. Refusing the
+  // newcomer was the first instinct and it inverts: hold every slot and refresh them, and the
+  // OPERATOR can never park a request again — a lockout of the one person this is for, needing
+  // no credential to mount.
+  it("always lets the newest request in, so a flood cannot lock the operator out", () => {
+    const c = clock();
+    const store = new PairingStore({ now: c.now });
+    const flood: { code: string }[] = [];
+    for (let i = 0; i < MAX_PENDING; i++) {
+      c.advance(1_000);
+      flood.push(store.park(REQ)!);
+    }
+    c.advance(1_000);
+    const mine = store.park(REQ);
+    assert.ok(mine, "the request made by the person at the machine must always fit");
+    assert.equal(store.pending().length, MAX_PENDING, "and the queue stays bounded");
     assert.ok(
-      store.pending().some((p) => p.code === first.code),
-      "and the earliest one is still there",
+      store.pending().some((p) => p.code === mine!.code),
+      "the newest is the one kept",
+    );
+    assert.ok(
+      !store.pending().some((p) => p.code === flood[0]!.code),
+      "the oldest is the one dropped",
     );
   });
 
-  it("lets a lapsed request make room again", () => {
+  it("keeps the queue bounded however many arrive", () => {
     const c = clock();
     const store = new PairingStore({ now: c.now });
-    for (let i = 0; i < MAX_PENDING; i++) store.park(REQ);
-    c.advance(PENDING_TTL_MS + 1);
-    assert.ok(store.park(REQ), "expiry is what keeps a flood from being permanent");
+    for (let i = 0; i < MAX_PENDING * 4; i++) {
+      c.advance(100);
+      assert.ok(store.park(REQ));
+    }
+    assert.equal(store.pending().length, MAX_PENDING, "evicting is not the same as growing");
   });
 
   it("expires a request rather than leaving it approvable", () => {

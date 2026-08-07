@@ -34,9 +34,10 @@ Hardest rules:
   the one only a human can do — reading their own screen — instead of making them a typist for a
   command the agent could run. It does not weaken the gate: the agent has the machine's
   credential either way, and what it cannot do is invent a code nobody saw.
-- **Refusing the overflow, never evicting.** The URL is public, so anyone holding it can make
-  this Mac show a prompt. Evicting the oldest to make room would drop the request the operator
-  is looking at — which is precisely when people start approving without reading. → `oauth/pairing.test.ts` "refuses the overflow rather than dropping a request the operator may be reading"
+- **A full queue evicts the OLDEST; the newest always fits.** Refusing the newcomer reads safer
+  and inverts: hold every slot and refresh them, and the operator can never park a request
+  again — a lockout of the one person this is for, mountable by a stranger with no credential.
+  The newest request is the operator's, because they just made it. → `oauth/pairing.test.ts` "always lets the newest request in, so a flood cannot lock the operator out"
 - **A parked request is memory, not disk.** Surviving a restart would let an approval outlive
   the browser that asked for it, so the operator would be approving something they can no longer
   see. It is also why `deckhand approve` talks to the running server instead of reading a file.
