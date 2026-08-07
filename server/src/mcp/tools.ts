@@ -658,14 +658,14 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   // itself on a second URL to show it.
   const bootReference = (
     workingApp: App,
-    against: { app?: string; ref?: string; worktree?: string; repo?: string } | undefined,
+    alongside: { app?: string; ref?: string; worktree?: string; repo?: string } | undefined,
     devices: { platform: "ios" | "android"; runtime?: string; model?: string }[],
     share: { access: "public" | "pin"; pin?: string },
   ): { reference: CompareReference; previewId: string; booted: boolean } | CallToolResult => {
     // An entry with nothing named means "my migratesFrom" — that is the whole
     // point of declaring it, and it saves the agent repeating the source app id.
-    const named = against && (against.app || against.ref || against.worktree || against.repo);
-    const a = named ? against : workingApp.migratesFrom ? { app: workingApp.migratesFrom } : undefined;
+    const named = alongside && (alongside.app || alongside.ref || alongside.worktree || alongside.repo);
+    const a = named ? alongside : workingApp.migratesFrom ? { app: workingApp.migratesFrom } : undefined;
     if (!a) {
       return fail(
         "needs_reference",
@@ -716,7 +716,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       spec = parseRefSpec({ ref: a.ref });
       key = `repo:${a.repo}@${a.ref}`;
     } else {
-      // against.ref → the working app's build config at another git ref (needs a repo).
+      // alongside.ref → the working app's build config at another git ref (needs a repo).
       if (!workingApp.repo) {
         return fail(
           "local_only_app",
@@ -731,7 +731,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     }
     if (base.type === "web") return fail("web_not_supported", "extra panes are for mobile apps (iOS/Android), not web previews");
     // The reference ALWAYS boots under a synthetic, distinct app id. Sharing the
-    // working app's id (a same-app against.ref, or against.app pointing at itself)
+    // working app's id (a same-app alongside.ref, or alongside.app pointing at itself)
     // would collide on the per-app stable shareId (self-pairing) and per-app PIN,
     // and a public reference boot would wipe a registered app's persisted PIN. A
     // fresh id keyed by `key` stays stable across restarts (so compare is idempotent).
