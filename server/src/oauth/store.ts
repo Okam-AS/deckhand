@@ -169,7 +169,7 @@ export class OAuthStore {
       createdMs: this.now(),
     };
     this.clients.set(client.clientId, client);
-    this.evictIdleClients(busy);
+    this.evictIdleClients(busy, client.clientId);
     this.save();
     return client;
   }
@@ -185,9 +185,13 @@ export class OAuthStore {
    * end to end before this argument existed, and repeatable indefinitely, so pairing never
    * completes.
    */
-  private evictIdleClients(busy: ReadonlySet<string> = new Set()): void {
+  private evictIdleClients(busy: ReadonlySet<string> = new Set(), keep?: string): void {
     if (this.clients.size <= MAX_CLIENTS) return;
-    const inUse = new Set([...this.grants.map((g) => g.clientId), ...busy]);
+    // `keep` is the client this registration just created. Without it, a registry where every
+    // other client is in use makes the newcomer the only evictable one — so `/register` answers
+    // 201 with a client_id it has already deleted, and the caller's next request is
+    // "unknown client" with nothing having gone visibly wrong.
+    const inUse = new Set([...this.grants.map((g) => g.clientId), ...busy, ...(keep ? [keep] : [])]);
     const evictable = [...this.clients.values()].filter((c) => !inUse.has(c.clientId)).sort((a, b) => a.createdMs - b.createdMs);
     for (const c of evictable) {
       if (this.clients.size <= MAX_CLIENTS) return;

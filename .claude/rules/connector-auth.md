@@ -36,9 +36,15 @@ Hardest rules:
   does not say what. Registration is unauthenticated and any https redirect is accepted, so
   without the client name and redirect host on the page, a stranger can hand the operator a link
   to this very page on their own trusted hostname and collect the grant.
-- **A client mid-flow is not evictable.** The registry cap is otherwise a weapon: register past
-  it and the client currently completing a pairing is evicted, so its token exchange fails
-  `invalid_client` after the code was already spent — repeatable, so pairing never completes.
+- **A client mid-flow is not evictable, and "mid-flow" ends at the TOKEN EXCHANGE.** The
+  registry cap is otherwise a weapon: register past it and the client completing a pairing is
+  evicted, so its exchange fails `invalid_client` after the code was already spent. Clearing at
+  the code submission instead leaves the redirect round-trip exposed, which is the same bug one
+  step along. → `oauth/router.test.ts` "survives a registration flood while a client is mid-pairing"
+- **In-flight is bounded by TIME, not by hope.** A visitor who closes the tab says nothing, so
+  entries lapse. The first version cleared only on success, and because a busy client cannot be
+  evicted, 64 abandoned page loads jammed registration for everyone until a restart — the very
+  failure the protection exists to prevent, made permanent.
 - **Mint after claim, once.** `/oauth/authorize`'s POST is the only place an authorization code
   is minted, and it sits behind `pairing.claim`. A second mint is a second way in. → `oauth/router.test.ts` "mints only after the pairing code has been spent"
 - **The code lives in memory, never on disk.** It is worth minutes, and a code that survived a

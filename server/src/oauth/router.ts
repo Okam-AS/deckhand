@@ -131,13 +131,25 @@ const singleString = (v: unknown): string | null => (typeof v === "string" && v 
 export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
   const router = express.Router();
   /**
-   * Clients that have reached the authorize page and not finished.
+   * Clients that have reached the authorize page and not finished, each with a deadline.
    *
-   * Bounded by the client cap itself and cleared on token exchange, so it cannot grow: this is
-   * a shield for the seconds between "the operator read me a code" and "the exchange landed",
-   * not a session store.
+   * Bounded by TIME, which is the only bound available: a visitor who closes the tab tells us
+   * nothing, and the first version — a plain Set cleared only on a successful POST — could be
+   * filled with 64 abandoned page loads. Because a busy client cannot be evicted, that jammed
+   * registration for everyone until a restart: exactly the failure it was written to prevent,
+   * made permanent. Entries lapse, so abandonment costs minutes rather than forever.
+   *
+   * Held until the TOKEN EXCHANGE, not until the code is submitted. Between those two is a
+   * redirect through the client's own backend, and the pairing code is already spent there —
+   * an eviction in that window is unrecoverable.
    */
-  const inFlight = new Set<string>();
+  const inFlight = new Map<string, number>();
+  const IN_FLIGHT_TTL_MS = 10 * 60 * 1000;
+  const busyClients = (): ReadonlySet<string> => {
+    const now = Date.now();
+    for (const [id, until] of inFlight) if (until <= now) inFlight.delete(id);
+    return new Set(inFlight.keys());
+  };
   router.use(express.json({ limit: "64kb" }));
   router.use(express.urlencoded({ extended: false, limit: "64kb" }));
 
@@ -165,7 +177,7 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
       // Clients mid-flow are not idle, whatever the grant table says. Without this the cap is a
       // weapon: register past it and the client currently completing a pairing is evicted, so
       // its token exchange fails after the code was already spent.
-      inFlight,
+      busyClients(),
     );
     res.status(201).json({
       client_id: client.clientId,
@@ -224,7 +236,7 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
 
     // Nothing is stored and nothing waits. The request carries no authority; the CODE does,
     // and the operator minted it at the machine.
-    inFlight.add(client.clientId);
+    inFlight.set(client.clientId, Date.now() + IN_FLIGHT_TTL_MS);
     codeForm(res, { clientId: client.clientId, redirectUri, state, challenge, clientName: client.name });
   });
 
@@ -252,7 +264,8 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
       codeForm(res, { clientId, redirectUri, state, challenge, clientName: client.name }, "That code is not valid. Ask for a fresh one.");
       return;
     }
-    inFlight.delete(clientId);
+    // NOT cleared here: the exchange has not happened yet.
+    inFlight.set(clientId, Date.now() + IN_FLIGHT_TTL_MS);
     const authCode = deps.store.mintCode({ clientId, redirectUri, label: client.name, codeChallenge: challenge });
     const url = new URL(redirectUri);
     url.searchParams.set("code", authCode);
@@ -287,6 +300,8 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
       // and the code it minted is single-use and short-lived. There is no list that
       // could have changed underneath it — revoking is `deckhand revoke`, which drops
       // the grant itself.
+      // The flow is over: the grant now protects this client from eviction on its own.
+      inFlight.delete(clientId);
       const issued = deps.store.issueGrant({ label: redeemed.label, clientId });
       res.json({
         access_token: issued.accessToken,

@@ -283,6 +283,28 @@ describe("who can mint an authorization code", () => {
   // request. The failure this guards is a future edit that "just returns the code when there
   // is one obvious client" — which hands a grant to whoever holds the URL, the exact thing
   // the parking exists to prevent. Minting belongs to the approval path alone.
+  // The registry cap is otherwise a weapon: register past it while somebody is mid-pairing and
+  // their client is evicted, so the token exchange fails AFTER the code was spent. Reproduced
+  // end to end before the fix existed, and repeatable, so pairing never completes.
+  it("survives a registration flood while a client is mid-pairing", async () => {
+    const clientId = await register();
+    const { verifier, challenge } = pkce();
+    const submitted = await submitCode(await authorize(authorizeUrl(clientId, challenge)), clientId, challenge);
+    assert.equal(submitted.status, 302, "the code was spent, so this client is committed");
+
+    // Well past the cap, all anonymous, exactly as a stranger with the public URL would.
+    for (let i = 0; i < 80; i++) await register();
+
+    const t = await token({
+      grant_type: "authorization_code",
+      client_id: clientId,
+      redirect_uri: REDIRECT,
+      code: new URL(submitted.headers.get("location")!).searchParams.get("code")!,
+      code_verifier: verifier,
+    });
+    assert.equal(t.status, 200, "a client whose code was already spent must still be able to finish");
+  });
+
   it("mints only after the pairing code has been spent", () => {
     const source = readFileSync(join(import.meta.dirname, "router.ts"), "utf8")
       .split("\n")

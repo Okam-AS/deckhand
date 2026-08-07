@@ -186,10 +186,15 @@ describe("docs describe the code that exists", () => {
       ["cli/setup.ts", readFileSync(join(SRC, "cli", "setup.ts"), "utf8")],
       ["cli/doctor.ts", readFileSync(join(SRC, "cli", "doctor.ts"), "utf8")],
     ] as const) {
-      // Only where it reads as a command being typed: the verb ends the quote, or takes a flag
-      // or an argument placeholder. `deckhand listening on …` is a log line, and a check that
-      // cannot tell those apart gets deleted rather than obeyed.
-      for (const m of body.matchAll(/`deckhand ([a-z-]+)(?=`| <|-{2}| [a-z-]+`)/g)) {
+      // Two shapes, because the biggest piece of CLI output is not backticked at all: the
+      // usage screen, which is the first thing a lost user reads. So a verb counts when it is
+      // quoted as a command AND when it is laid out as one — `deckhand pair` in prose, and
+      // "  deckhand pair    mint a code" in the help — at the help's own indent, since a
+      // deeply-indented continuation line is prose ("…deckhand uses your gh CLI session").
+      // `deckhand listening on …` is a log line, and a check that cannot tell those apart gets
+      // deleted rather than obeyed.
+      const shapes = [/`deckhand ([a-z-]+)(?=`| <| --| [a-z-]+`)/g, /(?:^|\n) {2,4}deckhand ([a-z-]+)(?=\s|$)/g];
+      for (const m of shapes.flatMap((re) => [...body.matchAll(re)])) {
         const verb = m[1]!;
         if (!verbs.has(verb) && !subs.has(verb)) missing.push(`${name}: "deckhand ${verb}"`);
       }
