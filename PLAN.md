@@ -238,7 +238,7 @@ doctor-builds, reports `ready` → agent offers the first `start_preview`.
 | `screenshot` | `{previewId, deviceId}` → MCP image content (PNG). iOS: `xcrun simctl io <udid> screenshot`; Android: `adb -s <serial> exec-out screencap -p` |
 | `describe` | `{previewId, deviceId}` → accessibility tree. iOS: serve-sim's ax endpoint (token-efficient, built for agents); Android: `adb shell uiautomator dump` (parsed/compacted) |
 | `ui` | `{previewId, deviceId, action}` where action ∈ `{tap {x,y}, type {text}, key {name}, button {name}, home, openUrl {url}}` (normalized 0..1 coords) — validated passthrough. iOS: serve-sim gesture/button/type commands; Android: adb input |
-| `logs` | `{previewId, deviceId?, source: "build"\|"metro"\|"app", tailLines?}` → text. `app` taps the streaming helper's forwarded simulator logs (serve-sim event-log) / adb logcat |
+| `logs` | `{previewId?\|app?, deviceId?, source?: "build"\|"stream"\|"metro"\|"app", tailLines?}` → the last `tailLines` (500 retained per source) of one device's captured log. `build` (default) is build/install output plus the NativeScript livesync and web dev-server streams — where a failed build says why. `stream` is the browser→helper trace, the one to read when the device says ready and the viewer shows nothing (see §7 "Streaming diagnostics"). `metro`/`app` are reserved and capture nothing yet. |
 | `add_app` | `{repo, type?}` → clone, detect, **doctor build** on a default device, structured report (`ready` or `missing: [...]`) |
 | `remove_app` | `{id, deleteCheckout?}` |
 | `start_test_run` / `update_test_run` / `finish_test_run` / `clear_test_run` | **Amended (2026-07-17):** agent-driven end-to-end testing. The agent (the brain) reports what it's testing — `{title, steps}`, per-step `running`/`passed`/`failed`, then a verdict + summary — surfaced live in the viewer as a calm spinner button + step popover. deckhand records; the agent writes the human report in chat. |
@@ -249,14 +249,16 @@ rejection of SimDeck (row §2) was about its **video transport** (WebRTC/TURN); 
 **control + inspection is decoupled from video** and is a much stronger `describe`/`ui`
 backend than serve-sim-ax/uiautomator — especially for NativeScript (component tree, CSS
 classes, and **.ts/.html source locations** via `@nativescript/simdeck-inspector`, an
-opt-in). deckhand keeps serve-sim / adb-screencap for the human **video**, and drives
+opt-in). deckhand keeps its own backends (serve-sim on iOS, adb on Android) for the
+human **video**, and drives
 SimDeck **REST only** — `GET /accessibility-tree`, `POST /action`, `GET /screenshot.png` —
 on the device it already booted (iOS by UDID, Android by `android:<avd>`). Two hard rules
 (enforced in `server/src/testing/`): **never** touch SimDeck's `/input`/`/control` WS,
 `/webrtc/offer`, or `/refresh` (they spin up the fragile private display/encoder session);
 and auth via the **same-origin loopback** allowance, so deckhand holds **no SimDeck token**.
 iOS HID can't type non-US text — non-ASCII `type` routes through the clipboard + paste.
-`logs` (metro/app) remains a follow-up.
+`logs` ships (see the tool table); its `metro` and `app` sources are the part that
+did not — they are accepted by the schema and reserved, and nothing appends to them.
 
 **Amended (2026-08-01): the drive loop is steered to a cheaper model.** Driving
 (`screenshot`→`describe`→`ui`→`update_test_run`) is mechanical and high-volume — it does
@@ -535,13 +537,14 @@ Essentials:
   helper URLs come out `https`/`wss` behind the tunnel (documented requirement; without it
   the page mixes content and input dies).
 
-### Android backend — decision-gate outcome (2026-07-09)
+### Android backend — the gate (2026-07-09) and what streams now
 
-The gate (ws-scrcpy vs embedded scrcpy-server vs …) resolved to: **ship an adb-based backend
-first, keep scrcpy H.264 as a documented follow-up upgrade behind the same seam.** Reason:
-scrcpy's raw H.264 wire protocol is version-specific and needs extensive on-device iteration
-to get right, which cannot be validated without a live emulator — too much risk for the
-initial cut. The shipped `streaming/androidAdb.ts` (`AndroidAdbBackend`):
+The gate (ws-scrcpy vs embedded scrcpy-server vs …) resolved at the time to: **ship an
+adb-based backend first, keep scrcpy H.264 as a possible upgrade behind the same seam.**
+Reason: scrcpy's raw H.264 wire protocol is version-specific and needs extensive on-device
+iteration to get right, which cannot be validated without a live emulator — too much risk
+for the initial cut. The first cut was `streaming/androidAdb.ts` (`AndroidAdbBackend`),
+which:
 
 - serves **`adb exec-out screencap -p` as a multipart PNG stream** on a loopback port — which
   **reuses Deckhand's existing viewer verbatim** (the MJPEG parser slices by Content-Length;
@@ -550,11 +553,23 @@ initial cut. The shipped `streaming/androidAdb.ts` (`AndroidAdbBackend`):
   `adb shell input tap/swipe` (normalized → device pixels via `wm size`);
 - provides `describe` via `uiautomator dump`.
 
-It is lower-fidelity than scrcpy H.264 (a few fps, not 60), and is honestly labeled as the
-initial Android path — **not** the "screenshot polling is never primary" rule that applies to
-iOS (where serve-sim gives real H.264). scrcpy H.264 (embedded `scrcpy-server` + a thin WS
-bridge, decoded Annex-B in the viewer) is the planned smoothness upgrade; because backends
-sit behind `StreamingBackend`, adding it changes nothing outside `streaming/`.
+That path is no longer the primary one, and the reason it was replaced is the point:
+PNG-per-frame cost ~640 KB per frame at a fixed 6.7 fps (~4.2 MB/s on a 1080x2400
+emulator) and wrote on a timer regardless of whether the socket could take them, so a
+client pulling ~1 MB/s fell further behind until the canvas stopped painting entirely.
+`streaming/androidH264.ts` (`adb exec-out screenrecord`, Annex-B repackaged to AVCC,
+decoded by the same WebCodecs player as iOS) carries the same content for ~12 KB/s and
+is what Android streams over now. One `screenrecord` process serves every viewer of a
+device — Android tolerates few concurrent recorders, and N would cost N encodes — so a
+late joiner is handed the cached parameter sets plus the current GOP rather than waiting
+out the ~10 s keyframe interval. `androidAdb.ts` remains the **fallback** for system
+images with no working AVC encoder (notably the API 29 emulator, where MediaCodec
+throws): that is detected on first use, the route 404s, and the viewer drops to MJPEG
+instead of staring at a dead stream. The upgrade landed entirely behind
+`StreamingBackend` and changed nothing outside `streaming/`, which is what the seam was
+for. **scrcpy was never taken** — see the §2 row for why, and note that the gate's
+premise (that H.264 needed scrcpy) turned out to be false: `screenrecord` is on every
+device already.
 
 `describe` / agent-grade input come from adb independent of the video path either way.
 
