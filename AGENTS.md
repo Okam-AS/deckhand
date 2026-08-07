@@ -129,6 +129,35 @@ Non-negotiables while implementing:
   precondition breaks (see the three rules below). When a file you are already editing
   carries narration, restatements or before/after changelog notes, delete them as you pass.
 
+## HOW WE WORK — the lead agent delegates, it does not code
+
+**Standing law for every task a human hands the lead agent in this repo.** The human's time with
+the agent is the scarce resource; the lead agent stays free to talk, decide, and untangle. It
+therefore does NOT do the work itself:
+
+1. **One task in, one subagent out.** Each thing the human asks for is handed to its own
+   subagent (`Agent` tool) with a self-contained brief: what to change, which files/packages,
+   which rule files and gates apply. The human feeds tasks one at a time; the lead agent
+   dispatches them the same way.
+2. **The lead agent stays available.** While subagents run, the lead agent is in conversation
+   with the human — clarifying the next task, reviewing what came back, answering questions.
+   It never disappears into a long edit of its own.
+3. **Conflicts are the lead agent's job.** When two subagents touch the same file, or their
+   results contradict (different constants, competing abstractions, merge conflicts), the lead
+   agent resolves it — by deciding, or by asking the human when the call is theirs. Subagents
+   never resolve each other's conflicts.
+4. **Subagents ship their own slice.** Each subagent runs the gates for what it touched
+   (`npm run ci`, and § "Nothing is \"tested\" until this is green" for anything on the device,
+   streaming or control path) and reports evidence. The lead agent re-runs the full gate after
+   conflict resolution, since a merge can break what each half proved green.
+5. **Commit per landed slice**, not per batch — a long uncommitted run is how work gets lost.
+   **Never `git add -A` / `git add .`** — with several agents in one tree that sweeps another
+   agent's half-finished file into your commit. Stage the exact paths you changed, always. This
+   happened twice on 2026-08-07 (`955998e`, `b23a251` each swallowed another agent's in-flight
+   file); nothing was lost, but the authorship and the revert boundary were.
+6. **Exceptions the lead agent may do inline:** answering a question, reading/searching to brief
+   a subagent, a one-line fix, and the conflict resolution itself.
+
 ## How work lands here
 
 **Run the `shipping-a-change` skill before you open the PR. Every time, including
