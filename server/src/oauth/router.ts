@@ -33,11 +33,19 @@ function page(res: express.Response, status: number, title: string, body: string
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(title)} · deckhand</title>
 <style>
-body{font-family:ui-rounded,system-ui,-apple-system,sans-serif;line-height:1.55;color:#f2e8dc;
-  background:#241b20;max-width:34rem;margin:0 auto;padding:9vh 1.25rem}
-h1{font-family:"New York",Georgia,ui-serif,serif;font-size:1.5rem;margin:0 0 .6rem}
-p{color:#c9baae}code{font-family:ui-monospace,Menlo,monospace;font-size:.9em;color:#e0a971}
-.code{font-family:ui-monospace,Menlo,monospace;font-size:2rem;letter-spacing:.18em;color:#e0a971;margin:.4rem 0 1rem}
+/* The viewer's palette (viewer/src/global.css). Somebody meets this page and the device grid
+   minutes apart, so they are one surface: neutral dark, hue only where something failed. */
+body{font-family:"SF Pro Rounded",ui-rounded,system-ui,-apple-system,sans-serif;line-height:1.55;color:#fcfcf6;
+  background:#1e1e1e;max-width:34rem;margin:0 auto;padding:9vh 1.25rem;-webkit-font-smoothing:antialiased}
+h1{font-family:"New York","Iowan Old Style",Georgia,ui-serif,serif;font-weight:650;font-size:1.5rem;margin:0 0 .6rem}
+p{color:#c6c7c1}code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.9em;color:#fcfcf6}
+.codebox{display:flex;align-items:center;gap:.75rem;background:#121212;border:1px solid #3b3b3b;
+  border-radius:14px;padding:.7rem .7rem .7rem 1.1rem;margin:.6rem 0 1.1rem;max-width:22rem}
+.code{flex:1;font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:1.9rem;letter-spacing:.18em;color:#fcfcf6}
+button{font:inherit;font-weight:600;font-size:.85rem;border:0;border-radius:999px;padding:.5rem 1rem;
+  color:#141414;background:#fcfcf6;cursor:pointer;transition:transform .12s ease,opacity .12s ease}
+button:hover{transform:translateY(-1px)}button:active{transform:scale(.98)}
+.status{color:#8a8a86;font-size:.85rem}
 </style></head><body><h1>${esc(title)}</h1>${body}</body></html>`,
   );
 }
@@ -55,15 +63,19 @@ function waitingPage(res: express.Response, id: string, code: string): void {
     res,
     200,
     "Waiting for approval",
-    `<p>Read this code out to whoever is setting up this deckhand:</p>
-     <p class="code">${esc(code)}</p>
-     <p>They approve it on the Mac — nothing connects until they do, and the request expires in a
-        few minutes. If you did not start this, say nothing: the code is all that lets it through.</p>
-     <p id="s">Waiting…</p>
+    `<p>Give this to your agent.</p>
+     <div class="codebox"><span class="code">${esc(code)}</span><button id="c" type="button">Copy</button></div>
+     <p id="s" class="status">Waiting…</p>
      <noscript><meta http-equiv="refresh" content="5"><p>Reload this page once it has been approved.</p></noscript>
      <script>
        const id = ${JSON.stringify(id)};
        const say = (t) => { document.getElementById("s").textContent = t; };
+       const btn = document.getElementById("c");
+       btn.onclick = async () => {
+         try { await navigator.clipboard.writeText(${JSON.stringify(code)}); } catch { /* no clipboard: the code is on screen anyway */ }
+         btn.textContent = "Copied";
+         setTimeout(() => (btn.textContent = "Copy"), 1600);
+       };
        const tick = async () => {
          try {
            const r = await fetch("pending/" + encodeURIComponent(id), { headers: { accept: "application/json" } });

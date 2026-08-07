@@ -398,6 +398,19 @@ describe("the connector URL is public by construction", () => {
   // (deps.connector)` block, every unit test stayed green because they build the routers
   // directly, and the connector answered 404 to claude.ai's very first request. A user found
   // it, which is exactly who this check exists to spare.
+  // A user meets these three pages and the device grid within minutes of each other, so they
+  // are one surface or they look broken. The viewer was re-paletted to neutral dark and the
+  // server-rendered pages were left warm — brown auth pages in front of a grey app.
+  it("renders every server-side page in the viewer's palette, not the retired warm one", () => {
+    const RETIRED = ["#241b20", "#2c2025", "#31242a", "#f2e8dc", "#c9baae", "#e0a971", "#d98873", "#e8b86d", "242,232,220"];
+    const offenders: string[] = [];
+    for (const file of ["oauth/router.ts", "setup/router.ts", "share/proxy.ts"]) {
+      const source = read(join(SRC, ...file.split("/")));
+      for (const hex of RETIRED) if (source.includes(hex)) offenders.push(`${file}: ${hex}`);
+    }
+    assert.deepEqual(offenders, [], "these pages must use viewer/src/global.css's tokens — see its header for why the warm palette went");
+  });
+
   it("mounts the routers a connector needs, not merely defines them", () => {
     const server = read(join(SRC, "server.ts"));
     for (const [what, call] of [
