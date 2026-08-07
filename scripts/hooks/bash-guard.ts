@@ -107,8 +107,24 @@ function cdTarget(cmd: string, before: number): string | undefined {
 export type ReviewStatus = () => { ok: boolean; detail: string };
 
 const receiptStatus: ReviewStatus = () => {
-  const verdict = validate(readReceipt(currentBranch()), diffHash());
-  return verdict.ok ? { ok: true, detail: "the review has converged" } : { ok: false, detail: verdict.reason };
+  // The receipt path is relative to the repo and the branch comes from `git` in the cwd, so
+  // reading it from a hook fired elsewhere reported the review state of nowhere — telling an
+  // agent whose review HAD converged to go and do one.
+  //
+  // Scoped to this read, and restored, because rule 2 deliberately resolves branches against
+  // the CALLER's cwd: `git -C <relative>` and a preceding `cd` are relative to where the
+  // command will actually run. A process-wide chdir here silently re-based both, which
+  // false-allowed a commit onto main from one worktree while blocking one on a feature branch
+  // from another.
+  const from = process.cwd();
+  const project = process.env.CLAUDE_PROJECT_DIR;
+  if (project && existsSync(project)) process.chdir(project);
+  try {
+    const verdict = validate(readReceipt(currentBranch()), diffHash());
+    return verdict.ok ? { ok: true, detail: "the review has converged" } : { ok: false, detail: verdict.reason };
+  } finally {
+    process.chdir(from);
+  }
 };
 
 export function decide(cmd: string, resolveBranch: BranchResolver = gitBranch, reviewStatus: ReviewStatus = receiptStatus): Verdict {
@@ -224,13 +240,6 @@ if (isEntryPoint) {
   // and runs the command. That is tolerable for rules 2–3, where the cost is a commit the
   // author can undo — and not for rule 1, whose whole value is that it cannot be got past. So
   // the fallback is per-rule: fail CLOSED on the pull request, open on everything else.
-  // The receipt lives at a path relative to the repo, and the branch comes from `git` in the
-  // cwd — so a hook fired from anywhere else read the review state of nowhere and told an
-  // agent whose review HAD converged to go and do one. Blocking was never in question; being
-  // right about why was.
-  const projectDir = process.env.CLAUDE_PROJECT_DIR;
-  if (projectDir && existsSync(projectDir)) process.chdir(projectDir);
-
   let verdict: Verdict;
   try {
     verdict = decide(command);

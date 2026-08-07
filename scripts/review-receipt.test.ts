@@ -327,9 +327,68 @@ describe("the hook is wired to the repo, not to the cwd", () => {
     const blocking = verdicts.filter((v) => v.status === 2);
     assert.equal(blocking.length, 1, `exactly one hook must block; got statuses ${verdicts.map((v) => v.status).join(", ")}`);
     assert.match(blocking[0]!.stderr, /a human's call/);
-    // …and it must know WHICH repo it is talking about, or it tells an agent whose review has
-    // converged to go and do one.
-    assert.doesNotMatch(blocking[0]!.stderr, /no review receipt for this branch/, "the guard read the review state of the wrong directory");
+    // Deliberately NOT asserting anything about the review state here: receipts are gitignored,
+    // so a clean checkout has none — and this test runs inside `npm run ci`, which the clean
+    // gate runs in a fresh worktree. Asserting a receipt exists would have made the gate
+    // impossible to satisfy from the one place it must pass. Which repo the guard reads is
+    // covered below, against a scratch repo, where the answer does not depend on this branch.
+  });
+
+  // Rule 2 must keep resolving branches against the CALLER's directory: `git -C <relative>` and
+  // a preceding `cd` are relative to where the command will actually run. Pointing the whole
+  // process at the project dir to find the receipt re-based both — it allowed a commit landing
+  // on main from one worktree and blocked one on a feature branch from another.
+  it("still judges a commit against the branch of the directory the command runs in", () => {
+    const repo = process.cwd();
+    const make = (name: string, branch: string) => {
+      const path = join(dir, name);
+      mkdirSync(path);
+      for (const args of [
+        ["init", "-q", "-b", branch],
+        ["config", "user.email", "t@example.com"],
+        ["config", "user.name", "t"],
+      ]) {
+        spawnSync("git", args, { cwd: path });
+      }
+      return path;
+    };
+    const onMain = make("on-main", "main");
+    const onFeature = make("on-feature", "feature/y");
+
+    const guard = (cwd: string, project: string) =>
+      spawnSync("npx", ["tsx", join(repo, "scripts/hooks/bash-guard.ts")], {
+        cwd,
+        input: JSON.stringify({ tool_input: { command: `git commit -m x` } }),
+        env: { ...process.env, CLAUDE_PROJECT_DIR: project },
+        encoding: "utf8",
+      });
+
+    assert.equal(guard(onMain, onFeature).status, 2, "a commit in a main checkout must be blocked whatever the project dir says");
+    assert.equal(guard(onFeature, onMain).status, 0, "and one on a feature branch must not be");
+  });
+
+  it("reads the review state of the project, not of the directory it was fired from", () => {
+    const repo = process.cwd();
+    const scratch = join(dir, "elsewhere");
+    mkdirSync(scratch);
+    spawnSync("git", ["init", "-q"], { cwd: scratch });
+    const scratchBranch = (spawnSync("git", ["branch", "--show-current"], { cwd: scratch, encoding: "utf8" }).stdout ?? "").trim();
+    // A receipt, so "there is no receipt" — the answer a clean checkout of THIS repo also gives
+    // — cannot be what makes the assertion below pass.
+    writeReceipt({ branch: scratchBranch, rounds: [], conversions: [], waived: [] }, join(scratch, RECEIPT_DIR));
+
+    // The scratch repo has no `origin/main` and so no merge base, so the guard reporting THAT
+    // is proof it read the scratch repo rather than deckhand — an answer that holds on any
+    // checkout, committed or not.
+    const payload = JSON.stringify({ tool_input: { command: `gh pr cre${"ate"}` } });
+    const run = spawnSync("npx", ["tsx", join(repo, "scripts/hooks/bash-guard.ts")], {
+      cwd: repo,
+      input: payload,
+      env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
+      encoding: "utf8",
+    });
+    assert.equal(run.status, 2);
+    assert.match(run.stderr, /cannot determine what this branch changes/);
   });
 });
 
@@ -420,7 +479,7 @@ describe("gates checkouts left behind by a killed run", () => {
   const plant = (name: string, owner?: string) => {
     const path = join(dir, name);
     mkdirSync(path);
-    if (owner !== undefined) writeFileSync(join(path, ".review-gates-owner"), `${owner}\n`);
+    if (owner !== undefined) writeFileSync(`${path}.owner`, `${owner}\n`);
     return path;
   };
 

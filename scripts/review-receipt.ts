@@ -561,8 +561,15 @@ export function gatesWorktree(run: Run = runGit): string | null {
   return join(gitDir, `review-gates-${createHash("sha256").update(here).digest("hex").slice(0, 12)}`);
 }
 
-/** Names the worktree that owns a gates checkout, so an abandoned one can be identified. */
-const OWNER_FILE = ".review-gates-owner";
+/**
+ * Names the worktree that owns a gates checkout, so an abandoned one can be identified.
+ *
+ * A SIBLING of the checkout rather than a file inside it, because `git worktree add` needs the
+ * path not to exist — so a marker inside could only be written after the checkout, leaving a
+ * window in which a concurrent run sees an unmarked live directory and force-removes it.
+ * Beside it, the marker goes down first and there is no window.
+ */
+const ownerMarker = (worktree: string): string => `${worktree}.owner`;
 
 /**
  * Remove gates checkouts whose OWNER is gone.
@@ -581,10 +588,10 @@ export function reclaimAbandonedGates(gitDir: string, remove: (path: string) => 
   for (const entry of readdirSync(gitDir, { withFileTypes: true })) {
     if (!entry.isDirectory() || !entry.name.startsWith("review-gates-")) continue;
     const path = join(gitDir, entry.name);
-    const ownerFile = join(path, OWNER_FILE);
-    // No marker means a run from before this existed, or one killed between `add` and the
-    // write. Neither has an owner to check, and leaving it would leak forever.
-    const owner = existsSync(ownerFile) ? readFileSync(ownerFile, "utf8").trim() : "";
+    // No marker means nobody claimed it — a leftover from before markers existed. Leaving it
+    // would leak forever, and it cannot be a live run: the marker is written first.
+    const marker = ownerMarker(path);
+    const owner = existsSync(marker) ? readFileSync(marker, "utf8").trim() : "";
     if (owner && existsSync(owner)) continue;
     remove(path);
   }
@@ -593,6 +600,7 @@ export function reclaimAbandonedGates(gitDir: string, remove: (path: string) => 
 function removeWorktree(path: string): void {
   spawnSync("git", ["worktree", "remove", "--force", path]);
   rmSync(path, { recursive: true, force: true });
+  rmSync(ownerMarker(path), { force: true });
 }
 
 /**
@@ -616,6 +624,9 @@ export function runGatesClean(branch: string, dir = RECEIPT_DIR): Receipt | { di
   if (!worktree) return { dirty: "not a git repository" };
   reclaimAbandonedGates(dirname(worktree));
   removeWorktree(worktree);
+  // Claimed BEFORE the checkout exists, so there is never an unmarked live directory for a
+  // concurrent run to mistake for an abandoned one.
+  writeFileSync(ownerMarker(worktree), `${runGit(["rev-parse", "--path-format=absolute", "--show-toplevel"]).trim()}\n`);
   const added = spawnSync("git", ["worktree", "add", "--detach", worktree, "HEAD"], { stdio: "inherit" });
   try {
     if (added.status !== 0) {
@@ -624,10 +635,6 @@ export function runGatesClean(branch: string, dir = RECEIPT_DIR): Receipt | { di
           `Until that is fixed the clean gate cannot run, and \`review:gates:quick\` does not substitute for it.`,
       );
     }
-    // Written BEFORE the long-running install: the whole point of the marker is to identify a
-    // checkout abandoned during it, and a marker written afterwards names only the runs that
-    // finished — the ones that clean up after themselves anyway.
-    writeFileSync(join(worktree, OWNER_FILE), `${runGit(["rev-parse", "--path-format=absolute", "--show-toplevel"]).trim()}\n`);
     const opts = { cwd: worktree, stdio: "inherit" as const };
     // `npm ci`, not `npm install`: it installs exactly the lockfile and fails if the two have
     // drifted, which is the drift this whole function exists to surface.
