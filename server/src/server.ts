@@ -96,6 +96,12 @@ export function createApp(deps: AppDeps): express.Application {
   // Viewer static assets (Vite emits absolute /assets/... URLs).
   if (deps.viewerDist) app.use(express.static(deps.viewerDist, { index: false }));
 
+  if (deps.connector) {
+    app.use(createOAuthMetadataRouter(deps.connector.baseUrl));
+    app.use("/oauth", createOAuthRouter({ store: deps.connector.store, pairing: deps.connector.pairing }));
+    app.use("/pair", createPairRouter({ store: deps.connector.store, pairing: deps.connector.pairing, auth: deps.auth }));
+  }
+
   app.use(
     "/mcp",
     createMcpRouter({

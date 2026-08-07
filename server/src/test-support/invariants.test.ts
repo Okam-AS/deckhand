@@ -393,6 +393,22 @@ describe("the connector URL is public by construction", () => {
     );
   });
 
+  // Written, tested, and never called is this repo's most expensive shape — it cost the orphan
+  // sweep, and it cost this: a stray regex during a refactor deleted the whole `if
+  // (deps.connector)` block, every unit test stayed green because they build the routers
+  // directly, and the connector answered 404 to claude.ai's very first request. A user found
+  // it, which is exactly who this check exists to spare.
+  it("mounts the routers a connector needs, not merely defines them", () => {
+    const server = read(join(SRC, "server.ts"));
+    for (const [what, call] of [
+      ["the OAuth discovery documents", /app\.use\(createOAuthMetadataRouter\(/],
+      ["/oauth", /app\.use\("\/oauth", createOAuthRouter\(/],
+      ["/pair", /app\.use\("\/pair", createPairRouter\(/],
+    ] as const) {
+      assert.match(server, call, `${what} must be mounted in server.ts — a router nobody mounts is a 404 with passing tests`);
+    }
+  });
+
   it("puts no approval path outside the credential the machine holds", () => {
     // The public half of pairing parks requests and proves nothing; the deciding half needs
     // tokens.yaml. If `pairRouter` ever stopped authenticating, the connector URL alone would
