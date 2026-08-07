@@ -29,7 +29,7 @@ Hardest rules:
   operator's own request is gone before they read its code. Nothing incoming is stored now, so
   there is nothing to flood. → `oauth/pairing.test.ts`
 - **The code is single-use and replaced on re-mint, and the guess budget belongs to the SOURCE,
-  not to the code.** Guessing is the only move a stranger has left, and ~4.8e8 possibilities is
+  not to the code.** Guessing is the only move a stranger has left, and ~3.9e8 possibilities (27 characters over six positions) is
   only strong while it is bounded — but burning the CODE on wrong guesses hands every stranger a
   way to shred every code the operator mints, as fast as they can loop. → `oauth/pairing.test.ts` "leaves the code usable by the person the operator is actually talking to"
 - **The page says WHO is connecting.** A code proves the operator meant to connect something; it
@@ -54,7 +54,12 @@ Hardest rules:
   registration has no credential to check — a client does not have one yet. Registering grants
   nothing, but each one is a row on disk, and this machine needs its free space for simulators
   and builds. → `oauth/router.test.ts` "caps registered clients, and never evicts one that holds a live grant"
-- **Never redirect an error to a `redirect_uri` you have not matched against the registered set.** Doing so makes `/oauth/authorize` an open redirector and hands `state` to whoever supplied the URI. → `oauth/router.test.ts` "never redirects an error to an unregistered redirect_uri"
+- **Never redirect an error to a `redirect_uri` at all — render it.** Matching against the
+  registered set is NOT enough, because registration is unauthenticated: any https URI a stranger
+  asked for is registered, so "matched" is not a trust boundary. Redirecting makes
+  `/oauth/authorize` a general open redirector on this hostname and hands `state` to whoever
+  supplied the URI. → `oauth/router.test.ts` "renders errors instead of redirecting them, even to a
+  registered uri", and `oauth/router.test.ts` "never redirects an error to an unregistered redirect_uri"
 - **A code is single-use even when redemption fails.** Deleting it only on success leaves an observed code open to verifier guessing. → `oauth/router.test.ts` "rejects a code redeemed with the wrong verifier, and burns it in the process"
 
 Revocation is `deckhand revoke <client-id>`, keyed by client because a client is what was

@@ -62,6 +62,13 @@ export const MIN_ROUNDS = 2;
 
 /** Gitignored: a receipt attests to a diff, so committing one would change that diff. */
 export const RECEIPT_DIR = ".claude/review-receipts";
+/**
+ * A waiver silences a blocking finding, so it must cost at least as much as raising one. Reporting
+ * demands `evidence`; waiving demanded nothing at all, so `why: ""` cleared a `must` — dismissing a
+ * bug was cheaper than reporting it. A length floor is crude and it is not nothing: "by design"
+ * does not reach it, and having to write a sentence is the point.
+ */
+export const MIN_WAIVER_REASON = 20;
 
 /** Where `handover` writes the PR body for a human to pass to `gh pr create --body-file`. */
 export const HANDOVER_FILE = ".claude/pr-body.md";
@@ -374,7 +381,12 @@ export function validate(receipt: Receipt | null, hash: string): Verdict {
   // mention it, and the gate opens with nothing fixed. Dropping it is distinguishable from
   // fixing it, because fixing it changes the diff — so a blocking finding counts as open when
   // the round that raised it reviewed the code AS IT STANDS and no later round cleared it.
-  const waived = new Set((receipt.waived ?? []).map((w) => w.finding));
+  // Only waivers that carry a reason count. `recordRound` refuses the rest, but the receipt is a
+  // file on disk and anything that can write it can write any shape — so the rule is enforced
+  // where it is READ as well as where it is written.
+  const waived = new Set(
+    (receipt.waived ?? []).filter((w) => (w.why ?? "").trim().length >= MIN_WAIVER_REASON).map((w) => w.finding),
+  );
   const open = new Set<string>();
   for (const round of receipt.rounds) {
     if (round.diff !== hash) continue; // reviewed older code; a fix is why the hash moved
@@ -497,6 +509,18 @@ export function recordRound(input: RoundInput, hash: string, branch: string, dir
     })),
   });
   next.conversions = [...base.conversions, ...(input.conversions ?? [])];
+  // A waiver silences a blocking finding, so it costs at least as much as raising one. Reporting
+  // demands `evidence`; waiving demanded nothing, so `why: ""` cleared a must — dismissing a bug
+  // was cheaper than reporting it, which is precisely backwards.
+  for (const w of input.waived ?? []) {
+    if (!w.finding?.trim() || (w.why ?? "").trim().length < MIN_WAIVER_REASON) {
+      throw new Error(
+        `every waiver needs the finding's fingerprint and a REASON of its own (at least ${MIN_WAIVER_REASON} ` +
+          `characters): why this cannot be mechanised, or why it is acceptable as it stands. Waiving is how a ` +
+          `blocking finding leaves the record, so it is written down or it does not happen.`,
+      );
+    }
+  }
   next.waived = [...base.waived, ...(input.waived ?? [])];
   writeReceipt(next, dir);
   return next;
@@ -671,7 +695,12 @@ export function handover(receipt: Receipt | null, hash: string, body: string, fi
   if (!verdict.ok) return verdict;
   if (!body.trim()) return { ok: false, reason: "the PR body is empty — pipe the filled-in body in on stdin." };
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, body.endsWith("\n") ? body : `${body}\n`);
+  // The curve goes IN the body. The receipt is gitignored — it is working state, not history —
+  // so a reader of the PR could see the claim "reviewed to convergence" and nothing behind it,
+  // while AGENTS.md says the value is that the claim is attributable and readable afterwards.
+  // Readable to whoever opens the PR, then, not only to whoever ran the review.
+  const withCurve = `${body.trimEnd()}\n\n---\n\n<details><summary>Review curve (\`npm run review:show\`)</summary>\n\n${summarize(receipt!)}\n\n</details>\n`;
+  writeFileSync(file, withCurve);
   return { ok: true };
 }
 

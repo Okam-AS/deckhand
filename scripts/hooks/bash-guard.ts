@@ -98,12 +98,17 @@ export function opensAPullRequest(cmd: string): boolean {
   // indicator is still required, so reading the same endpoint stays allowed — and `gh api`
   // switches to POST on its own the moment any parameter flag is present, which is why `-f`,
   // `-F` and `--input` count as one.
-  const posts = /(?:-X|--request)[= ]?\s*POST|--method[= ]\s*POST|(?:^|\s)-(?:f|F|d)\s|(?:^|\s)--(?:input|data\S*)\b/;
+  // An explicit non-POST method settles it. `-f`/`-F` count as a POST indicator because `gh api`
+  // switches on its own when a parameter flag appears — but only when no method was NAMED, or
+  // `gh api -X GET .../pulls -F state=open` (listing PRs a page at a time) was refused under the
+  // rule with no override, which is the one over-block this file cannot afford.
+  const named = /(?:-X|--request|--method)[= ]?\s*([A-Z]+)/.exec(cmd)?.[1];
+  const posts = named ? /^POST$/.test(named) : /(?:^|\s)-(?:f|F|d)\s|(?:^|\s)--(?:input|data\S*)\b/.test(cmd);
   // The COLLECTION, not a sub-resource: `/pulls` opens one, `/pulls/12/comments` and
   // `/pulls/12/reviews` are how you talk about one that exists — including this repo's own
   // review-comment path. Blocking those under a rule with no override is the one over-block
   // this file cannot afford, since the way past it is meant to be asking a person.
-  if (/\/pulls(?![\w/])/.test(cmd) && /\b(?:gh\s+api|curl)\b/.test(bare) && posts.test(cmd)) return true;
+  if (/\/pulls(?![\w/])/.test(cmd) && /\b(?:gh\s+api|curl)\b/.test(bare) && posts) return true;
   // One place quoted text is code rather than data: an interpreter standing by to run it —
   // whether the script arrives as an argument or down a pipe.
   const interpreter = /(?:^|\s)(?:(?:ba|z|k)?sh\s+-c|eval)\b|\|\s*(?:(?:ba|z|k)?sh|bash)\b/;

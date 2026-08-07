@@ -119,8 +119,22 @@ describe("the gate", () => {
 
   it("accepts that same finding once it is waived with a reason", () => {
     const open = round({ cold: true, findings: [{ id: "f.ts::boom", severity: "must" }] });
-    const receipt = converged({ rounds: [round({ newFindings: 1, diff: OLD }), open], waived: [{ finding: "f.ts::boom", why: "by design" }] });
+    const receipt = converged({ rounds: [round({ newFindings: 1, diff: OLD }), open], waived: [{ finding: "f.ts::boom", why: "by design: the platform gives no way to detect this" }] });
     assert.deepEqual(validate(receipt, HASH), { ok: true });
+  });
+
+  // Reporting a blocking finding demands `evidence`; waiving one demanded nothing, so `why: ""`
+  // cleared a `must` and dismissing a bug was cheaper than reporting it. Enforced where the
+  // receipt is READ as well as where it is written, because anything that can write the file can
+  // write any shape.
+  it("ignores a waiver with no reason, so silence cannot clear a must", () => {
+    const open = round({ cold: true, findings: [{ id: "f.ts::boom", severity: "must" }] });
+    for (const why of ["", "   ", "wontfix"]) {
+      const receipt = converged({ rounds: [round({ newFindings: 1, diff: OLD }), open], waived: [{ finding: "f.ts::boom", why }] });
+      const v = validate(receipt, HASH);
+      assert.equal(v.ok, false, `a waiver reading "${why}" must not count`);
+      assert.match(v.ok ? "" : v.reason, /unresolved blocking/);
+    }
   });
 
   it("does not let a leftover nit hold the gate open", () => {
@@ -248,6 +262,30 @@ describe("recording a round", () => {
     assert.equal(r.rounds.length, 1);
   });
 
+  // Waiving is how a blocking finding leaves the record, so it costs at least what raising one
+  // costs. It used to cost nothing: `why: ""` was accepted and cleared a `must`.
+  it("refuses a waiver with no reason of its own", () => {
+    for (const why of ["", "  ", "wontfix"]) {
+      assert.throws(
+        () => recordRound({ lens: "a", waived: [{ finding: "f.ts::boom", why }] }, HASH, "feature/x", dir),
+        /every waiver needs .* REASON/s,
+        `"${why}" must be refused`,
+      );
+    }
+    assert.throws(
+      () => recordRound({ lens: "a", waived: [{ finding: "  ", why: "a perfectly good reason, long enough" }] }, HASH, "feature/x", dir),
+      /fingerprint/,
+      "a waiver naming no finding waives nothing",
+    );
+    const ok = recordRound(
+      { lens: "a", waived: [{ finding: "f.ts::boom", why: "not mechanisable: the platform exposes no hook for it" }] },
+      HASH,
+      "feature/x",
+      dir,
+    );
+    assert.equal(ok.waived.length, 1);
+  });
+
   // Rounds happen in different sessions, so the curve has to accumulate on disk or round 4
   // re-reports what round 2 found and the gate never converges.
   it("extends a receipt written by an earlier session rather than restarting it", () => {
@@ -295,6 +333,16 @@ describe("the handover to a human", () => {
 
   it("refuses an empty body, so the human is never handed a blank PR", () => {
     assert.equal(handover(converged(), HASH, "   \n", file()).ok, false);
+  });
+
+  // The receipt is gitignored, so the person opening the PR cannot see it. A body claiming a
+  // converged review with nothing behind it is exactly what AGENTS.md says this exists to avoid:
+  // "explicit, attributable and readable afterwards" has to mean readable to THEM.
+  it("embeds the curve, since the receipt itself never leaves this machine", () => {
+    assert.deepEqual(handover(converged(), HASH, "## What was wrong\nA thing.", file()), { ok: true });
+    const written = readFileSync(file(), "utf8");
+    assert.match(written, /^## What was wrong/, "the author's reasoning stays first");
+    assert.match(written, /rounds →/, "and the curve travels with it");
   });
 });
 

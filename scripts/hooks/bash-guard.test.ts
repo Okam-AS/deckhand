@@ -156,3 +156,19 @@ describe("the quote blanking the rule rests on", () => {
     assert.equal(opensAPullRequest(`echo "gh pr create"`), false);
   });
 });
+
+describe("listing pull requests is not opening one", () => {
+  // Rule 1 has no override, so an over-block costs a person an interruption they did not need.
+  // `gh api` switches to POST on its own when a parameter flag appears, which is why `-f`/`-F`
+  // count — but a NAMED method settles the question, and paging through PRs is `-X GET … -F`.
+  it("allows a GET to the pulls collection even with parameter flags", () => {
+    allowed("gh api -X GET repos/Okam-AS/deckhand/pulls -F state=open -F per_page=100");
+    allowed("gh api --method GET repos/Okam-AS/deckhand/pulls -f state=open");
+    allowed("gh api repos/Okam-AS/deckhand/pulls --paginate");
+  });
+
+  it("still blocks the POST it exists for", () => {
+    assert.match(blocked("gh api repos/Okam-AS/deckhand/pulls -X POST -f base=main"), /a human's call/);
+    assert.match(blocked("gh api repos/Okam-AS/deckhand/pulls -F title=t -F head=f"), /a human's call/);
+  });
+});

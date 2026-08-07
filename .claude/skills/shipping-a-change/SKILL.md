@@ -150,8 +150,10 @@ surfaces **no blocking finding an earlier round hadn't already reported**.
 4. If the round found something new, **change the lens** and go again: a different pass
    emphasis, a fresh subagent with no session context, a different model. Repeating one
    lens re-finds one lens's bugs.
-5. **At least one round must be cold** — a reviewer starting from the diff alone, carrying
-   none of the context this code was written in. Your own session has the blind spot built
+5. **At least one round must be cold, and it must have read the code as it SHIPS** — a
+   reviewer starting from the diff alone, carrying none of the context this code was written
+   in. A cold round against an older diff does not count, because fixing something moves the
+   hash: `cold → fix → inline` is refused, and the shape that passes is `cold → fix → cold`. Your own session has the blind spot built
    in, so re-reading your work is never a cold round however carefully you do it. A fresh
    session, a colleague, or a subagent spawned for exactly this all qualify; say which.
    When you spawn one, give it the diff and **nothing else** — no summary of your reasoning,

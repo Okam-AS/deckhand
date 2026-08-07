@@ -14,6 +14,8 @@ import { PreviewEngine, type PreviewEngineDeps } from "../engine/preview.ts";
 import { TokenAuthenticator } from "../auth.ts";
 import { StateStore } from "../state.ts";
 import { SetupStore } from "../setup/setupStore.ts";
+import { OAuthStore } from "../oauth/store.ts";
+import { PairingStore } from "../oauth/pairing.ts";
 import { CredentialsMissingError } from "../github/credentials.ts";
 import type { App, Config, TokenEntry } from "../config.ts";
 import type { AttachedStream, StreamDeviceRef } from "../streaming/backend.ts";
@@ -108,10 +110,19 @@ function fakeEngine(): PreviewEngine {
 let base: string;
 let server: ReturnType<typeof import("node:http").createServer>;
 let engine: PreviewEngine;
+/**
+ * A real OAuth store behind the app, because the connector half of `/mcp` auth was untestable
+ * without one: every test here built `createApp` with no `connector`, so `deps.oauth` was
+ * undefined and the line that threads the store in could be deleted with all 742 tests green.
+ * A grant is the credential every claude.ai user arrives with.
+ */
+let oauthStore: OAuthStore;
+const CONNECTOR_BASE = "https://deckhand.example.com";
 
 before(async () => {
   const { createServer } = await import("node:http");
   engine = fakeEngine();
+  oauthStore = new OAuthStore({ persist: false });
   const app = createApp({
     engine,
     apps,
@@ -119,6 +130,7 @@ before(async () => {
     audit: { record: () => {} } as never,
     auth: new TokenAuthenticator(tokens),
     pinGate: createPinGate(engine, "test-secret"),
+    connector: { store: oauthStore, pairing: new PairingStore(), baseUrl: CONNECTOR_BASE },
   });
   server = createServer(app);
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
@@ -171,11 +183,36 @@ describe("MCP server (end-to-end over HTTP)", () => {
     assert.equal(res.status, 401);
     // The pointer is how an MCP client discovers where to authorize. A silent 404
     // leaves it with nothing to do but report the server as broken.
-    assert.match(res.headers.get("www-authenticate") ?? "", /resource_metadata=".*\/\.well-known\/oauth-protected-resource"/);
+    // Absolute, not relative. With no `baseUrl` the header came out as
+    // `resource_metadata="/.well-known/..."` and the old `.*` matched that with nothing in it —
+    // so the assertion passed on a value no real MCP client can resolve.
+    assert.equal(
+      res.headers.get("www-authenticate"),
+      `Bearer resource_metadata="${CONNECTOR_BASE}/.well-known/oauth-protected-resource"`,
+    );
   });
 
   it("rejects a request with no Authorization header at all", async () => {
     assert.equal((await call({})).status, 401);
+  });
+
+  // The credential every claude.ai user actually arrives with. Nothing proved this worked: the
+  // line threading the OAuth store into this router could be deleted with every test green,
+  // because the harness built the app without a connector at all. A grant that cannot
+  // authenticate here is a connector that pairs successfully and then does nothing.
+  it("accepts an OAuth grant's access token, not only a local credential", async () => {
+    const issued = oauthStore.issueGrant({ label: "Claude", clientId: "client-abc" });
+    const res = await call({ headers: { authorization: `Bearer ${issued.accessToken}` } });
+    assert.equal(res.status, 200, "a paired connector must be able to call the MCP surface");
+  });
+
+  // And revocation has to reach it, since `deckhand revoke` promises it takes effect on the
+  // client's next call with no restart.
+  it("stops accepting a grant the operator has revoked", async () => {
+    const issued = oauthStore.issueGrant({ label: "Claude", clientId: "client-revoked" });
+    assert.equal((await call({ headers: { authorization: `Bearer ${issued.accessToken}` } })).status, 200);
+    oauthStore.revokeClient("client-revoked");
+    assert.equal((await call({ headers: { authorization: `Bearer ${issued.accessToken}` } })).status, 401);
   });
 
   // THE regression this whole change exists for. The credential used to be a path

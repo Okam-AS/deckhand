@@ -181,6 +181,21 @@ a clean checkout. It cannot tell a review from a claim about one; what it buys i
 the claim is explicit, attributable and readable afterwards. Details and the honest
 limits: `scripts/review-receipt.ts`.
 
+Two things it enforces that cost a round if you learn them late:
+
+- **The cold round must have read the code AS IT SHIPS.** A cold round against an
+  older diff does not count, so `cold → fix → inline` is refused: fixing moves the
+  hash. In practice the converging round is itself a cold one, so budget for that —
+  the shape is `cold → fix → cold`, not two rounds and done. (Accepting a stale cold
+  round made the cheapest compliant path "one cold round early, then change whatever
+  you like", with nothing cold having read what ships.)
+- **A blocking finding leaves the record two ways: fixed, or waived with a reason.**
+  `waived` takes the fingerprint from `review:show` and a sentence saying why it
+  cannot be mechanised or why it is acceptable — at least 20 characters, because
+  waiving used to cost nothing while reporting demanded evidence, which made
+  dismissing a bug cheaper than raising one. A finding nobody mentions again stays
+  open: silence is not a resolution.
+
 Merging is still yours once the PR exists:
 
 ```

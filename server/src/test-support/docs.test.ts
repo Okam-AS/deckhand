@@ -155,7 +155,9 @@ describe("docs describe the code that exists", () => {
       // citations START; each `<file>.test.ts "<name>"` pair after it is one, wrapped or not.
       for (const chunk of src.split("→").slice(1)) {
         for (const m of chunk.matchAll(/`?\S*?\.test\.ts`?\s+"([^"]+)"/g)) {
-          const cited = m[1]!;
+          // Collapse the wrap. A citation may run onto the next line — one does — and comparing
+          // the raw capture then looks for a test name containing a newline and two spaces.
+          const cited = m[1]!.replace(/\s+/g, " ").trim();
           if (![...testNames].some((n) => n.startsWith(cited))) dangling.push(`${f}: "${cited}"`);
         }
       }
@@ -254,17 +256,20 @@ describe("docs describe the code that exists", () => {
     // entirely — the agent runs it and hangs on a prompt nobody sees.
     //
     // AGENTS.md had exactly that, one day after the section was written, because it restated
-    // the flow instead of pointing at the command that cannot drift.
+    // the flow instead of pointing at the command that cannot drift. README then had it too,
+    // eight lines above its own "do not attempt those steps" — the check was scoped to one file
+    // while the class belongs to every document an agent is pointed at.
     const HUMAN_ONLY = [/cloudflared tunnel login/];
-    const agentFacing = readFileSync(join(REPO, "AGENTS.md"), "utf8");
-    const shellBlocks = [...agentFacing.matchAll(/```(?:sh|bash|console)\n([\s\S]*?)```/g)].map((m) => m[1]!);
+    const shellBlocks = ["AGENTS.md", "README.md", "CONSTITUTION.md"].flatMap((doc) =>
+      [...readFileSync(join(REPO, doc), "utf8").matchAll(/```(?:sh|bash|console)\n([\s\S]*?)```/g)].map((m) => `${doc}: ${m[1]!}`),
+    );
     for (const block of shellBlocks) {
       for (const banned of HUMAN_ONLY) {
         assert.doesNotMatch(
           block,
           banned,
-          `AGENTS.md puts a human-only command in a runnable block. Describe it in prose as ` +
-            `something to ASK for, or let \`deckhand setup\` report it — it already does.`,
+          `${block.split(":")[0]} puts a human-only command in a runnable block. Describe it in prose ` +
+            `as something to ASK for, or let \`deckhand setup\` report it — it already does.`,
         );
       }
     }
