@@ -31,23 +31,12 @@ export type Verdict = { blocked: false } | { blocked: true; reason: string };
 const ALLOW: Verdict = { blocked: false };
 
 /**
- * The command with quoted spans and heredoc bodies blanked out, so a rule can ask "does this
- * command RUN x" rather than "does this text mention x".
- *
- * Matching raw text would block a commit whose MESSAGE quotes the command, and writing about
- * this gate is routine while working on it. Anchoring to command position fixes that case and
- * opens eight worse ones
- * — `(gh pr create)`, `env gh pr create`, `bash -c "…"`, a loop body — because a shell has more
- * command positions than a regex can enumerate. Blanking the quotes keeps the match permissive
- * where it should be and blind only where the text is data.
- */
-/**
  * The spellings a shell accepts for one word, collapsed onto that word.
  *
  * A rule asking "does this RUN git commit" has to see `git 'commit'`, `git com'mit'`,
  * `git \commit`, `git${IFS}commit` and a `git commit` split over a line continuation as the
  * same command, because bash does. Each of those was a live bypass: quoting the verb walked
- * past the commit-on-main rule, and `${IFS}` walked past the one rule with no override.
+ * past the rule that used to block a commit on `main`, and `${IFS}` walks past this one.
  *
  * Escaping is undone BEFORE quoted spans are considered, so `$'pr'` becomes `'pr'` and then
  * `pr`. The blanking in {@link withoutQuotedText} still decides what is data.
@@ -60,6 +49,16 @@ export function shellSpelling(cmd: string): string {
     .replace(/\\(?=\w)/g, ""); // \pr is pr
 }
 
+/**
+ * The command with quoted spans and heredoc bodies blanked out, so the rule can ask "does this
+ * command RUN x" rather than "does this text mention x".
+ *
+ * Matching raw text would block a commit whose MESSAGE quotes the command, and writing about this
+ * gate is routine while working on it. Anchoring to command position fixes that case and opens
+ * eight worse ones — `(gh pr create)`, `env gh pr create`, `bash -c "…"`, a loop body — because a
+ * shell has more command positions than a regex can enumerate. Blanking the quotes keeps the
+ * match permissive where it should be and blind only where the text is data.
+ */
 export function withoutQuotedText(cmd: string): string {
   return cmd
     .replace(/<<-?\s*(['"]?)(\w+)\1[\s\S]*?^\s*\2\s*$/gm, " ") // heredoc bodies

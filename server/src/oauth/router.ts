@@ -191,8 +191,10 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
         res,
         503,
         "temporarily_unavailable",
-        "the client registry is full: every client is mid-pairing or holds a grant. Pairing attempts lapse within ten minutes — " +
-          "if this persists, `deckhand connections` lists who holds a grant and `deckhand revoke <client-id>` frees a slot.",
+        "the client registry is full: every client is mid-pairing or holds a grant. Attempts that were only mid-pairing lapse " +
+          "within ten minutes, so try again then — a grant does not lapse, so if it persists, `deckhand connections` lists who " +
+          "holds one and `deckhand revoke <client-id>` frees a slot. If it lists nobody, the slots are pairing attempts and " +
+          "waiting is the only move.",
       );
       return;
     }

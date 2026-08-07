@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OAuthStore, RegistryFullError, type Grant, type OAuthClient } from "./store.ts";
@@ -58,6 +58,22 @@ describe("the client registry's ceiling", () => {
       onDisk().some((c) => c.clientId === "client-0"),
       "and a client mid-flow must survive, in the file as well as in memory",
     );
+  });
+
+  // …and writes NOTHING when there was nothing to evict, which is the steady state under a
+  // flood: every slot busy, so every refusal evicted nobody. Saving unconditionally there turned
+  // the one register path that touched no disk into a whole-file write+rename per request, at
+  // whatever rate an unauthenticated caller likes — the write amplification the cap exists to
+  // prevent (measured: 200 refusals, 10.8 kB rewritten each, bytes identical every time).
+  it("does not rewrite the file for a refusal that evicted nobody", () => {
+    const ids = seed(64);
+    const store = new OAuthStore({ file, now: () => 9_000 });
+    const busy = new Set(ids);
+    const before = statSync(file).mtimeMs;
+    for (let i = 0; i < 5; i++) {
+      assert.throws(() => store.registerClient({ redirectUris: ["https://claude.ai/cb"] }, busy), RegistryFullError);
+    }
+    assert.equal(statSync(file).mtimeMs, before, "a refusal that changed nothing must not touch the disk");
   });
 
   // The other half of the same path: when an idle client CAN be evicted, the registration

@@ -195,14 +195,15 @@ export class OAuthStore {
       createdMs: this.now(),
     };
     this.clients.set(client.clientId, client);
-    this.evictIdleClients(busy, client.clientId);
+    const evicted = this.evictIdleClients(busy, client.clientId);
     if (this.clients.size > MAX_CLIENTS) {
       this.clients.delete(client.clientId);
-      // Persist anyway: the eviction pass above may have dropped idle clients from memory, and
-      // throwing before the write left those gone in memory and present on disk — so a dropped
-      // client answered "unknown client" until a restart brought it back, and an oversized file
-      // was never trimmed by this path.
-      this.save();
+      // Persist only what changed. Throwing before the write left an eviction gone in memory and
+      // present on disk — a dropped client answered "unknown client" until a restart brought it
+      // back. Writing UNCONDITIONALLY was the other mistake: in the steady state a refusal evicts
+      // nothing, so every refused request rewrote the whole file byte for byte, at whatever rate
+      // an unauthenticated caller likes — the write amplification this cap exists to prevent.
+      if (evicted > 0) this.save();
       throw new RegistryFullError();
     }
     this.save();
@@ -220,18 +221,21 @@ export class OAuthStore {
    * end to end before this argument existed, and repeatable indefinitely, so pairing never
    * completes.
    */
-  private evictIdleClients(busy: ReadonlySet<string> = new Set(), keep?: string): void {
-    if (this.clients.size <= MAX_CLIENTS) return;
+  private evictIdleClients(busy: ReadonlySet<string> = new Set(), keep?: string): number {
+    if (this.clients.size <= MAX_CLIENTS) return 0;
     // `keep` is the client this registration just created. Without it, a registry where every
     // other client is in use makes the newcomer the only evictable one — so `/register` answers
     // 201 with a client_id it has already deleted, and the caller's next request is
     // "unknown client" with nothing having gone visibly wrong.
     const inUse = new Set([...this.grants.map((g) => g.clientId), ...busy, ...(keep ? [keep] : [])]);
     const evictable = [...this.clients.values()].filter((c) => !inUse.has(c.clientId)).sort((a, b) => a.createdMs - b.createdMs);
+    let evicted = 0;
     for (const c of evictable) {
-      if (this.clients.size <= MAX_CLIENTS) return;
+      if (this.clients.size <= MAX_CLIENTS) break;
       this.clients.delete(c.clientId);
+      evicted += 1;
     }
+    return evicted;
   }
 
   getClient(clientId: string): OAuthClient | null {
