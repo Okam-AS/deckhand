@@ -327,7 +327,12 @@ export interface StartPreviewRequest {
   spec?: RefSpec;
   devices: DeviceRequest[];
   access: "public" | "password";
-  /** Mark this as a public compare/migration reference pane (see PersistedPreview.reference). */
+  /**
+   * Mark this as a compare/migration pane: booted under a synthetic app id that is
+   * deliberately not in apps.yaml (see `PersistedPreview.reference`). A pane is NOT
+   * public — it takes the page's access, and `isReference` records what calling it
+   * public cost.
+   */
   reference?: boolean;
 }
 
