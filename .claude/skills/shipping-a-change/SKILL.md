@@ -147,6 +147,10 @@ itself. These rules keep the curve attached to the code:
   Then say what would justify one: the change is wrong, a test passes for the wrong reason
   (mutate the line and check), a comment states something false beside the code, a rule in
   `.claude/rules/` is weakened.
+
+  **On comments, the bar is a false PRECONDITION the code relies on — nothing else.**
+  Wording, tone, over-claiming prose and a rationale that could be phrased better are not
+  findings here; rewriting one costs a full round, since every edit voids the cold round.
 - **Check `git branch --show-current` before you record the round.** A reviewer that checked
   out the diff may leave the tree somewhere else, and the receipt is written for whatever
   branch you are standing on — a round recorded from `main` lands in `main`'s receipt, where
