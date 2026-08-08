@@ -1702,39 +1702,45 @@ describe("PreviewEngine idle sweep", () => {
     assert.equal(new Set(ids).size, ids.length, "no id may repeat");
   });
 
-  it("keeps live device ids unique across a remove and a re-add", async () => {
-    // addDevices indexes off the CURRENT length, and removeDevices shrinks it — so the index
-    // alone does not make an id unique. What does is the only caller: startPreview passes
-    // missingPlatforms(), so an added device's platform has nothing live to collide with, and
-    // the platform is part of the id. Assert the property, not the arithmetic: a second caller
-    // that skips the platform filter must fail here.
-    //
-    // The second half asserts what is true today rather than what is nice: the re-added
-    // android device gets the RETIRED id back, so anything still holding the old id (a viewer
-    // pane that has not reloaded) addresses the new device by it.
+  it("never re-mints a retired device id, on any platform", async () => {
+    // A device id is how a viewer pane addresses a stream, so an id must mean one device for
+    // the whole life of the preview — not merely one LIVE device. The counter is per preview
+    // and only ever goes up; it is not the device list's length, which shrinks on
+    // `removeDevices` and used to hand the retired index straight back.
     const lim = { config: { ...config, limits: { ...config.limits, maxTotalDevices: 6 } } };
-
-    // Two of one platform: the index alone would hand ios-1 out twice.
-    const same = makeEngine(lim);
     const req = (devices: DeviceRequest[]): StartPreviewRequest =>
       ({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices, access: "public" });
+
+    // Same platform, via addDevices directly — the caller shape `missingPlatforms()` does not
+    // cover. Indexing off the length gave the new device the id of the one still running.
+    const same = makeEngine(lim);
     same.engine.startPreview(req([{ platform: "ios" }, { platform: "ios" }]));
     await waitForPhase(same.engine, "pv1", ["ready", "failed"]);
     await same.engine.removeDevices("pv1", ["ios-0"]);
-    same.engine.startPreview(req([{ platform: "ios" }, { platform: "ios" }])); // idempotent start → addDevices, if anything is missing
+    same.engine.addDevices("pv1", [{ platform: "ios" }]);
     const ids = same.engine.getStatus("pv1")!.devices.map((d) => d.deviceId);
     assert.equal(new Set(ids).size, ids.length, "no two LIVE devices may share an id");
-    assert.deepEqual(ids, ["ios-1"], "ios is already live, so nothing is added");
+    assert.deepEqual(ids, ["ios-1", "ios-2"], "the added device gets a fresh index, not the free one");
 
-    // Across platforms: the retired id IS handed back. Asserted so the re-mint is a decision
-    // on the record rather than a surprise.
+    // Removing the HIGHEST id must not free it either — so the counter cannot be derived from
+    // the ids that are still live.
+    await same.engine.removeDevices("pv1", ["ios-2"]);
+    same.engine.addDevices("pv1", [{ platform: "ios" }]);
+    assert.deepEqual(
+      same.engine.getStatus("pv1")!.devices.map((d) => d.deviceId),
+      ["ios-1", "ios-3"],
+      "ios-2 is retired for good",
+    );
+
+    // Across platforms, through the idempotent start_preview path: the platform is part of the
+    // id, so this one never collided while live — but it did re-mint the retired name.
     const cross = makeEngine(lim);
     const both = (): StartPreviewRequest => req([{ platform: "ios" }, { platform: "android" }]);
     cross.engine.startPreview(both());
     await waitForPhase(cross.engine, "pv1", ["ready", "failed"]);
     await cross.engine.removeDevices("pv1", ["android-1"]);
     cross.engine.startPreview(both());
-    assert.deepEqual(cross.engine.getStatus("pv1")!.devices.map((d) => d.deviceId), ["ios-0", "android-1"]);
+    assert.deepEqual(cross.engine.getStatus("pv1")!.devices.map((d) => d.deviceId), ["ios-0", "android-2"]);
   });
 
   it("refuses to add beyond the machine's device budget, and says which limit", async () => {
@@ -1857,6 +1863,36 @@ describe("PreviewEngine idle sweep", () => {
     assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
     await h.engine.reapOrphans();
     assert.ok(reapKeep[1]!.length > 0, "a live preview's device must be named, or the sweep kills its own helper");
+  });
+
+  it("reaps a FAILED preview at boot, not just a running one", async () => {
+    // A failed preview still holds a booted simulator and a worktree — counting it as using
+    // zero devices was one of the two original resource leaks (PLAN §"Device lifecycle").
+    // So "stale on boot" is `phase !== "stopped"` and nothing narrower. There used to be a
+    // second, unreachable definition of it in state.ts that also excluded `failed`; this is
+    // what fails if anyone consolidates onto that one.
+    const file = `/tmp/deckhand-stale-${Math.random().toString(36).slice(2)}.json`;
+    writeFileSync(
+      file,
+      JSON.stringify({
+        version: 1,
+        previews: [
+          { previewId: "old-failed", shareId: "s1", appId: rnApp.id, ref: "main", source: "git", phase: "failed", devices: [], createdAt: 1, updatedAt: 1, passwordProtected: false },
+          { previewId: "old-ready", shareId: "s2", appId: rnApp.id, ref: "main", source: "git", phase: "ready", devices: [], createdAt: 1, updatedAt: 1, passwordProtected: false },
+          { previewId: "old-stopped", shareId: "s3", appId: rnApp.id, ref: "main", source: "git", phase: "stopped", devices: [], createdAt: 1, updatedAt: 1, passwordProtected: false },
+        ],
+        shareIds: {},
+        pins: {},
+      }),
+    );
+    const h = makeEngine({ store: new StateStore(file) });
+    try {
+      const report = await h.engine.reapOrphans();
+      assert.equal(report.previews, 2, "the failed preview is stale too — it kept its devices");
+      assert.deepEqual(h.store.load().previews, [], "and every one of them is dropped from state");
+    } finally {
+      rmSync(file, { force: true });
+    }
   });
 
   it("never allocates a console port an emulator already holds", async () => {

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, readdirSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import { StateStore, staleOnBoot, type PersistedPreview } from "./state.ts";
+import { StateStore, type PersistedPreview } from "./state.ts";
 
 let dir: string;
 before(() => {
@@ -58,26 +58,6 @@ describe("StateStore", () => {
     const file = join(dir, "v2.json");
     writeFileSync(file, JSON.stringify({ version: 2, previews: [preview("p", "ready")] }));
     assert.deepEqual(new StateStore(file).load(), { version: 1, previews: [], shareIds: {}, pins: {} });
-  });
-});
-
-describe("staleOnBoot", () => {
-  it("selects previews that were still live", () => {
-    const state = {
-      version: 1 as const,
-      previews: [
-        preview("live1", "ready"),
-        preview("live2", "running"),
-        preview("done", "stopped"),
-        preview("dead", "failed"),
-      ],
-      shareIds: {},
-      pins: {},
-    };
-    assert.deepEqual(
-      staleOnBoot(state).map((p) => p.previewId),
-      ["live1", "live2"],
-    );
   });
 });
 

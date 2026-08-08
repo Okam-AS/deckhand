@@ -174,6 +174,14 @@ interface LivePreview {
   app: App;
   spec?: RefSpec; // git source only; kept for restart_preview re-fetches
   devices: LiveDevice[];
+  /**
+   * The index the next device id gets. Only ever goes up, so a retired id is never
+   * handed out again — `devices.length` was not that, because `removeDevices` shrinks
+   * it. In memory only: no preview survives a restart (`reapOrphans` drops every
+   * non-`stopped` one and persists), so there is nothing to carry across.
+   * → `preview.test.ts` "never re-mints a retired device id, on any platform".
+   */
+  nextDeviceIndex: number;
   prep?: Promise<string>; // memoized source dir (shared across devices)
   sourceDir?: string;
   attached: Map<string, AttachedStream>;
@@ -1200,6 +1208,7 @@ export class PreviewEngine {
       app: req.app,
       spec: req.spec,
       devices,
+      nextDeviceIndex: devices.length,
       attached: new Map(),
       lastActivityAt: this.d.now!(),
       lastProgressAt: this.d.now!(),
@@ -1289,20 +1298,15 @@ export class PreviewEngine {
       );
     }
 
-    // Index off the current length. Devices ARE removed one at a time now
-    // (`removeDevices`, reached from the `stop_device` tool), so the index is not unique over
-    // a preview's lifetime: remove `android-1` from an ios+android preview, ask for android
-    // again, and the new device is called `android-1` too. A RETIRED ID CAN BE RE-MINTED —
-    // anything holding an old device id (a viewer pane that has not reloaded) will address the
-    // new device by the old name.
-    //
-    // What still keeps two LIVE devices from sharing an id is not the index but the shape of
-    // the only caller: startPreview passes `missingPlatforms()`, so every spec here is for a
-    // platform with nothing live to collide with, and the id carries the platform. A second
-    // caller that does not filter by platform breaks that immediately — index off the highest
-    // existing id instead of adding one. → `preview.test.ts` "keeps live device ids unique
-    // across a remove and a re-add".
-    const added = specs.map((spec, i) => newLiveDevice(spec, p.devices.length + i));
+    // A per-preview counter, NOT `p.devices.length`: `removeDevices` (the `stop_device` tool)
+    // shrinks the list, so the length handed a retired index straight back. Called through
+    // startPreview that was merely confusing — the id carries the platform and
+    // `missingPlatforms()` filters by it, so nothing live collided — but this method is
+    // public, and a caller that does not filter gave two LIVE devices one id. A device id is
+    // how a viewer pane addresses a stream, so that is one pane showing another's video.
+    const start = p.nextDeviceIndex;
+    const added = specs.map((spec, i) => newLiveDevice(spec, start + i));
+    p.nextDeviceIndex = start + specs.length;
     p.devices.push(...added);
     this.persist();
     this.markActive(p);
@@ -1383,10 +1387,6 @@ export class PreviewEngine {
    * working and pays for their build a second time.
    *
    * An empty result and a satisfied request must not look the same (CONSTITUTION §3).
-   *
-   * `addDevices` relies on this filter for more than politeness: a device id is
-   * `<platform>-<index>`, so "the added platform is not live" is what keeps two live
-   * devices from sharing an id. See the note there.
    */
   private missingPlatforms(p: LivePreview, req: StartPreviewRequest): Platform[] {
     const live = new Set(p.devices.map((d) => d.record.platform));
@@ -2947,6 +2947,10 @@ export class PreviewEngine {
    * can land in the seconds between the bind and here.
    */
   async reapOrphans(): Promise<{ sims: number; avds: number; previews: number }> {
+    // The only definition of "stale on boot" in the repo, and `failed` is deliberately
+    // inside it: a failed preview still holds a booted simulator and a worktree, and
+    // counting it as using zero devices was one of the two original resource leaks
+    // (PLAN, "Device lifecycle"). → `preview.test.ts` "reaps a FAILED preview at boot".
     const stale = this.d.store.load().previews.filter((p) => p.phase !== "stopped");
     // Spare whatever is already live. The map is normally empty at boot, but
     // this runs *after* the port is bound (see server.ts) — so an agent's
