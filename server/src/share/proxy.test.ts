@@ -549,10 +549,12 @@ describe("PIN gate (path-based share)", () => {
   });
 
   it("does not mint a partner cookie for a PUBLIC share's /state", async () => {
-    // The hole this closes: a compare/migration reference pane is public by
-    // construction, and pairing is symmetric — so /state on the PUBLIC side used
-    // to hand any anonymous caller an unlock cookie for the PIN-protected
-    // working share, which is the whole PIN bypassed with just the public link.
+    // The hole this closes: pairing is symmetric, so /state on the PUBLIC side of
+    // a pair used to hand any anonymous caller an unlock cookie for the
+    // PIN-protected share — the whole PIN bypassed with just the public link.
+    // (When it was found, every extra pane was booted public by construction.
+    // Panes take the page's access now; the guard never rested on that, and this
+    // is still what /state itself must refuse.)
     const wasCurrent = pinState.current;
     pinState.current = null; // share1 public
     pinState.others = [{ shareId: "paired-share", length: 4, pin: "4321" }];
