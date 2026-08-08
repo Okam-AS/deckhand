@@ -548,7 +548,11 @@ export class AndroidAdbBackend implements StreamingBackend {
   /**
    * Unlike serve-sim's detached daemons, these helpers are HTTP servers in THIS process — they
    * die with it, so the in-memory map really is their owner and a fresh process has nothing of
-   * ours to collect. This matters at boot (a no-op) and during the janitor sweep (not a no-op).
+   * ours to collect. Both callers run at process start — `server.ts` once, through
+   * `PreviewEngine.reapOrphans`, and `cli/doctor.ts` in a second process — and the janitor
+   * never calls this, so the helper prune below has an all-but-empty map to work on. Not
+   * provably empty: the boot sweep runs AFTER the port is bound, so a `start_preview` can
+   * attach while it runs, which is why the prune spares `keep` rather than clearing.
    *
    * The one Android resource that DOES outlive us is the on-device `screenrecord`:
    * androidH264.ts pkills it from its own `stop()`, which is our graceful teardown only, so a
