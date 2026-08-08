@@ -213,7 +213,7 @@ function LocalFirst() {
             </li>
             <li>
               <CheckIcon />
-              Capability-bounded MCP tools
+              No shell tool — every call audited
             </li>
             <li>
               <CheckIcon />

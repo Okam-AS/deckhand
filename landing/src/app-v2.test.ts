@@ -24,6 +24,19 @@ test("architecture makes local ownership explicit", () => {
   assert.doesNotMatch(markup, /API key/i);
 });
 
+// Nothing scopes a credential: `auth.ts` says there is no authorization step past
+// authentication, because one Mac serves one operator. So the page may claim a bounded
+// tool SURFACE — no shell tool (PLAN §11.3), every tool wrapped in `audited()`
+// (invariants.test.ts) — and must never imply per-credential capabilities or roles.
+test("the security list claims a bounded tool surface, not scoped credentials", () => {
+  const markup = renderToStaticMarkup(createElement(App));
+
+  const list = /<ul class="security-list">.*?<\/ul>/s.exec(markup)?.[0];
+  assert.ok(list, "the security list is gone — this test asserts nothing without it");
+  assert.match(list, /No shell tool — every call audited/);
+  assert.doesNotMatch(list, /capabilit|scoped|bounded|permission|role/i);
+});
+
 test("pricing treats the trial as universal and renders two purchase options", () => {
   const markup = renderToStaticMarkup(createElement(App));
 
