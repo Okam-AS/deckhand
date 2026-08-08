@@ -135,19 +135,29 @@ function danglingCitations(text: string, byFile: Map<string, Set<string>>): { fi
  * with an odd number of `"` or `` ` `` before it on the line is inside a string. Block
  * comments must open at the start of a line, which every doc block in this repo does.
  *
+ * Both guards SKIP THAT `//` and keep looking along the line — they used to abandon the whole
+ * line, which is a silent pass in the direction that matters: a fabricated citation written
+ * after a URL, or after a string containing `//`, was invisible to the check that keeps every
+ * precondition citation in this repo honest. Verified by mutation, in engine/metro.ts:
+ * `const _u = "http://example.com"; // → \`preview.test.ts\` "no such check"` left docs.test.ts
+ * 15/15 green, while the same citation on its own line failed it.
+ *
  * The limit that leaves: a `//` inside a multi-line template literal, on a line that opens no
  * quote of its own, reads as a comment. That costs a false finding only if such a string also
- * contains an arrow and a `*.test.ts "name"` pair, and it is a loud failure, not a silent pass.
+ * contains an arrow and a `*.test.ts "name"` pair — that one IS a loud failure rather than a
+ * silent pass.
  */
 function commentsOf(src: string): string {
   const out: string[] = [];
   for (const m of src.matchAll(/^[ \t]*\/\*[\s\S]*?\*\//gm)) out.push(m[0].replace(/^[ \t]*\*[ \t]?/gm, ""));
   for (const line of src.split("\n")) {
-    const i = line.indexOf("//");
-    if (i < 0 || line[i - 1] === ":") continue;
-    const before = line.slice(0, i);
-    if ((before.match(/"/g)?.length ?? 0) % 2 || (before.match(/`/g)?.length ?? 0) % 2) continue;
-    out.push(line.slice(i + 2));
+    for (let i = line.indexOf("//"); i >= 0; i = line.indexOf("//", i + 2)) {
+      if (line[i - 1] === ":") continue; // a URL's own slashes; the comment may still follow
+      const before = line.slice(0, i);
+      if ((before.match(/"/g)?.length ?? 0) % 2 || (before.match(/`/g)?.length ?? 0) % 2) continue;
+      out.push(line.slice(i + 2));
+      break;
+    }
   }
   return out.join("\n");
 }
@@ -441,6 +451,22 @@ describe("docs describe the code that exists", () => {
     );
   });
 
+  it("reads a comment that shares its line with a URL", () => {
+    // The check above is only as honest as `commentsOf`, and its failure direction is toward
+    // PASSING — a comment it drops is a citation nobody verifies. Fixtures, because both
+    // directions are invisible while every real file happens to be arranged conveniently.
+    //
+    // Direction 1 — the catch. Bailing on the whole line at a URL's `//` hid a fabricated
+    // citation written after one: verified by mutation in engine/metro.ts, 15/15 green.
+    assert.match(commentsOf(`const u = "http://example.com"; // \`preview.test.ts\` "nope"\n`), /preview\.test\.ts/);
+    assert.match(commentsOf(`const s = "a//b"; // \`preview.test.ts\` "nope"\n`), /preview\.test\.ts/);
+    // Direction 2 — a URL is not a comment, and neither is a `//` inside a string. Reporting
+    // one is a false red on ordinary code, which is how a guardrail gets switched off wholesale.
+    assert.equal(commentsOf(`const u = "http://example.com";\n`), "");
+    assert.equal(commentsOf(`const s = "a//b";\n`), "");
+    assert.match(commentsOf(`// see http://example.com\n`), /see http:\/\/example\.com/);
+  });
+
   it("only tells people to run deckhand commands that exist", () => {
     // Principle 1: an instruction that cannot be followed is worse than none, because the
     // reader assumes the mistake is theirs. It happened three times in one day — `deckhand`
@@ -496,6 +522,10 @@ describe("docs describe the code that exists", () => {
         /(?:^|\n) {2,4}deckhand ([a-z-]+)(?=\s|$)/g,
         // Unanchored, unlike the one above it: this output is written as `say("   1.  deckhand
         // …")`, so the "line" the check reads starts with the call, not with the indent.
+        // Limit of the two unbackticked shapes, stated rather than widened: the verb must be
+        // followed by whitespace or end-of-FILE, so a step whose verb is the last thing in its
+        // string literal — `say("   1.  deckhand nosuchverb")` — is not read as a command at all.
+        // Verified by mutation; no printed step is written that way today.
         /\d+\.\s{1,4}deckhand ([a-z-]+)(?=\s|$)/g,
       ];
       for (const m of shapes.flatMap((re) => [...body.matchAll(re)])) {

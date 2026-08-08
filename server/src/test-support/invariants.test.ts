@@ -59,6 +59,32 @@ const read = (f: string) => readFileSync(f, "utf8");
 const rel = (f: string) => f.slice(REPO.length + 1);
 
 /**
+ * The index just past the `)` closing the call whose `(` is at `from`, or -1 if it never closes.
+ *
+ * Balanced, not `[^)]*`: an args list may contain a call of its own, and `cli/setup.ts` already
+ * writes one. Verified by mutation — `deckhandCli(["doctor", String(port)]).out.includes(…)`
+ * passed "never branches on the text of deckhand's own output" while the same line without the
+ * nested call failed it.
+ * → "never branches on the text of deckhand's own output"
+ */
+function endOfCall(src: string, from: number): number {
+  let depth = 0;
+  for (let i = from; i < src.length; i++) {
+    const c = src[i]!;
+    if (c === '"' || c === "'" || c === "`") {
+      for (i++; i < src.length && src[i] !== c; i++) if (src[i] === "\\") i++;
+      continue;
+    }
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") {
+      depth--;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return -1;
+}
+
+/**
  * The TOP-LEVEL text of an object literal starting at `from` (whitespace allowed before the
  * `{`), with every nested `{}`/`[]`/`()` group and every string body blanked out. Returns null
  * when the argument is not an object literal at all, which the caller treats as a finding
@@ -113,6 +139,20 @@ function topLevelOptions(src: string, from: number): string | null {
 // to avoid the rule" is not a rule, and it is the same argument that widened the detached-spawn
 // and backend-import patterns.
 const NEW_WSS = /new\s+WebSocketServer\s*(?:<[^<>()]*>)?\s*\(/g;
+
+// A port is set two ways, and only one of them carries a colon. `{ port }` — ES6 shorthand, and
+// the commonest spelling of the wildcard bind PLAN §11 item 1 bans — has none, so `/\bport\s*:/`
+// read it as "no port here" and passed. Verified by mutation: `new WebSocketServer({ port })` in
+// streaming/backend.ts left this file 25/25 green.
+//
+// The shorthand half is anchored to `{` or `,` and must reach `,` or `}` without a colon, so a
+// VALUE named port (`handleProtocols: port`) is not read as a key. Both are applied to
+// `topLevelOptions`' output, where nested groups are already blanked.
+const HAS_PORT = /\bport\s*:|[{,]\s*port\s*(?=[,}])/;
+// `{ ...opts }` hides the key one level further away, and nothing here can say what is in it.
+// Refused for the same reason `new WebSocketServer(opts)` is refused rather than skipped: an
+// unreadable options object must be a finding, not a pass.
+const SPREAD_INTO_OPTIONS = /\.\.\./;
 
 /** The options text of every `new WebSocketServer(` in `src`, in order; null where not a literal. */
 function webSocketServerOptions(src: string): (string | null)[] {
@@ -333,7 +373,13 @@ describe("PLAN §11 — security model", () => {
             `check cannot read its port or host. Pass the options inline — PLAN §11 item 1 is not opt-out-able ` +
             `by moving the object to a variable.`,
         );
-        if (!/\bport\s*:/.test(opts!)) continue;
+        assert.doesNotMatch(
+          opts!,
+          SPREAD_INTO_OPTIONS,
+          `${rel(file)} spreads into a WebSocketServer's options, so this check cannot tell whether a port is ` +
+            `set — PLAN §11 item 1. List the options inline.`,
+        );
+        if (!HAS_PORT.test(opts!)) continue;
         assert.match(
           opts!,
           /\bhost\s*:\s*"127\.0\.0\.1"/,
@@ -380,6 +426,26 @@ describe("PLAN §11 — security model", () => {
     // scan — no entry at all, so not even the null above. A rule you can step around by
     // writing the same call differently is not a rule.
     assert.deepEqual(webSocketServerOptions(`new WebSocketServer<Foo>({ port: 9999 })`), ["{ port: 9999 }"]);
+  });
+
+  it("reads a port set by shorthand, and refuses a spread it cannot read", () => {
+    // The test above asserts only about the READER, and every shape in it was one the port
+    // detector already handled — so it read as coverage of the check while the detector itself
+    // was untested. It was also wrong: `{ port }` passed.
+    const opts = (src: string) => webSocketServerOptions(src)[0]!;
+    // Direction 1 — the shapes that must fire.
+    assert.match(opts(`new WebSocketServer({ port })`), HAS_PORT);
+    assert.match(opts(`new WebSocketServer({ noServer: true, port })`), HAS_PORT);
+    assert.match(opts(`new WebSocketServer({\n  port,\n  host: h,\n})`), HAS_PORT);
+    assert.match(opts(`new WebSocketServer({ ...opts })`), SPREAD_INTO_OPTIONS);
+    // Direction 2 — correct code must not fire, or the check gets switched off wholesale.
+    assert.doesNotMatch(opts(`new WebSocketServer({ noServer: true })`), HAS_PORT);
+    assert.doesNotMatch(opts(`new WebSocketServer({ noServer: true })`), SPREAD_INTO_OPTIONS);
+    // A value named `port` is not a port key, and neither is a longer word ending in one.
+    assert.doesNotMatch(opts(`new WebSocketServer({ noServer: true, handleProtocols: port })`), HAS_PORT);
+    assert.doesNotMatch(opts(`new WebSocketServer({ transport: t })`), HAS_PORT);
+    // Shorthand one level down is not this constructor's port either — it is already blanked.
+    assert.doesNotMatch(opts(`new WebSocketServer({ noServer: true, foo: { port } })`), HAS_PORT);
   });
 
   it("keeps secrets out of the MCP surface", () => {
@@ -508,6 +574,10 @@ describe("deckhand ships nothing about one particular install", () => {
     // outside the walk while this check's message said "shipped code and docs" — mutation put
     // a hostname in `viewer/index.html`, in `scripts/review-receipt.ts` and in an `ops/`
     // shell script, and all three passed.
+    // The gap that remains, stated because the message below is broader than the walk: files at
+    // the REPO ROOT and under `.github/` are read by no root here, so a hostname in the root
+    // `package.json` or in `.github/workflows/ci.yml` passes. Verified by mutation. Every `.md`
+    // anywhere is covered by the second loop, which is where the historical leaks lived.
     // `withFileTypes`, and skipping symlinks rather than following them: a git worktree carries
     // a DANGLING `server/node_modules` symlink, and `statSync` on it throws — the walk died
     // with ENOENT instead of reporting anything, which is a check that fails for a reason
@@ -561,6 +631,13 @@ describe("deckhand ships nothing about one particular install", () => {
  * direction is toward PASSING: an offender sharing a line with a URL disappears
  * along with the "comment". So this walks the source instead, and a `//` or a
  * block opener inside a quoted string is left alone.
+ *
+ * It does not lex REGEX LITERALS — the same limit `topLevelOptions` and `test-support/
+ * toolNames.ts` state — so a regex holding an odd number of `"`, `'` or `` ` `` opens a string
+ * here that the source never opened, and everything to the next matching quote is copied as if
+ * it were a literal. That desyncs toward PASSING, which is the direction that costs. Latent, not
+ * theoretical: probed across every top-level statement boundary in the 55 files this walks, all
+ * were still found — but a future regex is one edit away from breaking it silently.
  * → "puts no credential in an MCP route path", which plants exactly that.
  */
 function stripComments(src: string): string {
@@ -927,8 +1004,24 @@ describe("setup decides on state, not on its own prose", () => {
     // So: the output may be an ARGUMENT to something that shows it. Anywhere else — a condition, a
     // comparison, an intermediate variable, a ternary — is a finding, however it is spelt or
     // wrapped across lines.
-    const captures = [...src.matchAll(/(?:const|let)\s+(\w+)\s*=\s*deckhandCli\(/g)].map((m) => ({ name: m[1]!, at: m.index }));
+    const captures = [...src.matchAll(/(?:const|let)\s+(\w+)\s*=\s*deckhandCli\s*\(/g)].map((m) => ({ name: m[1]!, at: m.index }));
     assert.ok(captures.length > 0, "no `deckhandCli` result is captured — this check has lost its subject");
+    // Rebinding is the rule stepped around by writing it differently: `const res = doctor;` gives
+    // the result a name nothing below has seen, and `res.out.includes(…)` then passed. Each pass
+    // follows one hop, so a chain closes too. The limit that stays, because a text scan cannot do
+    // better: a result reaching a name any OTHER way — a parameter, an array element, a property
+    // — is still invisible to this check.
+    const seen = new Set(captures.map((c) => `${c.name}@${c.at}`));
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const m of src.matchAll(/(?:const|let)\s+(\w+)\s*=\s*(\w+)\s*;/g)) {
+        const key = `${m[1]}@${m.index}`;
+        if (seen.has(key) || !captures.some((c) => c.name === m[2]! && c.at < m.index)) continue;
+        seen.add(key);
+        captures.push({ name: m[1]!, at: m.index });
+        grew = true;
+      }
+    }
     const SINK = /(?:say|info|ok|step|console\.(?:log|error)|process\.stdout\.write|new\s+SetupError)\s*$/;
 
     /** Is this offset inside the argument list of something that only displays its argument? */
@@ -976,7 +1069,11 @@ describe("setup decides on state, not on its own prose", () => {
       if (!displayed(m.index)) offences.push(`setup.ts:${lineOf(m.index)}`);
     }
     // An inline `deckhandCli([...]).out` captures nothing, so the loop above cannot see it.
-    for (const m of src.matchAll(/deckhandCli\([^)]*\)\s*\.out\b/g)) {
+    // Brace-BALANCED via `endOfCall`, not `deckhandCli\([^)]*\)`: that stopped at the first `)`,
+    // and setup.ts already writes an args list containing a nested call, so the shape was live.
+    for (const m of src.matchAll(/deckhandCli\s*\(/g)) {
+      const end = endOfCall(src, m.index + m[0].length - 1);
+      if (end < 0 || !/^\s*\.out\b/.test(src.slice(end, end + 16))) continue;
       if (!displayed(m.index)) offences.push(`setup.ts:${lineOf(m.index)}`);
     }
     assert.deepEqual(
