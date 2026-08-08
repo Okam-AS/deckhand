@@ -141,6 +141,10 @@ itself. Two rules keep the curve attached to the code:
   Then say what would justify one: the change is wrong, a test passes for the wrong reason
   (mutate the line and check), a comment states something false beside the code, a rule in
   `.claude/rules/` is weakened.
+- **Check `git branch --show-current` before you record the round.** A reviewer that checked
+  out the diff may leave the tree somewhere else, and the receipt is written for whatever
+  branch you are standing on — a round recorded from `main` lands in `main`'s receipt, where
+  it counts for nothing and has to be deleted by hand.
 
   A two-file pairing fix cost four cold rounds this way on 2026-08-08 — one for untested
   tests, three for angles the briefs supplied.
