@@ -95,7 +95,8 @@ contract in PLAN §6 is built; what §6 still names as unbuilt, it names in plac
 to physical hardware (`list_devices` reports `physical` but `targetable` is always false)
 and the `metro`/`app` `logs` sources, which are accepted and capture nothing. Outside §6,
 PLAN §11 item 7's host hygiene (dedicated macOS user, no personal credentials, FileVault) is
-documented nowhere: `ops/README.md` covers the LaunchAgents and not that.
+stated in PLAN and in no RUNBOOK: nothing tells an operator how to set it up or how to check
+it holds, and `ops/README.md` covers the LaunchAgents and not that.
 
 If you are here to **implement further**, your instructions are:
 
@@ -113,7 +114,8 @@ If you are here to **implement further**, your instructions are:
    rule not covered by `npm run ci` or the guardrails.
 4. The streaming layer is **decided** (PLAN.md §2/§8): iOS via **serve-sim** — its
    H.264 path is `stream.avcc` over a long-lived **chunked HTTP** response decoded with
-   WebCodecs, NOT a WebSocket (the WebSocket carries HID input only). A browser with
+   WebCodecs, NOT a WebSocket (the WebSocket carries **no video** — HID input up, and a
+   size/orientation config frame down, which deckhand's viewer ignores). A browser with
    WebCodecs probes avcc and reads a 404 as "use `stream.mjpeg`"; one without starts on
    MJPEG and never probes. Either way it is a runtime answer about this machine,
    never a claim written down in advance about what serve-sim can do. Android via
@@ -132,7 +134,8 @@ Non-negotiables while implementing:
   dependencies without a strong reason. When in doubt, re-read PLAN.md §2.
 - Security invariants (PLAN.md §11) are acceptance criteria, not suggestions — especially:
   loopback-only binding, no credentialless path to a device or a repo (PLAN §11 item 1
-  names the four open-by-construction OAuth endpoints), no secrets through MCP, tokens never in
+  tabulates the seven open-by-construction OAuth handlers and what stands in front of each —
+  count them against `server/src/oauth/router.ts` before you trust the list), no secrets through MCP, tokens never in
   argv/URLs/logs.
 - Structured, actionable MCP errors: the model relaying the error to a human must be able
   to say exactly what to do next.
