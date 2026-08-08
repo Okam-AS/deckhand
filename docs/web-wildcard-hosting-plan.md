@@ -109,7 +109,7 @@ http://127.0.0.1:<devPort>/   (the framework's dev server, bound loopback, no --
   or an undetected `web` app) or `subdomain` (Nuxt/Next). The result is recorded on the
   preview record as `webFramework`. `static` is declared but unreachable — no detector
   returns it and nothing serves a built `dist/`.
-- Readiness: the same HTTP-200 probe (`WebBackend`), against `http://127.0.0.1:<p>/` with
+- Readiness: the same readiness probe — any HTTP answer counts, so a 404 from a warming framework reads as ready (`WebBackend`), against `http://127.0.0.1:<p>/` with
   an empty base path.
 
 ### 4. Reverse proxy (share/proxy.ts)

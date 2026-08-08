@@ -365,8 +365,10 @@ export function nativescriptDevRun(platform: "ios" | "android", deviceHandle: st
  *   --port <p>        pins the port deckhand allocated
  *   --base <base>     serves every asset URL under the share path, so the reverse
  *                     proxy (and Vite's own HMR socket) sit under /s/<shareId>/web/
- * `base` must end with a slash (Vite requirement). Vite-first; other bundlers
- * (Next.js basePath, etc.) are a documented follow-up behind the same seam.
+ * `base` must end with a slash (Vite requirement). This is the PATH hosting mode, and
+ * it is Vite-only by construction — a framework that cannot take its base at runtime
+ * is hosted at the root of a per-share subdomain instead (`webHostingMode` in
+ * `detect.ts`), which is how Nuxt and Next ship today rather than as a follow-up.
  */
 export function webDevRun(devScript: string, base: string, port: number): { command: string; args: string[] } {
   return {
