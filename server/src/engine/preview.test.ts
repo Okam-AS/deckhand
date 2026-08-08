@@ -1690,8 +1690,9 @@ describe("PreviewEngine idle sweep", () => {
 
   it("keeps device ids unique and ordered when one is added later", async () => {
     // Ids are how a viewer pane addresses a stream, so a repeat would point a pane at the
-    // wrong device with both ends agreeing on the name. Safe today only because a device is
-    // never removed from a live preview; see the note in addDevices if that changes.
+    // wrong device with both ends agreeing on the name. This covers the add-only case; the
+    // remove-then-add case is the test below, and the note in addDevices says what actually
+    // keeps two live ids apart.
     const h = makeEngine({ config: { ...config, limits: { ...config.limits, maxTotalDevices: 6 } } });
     h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }, { platform: "ios" }], access: "public" });
     await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
@@ -1699,6 +1700,39 @@ describe("PreviewEngine idle sweep", () => {
     const ids = h.engine.getStatus("pv1")!.devices.map((d) => d.deviceId);
     assert.deepEqual(ids, ["ios-0", "ios-1", "android-2"]);
     assert.equal(new Set(ids).size, ids.length, "no id may repeat");
+  });
+
+  it("keeps live device ids unique across a remove and a re-add", async () => {
+    // addDevices indexes off the CURRENT length, and removeDevices shrinks it — so the index
+    // alone does not make an id unique. What does is the only caller: startPreview passes
+    // missingPlatforms(), so an added device's platform has nothing live to collide with, and
+    // the platform is part of the id. Assert the property, not the arithmetic: a second caller
+    // that skips the platform filter must fail here.
+    //
+    // Note what is NOT asserted, because it is true today: the re-added android device gets
+    // the retired id back. A viewer pane still holding the old one addresses the new device.
+    const lim = { config: { ...config, limits: { ...config.limits, maxTotalDevices: 6 } } };
+
+    // Two of one platform: the index alone would hand ios-1 out twice.
+    const same = makeEngine(lim);
+    const twoIos = { app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }, { platform: "ios" }], access: "public" } as const;
+    same.engine.startPreview({ ...twoIos });
+    await waitForPhase(same.engine, "pv1", ["ready", "failed"]);
+    await same.engine.removeDevices("pv1", ["ios-0"]);
+    same.engine.startPreview({ ...twoIos }); // idempotent start → addDevices, if anything is missing
+    const ids = same.engine.getStatus("pv1")!.devices.map((d) => d.deviceId);
+    assert.equal(new Set(ids).size, ids.length, "no two LIVE devices may share an id");
+    assert.deepEqual(ids, ["ios-1"], "ios is already live, so nothing is added");
+
+    // Across platforms: the retired id IS handed back. Asserted so the re-mint is a decision
+    // on the record rather than a surprise.
+    const cross = makeEngine(lim);
+    const both = { ...twoIos, devices: [{ platform: "ios" }, { platform: "android" }] } as const;
+    cross.engine.startPreview({ ...both });
+    await waitForPhase(cross.engine, "pv1", ["ready", "failed"]);
+    await cross.engine.removeDevices("pv1", ["android-1"]);
+    cross.engine.startPreview({ ...both });
+    assert.deepEqual(cross.engine.getStatus("pv1")!.devices.map((d) => d.deviceId), ["ios-0", "android-1"]);
   });
 
   it("refuses to add beyond the machine's device budget, and says which limit", async () => {

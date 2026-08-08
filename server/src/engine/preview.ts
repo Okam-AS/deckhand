@@ -847,8 +847,12 @@ export class PreviewEngine {
    * refused once a second, silently). The unlock route uses this to mint each
    * partner's cookie too.
    *
-   * Symmetric on purpose: whichever pane the viewer is opened from has to
-   * unlock the others.
+   * FORWARD ONLY, and that direction is a security property rather than an
+   * omission: a page mints for the panes it renders, and a pane never mints for
+   * the page holding it. Panes are keyed by CONTENT, so two pages naming the
+   * same source share one pane — the note in the body says what the reverse
+   * direction cost. → `preview.test.ts` "mints a page's panes, and never the
+   * other way round".
    */
   pairedShareIds(shareId: string): string[] {
     const out = new Set<string>();
@@ -1297,13 +1301,19 @@ export class PreviewEngine {
       );
     }
 
-    // Index off the current length, which is safe ONLY because a device is never removed
-    // from a live preview — they go away with the whole preview or not at all. If per-device
-    // removal is ever added, this silently starts reusing ids, and a device id is how a viewer
-    // pane addresses a stream: both ends would agree on the name and disagree about the
-    // device. Indexing off the highest id instead is one line, and it is deliberately NOT
-    // here, because with no removal there is no input that tells the two apart and a guard no
-    // test can fail is not a guard.
+    // Index off the current length. Devices ARE removed one at a time now
+    // (`removeDevices`, reached from the `stop_device` tool), so the index is not unique over
+    // a preview's lifetime: remove `android-1` from an ios+android preview, ask for android
+    // again, and the new device is called `android-1` too. A RETIRED ID CAN BE RE-MINTED —
+    // anything holding an old device id (a viewer pane that has not reloaded) will address the
+    // new device by the old name.
+    //
+    // What still keeps two LIVE devices from sharing an id is not the index but the shape of
+    // the only caller: startPreview passes `missingPlatforms()`, so every spec here is for a
+    // platform with nothing live to collide with, and the id carries the platform. A second
+    // caller that does not filter by platform breaks that immediately — index off the highest
+    // existing id instead of adding one. → `preview.test.ts` "keeps live device ids unique
+    // across a remove and a re-add".
     const added = specs.map((spec, i) => newLiveDevice(spec, p.devices.length + i));
     p.devices.push(...added);
     this.persist();
@@ -2922,7 +2932,13 @@ export class PreviewEngine {
    * Clear out whatever the previous process left behind. Deckhand's devices do
    * not survive its own exit — a crash or a plain `serve` restart orphans every
    * booted simulator, emulator and helper it owned, and nothing ever collected
-   * them. Called once, before the server starts listening.
+   * them.
+   *
+   * Called once per boot, but AFTER the HTTP port is bound (see `server.ts`) —
+   * the bind is what proves we are the only server, so a second `deckhand
+   * serve` dies on EADDRINUSE before it can delete this one's devices. Every
+   * sweep below therefore has to spare what is live RIGHT NOW: a `start_preview`
+   * can land in the seconds between the bind and here.
    */
   async reapOrphans(): Promise<{ sims: number; avds: number; previews: number }> {
     const stale = this.d.store.load().previews.filter((p) => p.phase !== "stopped");

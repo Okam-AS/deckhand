@@ -103,18 +103,27 @@ export class Reaper {
    * Kill processes left behind by a previous deckhand, identified by an env
    * marker it stamps on its own.
    *
-   * Used for two things that are spawned `detached` and so outlive the server:
-   * Metro (leaked one per restart until the 8081-8099 range was full) and the
+   * Used for the things spawned `detached` that outlive the server: Metro
+   * (leaked one per restart until the 8081-8099 range was full), the
    * NativeScript livesync runners (36 orphans at 418% CPU, measured — which
-   * starved the CPU-bound Android emulators while native iOS stayed fine).
+   * starved the CPU-bound Android emulators while native iOS stayed fine), and
+   * build steps (xcodebuild/gradle reparented to launchd by a restart).
    *
    * Identified by the ENV marker, never by argv: the developer's own
    * `expo start` or `ns run` looks identical from the outside, and killing that
    * would be the emulator-hijack mistake in another costume.
    *
-   * Called at boot only, before anything is owned, so every marked process
-   * found is by definition an orphan. `keepPids` exists for callers that run it
-   * later.
+   * `keepPids` is NOT optional in practice, and deleting it at the call sites
+   * kills live work. The one caller (`PreviewEngine.reapOrphans`) runs at boot
+   * but AFTER the HTTP port is bound — deliberately, because the bind is what
+   * proves only one server is running: a second `deckhand serve` has to die on
+   * EADDRINUSE before it can delete the running server's devices. That ordering
+   * leaves seconds in which an agent's `start_preview` lands, and its
+   * brand-new Metro / livesync / xcodebuild carries the very marker this hunts
+   * for. So a marked process is an orphan only once the caller's live pids are
+   * excluded. → `preview.test.ts` "spares its own live processes when reaping
+   * orphans by marker" (Metro and livesync; the build keep-set is not asserted
+   * there).
    */
   async reapOrphansByMarker(marker: string, keepPids: Iterable<number> = []): Promise<number[]> {
     const keep = new Set(keepPids);
