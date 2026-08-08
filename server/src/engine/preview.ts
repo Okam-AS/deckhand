@@ -3011,7 +3011,11 @@ export class PreviewEngine {
         // between reading it and acting on it widens that window. (Putting the
         // Metro reap ahead of it did exactly that, and the in-flight test caught
         // it.) Metro and devices are independent, so order costs nothing here.
-        const devices = await reaper.reap(this.liveDeviceHandles());
+        // Lazily, not by value: `reap` awaits a shutdown and a delete per orphan, and the boot
+        // sweep runs AFTER the port is bound on purpose — so a `start_preview` can create a
+        // device between the read and the kill. Passing the reader lets it re-check at each
+        // destructive call instead of diffing against a set from before the awaits.
+        const devices = await reaper.reap(() => this.liveDeviceHandles());
         // Metro AND the livesync runners: both are spawned detached and tracked
         // only in memory, so both were reparented to launchd on every restart.
         // The livesync leak was the worse of the two by far — 36 orphans at 418%
@@ -3343,15 +3347,20 @@ export class PreviewEngine {
       // shape boots it again instead of paying for a create (and, on Android, a
       // fresh ~2 GB AVD image) every single time.
       const pooled = dev.poolName != null;
+      let stoppedCleanly = true;
       if (dev.record.platform === "android") {
+        // `shutdown` answers whether the device actually went away. It matters here and
+        // nowhere else: deleting the AVD takes its NAME out of `listAvds()`, and that name is
+        // the only thing `pkill -f "avd <name>"` in the reaper has to go on. Delete after a
+        // failed shutdown and a live QEMU is left with no collector — the 418%-CPU class.
         if (dev.record.serial) {
-          await this.android().shutdown(dev.record.serial).catch(() => {});
+          stoppedCleanly = await this.android().shutdown(dev.record.serial).catch(() => false);
           this.androidPorts.delete(portForSerial(dev.record.serial));
         }
         // Reserved before the boot, so it must be freed even when no serial ever
         // came back (boot timeout, emulator crash).
         if (dev.androidPort != null) this.androidPorts.delete(dev.androidPort);
-        if (dev.record.udid && !pooled) await this.android().deleteAvd(dev.record.udid).catch(() => {}); // udid holds the AVD name
+        if (dev.record.udid && !pooled && stoppedCleanly) await this.android().deleteAvd(dev.record.udid).catch(() => {}); // udid holds the AVD name
       } else if (dev.record.udid) {
         await this.d.simctl.shutdown(dev.record.udid).catch(() => {});
         if (!pooled) await this.d.simctl.delete(dev.record.udid).catch(() => {});

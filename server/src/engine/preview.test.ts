@@ -2078,8 +2078,11 @@ describe("PreviewEngine idle sweep", () => {
     const h = makeEngine({
       config: { ...config, limits: { ...config.limits, reuseDevices: false } },
       reaper: fakeReaper({
-        reap: async (keep: typeof keepSeen = {}) => {
-          keepSeen = keep;
+        // `reap` takes the handles LAZILY now, so it can re-read them before each destructive
+        // call. What arrives here is the reader, not a snapshot — calling it is the point, and
+        // a fake that just recorded the argument would record a function and assert nothing.
+        reap: async (keep: typeof keepSeen | (() => typeof keepSeen) = {}) => {
+          keepSeen = typeof keep === "function" ? keep() : keep;
           return { sims: [], avds: [], keptPooled: [] };
         },
       }),
