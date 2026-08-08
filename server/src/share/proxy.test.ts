@@ -612,9 +612,11 @@ describe("PIN gate (path-based share)", () => {
   });
 
   it("does not mint a partner cookie for a PUBLIC share's /state", async () => {
-    // The hole this closes: pairing is symmetric, so /state on the PUBLIC side of
-    // a pair used to hand any anonymous caller an unlock cookie for the
-    // PIN-protected share — the whole PIN bypassed with just the public link.
+    // The hole this closes: /state on the PUBLIC side of a pair used to hand any
+    // anonymous caller an unlock cookie for the PIN-protected share — the whole
+    // PIN bypassed with just the public link. This route sees a SET of partner
+    // ids, not which way the pairing runs, so it cannot lean on `pairedShareIds`
+    // being forward only; it has to refuse on its own.
     // (When it was found, every extra pane was booted public by construction.
     // Panes take the page's access now; the guard never rested on that, and this
     // is still what /state itself must refuse.)

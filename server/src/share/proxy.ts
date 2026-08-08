@@ -510,8 +510,11 @@ export function createShareRouter(deps: ShareDeps): express.Router {
     // A pane takes the PAGE's access and its synthetic app id is keyed by access
     // class, so a public page and a PIN-protected one never land on the same
     // pane (`bootReference`, mcp/tools.ts). That is a property of the caller
-    // and is NOT what makes this safe — pairing is symmetric and this route
-    // cannot see how a pair was formed, so the check has to stand on its own.
+    // and is NOT what makes this safe: this route cannot see how a pair was
+    // formed, so the check has to stand on its own. Do NOT reach for symmetry
+    // to justify it — `pairedShareIds` is forward only on purpose (a page mints
+    // for its panes, never a pane for its page, `engine/preview.ts`), and
+    // believing it symmetric is what the cross-page bypass was built on.
     // → `proxy.test.ts` "does not mint a partner cookie for a PUBLIC share's /state"
     if (info.required) {
       // The `allowed` term is belt-and-braces, not an optimisation: each
