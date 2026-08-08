@@ -424,8 +424,10 @@ env-signature; restart only when env changes or health (`GET /status`) fails. En
   AVD via `avdmanager create avd --force --name deckhand_<...> --package <sysimg>` (the
   lowercase `deckhand_` prefix is `AVD_PREFIX`, and the orphan sweep selects on it — an AVD
   named anything else is never reaped); **deckhand
-  boots the emulator itself**: `emulator -avd <name> -no-audio -no-boot-anim` (headless flags
-  per the P2 evaluation; keep GPU on for rendering), wait for `adb wait-for-device` +
+  boots the emulator itself**: `emulator -avd <name> -no-window -gpu host`, plus
+  `-no-audio -no-boot-anim -no-snapshot`. Windowless but NOT software-rendered — dropping
+  `-gpu host` is what makes a headless emulator expensive, and `android.ts` carries the
+  measurement that settled it. Wait for `adb wait-for-device` +
   `sys.boot_completed=1`. The serial is deterministic from the console port deckhand assigns
   (`emulator-<port>`). Install with `ANDROID_SERIAL=<serial>`.
 - Tool env resolution (JAVA_HOME/ANDROID_HOME/PATH) is fiddly on macOS — port the approach
@@ -872,8 +874,13 @@ and a tool added later cannot forget it. One tool goes around the funnel:
 `screenshot` returns an image content block with nowhere to put JSON, so it
 carries no notice, and `mcp/responses.test.ts` keeps it the only one.
 
-It speaks only for a clean checkout on `main`. A feature branch or a dirty tree
-gets a factual note, never an update prompt.
+The two states are gated differently. `pull-and-restart` compares the checkout to
+`origin/main` and speaks **only** for a clean checkout on `main`, because a feature
+branch is not out of date. `restart` compares the sha this process booted on against
+the sha on disk, so it fires on any branch and on a dirty tree — running code being
+stale is true regardless. `version.ts` does compose a factual note for an off-`main`
+or dirty checkout, but `ok()` ships a note only alongside a `deckhandUpdate`, so that
+note never reaches a tool response.
 
 **Never automatic.** Updating means restarting, and a restart tears down every
 booted simulator on the machine. The tool reports; the human decides.

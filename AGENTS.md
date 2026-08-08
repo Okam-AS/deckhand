@@ -472,18 +472,22 @@ from a question:
 - **BLOCKED** — also relay-and-stop, but an errand off this machine: a browser and
   their Cloudflare account. **Never attempt these**; `cloudflared tunnel login`
   opens a browser and will hang you forever, and retrying changes nothing.
-- **ASK THE USER** — an input, not an obstacle. Ask the one question in the words
-  given, take the answer, and carry on yourself.
+- **ASK THE USER** — an input, not an obstacle. Ask each question in the words
+  given, take the answers, and carry on yourself. There is more than one: a fresh
+  install asks for the hostname and, marked `(optional)`, a second hostname for web
+  previews.
 
 `fix:` is the only one of the four you may run. The other three are the user's, and
 the two labels that look alike differ only in where the work happens — say `you:`
 items as the local chores they are, rather than reporting them as blocked.
 
 **Do not paste the report at the user.** When nothing is missing and nothing is
-blocked, the only thing left is one answer — so ask one question. An agent that
-files a status report there has turned a ten-second exchange into a puzzle.
+blocked, the only thing left is the ASK THE USER questions — so ask those, and
+nothing else. An agent that files a status report there has turned a ten-second
+exchange into a puzzle.
 
-Then run `setup --hostname <their answer>`. It does the rest — tunnel, DNS, the cloudflared config
+Then run `setup --hostname <their answer>` (adding `--web-host <their answer>` if
+they wanted web previews). It does the rest — tunnel, DNS, the cloudflared config
 (merged, never overwritten), the `deckhand` command, the LaunchAgents, doctor —
 and is safe to re-run, so it is also the repair tool.
 
