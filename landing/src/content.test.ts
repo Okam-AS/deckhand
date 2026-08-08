@@ -27,7 +27,9 @@ test("v2 pricing keeps the approved commercial model with one universal trial", 
 // (CONSTITUTION.md "Who it is for"), so no plan may sell a shared one.
 test("no plan sells a team, a seat or shared access", () => {
   const sold = JSON.stringify([content.paidPricingPlans, content.trialOffer, content.productFacts]);
-  assert.doesNotMatch(sold, /team|seat|shared|colleagues/i);
+  // Anchored: unanchored this also fired on "steam", "seated" and "unshared", and a check that
+  // goes red on correct copy gets deleted rather than fixed.
+  assert.doesNotMatch(sold, /\b(teams?|seats?|shared|colleagues?)\b/i);
 });
 
 test("local-first product claims stay precise", () => {
