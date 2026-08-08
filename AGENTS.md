@@ -162,6 +162,12 @@ therefore does NOT do the work itself:
    agent's half-finished file into your commit. Stage the exact paths you changed, always. This
    happened twice on 2026-08-07 (`955998e`, `b23a251` each swallowed another agent's in-flight
    file); nothing was lost, but the authorship and the revert boundary were.
+   **`git commit -a`, and a pre-populated index, are the same hazard by another route.** Another
+   agent may have already run `git add` on its own files before you commit, so `git commit -m`
+   with no paths ships them too — that happened again on 2026-08-08 and had to be unpicked with
+   a soft reset. `git commit --only <your paths>` is the form that cannot do it, and it is the
+   one to use in a shared tree. After committing, read `git show --stat` and confirm the file
+   list is yours alone; if it is not, `git reset --soft HEAD~1` and re-commit with `--only`.
 6. **Exceptions the lead agent may do inline:** answering a question, reading/searching to brief
    a subagent, a one-line fix, and the conflict resolution itself.
 
