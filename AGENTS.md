@@ -13,10 +13,16 @@ before engine or viewer code, [auto-mate-learnings](./docs/reference/auto-mate-l
 ## What deckhand is today (iOS + Android, multi-device, local dev mode)
 
 *(What exists, not how it got here. When you change what the system is, change this
-section and PLAN in the same PR.)*
+section and PLAN in the same PR. Deckhand is built: PLAN describes what it IS, so do not
+add a phase list, a risk register or a dated "Validated:" log back to either.)*
 
 PLAN describes the architecture. The invariants that bind every change:
 
+- **The daily dev loop** (PLAN §2): local `path` apps build in place — no worktree, no push,
+  NativeScript as a long-lived livesync process with HMR off — `start_preview` is idempotent,
+  share URLs are stable per app (persisted in state.json), `restart_preview` rebuilds in place
+  (git: fetch+reset; local: re-run) on the same booted devices, named refs always fetch, and
+  the viewer has a Rebuild button for local shares.
 - **A local app's source dir is borrowed, never owned:** never `npm ci`-wiped, never
   removed on teardown, and its git state is deckhand's to read/run, never to write.
   Anything deckhand generates to host the app stays **untracked** — outside the tree, or
@@ -47,15 +53,23 @@ PLAN describes the architecture. The invariants that bind every change:
   Vendor serve-sim's client parsing (Apache-2.0, keep attribution) rather than invent a
   wire format.
 - **Migration is a parity harness, not a diff tool.** Deckhand runs the apps and reads the
-  ledger; the agent judges parity and writes it. No diff tool, no golden snapshots, no
+  ledger; the agent judges parity and writes it. A target app declares `migratesFrom` (the
+  source app id) and the checklist comes from `items` on `start_preview` or from
+  `deckhand.migration.yaml` in the target repo. No diff tool, no golden snapshots, no
   persisted session — deliberately not built.
 - **A page is a set of panes, not a pair** (PLAN §6), and there is no compare view or
-  compare tool. Panes stream from their **own** shareIds, so the streaming seam is
+  compare tool. `start_preview`'s `alongside` puts extra sources on one page — another app,
+  this app at another ref, a worktree, an arbitrary repo, or `{}` for the registered
+  `migratesFrom` — and `shareState` returns `panes[]`; one link, one PIN, `pairedShareIds()`
+  fanning the unlock across them. Panes stream from their **own** shareIds, so the streaming seam is
   untouched. The viewer has ONE stage: `computeStage` in `viewer/src/panes.ts` decides
   grouping and visibility as a pure function, so keep new layout rules there and not in
   `App.tsx`, which has no tests of its own.
-- **Physical devices are OUT** on both platforms; PLAN §2 says why. **Known gap, so do not
-  imply otherwise:** the local (`path`) livesync build path is unvalidated on-device.
+- **Physical devices are OUT** on both platforms; PLAN §2 says why. **Three known gaps, so
+  do not imply otherwise:** the local (`path`) livesync build path is unvalidated on-device,
+  the `metro`/`app` `logs` sources are accepted and capture nothing, and PLAN §11 item 7's
+  host hygiene (dedicated macOS user, no personal credentials, FileVault) is stated in PLAN
+  and in no runbook — nothing tells an operator how to set it up or check it holds.
 
 Non-negotiables while implementing:
 
@@ -63,7 +77,7 @@ Non-negotiables while implementing:
   dependency without a strong reason. In doubt, re-read PLAN §2.
 - Security invariants (PLAN §11) are acceptance criteria: loopback-only binding, no
   credentialless path to a device or a repo (PLAN §11 item 1 tabulates the
-  open-by-construction OAuth handlers — count them against `server/src/oauth/router.ts`
+  seven open-by-construction OAuth handlers — count them against `server/src/oauth/router.ts`
   before you trust the list), no secrets through MCP, tokens never in argv/URLs/logs.
 - Structured, actionable MCP errors: the model relaying one to a human must be able to say
   exactly what to do next.
@@ -72,8 +86,9 @@ Non-negotiables while implementing:
 
 ## Comments
 
-**Anyone reading this code can read code** — the *what* is already on screen. Write a
-comment only when the reader would otherwise be wrong, and keep it to **one line**. Three
+**The default is no comment.** Agents write far too many here — a fix feels like it needs
+its story told beside it, and it does not. Anyone reading this code can read code, so the
+*what* is already on screen. A comment is the exception, it is **one line**, and only three
 reasons qualify:
 
 - A **quirk** — a platform or a dependency behaving unlike its docs.
@@ -97,6 +112,18 @@ Two rules that survive the brevity:
   rots.
 
 When a file you are editing carries narration or changelog notes, delete them as you pass.
+A diff that adds more comment lines than code lines is the signal: cut it back.
+
+**The same applies to every sentence you leave behind** — doc, tool description, test name,
+landing copy — because a reader acts on it without seeing what you saw, and a false map is
+trusted where an absent one is not. Two rules beyond deleting the obsolete claim:
+
+- **Do not restate what you can point at.** Install steps, a dependency's capabilities, a
+  line number, a test count, a file tree: all of these rotted here, one within a day of
+  being written. Point at the command, probe the capability, name the method.
+- **Put the past tense IN the sentence, never only in the heading** — a grep landing does
+  not see the heading. Never delete the example itself: it is the evidence the rule was
+  paid for.
 
 ## HOW WE WORK — the lead agent delegates, it does not code
 
@@ -110,8 +137,9 @@ it does NOT do the work itself:
    into a long edit of its own.
 3. **Conflicts are the lead agent's job** — it decides, or asks the human when the call is
    theirs. Subagents never resolve each other's conflicts.
-4. **Subagents ship their own slice**: each runs the gates for what it touched and reports
-   evidence. The lead agent re-runs the full gate after conflict resolution, since a merge
+4. **Subagents ship their own slice**: each runs the gates for what it touched — `npm run
+   ci`, plus § "Nothing is \"tested\" until this is green" for anything on the device,
+   streaming or control path — and reports evidence. The lead agent re-runs the full gate after conflict resolution, since a merge
    can break what each half proved green.
 5. **Commit per landed slice**, not per batch — a long uncommitted run is how work gets
    lost. **Never `git add -A` / `git add .`**, and never bare `git commit -m` / `git commit
@@ -315,7 +343,8 @@ it distinguishes an errand from a question.
 - `fix: <command>` — yours to run, and **the only one of the four you may run.**
 - `you: <what to do>` — only a person at this Mac can do it (an App Store install, an Apple
   ID, a `sudo` licence accept, the machine's default Node). Relay the line as written and
-  stop; setup is safe to re-run once they say it is done.
+  stop; setup is safe to re-run once they say it is done. Say these as the local chores they
+  are — reporting one as blocked reads as "the install failed".
 - **BLOCKED** — also relay-and-stop, but an errand off this machine: a browser and their
   Cloudflare account. Never attempt these; the Cloudflare tunnel login opens a browser and
   hangs you forever.
@@ -401,7 +430,7 @@ something is unchecked.
 | serve-sim pinned exactly + a matching patch file | A SECURITY control: serve-sim ships `/exec`, reachable from inside the simulator, which shares the host's loopback. `patch-package` strips it; a caret range drifts past the patch |
 | no concrete backend imported outside `streaming/` | PLAN §8's seam. Two composition roots are named explicitly, so the exception is a decision rather than an erosion |
 | every MCP tool wrapped in `audited()` | PLAN §11 item 2. A tool added without it is invisible to the audit trail and nothing else fails |
-| every `.listen()` binds 127.0.0.1, and server.ts has exactly one | PLAN §11 item 1 — a wildcard bind puts the whole MCP surface on the LAN. Every file under `server/src`, plus `new WebSocketServer({ port })`, which opens a socket with no `.listen()`. Two exemptions by file and reason: metro.ts's port probe, and cli.ts's delegation to `createServer().listen()` |
+| every `.listen()` binds 127.0.0.1, and server.ts has exactly one | PLAN §11 item 1 — a wildcard bind puts the whole MCP surface on the LAN. Every file under `server/src`, plus `new WebSocketServer({ port })`, which opens a socket with no `.listen()`. Two exemptions by file and reason: metro.ts's port probe, which must bind every interface to mean anything, and cli.ts's delegation to `createServer().listen()` |
 | the share gate keeps its `i` flag | Express dispatches routes case-insensitively; losing it was a live auth bypass. Checked with comments stripped — quoting the pattern in a comment used to satisfy it |
 | every detached spawn stamps a marker (any `detached:` that is not `false`) | Four resources outlive the server; three leaked, one to 36 orphans at 418% CPU that starved the emulators. An in-memory Map is not an owner |
 | docs name only tools and files that exist | A tool nobody built was documented, and the dead name leaked into a tool *description* — text a model reads as instructions. No "recording history" exemption: these documents describe what exists now |
