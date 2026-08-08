@@ -32,4 +32,21 @@ describe("streamBadge", () => {
     assert.equal(streamBadge("fallback", { ready: false, isThumb: false }), null, "the phase overlay owns a device that is still building");
     assert.equal(streamBadge("fallback", { ready: true, isThumb: true }), null, "a thumbnail is too small to carry a pill");
   });
+
+  // "error" is `scheduleReconnect` giving up after MAX_RECOVERY tries: it sets the
+  // status and returns without arming another timer, so nothing is retrying. The
+  // pill used to read "Connecting…" — a stream that had stopped trying telling the
+  // one person actually waiting on it that it hadn't.
+  it("says the stream stopped once the player has given up, not that it is connecting", () => {
+    assert.equal(streamBadge("error", { ready: true, isThumb: false }), "Stream stopped — reload");
+  });
+
+  it("suppresses the stopped pill in the same places as every other one", () => {
+    // A thumbnail runs a real player (the stream effect is not gated on variant),
+    // so it reaches "error" like any other frame.
+    assert.equal(streamBadge("error", { ready: true, isThumb: true }), null);
+    // The status outlives a device dropping back out of `ready` (a rebuild); the
+    // phase overlay owns the frame then, and two verdicts at once is one too many.
+    assert.equal(streamBadge("error", { ready: false, isThumb: false }), null);
+  });
 });
