@@ -97,10 +97,10 @@ export const PAIR_FORM_SCRIPT = `
   // The code is single-use, so a second POST spends nothing and tells the visitor "invalid code"
   // about a code that just worked. Auto-submit makes that easy to hit: pasting submits, and the
   // hand already on its way to Connect clicks a form that is mid-flight.
-  // Nobody with JS ever clicks this button — the form submits itself — so once it is spent it
-  // stops asking for a click and reports instead. It stays in the markup because it is the only
-  // way to submit with the script broken or switched off, and because implicit submission
-  // (Enter in a single-field form) goes through the form's default button.
+  // Typing or pasting a code submits without the button, so once one is away the button stops
+  // asking for a click and reports instead. It is still load-bearing: it submits with the script
+  // off, implicit submission (Enter in a single-field form) goes through it, and it is the only
+  // way forward for a visitor whose field the browser restored — see the enable above.
   c.form.addEventListener("submit", (e) => {
     if (sent) { e.preventDefault(); return; }
     sent = true;
