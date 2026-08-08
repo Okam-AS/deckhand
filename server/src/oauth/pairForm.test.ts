@@ -49,6 +49,8 @@ class StubInput {
 
 class StubButton {
   disabled = true;
+  /** The markup's label, so a test sees the same starting text a visitor does. */
+  textContent = "Connect";
   constructor(private readonly form: StubForm) {}
 
   click(): void {
@@ -119,10 +121,17 @@ describe("the pairing form", () => {
     assert.equal(form.posts, 1);
   });
 
+  it("reports rather than asks for a click once the code is away", () => {
+    const { input, button } = runForm();
+    input.type("GGE-DYW");
+    assert.equal(button.textContent, "Connecting…", "the button nobody clicks is the only place left to say what is happening");
+  });
+
   it("is usable again when the visitor comes back to a restored page", () => {
     const { input, button, form, window } = runForm();
     input.type("GGE-DYW");
     window.restoreFromBfcache();
+    assert.equal(button.textContent, "Connect", "a restored page is asking again, not still connecting");
     assert.equal(button.disabled, false, "a POST that never landed must not lock the form for good");
     assert.equal(input.readOnly, false);
     button.click();

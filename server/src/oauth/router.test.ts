@@ -153,6 +153,11 @@ describe("OAuth authorization server", () => {
     const asked = [...PAIR_FORM_SCRIPT.matchAll(/getElementById\("([^"]+)"\)/g)].map((m) => m[1]);
     assert.ok(asked.length > 0, "if the script stops looking elements up, this check has stopped checking");
     for (const id of asked) assert.match(html, new RegExp(`id="${id}"`), `the script looks up #${id}`);
+    // The script restores the button's label after a restored page, so that string is the markup's
+    // label in a second place. Drift and a returning visitor is offered a differently-named button.
+    const restored = PAIR_FORM_SCRIPT.match(/b\.textContent = "([^"]+)";\n\s+b\.disabled/)?.[1];
+    assert.ok(restored, "the script no longer restores a label; drop this half of the check with it");
+    assert.match(html, new RegExp(`>${restored}</button>`), "the restored label is the one the page ships with");
   });
 
   it("requires PKCE S256", async () => {
