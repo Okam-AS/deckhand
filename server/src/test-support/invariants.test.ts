@@ -58,12 +58,6 @@ function testFiles(dir = SRC, out: string[] = []): string[] {
 const read = (f: string) => readFileSync(f, "utf8");
 const rel = (f: string) => f.slice(REPO.length + 1);
 
-function allIndexesOf(src: string, needle: string): number[] {
-  const out: number[] = [];
-  for (let i = src.indexOf(needle); i >= 0; i = src.indexOf(needle, i + 1)) out.push(i);
-  return out;
-}
-
 /**
  * The TOP-LEVEL text of an object literal starting at `from` (whitespace allowed before the
  * `{`), with every nested `{}`/`[]`/`()` group and every string body blanked out. Returns null
@@ -113,12 +107,17 @@ function topLevelOptions(src: string, from: number): string | null {
   return null;
 }
 
-const NEW_WSS = "new WebSocketServer(";
+// A pattern, not `indexOf("new WebSocketServer(")`. `ws` is generic, so `new
+// WebSocketServer<Foo>({ port: 9999 })` is legal and the literal match found NO occurrence at
+// all — not even the loud `null` the caller treats as a finding. "Write it slightly differently
+// to avoid the rule" is not a rule, and it is the same argument that widened the detached-spawn
+// and backend-import patterns.
+const NEW_WSS = /new\s+WebSocketServer\s*(?:<[^<>()]*>)?\s*\(/g;
 
 /** The options text of every `new WebSocketServer(` in `src`, in order; null where not a literal. */
 function webSocketServerOptions(src: string): (string | null)[] {
   const stripped = stripComments(src);
-  return allIndexesOf(stripped, NEW_WSS).map((at) => topLevelOptions(stripped, at + NEW_WSS.length));
+  return [...stripped.matchAll(NEW_WSS)].map((m) => topLevelOptions(stripped, m.index + m[0].length));
 }
 
 describe("PLAN §2 — locked decisions", () => {
@@ -289,9 +288,13 @@ describe("PLAN §11 — security model", () => {
       ["server/src/engine/metro.ts", "port-availability probe, bound and closed immediately"],
       ["server/src/cli.ts", "delegates to createServer().listen(); the real bind is in server.ts"],
     ]);
+    // Comments stripped, for the reason the share gate below states: a comment writing
+    // `.listen(port)` — the shape this very rule is explained with — is not a bind, and
+    // reporting it is a FALSE RED on the author who documented the rule. The strip is
+    // string-aware (`stripComments`), so an offender sharing a line with a URL survives it.
     for (const file of sourceFiles()) {
       if (exempt.has(rel(file))) continue;
-      for (const m of read(file).matchAll(/\.listen\(([^)]*)\)/g)) {
+      for (const m of stripComments(read(file)).matchAll(/\.listen\(([^)]*)\)/g)) {
         assert.match(
           m[1]!,
           /"127\.0\.0\.1"/,
@@ -343,7 +346,9 @@ describe("PLAN §11 — security model", () => {
     // (Both directions of the reader itself are pinned by "reads a WebSocketServer's options
     // past a comment" — this loop only sees the two real constructors, so neither the false
     // red nor the catch would show up here.)
-    const listens = [...read(join(SRC, "server.ts")).matchAll(/\.listen\(([^)]*)\)/g)];
+    // Same strip, and here it fails the other way: a comment mentioning `.listen(` in server.ts
+    // makes the count two and reports a second socket that does not exist.
+    const listens = [...stripComments(read(join(SRC, "server.ts"))).matchAll(/\.listen\(([^)]*)\)/g)];
     assert.equal(listens.length, 1, `expected exactly one .listen() in server.ts, found ${listens.length}`);
   });
 
@@ -371,6 +376,10 @@ describe("PLAN §11 — security model", () => {
     assert.doesNotMatch(nested!, /\bport\s*:/);
     // And the escape hatch the null is there to refuse.
     assert.deepEqual(webSocketServerOptions(`new WebSocketServer(opts)`), [null]);
+    // `ws` is generic, and a type argument used to make the constructor invisible to the
+    // scan — no entry at all, so not even the null above. A rule you can step around by
+    // writing the same call differently is not a rule.
+    assert.deepEqual(webSocketServerOptions(`new WebSocketServer<Foo>({ port: 9999 })`), ["{ port: 9999 }"]);
   });
 
   it("keeps secrets out of the MCP surface", () => {
@@ -400,17 +409,20 @@ describe("PLAN §11 — security model", () => {
     // line (this codebase's own comment style) satisfied the assertion from the comment and
     // left the check permanently inert, with no signal. A guardrail that can be disabled by
     // documenting it is worse than none.
-    const src = read(join(SRC, "share", "proxy.ts"))
-      .split("\n")
-      .map((l) => l.replace(/\/\/.*$/, ""))
-      .filter((l) => l.includes("(dev|web|restart)"));
+    const proxy = stripComments(read(join(SRC, "share", "proxy.ts")));
+    const src = proxy.split("\n").filter((l) => l.includes("(dev|web|restart)"));
     assert.ok(src.length, "the share-gate route matcher moved — find it and re-pin this check");
     // The gate must resolve the shareId the way the HANDLERS do. `req.path` is not
     // percent-decoded and `req.params` is, so a gate reading the raw segment authorises a
     // different share than the one it then serves — the third bypass on this seam, after
     // case-sensitivity and pane pairing. All three had the same cause.
+    //
+    // Against the STRIPPED source, like everything else here. Written against the raw file it
+    // was satisfied by a comment naming `decodeURIComponent(m[1]!)` — the same way the `i`-flag
+    // check above was once satisfied from a comment, three lines after the strip that exists
+    // for exactly that, on the seam that has had two auth bypasses.
     assert.match(
-      read(join(SRC, "share", "proxy.ts")),
+      proxy,
       /decodeURIComponent\(m\[1\]/,
       "the share gate must percent-decode the id it authorises, because req.params does and the handlers read that",
     );
@@ -783,7 +795,22 @@ describe("one definition of the gate", () => {
   });
 });
 
+/** Any `detached:` whose value is not literally `false`. → "reads a detached flag past its ordinary spelling" */
+const DETACHED_NOT_FALSE = /detached:(?!\s*false\b)/;
+
 describe("the detached-spawn rule", () => {
+  it("reads a detached flag past its ordinary spelling", () => {
+    // Both directions, on fixtures: the repo has no `detached: false` today, so the false red
+    // that the broken form produced was invisible here — it would have arrived as a red on
+    // whoever next wrote a foreground spawn, which is how a guardrail gets deleted.
+    for (const correct of ["detached: false", "detached:false", "detached:  false,"]) {
+      assert.equal(DETACHED_NOT_FALSE.test(correct), false, `${correct} is a foreground spawn and must not trip the rule`);
+    }
+    for (const caught of ["detached: true", "detached:true", "detached: !opts.foreground", "detached: cfg.bg"]) {
+      assert.equal(DETACHED_NOT_FALSE.test(caught), true, `${caught} must require a marker stamp`);
+    }
+  });
+
   it("marks every long-lived detached spawn so a later boot can collect it", () => {
     // Four resources are spawned detached and outlive the server that owns them;
     // three of them leaked, one to 36 orphans at 418% CPU. An in-memory Map is
@@ -799,14 +826,15 @@ describe("the detached-spawn rule", () => {
     // `detached: true`, the guard was skipped entirely by `detached: !opts.foreground` or by
     // hiding the option in a spread — so the way to avoid the rule was to write the spawn
     // slightly differently, which is not a rule.
-    // The negative lookahead has to swallow the whitespace, not sit behind it: written
-    // `/detached:(?!\s*false\b)/`, `\s*` matches empty, the lookahead then sees `" false"`, and
-    // the ordinary spelling `detached: false` FIRED. Only `detached:false` was exempt. Nothing
-    // in the tree spells it that way today, so this cried wolf at nobody yet — and a guardrail
-    // that fails on correct code gets deleted rather than obeyed, which is the whole loss.
+    // The negative lookahead has to swallow the whitespace, not sit behind it. Written
+    // `/detached:\s*(?!false\b)/` — the broken form — `\s*` backtracks to empty, the lookahead
+    // then sees `" false"`, which is not `false`, and the ordinary spelling `detached: false`
+    // FIRED. Only `detached:false` was exempt. `DETACHED_NOT_FALSE` below is the fixed form and
+    // is pinned by a fixture, because the two spellings differ by one character's position and
+    // a reader who has only the prose reverts to the broken one.
     for (const file of sourceFiles()) {
       const src = read(file);
-      if (!/detached:(?!\s*false\b)/.test(src)) continue;
+      if (!DETACHED_NOT_FALSE.test(src)) continue;
       assert.match(
         src,
         /MARKER_ENV\]:/,
