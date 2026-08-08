@@ -177,7 +177,7 @@ lockfile, and build output nobody committed. `npm run ci` in place cannot see an
 because all of it is present. It refuses to run on a dirty tree for the same reason — CI
 tests what you push.
 
-## 8. The handover — a human opens the PR
+## 8. The handover — you open the PR, from the body the gate wrote
 
 Body carries the reasoning, not a changelog: what was wrong, why this is the fix, what you
 verified, and **what you did not**. Name which check covers which half when a fix has two.
