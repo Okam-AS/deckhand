@@ -225,9 +225,9 @@ describe("AndroidAdbBackend.reapOrphans — recorders left inside the emulator",
 
   it("spares a live preview's device, whether keep names the AVD or the serial", async () => {
     // The boot sweep runs AFTER the port is bound, so a start_preview can be
-    // mid-attach. `keep` carries AVD names on Android (liveDeviceHandles fills
-    // it from record.udid) while the helper map is keyed by serial — reading
-    // only one of the two spares only half the live devices.
+    // mid-attach. `keep` carries both the AVD name and the serial, and EITHER
+    // must spare the device: an emulator that is still booting is in `keep` by
+    // name only, since `record.serial` is not set until it answers adb.
     const byAvd = sweepHarness({ serials: ["emulator-5554"], avds: { "emulator-5554": "deckhand_p1_1" } });
     await byAvd.backend.reapOrphans(new Set(["deckhand_p1_1"]));
     assert.deepEqual(byAvd.killed(), [], "an AVD a live preview holds is not swept");

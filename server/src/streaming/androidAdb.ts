@@ -589,10 +589,11 @@ export class AndroidAdbBackend implements StreamingBackend {
    *      bounds, and a console that will not tell us the name reads as "not
    *      provably ours" — the safe direction.
    *   3. neither the serial nor its AVD name is in `keep`, and no helper of
-   *      ours holds the serial. `keep` carries AVD names on Android
-   *      (`liveDeviceHandles` fills it from `record.udid`) while the helper map
-   *      is keyed by serial, so BOTH have to be consulted; matching one alone
-   *      would spare only half the live devices.
+   *      ours holds the serial. `keep` carries BOTH identifiers, so the serial
+   *      alone would answer for an ATTACHED device — the AVD name is still
+   *      checked because it covers a window the serial cannot: between
+   *      `record.udid = <avd name>` and `record.serial = <serial>` an emulator
+   *      is still booting and is in `keep` by name only.
    *   4. no host-side `adb -s <serial> exec-out screenrecord` is alive. This is
    *      the only check that survives a process boundary, and it is what makes
    *      `deckhand doctor --device-only` — a separate process, empty helper map,
