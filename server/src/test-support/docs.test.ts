@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { registeredTools, registerToolCallCount, schemaFieldNames, stringLiterals } from "./toolNames.ts";
+import {
+  quotedRegexLiterals,
+  registeredTools,
+  registerToolCallCount,
+  schemaFieldNames,
+  stringLiterals,
+} from "./toolNames.ts";
 import { repoFilesEndingWith } from "./repoFiles.ts";
 
 /**
@@ -256,6 +262,18 @@ describe("docs describe the code that exists", () => {
     // Tightening it needs a real schema walk, not a wider regex.
     const fields = schemaFieldNames(TOOLS);
     assert.ok(fields.size > 20, `only ${fields.size} zod fields parsed — the schema style changed, fix this check`);
+    // The other half of the anti-vacuity floor, and the one that bites hardest: `stringLiterals`
+    // does not lex regex literals, so a regex containing a quote (`/["']/`) makes every quote
+    // after it pair one position out. This loop then reads code fragments as prose and the
+    // descriptions it exists to scan as code — and finds nothing, silently. Its docblock states
+    // that precondition; this is what fails when it breaks.
+    assert.deepEqual(
+      quotedRegexLiterals(TOOLS),
+      [],
+      `tools.ts has a regex literal containing a quote character, which desyncs stringLiterals — ` +
+        `this check would then scan code instead of descriptions and pass for the wrong reason. ` +
+        `Move the pattern out of tools.ts, or teach stringLiterals to lex regex literals.`,
+    );
     const ghosts = new Set<string>();
     for (const text of stringLiterals(TOOLS)) {
       for (const m of text.matchAll(/\b(?:pass|use|with|set) ([a-z][A-Za-z0-9]*)\s*:\s*[[{]/g)) {

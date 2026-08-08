@@ -74,6 +74,13 @@ function allIndexesOf(src: string, needle: string): number[] {
  * literals — the same limit `test-support/toolNames.ts` states — so a regex containing an
  * unbalanced brace or a quote inside an options object would desync it; none exists, and the
  * failure mode is a loud null rather than a silent pass.
+ *
+ * COMMENTS ARE NOT ITS JOB — call it on `stripComments(src)`, as `webSocketServerOptions` does.
+ * An apostrophe in a `//` comment inside the object (`noServer: true, // don't bind`) reads as
+ * a quote here, swallows the closing brace, and returns null: a FALSE RED telling the author to
+ * inline an object that already is inline. Unactionable messages are how a guardrail gets
+ * switched off wholesale.
+ * → "binds every listening socket to loopback", "reads a WebSocketServer's options past a comment"
  */
 function topLevelOptions(src: string, from: number): string | null {
   let i = from;
@@ -104,6 +111,14 @@ function topLevelOptions(src: string, from: number): string | null {
     out += depth === 1 ? c : " ";
   }
   return null;
+}
+
+const NEW_WSS = "new WebSocketServer(";
+
+/** The options text of every `new WebSocketServer(` in `src`, in order; null where not a literal. */
+function webSocketServerOptions(src: string): (string | null)[] {
+  const stripped = stripComments(src);
+  return allIndexesOf(stripped, NEW_WSS).map((at) => topLevelOptions(stripped, at + NEW_WSS.length));
 }
 
 describe("PLAN §2 — locked decisions", () => {
@@ -301,9 +316,13 @@ describe("PLAN §11 — security model", () => {
     // Nested braces/brackets/parens are BLANKED rather than kept, so `port:` and `host:` are
     // read at the top level only: a `port` key inside a nested sub-object is not this
     // constructor's port, and matching it would fire on correct code.
+    //
+    // Comments stripped first, for the same reason as the share gate below: an apostrophe in a
+    // `// don't bind` inside the object opened a string that ate the closing brace, and the
+    // author of correct code was told to inline an object they had already inlined. Pinned by
+    // "reads a WebSocketServer's options past a comment".
     for (const file of sourceFiles()) {
-      for (const at of allIndexesOf(read(file), "new WebSocketServer(")) {
-        const opts = topLevelOptions(read(file), at + "new WebSocketServer(".length);
+      for (const opts of webSocketServerOptions(read(file))) {
         assert.notEqual(
           opts,
           null,
@@ -321,8 +340,37 @@ describe("PLAN §11 — security model", () => {
       }
     }
     // The composition root keeps its stricter rule: exactly one server socket.
+    // (Both directions of the reader itself are pinned by "reads a WebSocketServer's options
+    // past a comment" — this loop only sees the two real constructors, so neither the false
+    // red nor the catch would show up here.)
     const listens = [...read(join(SRC, "server.ts")).matchAll(/\.listen\(([^)]*)\)/g)];
     assert.equal(listens.length, 1, `expected exactly one .listen() in server.ts, found ${listens.length}`);
+  });
+
+  it("reads a WebSocketServer's options past a comment", () => {
+    // The check above is a text scan, and both of its failure directions are invisible while
+    // this repo has exactly two constructors, both correct. Fixtures, not the real files: a
+    // false red only ever appears the day someone writes an ordinary comment.
+    //
+    // Direction 1 — correct code must not fire. The apostrophe in `don't` used to open a
+    // string that swallowed the closing brace, so this returned null and the author was told
+    // to "pass the options inline" for an object that was already inline.
+    assert.deepEqual(
+      webSocketServerOptions(`const wss = new WebSocketServer({\n  noServer: true, // don't bind\n});\n`),
+      ["{\n  noServer: true, \n}"],
+    );
+    // Direction 2 — a real wildcard bind must still be caught, including the two shapes the
+    // check was widened for: a port written after a nested callback, and a non-literal argument.
+    const [afterCallback] = webSocketServerOptions(
+      `new WebSocketServer({ handleProtocols: (p) => { return p[0]; }, port: 9999 })`,
+    );
+    assert.match(afterCallback!, /\bport\s*:/);
+    assert.doesNotMatch(afterCallback!, /\bhost\s*:\s*"127\.0\.0\.1"/);
+    // A `port` nested one level down is not this constructor's port, so it stays blanked.
+    const [nested] = webSocketServerOptions(`new WebSocketServer({ noServer: true, foo: { port: 9999 } })`);
+    assert.doesNotMatch(nested!, /\bport\s*:/);
+    // And the escape hatch the null is there to refuse.
+    assert.deepEqual(webSocketServerOptions(`new WebSocketServer(opts)`), [null]);
   });
 
   it("keeps secrets out of the MCP surface", () => {

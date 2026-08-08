@@ -59,7 +59,8 @@ export function schemaFieldNames(toolsSrc: string): Set<string> {
  * it is what actually matters: no regex literal in the input contains a quote character. All
  * three satisfy that. Adding one that does not — `/["']/`, a class with an apostrophe in it —
  * desyncs this lexer silently, so extend it then, or scope the caller to the literals it can
- * trust.
+ * trust. `quotedRegexLiterals` below is that precondition as a check, and the caller asserts
+ * it — a precondition nothing fails on is the same as no precondition.
  */
 export function stringLiterals(src: string): string[] {
   const out: string[] = [];
@@ -100,6 +101,75 @@ export function stringLiterals(src: string): string[] {
         i++;
       }
       out.push(buf);
+    } else i++;
+  }
+  return out;
+}
+
+/**
+ * Every `/…/` in `src` that contains a quote character — i.e. every regex literal that would
+ * desync `stringLiterals`. Empty is the precondition holding.
+ *
+ * Why this is sound despite sharing the lexer's blind spot: the walk is CORRECT up to the
+ * first offending regex, because the only thing that desyncs it is an offending regex. So the
+ * first one is always seen, which is the one that has to be reported.
+ *
+ * Deliberately conservative about what counts as a candidate — `/` to the next unescaped `/`
+ * on the SAME line, non-empty — so a division (`(a + b) / c`) has no closer and is not a
+ * candidate at all, and a character class containing `/` closes early rather than swallowing
+ * the rest of the line. Both directions err toward "not a regex", which is right: the caller
+ * uses this to reject, and a guardrail that fires on correct code gets switched off.
+ */
+export function quotedRegexLiterals(src: string): string[] {
+  const out: string[] = [];
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i]!;
+    if (c === "/" && src[i + 1] === "/") {
+      while (i < src.length && src[i] !== "\n") i++;
+    } else if (c === "/" && src[i + 1] === "*") {
+      const end = src.indexOf("*/", i + 2);
+      i = end < 0 ? src.length : end + 2;
+    } else if (c === '"' || c === "'" || c === "`") {
+      i++;
+      while (i < src.length) {
+        const d = src[i]!;
+        if (d === "\\") {
+          i += 2;
+          continue;
+        }
+        // `${…}` holds CODE, and skipping it as literal text ends the template early at the
+        // first quote or backtick inside it. Same brace walk `stringLiterals` uses.
+        if (c === "`" && d === "$" && src[i + 1] === "{") {
+          let depth = 1;
+          i += 2;
+          while (i < src.length && depth > 0) {
+            if (src[i] === "{") depth++;
+            else if (src[i] === "}") depth--;
+            i++;
+          }
+          continue;
+        }
+        i++;
+        if (d === c) break;
+      }
+    } else if (c === "/") {
+      let j = i + 1;
+      let body = "";
+      while (j < src.length && src[j] !== "\n" && src[j] !== "/") {
+        if (src[j] === "\\") {
+          body += src.slice(j, j + 2);
+          j += 2;
+          continue;
+        }
+        body += src[j]!;
+        j++;
+      }
+      if (src[j] === "/" && body.length > 0) {
+        if (/["'`]/.test(body)) out.push(`/${body}/`);
+        // Consumed either way: a candidate's own slashes must not be re-read as a comment.
+        i = j + 1;
+      } else i++;
     } else i++;
   }
   return out;
