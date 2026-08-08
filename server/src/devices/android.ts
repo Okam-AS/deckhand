@@ -23,6 +23,11 @@ import { androidProcessEnv } from "./toolEnv.ts";
  * (`engine/reaper.ts`) and the streaming seam (`streaming/androidAdb.ts`) have
  * to recognise deckhand's own emulators, and the seam takes no dependency on
  * the engine. Two copies of the string could drift with nothing to notice.
+ *
+ * `POOL_AVD_PREFIX` lives in `engine/reaper.ts` and must stay INSIDE this one:
+ * both sweeps select by this prefix, so a pooled AVD that falls outside it is
+ * never reaped and its recorder never swept.
+ * → `reaper.test.ts` "names pooled devices INSIDE the general prefix"
  */
 export const AVD_PREFIX = "deckhand_";
 

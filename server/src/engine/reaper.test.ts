@@ -1,7 +1,8 @@
 import { fakeSimctl, fakeAndroid } from "../test-support/fakes.ts";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { Reaper, orphanSims, orphanAvds, type ReaperDeps } from "./reaper.ts";
+import { Reaper, orphanSims, orphanAvds, SIM_PREFIX, POOL_SIM_PREFIX, POOL_AVD_PREFIX, type ReaperDeps } from "./reaper.ts";
+import { AVD_PREFIX } from "../devices/android.ts";
 import type { SimDevice } from "../devices/ios.ts";
 
 const sims: SimDevice[] = [
@@ -26,6 +27,18 @@ describe("orphan selection", () => {
       ["BBB"],
     );
     assert.deepEqual(orphanAvds(avds, new Set(["deckhand_pv1_android_0"])), ["deckhand_pv2_android_1"]);
+  });
+
+  it("names pooled devices INSIDE the general prefix, or nothing reaps them", () => {
+    // Not a tautology about two string constants: three places select deckhand's
+    // devices by the GENERAL prefix and rely on the pooled one being a prefix of it —
+    // `orphanAvds` above (the only route by which a pooled AVD is reaped at all),
+    // `Reaper.reap`'s simulator pass, and `sweepDeviceRecorders`' ownership gate 2 in
+    // streaming/androidAdb.ts. AVD_PREFIX was hoisted into devices/android.ts while
+    // POOL_AVD_PREFIX stayed here, so a rename on either side now drops pooled devices
+    // out of every sweep silently — nothing else in the suite reads both.
+    assert.ok(POOL_AVD_PREFIX.startsWith(AVD_PREFIX), `${POOL_AVD_PREFIX} must start with ${AVD_PREFIX}`);
+    assert.ok(POOL_SIM_PREFIX.startsWith(SIM_PREFIX), `${POOL_SIM_PREFIX} must start with ${SIM_PREFIX}`);
   });
 });
 
