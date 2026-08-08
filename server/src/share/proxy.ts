@@ -517,7 +517,10 @@ export function createShareRouter(deps: ShareDeps): express.Router {
       // The `allowed` term is belt-and-braces, not an optimisation: each
       // partner's cookie is path-scoped to `/s/<partner>`, so the browser never
       // sends it here and this is in practice always true — every partner's
-      // cookie is re-minted on each poll, identical each time.
+      // cookie is re-minted on each poll, identical each time. The scoping half
+      // of that is a claim about what `setUnlockCookie` emits, so it is held:
+      // → `proxy.test.ts` "scopes each minted unlock cookie to one share, and
+      // never to a wider path".
       for (const partner of deps.engine.pairedShareIds(shareId)) {
         if (!deps.pinGate.info(partner).required || deps.pinGate.allowed(req.headers.cookie, partner)) continue;
         const cookie = deps.pinGate.issue(partner);

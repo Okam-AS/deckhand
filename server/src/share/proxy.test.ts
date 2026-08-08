@@ -77,6 +77,22 @@ function postWithHost(
   });
 }
 
+/** The Path attribute of a Set-Cookie line, or undefined when it carries none. */
+function cookiePath(setCookie: string): string | undefined {
+  return /;\s*path=([^;]*)/i.exec(setCookie)?.[1]?.trim();
+}
+
+/**
+ * Would a browser send a cookie scoped to `cookiePath` on a request for
+ * `requestPath`? RFC 6265 §5.1.4, so the assertion is about REACH rather than
+ * about the header's spelling.
+ */
+function pathMatches(cookiePath: string, requestPath: string): boolean {
+  if (cookiePath === requestPath) return true;
+  if (!requestPath.startsWith(cookiePath)) return false;
+  return cookiePath.endsWith("/") || requestPath[cookiePath.length] === "/";
+}
+
 // ---------------------------------------------------------------------------
 // Regression: a serve-sim helper that drops its socket mid-stream (what happens
 // on teardown while a viewer is watching) must not surface as an unhandled
@@ -497,6 +513,48 @@ describe("PIN gate (path-based share)", () => {
         const opened = await fetch(`${base()}/s/${partner}/dev/ios-0/stream.mjpeg`, { headers: { cookie } });
         assert.notEqual(opened.status, 401, `${partner} must no longer be PIN-gated`);
       }
+    } finally {
+      pinState.others = [];
+    }
+  });
+
+  it("scopes each minted unlock cookie to one share, and never to a wider path", async () => {
+    // `/state`'s top-up loop calls its `allowed` term belt-and-braces, on the
+    // grounds that a partner's cookie is path-scoped and so never reaches
+    // `/s/<this share>/state` in the first place. That is a claim about what
+    // Set-Cookie says, and nothing checked it: the tests above match
+    // `Path=/s/<id>` only to PICK a cookie out of the list, so widening every
+    // scope to `/` would be "fixed" by editing a selector and the belt would be
+    // gone with nothing red. Asserted here as REACH (RFC 6265 path-match), not
+    // as header text, so a reformat cannot break it and a real widening cannot
+    // pass.
+    pinState.others = [
+      { shareId: "paired-share", length: 4, pin: "4321" },
+      { shareId: "third-share", length: 4, pin: "5678" },
+    ];
+    try {
+      const good = await fetch(`${base()}/s/share1/unlock`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pin: "1234" }),
+      });
+      assert.equal(good.status, 200);
+      const set = good.headers.getSetCookie?.() ?? [];
+      assert.equal(set.length, 3, `expected one unlock cookie per share, got: ${set.join(" | ")}`);
+
+      const paths = set.map((c) => {
+        const p = cookiePath(c);
+        assert.ok(p, `an unlock cookie with no Path is scoped by the browser, not by us: ${c}`);
+        return p;
+      });
+      const shares = ["share1", "paired-share", "third-share"];
+      for (const p of paths) {
+        // The property the comment rests on: one cookie, one share.
+        const reaches = shares.filter((id) => pathMatches(p, `/s/${id}/dev/ios-0/stream.mjpeg`));
+        assert.deepEqual(reaches, [reaches[0]], `Path=${p} is sent to ${reaches.length} shares (${reaches.join(", ")}), not 1`);
+        assert.equal(pathMatches(p, "/health"), false, `Path=${p} escapes /s/ altogether`);
+      }
+      assert.equal(new Set(paths).size, 3, `each share needs its own scope, got: ${paths.join(", ")}`);
     } finally {
       pinState.others = [];
     }
