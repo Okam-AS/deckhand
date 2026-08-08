@@ -18,6 +18,11 @@ import { repoRoot } from "../version.ts";
 const ANDROID_SMOKE_PORTS: [number, number] = [3290, 3299];
 /** Console port for the gate's emulator, clear of the 5554-5584 band a developer's own AVD lands in. */
 const ANDROID_SMOKE_CONSOLE_PORT = 5680;
+/**
+ * The serial that port answers on. Known BEFORE the boot, which is the point: it is the
+ * only handle on the gate's emulator when `bootEmulator` throws without returning one.
+ */
+export const DOCTOR_SMOKE_SERIAL = serialForPort(ANDROID_SMOKE_CONSOLE_PORT);
 
 /**
  * The gate's own two devices, DERIVED from the prefixes every sweep selects on —
@@ -384,7 +389,7 @@ async function smokeAndroid(): Promise<Check[]> {
     // would answer INSTANTLY against it and every check after would be aimed at a machine that
     // is shutting down — the same class as the console-port hijack in the engine, which is why
     // that one consults adb rather than trusting its own bookkeeping. Wait it out.
-    const leftover = serialForPort(ANDROID_SMOKE_CONSOLE_PORT);
+    const leftover = DOCTOR_SMOKE_SERIAL;
     if ((await android.attachedSerials()).includes(leftover)) {
       await android.shutdown(leftover).catch(() => {});
       for (let i = 0; i < 30 && (await android.attachedSerials()).includes(leftover); i++) {
@@ -463,8 +468,15 @@ export async function releaseSmokeAvd(
   avd: string,
   serial?: string,
 ): Promise<string | null> {
-  const stopped = serial ? await android.shutdown(serial).catch(() => false) : true;
-  if (!stopped) return `${serial} did not exit; ${avd} kept so the orphan sweep can still name it (\`pkill -f "avd ${avd}"\`)`;
+  // No serial means the boot never got one, NOT that nothing is running: `bootEmulator`
+  // launches QEMU detached and only then waits, so a timeout or an abort throws with the
+  // emulator alive. The console port is known before the boot, so ask that instead of
+  // reading the missing serial as an absence — `preview.ts` kills by `serialForPort(port)`
+  // in exactly this case. adb answers the question either way: `shutdown` returns true as
+  // soon as it stops knowing the serial, so a device that never came up still deletes.
+  const target = serial ?? DOCTOR_SMOKE_SERIAL;
+  const stopped = await android.shutdown(target).catch(() => false);
+  if (!stopped) return `${target} did not exit; ${avd} kept so the orphan sweep can still name it (\`pkill -f "avd ${avd}"\`)`;
   await android.deleteAvd(avd).catch(() => {});
   return null;
 }

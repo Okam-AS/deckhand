@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   DOCTOR_AVD_NAME,
   DOCTOR_SIM_NAME,
+  DOCTOR_SMOKE_SERIAL,
   checkConnectorAuth,
   checkPublicUrl,
   deviceGateExit,
@@ -343,12 +344,30 @@ describe("releaseSmokeAvd", () => {
     assert.match(kept ?? "", new RegExp(DOCTOR_AVD_NAME));
   });
 
-  it("deletes it when there was no emulator to stop at all", async () => {
-    // A createAvd that succeeded and a boot that never returned a serial: nothing is
-    // running, so keeping the image would leak ~2 GB per red gate run.
+  it("asks the console port when the boot never returned a serial", async () => {
+    // What this pins: a missing serial is UNKNOWN, never "nothing is running".
+    // `bootEmulator` launches QEMU detached (`void this.run("emulator", …)`) and only
+    // then waits, so a `wait-for-device` timeout, a boot-prop timeout or an abort throws
+    // with the emulator alive and `smokeAndroid`'s `serial` never assigned — the failure
+    // path IS the live-emulator path. Reading it as an absence deleted the AVD, and once
+    // the name leaves `listAvds()` neither `orphanAvds` nor `pkill -f "avd <name>"` can
+    // ever name the process again. doctor knows the console port before it boots, so it
+    // has a serial to ask; `preview.ts` kills by `serialForPort(port)` for this reason.
     const calls: string[] = [];
-    assert.equal(await releaseSmokeAvd(android(calls, false), DOCTOR_AVD_NAME, undefined), null);
-    assert.deepEqual(calls, [`deleteAvd ${DOCTOR_AVD_NAME}`]);
+    const kept = await releaseSmokeAvd(android(calls, false), DOCTOR_AVD_NAME, undefined);
+    assert.deepEqual(calls, [`shutdown ${DOCTOR_SMOKE_SERIAL}`], "a serial-less failure must still ask the port it booted on");
+    assert.match(kept ?? "", new RegExp(DOCTOR_AVD_NAME), "and an emulator that would not exit keeps its AVD, whatever the caller knew");
+  });
+
+  it("deletes the AVD when the console port confirms nothing is there", async () => {
+    // The genuinely-empty case — a `createAvd` that succeeded and an emulator that never
+    // started — is not distinguishable from the one above by the caller, only by adb:
+    // `shutdown` returns true as soon as `adb get-state` stops knowing the serial. So
+    // confirmation, not the absence of a serial, is what licenses the delete; otherwise
+    // every red gate run leaks a ~2 GB image.
+    const calls: string[] = [];
+    assert.equal(await releaseSmokeAvd(android(calls, true), DOCTOR_AVD_NAME, undefined), null);
+    assert.deepEqual(calls, [`shutdown ${DOCTOR_SMOKE_SERIAL}`, `deleteAvd ${DOCTOR_AVD_NAME}`]);
   });
 });
 
