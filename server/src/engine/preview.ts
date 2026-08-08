@@ -2544,9 +2544,17 @@ export class PreviewEngine {
   }
 
   /**
-   * Whether a preview is a compare/migration reference pane — deliberately
-   * public, and deliberately not backed by an app in apps.yaml. The only case
-   * where "no app found" is legitimate rather than a reason to deny.
+   * Whether a preview is a pane booted alongside a page — deliberately not backed
+   * by an app in apps.yaml, which is the only case where "no app found" is
+   * legitimate rather than a reason to deny.
+   *
+   * A pane is NOT public. It takes the page's access, and its synthetic app id is
+   * keyed by access class so a public page and a protected one never land on the
+   * same pane. This said "deliberately public" until 2026-08-08, and that sentence
+   * is what made `set_pin { previewId: <pane>, remove: true }` look harmless — it
+   * published a protected page's pane, reproduced and fixed the same day. If you
+   * are reading this to decide whether a pane needs guarding: it does.
+   * → `server.test.ts` "refuses to set or remove a PIN on a pane"
    */
   isReference(previewId: string): boolean {
     return this.previews.get(previewId)?.record.reference === true;
