@@ -978,6 +978,21 @@ describe("source stays source", () => {
 });
 
 describe("setup decides on state, not on its own prose", () => {
+  it("finds the end of a call whose arguments contain a call", () => {
+    // The check below reads the real setup.ts, so neither direction of its scanner shows up
+    // there until someone writes the shape. `deckhandCli\([^)]*\)\s*\.out` stopped at the first
+    // `)`, and setup.ts already writes an args list holding a nested call — so the inline shape
+    // was unpoliced in the spelling it is most likely to wear.
+    const at = (s: string) => s.slice(endOfCall(s, s.indexOf("(")));
+    assert.equal(at(`deckhandCli(["doctor", String(port)]).out.includes("x")`), `.out.includes("x")`);
+    assert.equal(at(`deckhandCli(["doctor"]).out`), ".out");
+    // A `)` inside a string argument does not close the call.
+    assert.equal(at(`deckhandCli([")"]).out`), ".out");
+    // Unbalanced is -1 — an answer the caller can skip, not a wrong offset it would act on.
+    assert.equal(endOfCall("deckhandCli(", 11), -1);
+  });
+
+
   // Three times now, a `setup` branch has been broken by an unrelated edit to a message it was
   // grepping. It looked for "admin" (meaningless once roles went away), then for a non-empty
   // stdout (always non-empty, because silence reads as a broken command), then for "no tokens
