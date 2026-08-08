@@ -56,7 +56,7 @@ the code would hand a stranger a way to shred every code the operator mints. `de
 <client-id>` takes a client back, effective on its next call, no restart. Claude Code on the machine
 uses a local `tokens.yaml` bearer token instead and needs no approval.
 
-**The GitHub access ladder** (PLAN §2/§6/§11.4): credentials resolve PAT → GitHub App →
+**The GitHub access ladder** (PLAN §2/§6/§11 item 4): credentials resolve PAT → GitHub App →
 ambient `gh` CLI session (`githubAmbient`, default on) → anonymous git for public repos
 (gated on `allowPublicRepos`) → one-time PAT setup URL as last resort. Onboarding
 responses (`list_apps` empty state, `github_auth_missing`) carry `host: {hostname, user}`
@@ -609,8 +609,8 @@ the file, not this list, before concluding something is unchecked.
 | dependency allow-list (runtime + dev, incl. the root package.json) · no DB driver | PLAN §2 "keep the list ruthlessly short". Adding a dep is a PLAN decision — argue it there, then widen the set. The root and `devDependencies` are in scope because a dep added there hoists into the shared `node_modules` and is importable everywhere |
 | serve-sim pinned exactly + a matching patch file | The pin is a SECURITY control: serve-sim ships `/exec`, reachable from inside the simulator, which shares the host's loopback. `patch-package` strips it. A caret range drifts past the patch |
 | no concrete backend imported outside `streaming/` | PLAN §8's seam. Two composition roots are named explicitly, so the exception is a decision rather than an erosion |
-| every MCP tool wrapped in `audited()` | PLAN §11.2. A tool added without it is invisible to the audit trail and nothing else fails |
-| every `.listen()` binds 127.0.0.1, and server.ts has exactly one | PLAN §11.1. A wildcard bind puts the whole MCP surface on the LAN. Every source file under `server/src`, because the per-device Android helper binds a socket too — and `new WebSocketServer({ port })`, which opens one without a `.listen()` at all. Two exemptions, by file and reason: metro.ts's port-availability probe, which must bind every interface to mean anything, and cli.ts's delegation to `createServer().listen()` |
+| every MCP tool wrapped in `audited()` | PLAN §11 item 2. A tool added without it is invisible to the audit trail and nothing else fails |
+| every `.listen()` binds 127.0.0.1, and server.ts has exactly one | PLAN §11 item 1. A wildcard bind puts the whole MCP surface on the LAN. Every source file under `server/src`, because the per-device Android helper binds a socket too — and `new WebSocketServer({ port })`, which opens one without a `.listen()` at all. Two exemptions, by file and reason: metro.ts's port-availability probe, which must bind every interface to mean anything, and cli.ts's delegation to `createServer().listen()` |
 | the share gate keeps its `i` flag | Express dispatches routes case-insensitively. Losing it was a live auth bypass. Checked on every matching line with comments stripped — quoting the pattern in a comment used to satisfy it |
 | every detached spawn stamps a marker (any `detached:` that is not `false`) | Four resources outlive the server; three leaked, one to 36 orphans at 418% CPU that starved the emulators. An in-memory Map is not an owner |
 | docs name only tools and files that exist | PLAN documented a tool nobody built, and the dead name leaked into a tool *description* — text a model reads as instructions. There is no "but I'm recording history" exemption: PLAN and this file describe what exists now, and git holds the past |

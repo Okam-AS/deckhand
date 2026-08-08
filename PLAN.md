@@ -41,7 +41,7 @@ implementation:
 | Local dev mode + daily-loop contract | **Amended (2026-07-15):** an app may declare a local `path` (instead of, or alongside, `repo`). Local previews build **in place** in the developer's working copy — no worktree, no push — and NativeScript runs as a long-lived **livesync** process (`ns run --no-hmr`, watch on, HMR off — NS HMR is unreliable) so file saves reach the running sim with no tool calls. The loop rides in the tools themselves: `start_preview` is **idempotent** per (app, source, ref), share ids are **stable per app** (persisted; a bookmarked viewer URL never rots), and `restart_preview` rebuilds in place (git: fetch new tip + reset worktree; local: re-run) on the same booted devices. Consequence: named branches/PRs now **always fetch** (the old local-first shortcut served stale commits; SHAs remain local-first). Local previews trade snapshot determinism for the loop — the build mirrors whatever is on disk; the source dir is borrowed, never wiped (`npm ci` guarded) and never removed. Local apps are registered on the machine itself (`deckhand app add <id> --path <dir>`), not over MCP. |
 | Tunnel | `cloudflared` **named tunnel** with a stable hostname on the owner's Cloudflare-managed domain. Deckhand binds `127.0.0.1` only. |
 | MCP auth | An `Authorization: Bearer` credential at `/mcp` — **never a path segment**. Two ways to hold one, both per-person: an **OAuth grant** (the claude.ai path), or a local `tokens.yaml` token for a client on the machine that has no browser. Every credential is still the operator's, so authenticating IS authorizing and there are still no roles. **Superseded (2026-08-07): the path token, and the "no OAuth" decision with it.** `/mcp/<token>` was safe only while the connector URL was a secret, and it is not: a connector added in **Claude Enterprise is visible to the whole organisation**, so everyone in it could read the credential out of the URL and drive this Mac. OAuth is what makes each client authorize individually; completing it needs a pairing code the operator mints at the machine — `deckhand pair`, typed into the page `/oauth/authorize` serves (§11.6). The original worry — many people on one Mac's six device slots — is answered by that approval, not by hoping a URL stays private. |
-| GitHub access | **Minimal GitHub App** — permissions `Contents: Read-only` (optionally `Pull requests: Read-only`), **no webhooks, no OAuth, no callback URLs**. One App ID + private key PEM on the mini. Each repo org installs the app and picks repos. Hourly installation tokens, injected into git via ephemeral `GIT_ASKPASS`. The set of app installations *is* the repo allowlist. **Amended (2026-07-10):** a **fine-grained PAT** (`Contents: Read-only`, selected repos) is an equally supported auth mode — same tokenResolver seam, far less setup, and the mode agent-led onboarding (§6) walks new users through. The App remains the recommended path for multi-org installs. **Amended (2026-07-15): the access ladder.** Asking a user for a PAT when the machine can already read the repo is bad onboarding, so credentials resolve in order: PAT file → GitHub App → (if `githubAmbient`, default on) the deckhand user's **gh CLI session** (`gh auth token`, in-memory, same `GIT_ASKPASS` handling) → anonymous git (public repos; gated on `allowPublicRepos`) → the one-time setup URL as **last resort**. Explicit credentials always shadow ambient ones, so an App's installation set remains the allowlist. Before any of this, onboarding steers to a **local checkout** when one exists (§6). Ambient tradeoff recorded in §11.4. |
+| GitHub access | **Minimal GitHub App** — permissions `Contents: Read-only` (optionally `Pull requests: Read-only`), **no webhooks, no OAuth, no callback URLs**. One App ID + private key PEM on the mini. Each repo org installs the app and picks repos. Hourly installation tokens, injected into git via ephemeral `GIT_ASKPASS`. The set of app installations *is* the repo allowlist. **Amended (2026-07-10):** a **fine-grained PAT** (`Contents: Read-only`, selected repos) is an equally supported auth mode — same tokenResolver seam, far less setup, and the mode agent-led onboarding (§6) walks new users through. The App remains the recommended path for multi-org installs. **Amended (2026-07-15): the access ladder.** Asking a user for a PAT when the machine can already read the repo is bad onboarding, so credentials resolve in order: PAT file → GitHub App → (if `githubAmbient`, default on) the deckhand user's **gh CLI session** (`gh auth token`, in-memory, same `GIT_ASKPASS` handling) → anonymous git (public repos; gated on `allowPublicRepos`) → the one-time setup URL as **last resort**. Explicit credentials always shadow ambient ones, so an App's installation set remains the allowlist. Before any of this, onboarding steers to a **local checkout** when one exists (§6). Ambient tradeoff recorded in §11 item 4. |
 | Multi-org / multi-dev | **Dropped (2026-08-05.)** One install, one operator, however many repo orgs their credential reaches. A second developer runs their own deckhand; a colleague who only needs to WATCH uses the share link, which needs no token. |
 | Viewer | One page (ours — not serve-sim's preview UI), multiple devices side by side, live video + **touch control on** (not view-only), public or PIN-protected share links. |
 | Setup story | Setup on the mini will be performed **by an AI over SSH**. `AGENTS.md`/`CLAUDE.md` must be an agent runbook; the installer — `deckhand setup` (§10), not the config-writing `init` it calls — must be idempotent/resumable with non-interactive flags; `deckhand doctor --device-only` must prove the install works end to end on real hardware. The human is asked as little as the tooling cannot infer: `setup`'s preflight (`humanInput` in `cli/preflight.ts`) asks for a tunnel hostname, and optionally a second hostname for web previews. Credentials are not among them — the GitHub ladder (above) reaches an ambient `gh` session before it asks for anything. |
@@ -114,7 +114,7 @@ githubApp:                        # EITHER a GitHub App (multi-org)…
   privateKeyPath: ~/.deckhand/github-app.pem
 # githubPat:                      # …OR a fine-grained PAT (single-owner; see §2 amendment)
 #   path: ~/.deckhand/github-pat  # mode 0600, written via the one-time setup URL (§6) or SSH
-githubAmbient: true               # no PAT/App → fall back to the deckhand user's gh CLI session (§11.4 note)
+githubAmbient: true               # no PAT/App → fall back to the deckhand user's gh CLI session (§11 item 4 note)
 allowPublicRepos: false           # public repos from owners without an app installation; also
                                   # gates anonymous git for credential-less installs
 limits:
@@ -220,7 +220,7 @@ onboarding script lives in the tool responses; the agent is only the messenger. 
    tunnel, single-use, short TTL, bound to the pending action — where the user pastes the
    PAT / uploads the App PEM / sets secret env directly into the mini (written mode 0600).
    The agent guides step by step but never sees the secret; a token pasted into a chat
-   transcript would outlive the conversation. This preserves §11.5 exactly.
+   transcript would outlive the conversation. This preserves §11 item 5 exactly.
 
 Target first-contact conversation: user installs the connector and says "run my app" →
 agent (from `list_apps` empty state) asks which repos → `add_app` → agent relays the
@@ -300,7 +300,7 @@ translator. Three small additions close the gap:
    live oracle), and any persisted migration session (the pair derives from `migratesFrom` +
    the existing stable per-app shareIds). Boundary: deckhand runs and shows both apps and
    reads the ledger; the agent translates code, judges parity, and writes the ledger — and
-   deckhand never writes to either repo (§11.4).
+   deckhand never writes to either repo (§11 item 4).
 
 **One page, several sources (amended 2026-07-31).** The above was built as a *pair*: one
 working preview plus one reference, on two URLs, the reference forced public because there
@@ -644,7 +644,7 @@ dir is never touched).
   The cookie also binds the PIN in force (`pinFingerprint`), so changing or removing a PIN
   revokes cookies issued under the old one instead of leaving them valid for the 12 h TTL —
   which mattered because shareIds are stable per app and reused across stop/restart.
-  **Deliberate §11.5 relaxation:** the user chose to set the PIN by telling
+  **Deliberate §11 item 5 relaxation:** the user chose to set the PIN by telling
   the agent (through MCP) rather than an out-of-band setup URL — so a share PIN (a low-value,
   shareable access code, not a standing bearer credential) may travel through MCP. It is
   **redacted from the audit log** (`summarizeArgs`), never stored in plaintext, and the tool
