@@ -19,10 +19,10 @@ is the upgrade and the host-label router already there is what serves it.
 
 `webHost` is optional: omit it and subdomain-web stays loopback-only.
 
-This **extends** the `web` app type (PLAN §2/§8/§11.6 amendments) rather than competing with
-it, because the path-based model rests on a Vite-specific trick — see "Context" below. And
-the guarantee it exists to deliver is **zero checkout edits**; §5 and the Coexistence
-section below both depend on that.
+This **extends** the `web` app type (PLAN §2/§8/§11 item 6 amendments) rather than competing
+with it, because the path-based model rests on a Vite-specific trick — see "Context" below.
+And the guarantee it exists to deliver is **zero checkout edits**; the "Coexistence" and
+"Verification" sections below both depend on that.
 
 ## Context
 
@@ -129,15 +129,15 @@ http://127.0.0.1:<devPort>/   (the framework's dev server, bound loopback, no --
   framework) keeps both live during migration.
 
 ## Security (maps to PLAN §11)
-- **§11.1 loopback-only**: dev servers still bind `127.0.0.1`; the subdomain resolves to
+- **§11 item 1, loopback-only**: dev servers still bind `127.0.0.1`; the subdomain resolves to
   one preview's own loopback port (no SSRF/traversal). Only cloudflared is public.
-- **§11.6 shares**: the whole origin is exposed (same posture as the path-based web proxy),
+- **§11 item 6, shares**: the whole origin is exposed (same posture as the path-based web proxy),
   gated by the PIN (+ the 144-bit shareId on the path form). Cookie isolation is the
   security-sensitive part: deckhand's own `deck_unlock` cookie is signed per share and is
   stripped before anything is forwarded upstream, so it never reaches the app. The *app's*
   own cookies are a different matter — every share sits on one public hostname, so a cookie
   an app sets under `/s/A/web/` is sent to a different app under `/s/B/web/`. That was
-  reviewed and **accepted** (PLAN §11.6), not solved; revisit it before two mutually
+  reviewed and **accepted** (PLAN §11 item 6), not solved; revisit it before two mutually
   untrusted parties ever hold shares on one hostname.
 - **Borrow-never-own**: zero checkout edits — the whole reason for this model.
 

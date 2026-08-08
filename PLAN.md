@@ -315,7 +315,7 @@ a page simply was. Generalised:
 2. **One link, one PIN.** `pairedShareIds()` fans the unlock out over the whole set, so the
    public-by-construction reference is gone. Panes still stream from **their own**
    shareIds — §8's proxy contract ("only for device IDs belonging
-   to that share's preview") and §11.6's narrow allow-list are untouched, so no new route is
+   to that share's preview") and §11 item 6's narrow allow-list are untouched, so no new route is
    forwarded and the streaming seam did not change. The proxy's unlock minting did: it fans
    out from a single partner to the set, FORWARD ONLY — a pane never mints for the page
    holding it, because panes are content-keyed and two pages can share one.
@@ -334,7 +334,7 @@ protected pane joins only when the page itself is protected, so access is never 
 from nothing. The panes are chosen by an operator whose token already passed
 `canAccessApp` for each one. Revisit if deckhand ever serves mutually-untrusted parties on
 one hostname; the fix then is a per-page principal, not a narrower pane list. Note this
-compounds the cookie-jar risk in §11.6 for `web` panes specifically — "per share" stops
+compounds the cookie-jar risk in §11 item 6 for `web` panes specifically — "per share" stops
 being a sufficient scope unit when one page spans several apps.
 
 Validation rules enforced server-side (never trust the model): app must exist; ref/PR must
@@ -592,7 +592,7 @@ the proxy is the sole path in, with share auth enforced at upgrade time.
 `/s/:shareId/web/*` — a **wildcard** reverse proxy (a dev server serves arbitrary
 paths, unlike the four-subpath device allow-list), plus a WebSocket branch under the
 same base for Vite HMR (the `vite-hmr` subprotocol is echoed and forwarded). This
-deliberately **inverts** the device proxy's narrow-allow-list posture (§11.6): the whole
+deliberately **inverts** the device proxy's narrow-allow-list posture (§11 item 6): the whole
 dev-server origin is exposed, gated only by the 144-bit `shareId` + the PIN a web share
 always carries (see §9).
 Every other invariant holds — the upstream is strictly **that share's own loopback
@@ -734,10 +734,13 @@ change eases in/out — nothing snaps.
    unauthenticated *by construction*, because a client with no credential yet has to start
    somewhere: the two `/.well-known/oauth-*` discovery documents (public, no secret in them),
    `POST /oauth/register` (RFC 7591 dynamic registration — capped, since it writes to disk), and
-   `GET /oauth/authorize`, which is unauthenticated at the origin and authenticated by
-   **the operator's approval in front of it**. Registering or discovering buys nothing: a grant
-   needs a request the operator approved at the machine (§11.6). Everything that touches a device or a
-   repo is still behind a credential.
+   `GET /oauth/authorize`, which is unauthenticated at the origin and gated by **a pairing code
+   the operator minted at the machine**. Registering or discovering buys nothing, and nothing
+   incoming is stored: a grant needs a code that only `deckhand pair` produces, and wrong guesses
+   lock out the SOURCE rather than burning the code (§11.6). The other direction — park the
+   incoming request and let the operator approve one from a list — was tried and rejected,
+   because parking is unauthenticated and a stranger parked faster than a person could walk to
+   the Mac. Everything that touches a device or a repo is still behind a credential.
    **Caveat (audit 2026-07-27):** loopback is *not* a boundary against a share holder. An
    iOS Simulator shares the host's network stack (`127.0.0.1` inside it is the Mac's
    loopback; Android's emulator aliases it as `10.0.2.2`), and a share grants real device
