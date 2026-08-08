@@ -8,10 +8,11 @@ import { execFile } from "node:child_process";
 // serve-sim / adb-screencap; SimDeck is never asked to stream.
 //
 // Two hard rules keep us off SimDeck's fragile paths and off any token handling:
-//   1. Use REST only: GET /api/simulators/{udid}/accessibility-tree,
-//      POST /api/simulators/{udid}/action, GET .../screenshot.png. NEVER the
-//      /input or /control WebSocket, /webrtc/offer, or /refresh — those spin up
-//      the private CoreSimulator display/encoder session.
+//   1. Use REST only: GET /api/health, GET /api/simulators/{udid}/accessibility-tree,
+//      POST /api/simulators/{udid}/action, POST .../pasteboard (the non-US iOS
+//      typing path), GET .../screenshot.png. NEVER the /input or /control
+//      WebSocket, /webrtc/offer, or /refresh — those spin up the private
+//      CoreSimulator display/encoder session.
 //   2. Auth via the same-origin loophole: SimDeck accepts a loopback POST with a
 //      matching `Origin` header and no token (a loopback GET needs neither). So
 //      deckhand holds NO SimDeck token — there is no secret to leak.
