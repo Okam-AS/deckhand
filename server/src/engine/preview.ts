@@ -806,10 +806,14 @@ export class PreviewEngine {
           }
         } else if (p.app.migratesFrom) {
           const src = this.livePreviewForApp(p.app.migratesFrom);
-          // A migration pairs two REAL apps, each with its own PIN — unlike a
-          // compare session, whose reference is a synthetic always-public app.
-          // So the source pane is only mountable when this page can actually
-          // unlock it: the unlock propagates from a proven PIN on this share,
+          // A migration pairs two REGISTERED apps, each with its own PIN, set
+          // independently. An `alongside` pane cannot drift that way — it is a
+          // synthetic app whose id is keyed by the page's access class and whose
+          // PIN is written from the page's at boot (`bootReference`,
+          // mcp/tools.ts), so it is NOT public and NOT free to mint toward.
+          // A migration source is a real app, so the pane is only mountable when
+          // this page can actually unlock it: the unlock propagates from a
+          // proven PIN on this share,
           // and the pad only ever renders for the page's own shareId. Showing
           // the pane anyway (a public target beside a PIN-protected source) got
           // its socket refused once a second, forever, with nothing on screen
@@ -3021,10 +3025,14 @@ export class PreviewEngine {
         // call, and until this line existed it had none: StreamingRouter.reapOrphans() was
         // written, tested, and never reached from boot, so the 2h48m orphan that motivated
         // it (see serveSim.ts) would have survived every restart. Spare what is live, for
-        // the same reason the device reap does — and by EVERY identifier a
-        // backend might key on, not just the two the Reaper uses: serve-sim's
-        // helper map is keyed by simulator UDID, AndroidAdbBackend's by adb
-        // serial. See liveDeviceHandles.
+        // the same reason the device reap does — and by every identifier a BACKEND
+        // keys on, which is not the set the Reaper uses: serve-sim's helper map is
+        // keyed by simulator UDID, AndroidAdbBackend's by adb serial, and its
+        // recorder sweep reads the AVD name too (that is what answers for an
+        // emulator still booting, before a serial exists). `names` is the fourth
+        // thing liveDeviceHandles returns and is left out deliberately: it is the
+        // simulator/AVD *device* name, which only the Reaper matches on — no
+        // backend has ever seen it. A backend that keys on one has to be added here.
         const live = this.liveDeviceHandles();
         await this.d.streaming.reapOrphans(new Set([...live.udids, ...live.avds, ...live.serials])).catch(() => {});
         return devices;

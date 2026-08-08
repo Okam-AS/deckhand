@@ -189,8 +189,11 @@ function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (
 
   const android = androidFake(simctlCalls);
   // Named so a test can read back what was persisted; the engine has no snapshot accessor
-  // and should not grow one just for tests.
-  const store = new StateStore(`/tmp/deckhand-noop-${Math.random().toString(36).slice(2)}.json`);
+  // and should not grow one just for tests. It has to be the SAME store the engine got:
+  // returning a second one made `h.store.load()` read a file nothing ever wrote, so it
+  // answered EMPTY (ENOENT) and an assertion that state was cleared passed without the
+  // clearing ever happening.
+  const store = overrides.store ?? new StateStore(`/tmp/deckhand-noop-${Math.random().toString(36).slice(2)}.json`);
 
   const deps: PreviewEngineDeps = {
     config: overrides.config ?? config,
@@ -881,9 +884,10 @@ describe("PreviewEngine migration pairing", () => {
   });
 
   it("hides a migration source the target's viewer could never unlock", async () => {
-    // Two REGISTERED apps with independent PINs — unlike a compare reference,
-    // which is synthetic and always public. A public target must not carry a
-    // PIN-protected source's pane: unlock only propagates out of a proven PIN on
+    // Two REGISTERED apps with independent PINs — unlike an `alongside` pane,
+    // which is synthetic and inherits the page's access class at boot rather
+    // than being public. A public target must not carry a PIN-protected
+    // source's pane: unlock only propagates out of a proven PIN on
     // the page's own share, so that pane would be refused every retry with no
     // pad to type into, and minting its cookie anyway would hand the source's
     // stream to anyone holding the target's public link.
