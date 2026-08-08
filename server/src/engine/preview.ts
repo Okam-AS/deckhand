@@ -1791,6 +1791,18 @@ export class PreviewEngine {
     });
     this.setPhase(p, dev, "booting", "booting emulator");
     let serial: string;
+    // QEMU exists from here on: `bootEmulator` spawns the emulator detached BEFORE its
+    // first await and only waits afterwards, while `record.serial` appears seconds to
+    // minutes later. In between, a stop/remove aborts this boot and tears the device
+    // down in the same call with nothing awaiting it — and teardown, finding no serial,
+    // has no shutdown to ask and so no answer to record. Say the answer now, in the only
+    // direction that is safe to be wrong in: nothing has confirmed this emulator is
+    // gone, so its AVD name — the sole handle `pkill -f "avd <name>"` and the reaper
+    // have on the process — is not deletable by teardownDevices or trimPool. This one
+    // piece of bookkeeping precedes its effect deliberately (the rest of the file
+    // records after): it is a claim that a process may exist, and the spawn is what it
+    // is guarding against. Every path below settles it — clean shutdown clears it.
+    this.noteStopped(avdName, false);
     try {
       serial = await android.bootEmulator(avdName, port, undefined, { wipeData, signal: dev.abort.signal });
       // The wipe has now actually run, so the AVD really does belong to this app.
@@ -1806,7 +1818,14 @@ export class PreviewEngine {
       // And if it will not die, say so where teardown will read it: this device has no
       // record.serial, so teardownDevices cannot re-ask and would otherwise delete the AVD
       // of the emulator we just failed to kill.
-      this.noteStopped(avdName, await android.shutdown(serialForPort(port)).catch(() => false));
+      const stoppedCleanly = await android.shutdown(serialForPort(port)).catch(() => false);
+      this.noteStopped(avdName, stoppedCleanly);
+      // An aborted boot has already been past teardownDevices, which declined this AVD
+      // because nothing had confirmed the emulator gone. The kill above is that
+      // confirmation and nothing runs after it, so this is the last owner of a ~2 GB
+      // image. A boot that merely TIMED OUT is not aborted: its device keeps its record
+      // and teardown deletes the AVD later, having re-read the same answer.
+      if (dev.abort.signal.aborted && !dev.poolName && stoppedCleanly) await android.deleteAvd(avdName).catch(() => {});
       this.androidPorts.delete(port);
       dev.androidPort = undefined;
       throw err;

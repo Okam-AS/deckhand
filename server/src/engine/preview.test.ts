@@ -2825,11 +2825,19 @@ describe("an emulator that would not die keeps its AVD", () => {
     startAndroid(h);
     while (!calls.includes("emu boot")) await new Promise((r) => setTimeout(r, 5));
 
-    // Teardown runs first and cannot re-ask a device with no serial; what it does
-    // there is a separate question. This test is about what the boot path does when
-    // it comes back and finds the preview gone.
+    // Teardown runs FIRST, while QEMU is already up — `bootEmulator` spawns the
+    // emulator before its first await, so the process exists from the moment the fake
+    // records "emu boot". This device has no serial yet, so teardown has nothing to
+    // shut down and no answer to record; that must not read as "nothing to keep".
+    // Discarding the calls here (which this test used to do) hid a delete of the AVD
+    // whose emulator is mid-boot — the same name, the same guard, three lines above
+    // the assertion that no delete happened.
     await h.engine.stopPreview("pv1");
-    calls.length = 0;
+    assert.deepEqual(
+      calls.filter((c) => c.startsWith("deleteAvd ")),
+      [],
+      `teardown deleted the AVD of an emulator whose boot is still in flight — saw ${JSON.stringify(calls)}`,
+    );
     releaseBoot();
     // The abandon path is not awaited by anything the test holds; wait for its own
     // trace rather than for a phase, and give a delete that should not happen time
@@ -2842,6 +2850,45 @@ describe("an emulator that would not die keeps its AVD", () => {
       calls.filter((c) => c.startsWith("deleteAvd ")),
       [],
       "an emulator that outlived its shutdown must keep its AVD name here too",
+    );
+  });
+
+  it("reclaims the AVD image when an aborted boot's emulator really did die", async () => {
+    // The other side of the guard above, and the reason it is not simply "never delete
+    // while booting": teardown has already declined this AVD, so if the kill-by-port
+    // DID confirm the emulator gone, the boot path is the last thing that can reclaim
+    // a ~2 GB image nobody owns any more. Only a confirmed death may delete.
+    const calls: string[] = [];
+    let failBoot!: () => void;
+    const booting = new Promise<void>((_ok, fail) => (failBoot = () => fail(new Error("boot aborted"))));
+    const h = makeEngine({
+      android: androidFake(calls, {
+        shutdown: async (serial: string) => {
+          calls.push(`shutdown ${serial}`);
+          return true; // this one really did exit
+        },
+        deleteAvd: async (name: string) => void calls.push(`deleteAvd ${name}`),
+        bootEmulator: async () => {
+          calls.push("emu boot");
+          await booting;
+          return "emulator-5554";
+        },
+      }),
+    });
+    startAndroid(h);
+    while (!calls.includes("emu boot")) await new Promise((r) => setTimeout(r, 5));
+
+    await h.engine.stopPreview("pv1");
+    assert.deepEqual(calls.filter((c) => c.startsWith("deleteAvd ")), [], "teardown still must not delete a booting AVD");
+
+    failBoot();
+    for (let i = 0; i < 200 && !calls.some((c) => c.startsWith("shutdown ")); i++) await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.deepEqual(
+      calls.filter((c) => c.startsWith("deleteAvd ")),
+      ["deleteAvd deckhand_pv1_android_0"],
+      `an emulator confirmed gone leaves no image behind — saw ${JSON.stringify(calls)}`,
     );
   });
 
