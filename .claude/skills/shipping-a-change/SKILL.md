@@ -123,7 +123,13 @@ surfaces **no blocking finding an earlier round hadn't already reported**.
 
 **Round count scales with the change, not with the ceremony.** A round exists to catch a
 defect; a round that reports what the last brief asked for is the process reviewing
-itself. Two rules keep the curve attached to the code:
+itself. These rules keep the curve attached to the code:
+
+- **Freeze the diff before the first cold round.** The gate wants a cold round that read
+  the code AS IT SHIPS, so *every* later edit voids it — a comment, a doc, a rule file, a
+  typo. Finish all of it, then review. And if the edit is not part of the change (a skill,
+  a rule, a note to the next agent), it belongs in its own PR: bolting it on here costs a
+  full round per edit and buys the reviewer nothing.
 
 - **Mutation-test before the first cold round, not after it.** Delete each line your new
   tests guard, watch a test fail, put it back (step 4). A round spent telling you a test
