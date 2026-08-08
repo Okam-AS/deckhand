@@ -114,8 +114,8 @@ export const RECORDER_ARGV = [
  * cross adb — so this argv prefix is the only evidence of ownership available
  * on the device. It stops at `--output-format=h264` on purpose: the bit-rate is
  * a tunable, and an orphan left by an older build was started with whatever
- * value that build used. → `androidH264.test.ts` "the pkill pattern is a prefix
- * of the argv we actually spawn".
+ * value that build used. → `androidH264.test.ts` "the device-side sweep hunts
+ * for the argv we actually spawn".
  */
 export const RECORDER_PKILL_PATTERN = RECORDER_ARGV.slice(0, 2).join(" ");
 
