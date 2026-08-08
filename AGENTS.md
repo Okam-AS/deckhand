@@ -509,6 +509,45 @@ from under a citation fails `docs.test.ts`.
 | `landing.md` | `landing/**` — the public page; what it depicts is a claim about the product |
 | `tests.md` | every `*.test.ts` — see it fail first; fakes are complete or they lie |
 
+## A claim you leave behind is a claim someone will act on
+
+**Every sentence in this repo — comment, doc, tool description, test name, landing
+copy — is read by someone who cannot see what you saw.** They will act on it. That
+makes an obsolete claim more expensive than no claim, because a false map is trusted
+and an absent one is not.
+
+The rules, learned by finding thirty-odd of these in one sweep:
+
+1. **Delete it; do not annotate it.** "Superseded", "no longer used", "kept for
+   historical reference" — a reader lands mid-file via grep and acts on the thing you
+   labelled dead. If it is gone, remove every trace of it. The one exception is the
+   next rule.
+2. **A rejected design is load-bearing exactly when it stops someone rebuilding it.**
+   Test: *would deleting this make it likely the next agent reintroduces the bug?* If
+   yes, it does not belong in a document that rots — move it into the `.claude/rules/`
+   file for that area, once, where an agent is handed it on opening the file.
+3. **Put the past tense IN the sentence, never only in the heading.** "A document said
+   `token list` shows the connector URL, while it showed masked names" survives a grep
+   landing. "It did not" under a heading six lines up does not. Never delete the
+   example itself — the example is the evidence a principle was paid for.
+4. **Do not restate what you can point at.** The install steps, a dependency's
+   capabilities, a line number, a test count, a file tree: all of these rotted here,
+   some within a day of being written. Point at the command, probe the capability,
+   name the method instead of the line. `serveSim.ts` claimed the pinned serve-sim
+   could not serve avcc; two documents copied it during the cleanup PR that was
+   removing claims exactly like it.
+5. **A comment stating a precondition needs a test that fails when it breaks** — and
+   if none exists, say so IN the comment. The worst finding of a recent audit was
+   "Symmetric on purpose" sitting above a body that is forward-only, where the
+   symmetry it invited had been a cross-page authentication bypass. The code was
+   guarded; the comment was the hazard.
+6. **When you change behaviour, re-read the comments you did NOT touch.** The
+   dangerous one is never in the diff. A rationale ages while the code it justifies
+   stays correct, which is the shape no reviewer catches by reading the change alone.
+7. **Whatever you caught this way, make it a check** (see the skill's step 5). If it
+   cannot be mechanised, write it into the area's rule file so the next reader is told
+   what no test can tell them.
+
 ## The guardrails — read this before you change anything
 
 `server/src/test-support/` holds checks that fail the build when a decision this
