@@ -16,7 +16,7 @@ import { hashPassword, verifyPassword } from "../share/shares.ts";
 import { WorktreeManager, worktreeKey, type RefSpec, refDescription } from "./worktree.ts";
 import { pruneDerivedData } from "./derivedData.ts";
 import { Simctl, selectRuntime, selectDeviceType, deviceLabel, type SimDevice } from "../devices/ios.ts";
-import { AndroidManager, selectSystemImage, portForSerial, serialForPort } from "../devices/android.ts";
+import { AndroidManager, AVD_PREFIX, selectSystemImage, portForSerial, serialForPort } from "../devices/android.ts";
 import type { PhysicalDevices } from "../devices/physical.ts";
 import { resolveAndroidEnv } from "../devices/toolEnv.ts";
 import { Reaper, POOL_SIM_PREFIX, POOL_AVD_PREFIX } from "./reaper.ts";
@@ -1741,7 +1741,7 @@ export class PreviewEngine {
       // correct, which is what made this easy to miss. Claimed after the boot
       // returns instead — see below.
     } else {
-      avdName = `deckhand_${p.record.previewId}_${dev.record.deviceId}`.replace(/[^A-Za-z0-9_]/g, "_");
+      avdName = `${AVD_PREFIX}${p.record.previewId}_${dev.record.deviceId}`.replace(/[^A-Za-z0-9_]/g, "_");
       dev.deviceName = avdName; // see bootIos: spare it by name while createAvd runs
       await android.createAvd(avdName, image, profile);
     }
