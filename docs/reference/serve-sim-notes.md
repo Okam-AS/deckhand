@@ -36,8 +36,7 @@ summary: the project moves, and the pin in `server/package.json` moves with it.
   at runtime beyond simctl.
 - Helper state lives in `$TMPDIR/serve-sim/` (pid/port registry). `serve-sim --list` and
   `serve-sim --kill [device]` manage running streams. Deckhand's janitor uses the kill form
-  and its own `lsof` on the port; it never reads `--list`, because that registry is the
-  daemon's bookkeeping and not an owner deckhand can trust.
+  (`-k`) and its own `lsof` on the port; it never reads `--list`.
 
 ## CLI surface — serve-sim's own, NOT what Deckhand calls
 
