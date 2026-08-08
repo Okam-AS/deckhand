@@ -1,9 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { auditedTools, registeredTools, registerToolCallCount } from "./toolNames.ts";
+import { repoFilesEndingWith } from "./repoFiles.ts";
 
 /**
  * The rules PLAN.md states as acceptance criteria, as executable checks.
@@ -22,28 +23,34 @@ import { auditedTools, registeredTools, registerToolCallCount } from "./toolName
 const SRC = join(dirname(fileURLToPath(import.meta.url)), "..");
 const REPO = join(SRC, "..", "..");
 
+// Both walks skip symlinks rather than following them, like `shipped()` below: a git worktree
+// carries a dangling `server/node_modules` symlink, and a `statSync` through one throws ENOENT
+// — a guardrail that fails for a reason nobody can act on.
+
 /** Every .ts file under server/src, excluding tests and this directory. */
 function sourceFiles(dir = SRC, out: string[] = []): string[] {
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry);
-    if (statSync(full).isDirectory()) {
-      if (entry !== "test-support") sourceFiles(full, out);
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isSymbolicLink()) continue;
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name !== "test-support") sourceFiles(full, out);
       continue;
     }
-    if (entry.endsWith(".ts") && !entry.endsWith(".test.ts")) out.push(full);
+    if (entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts")) out.push(full);
   }
   return out;
 }
 
 /** Test files, which `sourceFiles` deliberately skips — some rules apply only to them. */
 function testFiles(dir = SRC, out: string[] = []): string[] {
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry);
-    if (statSync(full).isDirectory()) {
-      if (entry !== "test-support") testFiles(full, out);
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isSymbolicLink()) continue;
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name !== "test-support") testFiles(full, out);
       continue;
     }
-    if (entry.endsWith(".test.ts")) out.push(full);
+    if (entry.name.endsWith(".test.ts")) out.push(full);
   }
   return out;
 }
@@ -396,15 +403,11 @@ describe("deckhand ships nothing about one particular install", () => {
     // their employer, and a verification recipe with their home directory in it — in a PUBLIC
     // repo, with this check green throughout. A document ships whatever directory it sits in,
     // and naming three of them made every other one look like a deliberate exemption.
-    const markdown = (dir: string, out: string[] = []): string[] => {
-      for (const entry of readdirSync(dir)) {
-        if (entry === "node_modules" || entry === "dist" || entry === ".git") continue;
-        const full = join(dir, entry);
-        if (statSync(full).isDirectory()) markdown(full, out);
-        else if (entry.endsWith(".md")) out.push(full);
-      }
-      return out;
-    };
+    // Sourced from git rather than walked (see repoFiles.ts): the raw walk read ignored files
+    // too, and `.claude/pr-body.md` — written by `review:handover` one step before the PR —
+    // routinely quotes a path or a hostname from the work being described. It also died on the
+    // dangling `server/node_modules` symlink a worktree carries, exactly as `shipped()` did.
+    const markdown = (): string[] => repoFilesEndingWith(REPO, ".md").map((p) => join(REPO, p));
     const offenders: string[] = [];
     for (const root of ["server", "viewer", "landing", "ops", "scripts"]) {
       for (const file of shipped(join(REPO, root))) {
@@ -412,7 +415,7 @@ describe("deckhand ships nothing about one particular install", () => {
         if (m) offenders.push(`${rel(file)}: "${m[0]}"`);
       }
     }
-    const docs = markdown(REPO);
+    const docs = markdown();
     assert.ok(docs.length > 8, `only ${docs.length} markdown files walked — the walk is wrong, fix this check`);
     for (const doc of docs) {
       const m = banned.exec(readFileSync(doc, "utf8"));

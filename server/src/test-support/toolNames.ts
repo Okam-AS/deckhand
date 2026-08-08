@@ -43,6 +43,18 @@ export function schemaFieldNames(toolsSrc: string): Set<string> {
  * in between — which drags identifiers like `args.previewId` into what is supposed to
  * be a scan of PROSE. Reading the quotes as a lexer does is the only way the result
  * means what the check claims it means.
+ *
+ * KNOWN LIMIT — it does not lex REGEX LITERALS. It knows `//`, comment blocks and all
+ * three quote characters; a regex containing a quote character (`/["']/`, or a character
+ * class with an apostrophe in it) is read as an ordinary quote opening a string, and every
+ * quote after it pairs one position out. The scan then silently reports code as prose and
+ * prose as code, so the check keyed on it — "keeps dead parameter names out of agent-facing
+ * text" — quietly changes what it examines rather than failing. Telling a regex apart from
+ * a division needs the previous significant token, and `)` is genuinely ambiguous
+ * (`if (x) /re/` versus `(a + b) / c`), so the heuristic has its own silent-misread case:
+ * the limit is stated rather than half-fixed. `mcp/tools.ts`, the only input today, has no
+ * regex literal — if one is added there, extend this or scope the caller to the literals it
+ * can trust.
  */
 export function stringLiterals(src: string): string[] {
   const out: string[] = [];
