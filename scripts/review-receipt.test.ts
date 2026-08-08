@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   appendRound,
+  contentMoved,
   currentBranch,
   diffHash,
   diffHashes,
@@ -24,13 +25,18 @@ import {
   summarize,
   UNRESOLVABLE_DIFF,
   validate,
+  waiverAnswered,
   writeReceipt,
   type Receipt,
   type Round,
+  type Snapshot,
 } from "./review-receipt.ts";
 
 const HASH = "a".repeat(64);
 const OLD = "b".repeat(64);
+
+/** What the CLI hands `recordRound`: the three things hashed about the code under review. */
+const snap = (over: Partial<Snapshot> = {}): Snapshot => ({ diff: HASH, code: HASH, files: {}, ...over });
 
 let dir: string;
 beforeEach(() => {
@@ -225,10 +231,125 @@ describe("the gate", () => {
     assert.match(!v.ok ? v.reason : "", /f\.ts::boom/);
   });
 
-  it("accepts that same finding once it is waived with a reason", () => {
+  // The bypass that made resolutions per-file, reproduced end to end through the CLI: with the
+  // reported line still in the shipping tree, `chmod +x src/f.ts && git commit -qam "mode bit
+  // only"` printed "1 file changed, 0 insertions(+), 0 deletions(-)", moved the tracked-diff hash
+  // — which was the whole of the old rule — and the next round's `resolved` closed a `must` about
+  // code nobody had touched. A blank line, an unrelated tracked file and a one-way rename are the
+  // same bypass in other clothes: every one of them moves the diff text and none of them moves the
+  // bytes the finding names.
+  it("ignores a resolution when the diff text moved but the file the finding names did not", () => {
+    const BUG = { "src/f.ts": "returns-true", "src/other.ts": "one" };
+    const raised = round({
+      cold: true,
+      diff: OLD,
+      code: "d".repeat(64),
+      files: BUG,
+      findings: [{ id: "src/f.ts::auth always returns true", severity: "must" }],
+      newFindings: 1,
+    });
+    // Each of these moved BOTH whole-diff hashes and left `src/f.ts` byte-identical.
+    for (const [what, files] of [
+      ["a mode bit", BUG],
+      ["an unrelated tracked file", { ...BUG, "src/other.ts": "two" }],
+      ["a one-way rename", { "src/renamed.ts": "returns-true", "src/other.ts": "one" }],
+    ] as const) {
+      const claimed = round({ lens: "after", cold: true, code: "e".repeat(64), files, resolved: ["src/f.ts::auth always returns true"] });
+      const v = validate(converged({ rounds: [raised, claimed] }), HASH);
+      assert.equal(v.ok, false, `${what} is not a fix`);
+      assert.match(!v.ok ? v.reason : "", /auth always returns true/);
+    }
+  });
+
+  // The other direction, and the one that decides whether this is worth having: the honest
+  // sequence must still converge in raise → fix → resolve, with no extra round and no new field.
+  it("accepts a resolution when the file the finding names holds different bytes", () => {
+    const raised = round({
+      cold: true,
+      diff: OLD,
+      code: "d".repeat(64),
+      files: { "src/f.ts": "returns-true" },
+      findings: [{ id: "src/f.ts::auth always returns true", severity: "must" }],
+      newFindings: 1,
+    });
+    const fixed = round({
+      lens: "cold-after-the-fix",
+      cold: true,
+      code: "e".repeat(64),
+      files: { "src/f.ts": "checks-the-token" },
+      resolved: ["src/f.ts::auth always returns true"],
+    });
+    assert.deepEqual(validate(converged({ rounds: [raised, fixed] }), HASH), { ok: true });
+  });
+
+  // A finding about a caller is often fixed in the callee. Refusing that would push honest reviews
+  // toward waivers, which cost less — so the fix can name where it landed, and that path is
+  // checked exactly as hard: the file it names has to have moved.
+  it("accepts a resolution that names another file as where the fix landed, if that file moved", () => {
+    const raised = round({
+      cold: true,
+      diff: OLD,
+      code: "d".repeat(64),
+      files: { "a.ts": "caller", "b.ts": "callee" },
+      findings: [{ id: "a.ts::the token is never checked", severity: "must" }],
+      newFindings: 1,
+    });
+    const elsewhere = { "a.ts": "caller", "b.ts": "callee-now-checks" };
+    const named = round({
+      lens: "cold-after-the-fix",
+      cold: true,
+      code: "e".repeat(64),
+      files: elsewhere,
+      resolved: [{ id: "a.ts::the token is never checked", file: "b.ts" }],
+    });
+    assert.deepEqual(validate(converged({ rounds: [raised, named] }), HASH), { ok: true });
+    const lying = round({ ...named, resolved: [{ id: "a.ts::the token is never checked", file: "a.ts" }] });
+    const v = validate(converged({ rounds: [raised, lying] }), HASH);
+    assert.equal(v.ok, false, "naming a file that did not move must buy nothing");
+  });
+
+  it("accepts that same finding once it is waived with a reason and read past", () => {
     const open = round({ cold: true, findings: [{ id: "f.ts::boom", severity: "must" }] });
-    const receipt = converged({ rounds: [round({ newFindings: 1, diff: OLD }), open], waived: [{ finding: "f.ts::boom", why: "by design: the platform gives no way to detect this" }] });
+    const receipt = converged({
+      rounds: [round({ newFindings: 1, diff: OLD }), open],
+      // Recorded with round 0, so the cold round at the current diff came after it.
+      waived: [{ finding: "f.ts::boom", why: "by design: the platform gives no way to detect this", round: 0 }],
+    });
     assert.deepEqual(validate(receipt, HASH), { ok: true });
+  });
+
+  // Waiving was exempt from every rule except a 20-character reason — traced, then reproduced
+  // through the CLI: `{"finding": "src/f.ts::auth always returns true", "why":
+  // "aaaaaaaaaaaaaaaaaaaaaaaa"}` cleared a `must` with the working tree untouched and no commit.
+  // Raising that finding had cost the author a round; writing it off cost less than raising it.
+  it("refuses a waiver recorded after the last cold round, so writing a finding off costs a round", () => {
+    const raised = round({ cold: true, findings: [{ id: "f.ts::boom", severity: "must" }], newFindings: 1 });
+    const waivedAt1 = converged({
+      rounds: [raised, round({ lens: "the-waiving-round" })],
+      waived: [{ finding: "f.ts::boom", why: "accepted: nothing downstream can act on it anyway", round: 1 }],
+    });
+    const v = validate(waivedAt1, HASH);
+    assert.equal(v.ok, false, "nobody has read the branch with that decision standing");
+    assert.match(!v.ok ? v.reason : "", /f\.ts::boom/);
+    assert.match(!v.ok ? v.reason : "", /costs\s+what raising one costs|one more cold round/);
+    // The way through is the round, not a longer sentence: one cold round after the decision.
+    const readPast = converged({
+      rounds: [...waivedAt1.rounds, round({ lens: "cold-after-the-waiver", cold: true })],
+      waived: waivedAt1.waived,
+    });
+    assert.deepEqual(validate(readPast, HASH), { ok: true });
+  });
+
+  // A cold round that came BEFORE the decision has not read the branch with it standing, and a
+  // cold round on older code has not read this branch at all.
+  it("counts only a cold round after the waiver, on the code as it ships", () => {
+    const rounds = [round({ cold: true, newFindings: 1, diff: OLD }), round({ cold: true })];
+    assert.equal(waiverAnswered({ round: 1 }, rounds, HASH), false, "the cold round is the one the waiver arrived with");
+    assert.equal(waiverAnswered({ round: 0 }, rounds, HASH), true);
+    assert.equal(waiverAnswered({ round: -1 }, [rounds[0]!], HASH), false, "that cold round reviewed older code");
+    // Receipts written before waivers carried a round fall back to the older rule, where a reason
+    // was the whole price — there is no migration for a gitignored file.
+    assert.equal(waiverAnswered({}, rounds, HASH), true, "a legacy waiver keeps the rule it was written under");
   });
 
   // Reporting a blocking finding demands `evidence`; waiving one demanded nothing, so `why: ""`
@@ -307,6 +428,15 @@ describe("the gate", () => {
       // a list of non-strings is the same crash class one field along.
       JSON.parse(JSON.stringify({ ...converged(), rounds: [round({ newFindings: 1, diff: OLD }), { ...round({ cold: true }), resolved: "f::x" }] })),
       JSON.parse(JSON.stringify({ ...converged(), rounds: [round({ newFindings: 1, diff: OLD }), { ...round({ cold: true }), resolved: [12345] }] })),
+      // The object form of a resolution is walked for an id AND a path, and `files` is walked for
+      // its values — three more fields read off a file on disk, so three more of the same class.
+      JSON.parse(JSON.stringify({ ...converged(), rounds: [round({ newFindings: 1, diff: OLD }), { ...round({ cold: true }), resolved: [{ id: "f::x" }] }] })),
+      JSON.parse(JSON.stringify({ ...converged(), rounds: [round({ newFindings: 1, diff: OLD }), { ...round({ cold: true }), resolved: [{ file: "f.ts" }] }] })),
+      JSON.parse(JSON.stringify({ ...converged(), rounds: [round({ newFindings: 1, diff: OLD }), { ...round({ cold: true }), files: "f.ts" }] })),
+      JSON.parse(JSON.stringify({ ...converged(), rounds: [round({ newFindings: 1, diff: OLD }), { ...round({ cold: true }), files: { "f.ts": 12345 } }] })),
+      // `round` on a waiver decides which cold rounds come after it, so a string there would
+      // compare as a string against every index.
+      JSON.parse(JSON.stringify({ ...converged(), waived: [{ finding: "f::x", why: "a reason long enough to count", round: "1" }] })),
     ]) {
       const v = validate(bad as unknown as Receipt, HASH);
       assert.equal(v.ok, false, `expected a refusal for ${JSON.stringify(bad)}`);
@@ -360,20 +490,20 @@ describe("counting what is new", () => {
 
 describe("recording a round", () => {
   it("rejects a round with no lens, so the floor cannot be padded with anonymous rounds", () => {
-    assert.throws(() => recordRound({ lens: "  " }, HASH, "feature/x", dir), /needs a `lens`/);
+    assert.throws(() => recordRound({ lens: "  " }, snap(), "feature/x", dir), /needs a `lens`/);
   });
 
   // A blocking finding costs the author a round, so it has to be checkable — the cheapest
   // defence against a confident claim about code that does not say what the reviewer thinks.
   it("rejects a blocking finding with no evidence, and names which one", () => {
     assert.throws(
-      () => recordRound({ lens: "a", findings: [{ file: "f.ts", claim: "boom" }] }, HASH, "feature/x", dir),
+      () => recordRound({ lens: "a", findings: [{ file: "f.ts", claim: "boom" }] }, snap(), "feature/x", dir),
       /needs `evidence`.*f\.ts: boom/s,
     );
   });
 
   it("lets a nit through without evidence", () => {
-    const r = recordRound({ lens: "a", findings: [{ file: "f.ts", claim: "naming", severity: "nit" }] }, HASH, "feature/x", dir);
+    const r = recordRound({ lens: "a", findings: [{ file: "f.ts", claim: "naming", severity: "nit" }] }, snap(), "feature/x", dir);
     assert.equal(r.rounds.length, 1);
   });
 
@@ -382,19 +512,19 @@ describe("recording a round", () => {
   it("refuses a waiver with no reason of its own", () => {
     for (const why of ["", "  ", "wontfix"]) {
       assert.throws(
-        () => recordRound({ lens: "a", waived: [{ finding: "f.ts::boom", why }] }, HASH, "feature/x", dir),
+        () => recordRound({ lens: "a", waived: [{ finding: "f.ts::boom", why }] }, snap(), "feature/x", dir),
         /every waiver needs .* REASON/s,
         `"${why}" must be refused`,
       );
     }
     assert.throws(
-      () => recordRound({ lens: "a", waived: [{ finding: "  ", why: "a perfectly good reason, long enough" }] }, HASH, "feature/x", dir),
+      () => recordRound({ lens: "a", waived: [{ finding: "  ", why: "a perfectly good reason, long enough" }] }, snap(), "feature/x", dir),
       /fingerprint/,
       "a waiver naming no finding waives nothing",
     );
     const ok = recordRound(
       { lens: "a", waived: [{ finding: "f.ts::boom", why: "not mechanisable: the platform exposes no hook for it" }] },
-      HASH,
+      snap(),
       "feature/x",
       dir,
     );
@@ -405,19 +535,22 @@ describe("recording a round", () => {
   // the field exists to prevent — so a typo is an error where it is written, not an unexplained
   // refusal at handover.
   it("refuses a resolution no earlier round reported", () => {
-    recordRound({ lens: "one", findings: [{ file: "f.ts", claim: "boom", evidence: "f.ts:1" }] }, OLD, "feature/x", dir);
-    assert.throws(() => recordRound({ lens: "two", resolved: ["f.ts::typo"] }, HASH, "feature/x", dir), /no earlier round reported/);
-    assert.throws(() => recordRound({ lens: "two", resolved: ["  "] }, HASH, "feature/x", dir), /no earlier round reported/);
-    const ok = recordRound({ lens: "two", resolved: ["f.ts::boom"] }, HASH, "feature/x", dir);
+    const buggy = snap({ diff: OLD, code: OLD, files: { "f.ts": "bug" } });
+    const fixed = snap({ files: { "f.ts": "ok" } });
+    recordRound({ lens: "one", findings: [{ file: "f.ts", claim: "boom", evidence: "f.ts:1" }] }, buggy, "feature/x", dir);
+    assert.throws(() => recordRound({ lens: "two", resolved: ["f.ts::typo"] }, fixed, "feature/x", dir), /no earlier round reported/);
+    assert.throws(() => recordRound({ lens: "two", resolved: ["  "] }, fixed, "feature/x", dir), /no earlier round reported/);
+    const ok = recordRound({ lens: "two", resolved: ["f.ts::boom"] }, fixed, "feature/x", dir);
     assert.deepEqual(ok.rounds.at(-1)?.resolved, ["f.ts::boom"]);
   });
 
   // Every other claim here costs something; this one would cost one line of JSON if a round
-  // could resolve what it is itself looking at. A fix moves the diff, so the round after the fix
+  // could resolve what it is itself looking at. A fix moves the code, so the round after the fix
   // is the one that can say it.
   it("refuses to resolve a finding raised against the code as it stands", () => {
-    recordRound({ lens: "one", findings: [{ file: "f.ts", claim: "boom", evidence: "f.ts:1" }] }, HASH, "feature/x", dir);
-    assert.throws(() => recordRound({ lens: "two", resolved: ["f.ts::boom"] }, HASH, "feature/x", dir), /nothing has changed since/);
+    const now = snap({ files: { "f.ts": "bug" } });
+    recordRound({ lens: "one", findings: [{ file: "f.ts", claim: "boom", evidence: "f.ts:1" }] }, now, "feature/x", dir);
+    assert.throws(() => recordRound({ lens: "two", resolved: ["f.ts::boom"] }, now, "feature/x", dir), /holds the same bytes/);
   });
 
   // ... and the diff moving is not the code moving. An untracked file appearing changes the hash
@@ -426,28 +559,75 @@ describe("recording a round", () => {
   // says so a round later than it could have.
   it("refuses to resolve one when only an untracked file moved the hash", () => {
     const CODE = "d".repeat(64);
-    recordRound({ lens: "one", findings: [{ file: "f.ts", claim: "boom", evidence: "f.ts:1" }] }, HASH, "feature/x", dir, CODE);
-    assert.throws(() => recordRound({ lens: "two", resolved: ["f.ts::boom"] }, OLD, "feature/x", dir, CODE), /nothing has changed since/);
-    const ok = recordRound({ lens: "two", resolved: ["f.ts::boom"] }, OLD, "feature/x", dir, "c".repeat(64));
+    const before = snap({ code: CODE, files: { "f.ts": "bug" } });
+    recordRound({ lens: "one", findings: [{ file: "f.ts", claim: "boom", evidence: "f.ts:1" }] }, before, "feature/x", dir);
+    const shuffled = snap({ diff: OLD, code: CODE, files: { "f.ts": "bug" } });
+    assert.throws(() => recordRound({ lens: "two", resolved: ["f.ts::boom"] }, shuffled, "feature/x", dir), /holds the same bytes/);
+    const ok = recordRound({ lens: "two", resolved: ["f.ts::boom"] }, snap({ diff: OLD, files: { "f.ts": "ok" } }), "feature/x", dir);
     assert.deepEqual(ok.rounds.at(-1)?.resolved, ["f.ts::boom"], "a real code change still resolves it");
   });
 
-  it("stamps each round with the code it reviewed, not only the diff", () => {
-    const r = recordRound({ lens: "one" }, HASH, "feature/x", dir, "d".repeat(64));
+  // The bypass that made this per-file: `chmod +x` on the very file the finding named printed
+  // "1 file changed, 0 insertions(+), 0 deletions(-)", moved the tracked-diff hash, and bought the
+  // resolution. The bytes are what the finding was about, and they did not move.
+  it("refuses to resolve one when the file's mode moved but its bytes did not", () => {
+    const before = snap({ code: "d".repeat(64), files: { "f.ts": "bug" } });
+    recordRound({ lens: "one", findings: [{ file: "f.ts", claim: "auth always returns true", evidence: "f.ts:1" }] }, before, "feature/x", dir);
+    // Everything a mode change moves: the diff text, and so both whole-diff hashes. Not the file.
+    const chmodded = snap({ diff: OLD, code: "e".repeat(64), files: { "f.ts": "bug" } });
+    assert.throws(
+      () => recordRound({ lens: "two", resolved: ["f.ts::auth always returns true"] }, chmodded, "feature/x", dir),
+      /holds the same bytes/,
+    );
+  });
+
+  // An edit ANYWHERE used to answer any finding. The refusal has to name the file and the way out,
+  // because the honest case it also refuses — a fix that landed in the callee — looks identical
+  // from here and the author needs to be told what to write instead.
+  it("refuses a resolution when some other file moved, and says how to name where the fix landed", () => {
+    const before = snap({ code: "d".repeat(64), files: { "f.ts": "bug", "g.ts": "one" } });
+    recordRound({ lens: "one", findings: [{ file: "f.ts", claim: "boom", evidence: "f.ts:1" }] }, before, "feature/x", dir);
+    const elsewhere = snap({ diff: OLD, code: "e".repeat(64), files: { "f.ts": "bug", "g.ts": "two" } });
+    assert.throws(() => recordRound({ lens: "two", resolved: ["f.ts::boom"] }, elsewhere, "feature/x", dir), /"file": "<path you changed>"/);
+    const ok = recordRound({ lens: "two", resolved: [{ id: "f.ts::boom", file: "g.ts" }] }, elsewhere, "feature/x", dir);
+    assert.deepEqual(ok.rounds.at(-1)?.resolved, [{ id: "f.ts::boom", file: "g.ts" }], "the claim about where it landed is on the record");
+    // ... and naming a file that did not move buys nothing, so the object form is a claim, not a
+    // key that switches the check off.
+    assert.throws(
+      () => recordRound({ lens: "three", resolved: [{ id: "f.ts::boom", file: "f.ts" }] }, elsewhere, "feature/x", dir),
+      /holds the same bytes/,
+    );
+    assert.throws(
+      () => recordRound({ lens: "three", resolved: [{ id: "f.ts::boom", file: "  " }] }, elsewhere, "feature/x", dir),
+      /names an empty file/,
+    );
+  });
+
+  it("stamps each round with the code and the files it reviewed, not only the diff", () => {
+    const r = recordRound({ lens: "one" }, snap({ code: "d".repeat(64), files: { "f.ts": "x" } }), "feature/x", dir);
     assert.equal(r.rounds.at(-1)?.code, "d".repeat(64));
+    assert.deepEqual(r.rounds.at(-1)?.files, { "f.ts": "x" });
+  });
+
+  // A waiver is answered by a cold round recorded AFTER it, so the index it was recorded at is
+  // what makes that checkable. Off by one and the round it arrived with would answer it.
+  it("stamps a waiver with the round it was recorded alongside", () => {
+    recordRound({ lens: "one", findings: [{ file: "f.ts", claim: "boom", evidence: "f.ts:1" }] }, snap(), "feature/x", dir);
+    const r = recordRound({ lens: "two", waived: [{ finding: "f.ts::boom", why: "accepted: it costs more to mechanise than it saves" }] }, snap(), "feature/x", dir);
+    assert.equal(r.waived.at(-1)?.round, 1, "the waiver arrived with round index 1, not with the round before it");
   });
 
   // Rounds happen in different sessions, so the curve has to accumulate on disk or round 4
   // re-reports what round 2 found and the gate never converges.
   it("extends a receipt written by an earlier session rather than restarting it", () => {
-    recordRound({ lens: "one", findings: [{ file: "f.ts", claim: "boom", evidence: "f.ts:1" }] }, HASH, "feature/x", dir);
-    const second = recordRound({ lens: "two", cold: true, findings: [{ file: "f.ts", claim: "boom", evidence: "f.ts:1" }] }, HASH, "feature/x", dir);
+    recordRound({ lens: "one", findings: [{ file: "f.ts", claim: "boom", evidence: "f.ts:1" }] }, snap(), "feature/x", dir);
+    const second = recordRound({ lens: "two", cold: true, findings: [{ file: "f.ts", claim: "boom", evidence: "f.ts:1" }] }, snap(), "feature/x", dir);
     assert.deepEqual(second.rounds.map((r) => r.newFindings), [1, 0]);
   });
 
   it("keeps two branches' receipts apart even when a name would collide as a filename", () => {
-    recordRound({ lens: "a" }, HASH, "feature/x", dir);
-    recordRound({ lens: "b" }, HASH, "feature-x", dir);
+    recordRound({ lens: "a" }, snap(), "feature/x", dir);
+    recordRound({ lens: "b" }, snap(), "feature-x", dir);
     assert.equal(readReceipt("feature/x", dir)?.rounds[0]?.lens, "a");
     assert.equal(readReceipt("feature-x", dir)?.rounds[0]?.lens, "b", "a slash and a dash must not share a receipt");
   });
@@ -504,6 +684,23 @@ describe("the handover to a human", () => {
     const written = readFileSync(file(), "utf8");
     assert.match(written, /^## What was wrong/, "the author's reasoning stays first");
     assert.match(written, /rounds →/, "and the curve travels with it");
+  });
+
+  // The other half of what a waiver costs (the first is the round `waiverAnswered` demands): the
+  // human opening the PR cannot see the receipt, which is gitignored, so a decision to ship a
+  // known defect travelled to them as the digit in "waived: 1". Now it travels as the finding and
+  // the reason, in the rendered body.
+  it("spells out every waived finding, since the receipt never reaches whoever reads the PR", () => {
+    const receipt = converged({
+      rounds: [round({ newFindings: 1, diff: OLD }), round({ cold: true, findings: [{ id: "src/f.ts::auth always returns true", severity: "must" }] })],
+      waived: [{ finding: "src/f.ts::auth always returns true", why: "accepted: the caller is trusted and this ships behind a flag", round: 0 }],
+    });
+    assert.deepEqual(validate(receipt, HASH), { ok: true }, "the fixture must be one the gate accepts");
+    assert.deepEqual(handover(receipt, HASH, "body", BRANCH, file()), { ok: true });
+    const rendered = readFileSync(file(), "utf8").replace(/<!--[\s\S]*?-->/g, "");
+    assert.match(rendered, /1 known finding waived/);
+    assert.match(rendered, /auth always returns true/, "which finding");
+    assert.match(rendered, /the caller is trusted/, "and the reason given for shipping it");
   });
 
   // Pruning cannot reach a body someone names by hand, so the last defence is a human reading
@@ -600,6 +797,29 @@ describe("the commands a human actually runs", () => {
     writeFileSync(join(repo, ".claude", "pr-body.md"), `earned elsewhere\n<!-- deckhand-handover branch=feature/other diff=${HASH} -->\n`);
     return repo;
   };
+
+  // Every refusal `recordRound` raises names the fingerprint, the file and what to write instead —
+  // and thrown from the entry point it reached the caller as a stack trace with the instruction
+  // buried in it, which reads as a broken tool rather than as a state to fix.
+  it("`npm run review:round` refuses with the instruction, not with a stack trace", () => {
+    const repo = repoWithStaleBody();
+    const cmd = scripts()["review:round"]!.replace("scripts/review-receipt.ts", join(process.cwd(), "scripts/review-receipt.ts"));
+    for (const [body, expected] of [
+      ['{"lens":"  "}', /needs a `lens`/],
+      ["not json at all", /./],
+    ] as const) {
+      const run = spawnSync("sh", ["-c", cmd], {
+        cwd: repo,
+        input: body,
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${join(process.cwd(), "node_modules/.bin")}:${process.env.PATH ?? ""}` },
+      });
+      assert.equal(run.status, 1, `expected a refusal for ${body}: ${run.stderr}`);
+      assert.match(run.stderr ?? "", /✗ /, `expected a stated refusal for ${body}: ${run.stderr}`);
+      assert.match(run.stderr ?? "", expected);
+      assert.doesNotMatch(run.stderr ?? "", /^\s+at .*\(/m, `the refusal arrived as a crash: ${run.stderr}`);
+    }
+  });
 
   for (const verb of ["review:show", "review:check", "review:hash"]) {
     it(`\`npm run ${verb}\` deletes a body written for another branch`, () => {
@@ -775,7 +995,10 @@ describe("the summary a human reads", () => {
 });
 
 describe("what counts as the code under review", () => {
-  const fake = (parts: Record<string, string>) => (args: string[]) => parts[args[0]!] ?? "";
+  // `--name-only` is a second `git diff` with a different question, so the fake has to tell the
+  // two apart — keying on `args[0]` alone answered the file list with the diff text.
+  const fake = (parts: Record<string, string>) => (args: string[]) =>
+    args.includes("--name-only") ? (parts.names ?? "") : (parts[args[0]!] ?? "");
 
   it("is one hash over the merge-base diff plus the untracked file list", () => {
     const a = diffHash("origin/main", fake({ "merge-base": "abc\n", diff: "D", "ls-files": "u.txt" }));
@@ -807,6 +1030,53 @@ describe("what counts as the code under review", () => {
     assert.notEqual(code(""), diffHashes("origin/main", fake({ "merge-base": "abc\n", diff: "D2", "ls-files": "" })).code);
     const both = diffHashes("origin/main", fake({ "merge-base": "abc\n", diff: "D", "ls-files": "scratch.tmp" }));
     assert.notEqual(both.diff, diffHashes("origin/main", fake({ "merge-base": "abc\n", diff: "D", "ls-files": "" })).diff, "the identity half still sees it");
+  });
+
+  // The part a resolution actually rests on: bytes per path. It hashes the FILE, not that file's
+  // slice of the diff text — a mode change, a rebase, or an edit above a hunk all rewrite the diff
+  // text of a file whose content is exactly what it was.
+  it("hashes the content of each changed file, and reads it from the repository root", () => {
+    const read: string[] = [];
+    const files = (contents: Record<string, string>) =>
+      diffHashes("origin/main", fake({ "merge-base": "abc\n", diff: "D", names: "src/f.ts\nsrc/gone.ts\n", "rev-parse": "/repo\n" }), (p) => {
+        read.push(p);
+        const key = p.replace("/repo/", "");
+        return key in contents ? Buffer.from(contents[key]!) : null;
+      }).files;
+    const one = files({ "src/f.ts": "auth" });
+    assert.deepEqual(Object.keys(one), ["src/f.ts"], "a deleted file has no content to match, so it is absent");
+    assert.deepEqual(read, ["/repo/src/f.ts", "/repo/src/gone.ts"], "paths are joined to the toplevel, not read against the cwd");
+    assert.equal(one["src/f.ts"], files({ "src/f.ts": "auth" })["src/f.ts"], "the same bytes hash the same");
+    assert.notEqual(one["src/f.ts"], files({ "src/f.ts": "auth " })["src/f.ts"]);
+  });
+
+  it("fails closed on the file map too when there is no merge base", () => {
+    assert.deepEqual(diffHashes("origin/main", fake({})).files, {}, "no map means every resolution is refused, not accepted");
+  });
+});
+
+// The predicate every resolution now rests on. Its comment claims exactly two things — the bytes
+// at that path differ, and they have not merely been relabelled — and these are them.
+describe("whether the bytes at a path moved", () => {
+  it("is false when the content is identical, whatever else changed around it", () => {
+    assert.equal(contentMoved({ "f.ts": "x", "g.ts": "1" }, { "f.ts": "x", "g.ts": "2" }, "f.ts"), false);
+    assert.equal(contentMoved({ "f.ts": "x" }, { "f.ts": "x", "new.ts": "n" }, "f.ts"), false);
+  });
+
+  it("is false for a rename, since the bytes came across intact", () => {
+    assert.equal(contentMoved({ "f.ts": "x" }, { "g.ts": "x" }, "f.ts"), false, "same code, new label");
+    assert.equal(contentMoved({ "f.ts": "x" }, { "g.ts": "y" }, "f.ts"), true, "renamed AND rewritten is a change");
+  });
+
+  it("is true when the file is edited, added or emptied out of the diff", () => {
+    assert.equal(contentMoved({ "f.ts": "x" }, { "f.ts": "y" }, "f.ts"), true);
+    assert.equal(contentMoved({}, { "f.ts": "x" }, "f.ts"), true, "a file the branch did not touch before");
+    assert.equal(contentMoved({ "f.ts": "x" }, {}, "f.ts"), true, "reverted to what main has");
+  });
+
+  it("is symmetric enough to expire a resolution when the code goes back", () => {
+    assert.equal(contentMoved({ "f.ts": "bug" }, { "f.ts": "fixed" }, "f.ts"), true);
+    assert.equal(contentMoved({ "f.ts": "bug" }, { "f.ts": "bug" }, "f.ts"), false, "a revert puts the finding back");
   });
 });
 
