@@ -94,6 +94,32 @@ describe("AndroidAdbBackend.attach", () => {
     });
   });
 
+  it("never hands two devices attaching at once the same port", async () => {
+    // `usedPorts()` reads `this.helpers` and nothing else, and the helper is not
+    // recorded until AFTER `wm size` and the listen promise — two awaits later.
+    // `allocatePort` returns the LOWEST free port, so two devices in one preview
+    // (preview.ts runs attachAndReady for a group's devices inside one
+    // Promise.all) take the same port every time, not now and then. The second
+    // bind fails EADDRINUSE, and a throwing attach is not retried, so that
+    // device is failed outright.
+    const { adb } = fakeAdb();
+    const b = new AndroidAdbBackend({ portRange: [3300, 3310], adb });
+    // allSettled, and the teardown before the assertions: the bug's symptom is a
+    // REJECTION, and a rejected Promise.all would leave the first helper's real
+    // HTTP server listening — `node --test` then never exits and a regression
+    // hangs CI instead of reporting it.
+    const settled = await Promise.allSettled([
+      b.attach({ platform: "android", udid: "emulator-5554", serial: "emulator-5554" }),
+      b.attach({ platform: "android", udid: "emulator-5556", serial: "emulator-5556" }),
+    ]);
+    for (const r of settled) if (r.status === "fulfilled") await r.value.detach().catch(() => {});
+
+    const failed = settled.find((r) => r.status === "rejected");
+    assert.equal(failed, undefined, `an attach failed while its sibling was mid-attach: ${(failed as PromiseRejectedResult)?.reason}`);
+    const ports = settled.map((r) => new URL((r as PromiseFulfilledResult<{ origin: string }>).value.origin).port);
+    assert.notEqual(ports[0], ports[1], `two concurrent attaches took the same port (${ports[0]})`);
+  });
+
   it("frees the port on detach, so a device can be re-attached", async () => {
     const { adb } = fakeAdb();
     const b = new AndroidAdbBackend({ portRange: [3300, 3302], adb }); // deliberately tiny

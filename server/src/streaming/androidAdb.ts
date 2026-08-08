@@ -269,8 +269,22 @@ export class AndroidAdbBackend implements StreamingBackend {
     this.hostRecorderSerials = opts.hostRecorderSerials ?? defaultHostRecorderSerials;
   }
 
+  /**
+   * Ports claimed by an attach that has allocated one but has not yet recorded its helper.
+   *
+   * `attach` awaits `wm size` and then the listen, so `this.helpers` learns of the port two
+   * awaits after it was chosen — and `preview.ts` attaches every device of a group inside one
+   * `Promise.all`. Without this the second device is handed the SAME port (allocatePort takes
+   * the lowest free one, so this is deterministic, not a rare race), fails EADDRINUSE, and is
+   * failed outright: a throwing attach is not retried.
+   * → `androidAdbBackend.test.ts` "never hands two devices attaching at once the same port"
+   */
+  private readonly pendingPorts = new Set<number>();
+
   private usedPorts(): Set<number> {
-    return new Set([...this.helpers.values()].map((h) => h.port));
+    const used = new Set([...this.helpers.values()].map((h) => h.port));
+    for (const port of this.pendingPorts) used.add(port);
+    return used;
   }
 
   private async screenSize(serial: string): Promise<{ w: number; h: number }> {
@@ -287,78 +301,88 @@ export class AndroidAdbBackend implements StreamingBackend {
     if (existing) return this.streamHandle(existing);
 
     const port = allocatePort(this.range[0], this.range[1], this.usedPorts());
-    const base = helperBasePath(serial);
-    // `wm size` reports the rotation-independent physical size; `size` is the
-    // live input coordinate space, transposed by wireInput on rotation.
-    const size = await this.screenSize(serial);
-    const natural = { ...size };
+    this.pendingPorts.add(port);
+    try {
+      const base = helperBasePath(serial);
+      // `wm size` reports the rotation-independent physical size; `size` is the
+      // live input coordinate space, transposed by wireInput on rotation.
+      const size = await this.screenSize(serial);
+      const natural = { ...size };
 
-    const avcc = new AvccSource(serial);
+      const avcc = new AvccSource(serial);
 
-    const server = createServer((req, res) => {
-      const url = (req.url ?? "").split("?")[0]!;
-      if (url === `${base}/health`) {
-        res.writeHead(200).end("ok");
-        return;
-      }
-      if (url === `${base}/stream.avcc`) {
-        void this.serveAvcc(avcc, res);
-        return;
-      }
-      if (url === `${base}/stream.mjpeg`) {
-        this.serveMjpeg(serial, res);
-        return;
-      }
-      res.writeHead(404).end();
-    });
-
-    const wss = new WebSocketServer({ noServer: true });
-    server.on("upgrade", (req, socket, head) => {
-      const url = (req.url ?? "").split("?")[0]!;
-      if (url === `${base}/ws`) {
-        wss.handleUpgrade(req, socket, head, (ws) => this.wireInput(ws, serial, size, natural));
-      } else {
-        socket.destroy();
-      }
-    });
-
-    // Reject on 'error', not just resolve on success. Without a listener, an http.Server
-    // emitting 'error' — EADDRINUSE is the ordinary case, from a leaked helper on the same
-    // port — THROWS, the promise never settles, and attach() hangs forever. The engine is
-    // awaiting it, so the preview sits in "starting the stream" with no error and no timeout,
-    // and cli.ts's crash guard deliberately keeps the process alive, so nothing else surfaces
-    // it either. A port collision must fail the device, not wedge it.
-    await new Promise<void>((resolve, reject) => {
-      const onError = (err: Error): void => {
-        server.removeListener("listening", onListening);
-        reject(new Error(`android helper could not bind 127.0.0.1:${port} — ${err.message}`));
-      };
-      const onListening = (): void => {
-        server.removeListener("error", onError);
-        resolve();
-      };
-      server.once("error", onError);
-      server.once("listening", onListening);
-      server.listen(port, "127.0.0.1");
-    });
-    const helper: Helper = {
-      serial,
-      port,
-      server,
-      wss,
-      avcc,
-      stop: () => {
-        try {
-          avcc.dispose();
-          wss.close();
-          server.close();
-        } catch {
-          /* noop */
+      const server = createServer((req, res) => {
+        const url = (req.url ?? "").split("?")[0]!;
+        if (url === `${base}/health`) {
+          res.writeHead(200).end("ok");
+          return;
         }
-      },
-    };
-    this.helpers.set(serial, helper);
-    return this.streamHandle(helper);
+        if (url === `${base}/stream.avcc`) {
+          void this.serveAvcc(avcc, res);
+          return;
+        }
+        if (url === `${base}/stream.mjpeg`) {
+          this.serveMjpeg(serial, res);
+          return;
+        }
+        res.writeHead(404).end();
+      });
+
+      const wss = new WebSocketServer({ noServer: true });
+      server.on("upgrade", (req, socket, head) => {
+        const url = (req.url ?? "").split("?")[0]!;
+        if (url === `${base}/ws`) {
+          wss.handleUpgrade(req, socket, head, (ws) => this.wireInput(ws, serial, size, natural));
+        } else {
+          socket.destroy();
+        }
+      });
+
+      // Reject on 'error', not just resolve on success. Without a listener, an http.Server
+      // emitting 'error' — EADDRINUSE is the ordinary case, from a helper of a previous
+      // process left on the same port; it also used to mean the sibling attach running beside
+      // this one, until `pendingPorts` above closed that window — THROWS, the promise never
+      // settles, and attach() hangs forever. The engine is
+      // awaiting it, so the preview sits in "starting the stream" with no error and no timeout,
+      // and cli.ts's crash guard deliberately keeps the process alive, so nothing else surfaces
+      // it either. A port collision must fail the device, not wedge it.
+      await new Promise<void>((resolve, reject) => {
+        const onError = (err: Error): void => {
+          server.removeListener("listening", onListening);
+          reject(new Error(`android helper could not bind 127.0.0.1:${port} — ${err.message}`));
+        };
+        const onListening = (): void => {
+          server.removeListener("error", onError);
+          resolve();
+        };
+        server.once("error", onError);
+        server.once("listening", onListening);
+        server.listen(port, "127.0.0.1");
+      });
+      const helper: Helper = {
+        serial,
+        port,
+        server,
+        wss,
+        avcc,
+        stop: () => {
+          try {
+            avcc.dispose();
+            wss.close();
+            server.close();
+          } catch {
+            /* noop */
+          }
+        },
+      };
+      this.helpers.set(serial, helper);
+      return this.streamHandle(helper);
+    } finally {
+      // Released only once the helper is in `this.helpers`, so the port is claimed by one
+      // or the other at every instant — including on the throw path, where nothing else
+      // would ever forget the claim.
+      this.pendingPorts.delete(port);
+    }
   }
 
   private streamHandle(helper: Helper): AttachedStream {
