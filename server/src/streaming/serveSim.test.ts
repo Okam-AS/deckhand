@@ -268,6 +268,57 @@ describe("ServeSimBackend — surviving helpers", () => {
     assert.deepEqual(killedPids, [9101], "the daemon an unfinished attach had just bound must survive the sweep");
   });
 
+  it("never hands two concurrent attaches the same port", async () => {
+    // `usedPorts` folds `pendingPorts` into its answer BEFORE the per-port `lsof`
+    // loop, and every one of those probes is an await. An attach sitting in that
+    // loop therefore answers from a snapshot taken before the sibling attach
+    // running beside it staked its claim — and `allocatePort` returns the LOWEST
+    // free port, so the two do not merely collide sometimes, they collide every
+    // time. The second daemon gets EADDRINUSE (or adopts the first's port) and
+    // the engine fails that device.
+    //
+    // Same shape as `isSpared`, which this branch moved to AFTER its await: the
+    // sweep side was fixed, the allocator side kept reading the snapshot.
+    let second: Promise<{ origin: string }> | undefined;
+    // The flag is set BEFORE the call: `attach` runs synchronously as far as its
+    // own first probe, which lands back in here, so assigning `second` afterwards
+    // guards nothing and recurses until the stack goes.
+    let startedSecond = false;
+    const backend: ServeSimBackend = new ServeSimBackend({
+      portRange: [3100, 3102],
+      detachImpl: async (_bin, args) => {
+        const port = Number(args[args.indexOf("-p") + 1]!);
+        const udid = args[args.length - 1]!;
+        // The claim has to outlive the sibling's probe loop, which is what
+        // `pendingPorts` exists to cover; a detach that returned instantly would
+        // instead be caught by re-reading `this.helpers`.
+        await new Promise((r) => setTimeout(r, 20));
+        return JSON.stringify({ port, streamUrl: `http://127.0.0.1:${port}/helper/${udid}/stream.mjpeg` });
+      },
+      killImpl: async () => {},
+      listenersImpl: async () => {
+        // The FIRST probe of the first attach starts the second one, which then
+        // runs its own probe loop interleaved with this one — a plain
+        // `Promise.all` of two attaches on one engine group.
+        if (!startedSecond) {
+          startedSecond = true;
+          second = backend.attach({ platform: "ios", udid: "B" }) as Promise<{ origin: string }>;
+        }
+        await new Promise((r) => setTimeout(r, 0));
+        return [];
+      },
+      killPidImpl: () => {},
+    });
+
+    const a = await backend.attach({ platform: "ios", udid: "A" });
+    const b = await second!;
+    assert.notEqual(
+      new URL(a.origin).port,
+      new URL(b.origin).port,
+      `two attaches racing through usedPorts() took the same port (${a.origin})`,
+    );
+  });
+
   it("never blanket-kills while an attach already holds a port", async () => {
     // The blanket `serve-sim -k` kills every helper on the machine, so it is taken only when
     // we know of no helper at all. `this.helpers` is not the whole of what we know: an attach

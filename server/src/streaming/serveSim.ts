@@ -152,6 +152,12 @@ export class ServeSimBackend implements StreamingBackend {
    * helpers from the previous one are still alive on their ports. Allocating over one of those
    * hands the new device a daemon bound to a simulator that no longer exists — it answers, and
    * serves that dead simulator's last framebuffer forever.
+   *
+   * The loop below is one `lsof` per port, so every claim staked while it runs has to be
+   * re-read AFTER it — a sibling attach on the same engine group allocates during exactly
+   * that window, and `allocatePort` returns the lowest free port, so a stale snapshot hands
+   * both devices the same one every time rather than now and then.
+   * → `serveSim.test.ts` "never hands two concurrent attaches the same port"
    */
   private async usedPorts(): Promise<Set<number>> {
     const used = new Set([...this.helpers.values()].map((h) => h.port));
@@ -160,6 +166,8 @@ export class ServeSimBackend implements StreamingBackend {
       if (used.has(port)) continue;
       if ((await this.listenersImpl(port)).length) used.add(port);
     }
+    for (const helper of this.helpers.values()) used.add(helper.port);
+    for (const port of this.pendingPorts) used.add(port);
     return used;
   }
 
