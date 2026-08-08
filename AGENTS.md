@@ -179,6 +179,12 @@ therefore does NOT do the work itself:
    a soft reset. `git commit --only <your paths>` is the form that cannot do it, and it is the
    one to use in a shared tree. After committing, read `git show --stat` and confirm the file
    list is yours alone; if it is not, `git reset --soft HEAD~1` and re-commit with `--only`.
+   **And never `git commit --amend`.** `HEAD` is not yours in a shared tree: another agent can
+   commit between your commit and your amend, and then you are rewriting THEIR commit, not
+   yours. That happened on 2026-08-08 — an amend folded fifteen lines into a commit its author
+   had just made, and was unpicked with `git reset --mixed <their sha>`. Nothing was lost
+   because the agent noticed; nothing would have caught it if it had not. Make a second commit
+   instead. Tidy history is not worth another agent's work.
 6. **Exceptions the lead agent may do inline:** answering a question, reading/searching to brief
    a subagent, a one-line fix, and the conflict resolution itself.
 
