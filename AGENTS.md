@@ -18,9 +18,10 @@ detection (Expo/RN/NativeScript, iOS + Android), iOS simctl control, Android dev
 (avdmanager/emulator/adb, uiautomator describe, toolEnv), the streaming router (serve-sim
 for iOS, H.264/screencap backend for Android), the preview engine (**platform-grouped,
 build-once-install-many, parallel boots/installs**), the MCP server (token auth) + scoped
-share proxy, and the CLI. The viewer is one calm page with no platform switch: it asks
-every device for `stream.avcc` (H.264 decoded with WebCodecs) and falls back to
-`stream.mjpeg` on a 404 — boundary-framed JPEG on iOS, `adb screencap` PNG on Android,
+share proxy, and the CLI. The viewer is one calm page with no platform switch: where the
+browser has WebCodecs it asks every device for `stream.avcc` (H.264) and falls back to
+`stream.mjpeg` on a 404; a browser without WebCodecs starts on `stream.mjpeg` and never
+probes. MJPEG is boundary-framed JPEG on iOS, `adb screencap` PNG on Android,
 both painted through an `<img>`. Android's primary path is the WebCodecs one; the PNG
 stream is its fallback, not its normal route.
 
@@ -407,8 +408,11 @@ ready-to-paste poller, is the `waiting-for-a-preview` skill in `.claude/skills/`
 
 ## If a tool response carries `deckhandUpdate`
 
-Every successful tool response carries `deckhandUpdate` when the code the server
-is RUNNING is not the newest — in one of two states, which need different words:
+Every successful tool response that returns JSON carries `deckhandUpdate` when the
+code the server is RUNNING is not the newest — in one of two states, which need
+different words. (`screenshot` is the one exception: it returns an image block,
+which has nowhere to put JSON, so it carries no notice. `mcp/responses.test.ts`
+keeps it the only one.)
 
 - `action: "restart"` — the checkout was already pulled and the process is still
   on the old code. Ask: **"deckhand has been updated on disk but is still running
@@ -447,11 +451,20 @@ can fix it**, and — this is the part to get right — it distinguishes an erra
 from a question:
 
 - `fix: <command>` — yours to run. Run it.
-- **BLOCKED** — an errand needing a browser or their Cloudflare account. Relay it
-  and stop. **Never attempt these**; `cloudflared tunnel login` opens a browser
-  and will hang you forever, and retrying changes nothing.
+- `you: <what to do>` — a fix only a person at this Mac can perform: an App Store
+  install, an Apple ID, a `sudo` licence accept, a decision about the machine's
+  default Node. **Never attempt these either** — relay the line as written (it
+  already says what it needs and why you cannot) and stop. Setup is safe to
+  re-run, so pick up from `setup` again once they say it is done.
+- **BLOCKED** — also relay-and-stop, but an errand off this machine: a browser and
+  their Cloudflare account. **Never attempt these**; `cloudflared tunnel login`
+  opens a browser and will hang you forever, and retrying changes nothing.
 - **ASK THE USER** — an input, not an obstacle. Ask the one question in the words
   given, take the answer, and carry on yourself.
+
+`fix:` is the only one of the four you may run. The other three are the user's, and
+the two labels that look alike differ only in where the work happens — say `you:`
+items as the local chores they are, rather than reporting them as blocked.
 
 **Do not paste the report at the user.** When nothing is missing and nothing is
 blocked, the only thing left is one answer — so ask one question. An agent that

@@ -121,12 +121,17 @@ npx tsx server/src/cli.ts setup \
 
 ### If you are the agent
 
-- Run `setup` with no arguments first. It labels every line with who acts:
-  `fix:` is yours to run, **BLOCKED** is an errand needing a browser or their
-  Cloudflare account — relay it verbatim and stop, never attempt it, because
-  `cloudflared tunnel login` opens a browser and will hang you forever — and
-  **ASK THE USER** is one question to ask in the words given, not a report to
-  paste at them.
+- Run `setup` with no arguments first. It labels every line with who acts, and
+  `fix:` is the only one of the four you may run:
+  - `fix:` — yours to run.
+  - `you:` — a fix only a person at this Mac can do (an App Store install, an
+    Apple ID, a `sudo` licence accept, the machine's default Node). Relay the
+    line as written and stop; re-run `setup` once they say it is done.
+  - **BLOCKED** — also relay-and-stop, but an errand off this machine: a browser
+    and their Cloudflare account. Never attempt it — `cloudflared tunnel login`
+    opens a browser and will hang you forever.
+  - **ASK THE USER** — one question to ask in the words given, not a report to
+    paste at them.
 - Install what it says you can install. Then ask the user for a hostname on a
   domain they have on Cloudflare, and run `setup --hostname <that>`.
 - At the end, run `deckhand pair` yourself and give the user the code it prints;
