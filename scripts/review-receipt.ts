@@ -32,10 +32,15 @@
  * contain. It raises the floor and the cost. It does not manufacture diligence, and
  * pretending otherwise would make it worse than nothing by inviting trust it has not earned.
  *
- * Which is why this file is the ONLY thing standing between a branch and a pull request.
- * There used to be a PreToolUse hook refusing `gh pr create` outright, so the last step was
- * always a person's; it was removed, and the receipt is what replaced it. `handover` is
- * therefore not advisory — it is the gate.
+ * WHAT IT ALSO DOES NOT DO, and this one is easy to overclaim: it does not PREVENT a pull
+ * request. There used to be a PreToolUse hook refusing `gh pr create` outright; it was removed,
+ * and nothing local replaced it, because nothing local can — `gh pr create --body` and `--fill`
+ * never touch this file, and no matcher over a shell can enumerate the spellings of a command
+ * (that is why the hook went). So `handover` is a strong DEFAULT, not an enforcement: the
+ * documented route needs an artefact only a converged review produces, and {@link
+ * pruneStaleHandover} keeps that artefact from outliving the branch and diff it attests to.
+ * Someone determined to route around it will. The rule that they must not is prose, in
+ * AGENTS.md § "How work lands here" and the `shipping-a-change` skill, and prose is all it is.
  *
  * The part that compounds is `conversions`: each finding turned into a check that fires next
  * time (AGENTS.md § "The guardrails"). A receipt with findings and no conversions is a review
@@ -71,7 +76,18 @@ export const RECEIPT_DIR = ".claude/review-receipts";
  */
 export const MIN_WAIVER_REASON = 20;
 
-/** Where `handover` writes the PR body for a human to pass to `gh pr create --body-file`. */
+/**
+ * Where `handover` writes the PR body for `gh pr create --body-file`.
+ *
+ * ONE fixed path, not one per branch — deliberately, and it is the weaker of the two options.
+ * Per-branch names (the way {@link receiptPath} does it) would scope the artefact by
+ * construction, but the literal `.claude/pr-body.md` is keyed on in `.gitignore` and in three
+ * checks that exclude it from the doc scanners, and a name they cannot predict would either
+ * leak the body into the diff it attests to or silently drop those exclusions. So the scoping
+ * is done by {@link handoverStamp} and {@link pruneStaleHandover} instead: the file names the
+ * branch and the diff it was written for, and any review command run against a different one
+ * deletes it.
+ */
 export const HANDOVER_FILE = ".claude/pr-body.md";
 
 /**
@@ -687,23 +703,69 @@ export function runGatesClean(branch: string, dir = RECEIPT_DIR): Receipt | { di
 }
 
 /**
- * The handover: the artefact without which no PR can be opened.
+ * What the body attests to, in a form a later run can compare rather than guess at.
  *
- * The whole shape of the gate is that this artefact only EXISTS once the review converged —
- * it refuses to write the body file unless {@link validate} passes. So skipping the review
- * does not produce a PR someone has to catch; it produces no handover at all, and there is
- * nothing to pass to `--body-file`.
+ * An HTML comment because it has to survive being pasted into a PR — GitHub renders nothing,
+ * so the stamp costs the reader nothing, while the human-readable line beside it says the same
+ * two facts in words. One function produces both, so they cannot drift apart.
  */
-export function handover(receipt: Receipt | null, hash: string, body: string, file = HANDOVER_FILE): Verdict {
+export function handoverStamp(branch: string, hash: string): string {
+  return `<!-- deckhand-handover branch=${branch} diff=${hash} -->`;
+}
+
+/**
+ * Delete a body file that was written for a different branch, or for code that has since
+ * changed. Returns whether it removed one.
+ *
+ * The path is fixed and gitignored, so nothing ever cleaned it up: land branch A, cut branch B,
+ * and `gh pr create --body-file .claude/pr-body.md` succeeds on B with A's body — a PR whose
+ * review receipt describes someone else's diff, and nothing in the body said so. Every CLI
+ * command here prunes first, so following the workflow AT ALL clears a stale artefact before it
+ * can be used. Unreadable counts as stale: a body that cannot be shown to be current is not.
+ *
+ * This narrows the window; it does not close it. Nothing stops a caller naming the path
+ * directly, and `--body`/`--fill` never look at a file at all — see the header.
+ */
+export function pruneStaleHandover(branch: string, hash: string, file = HANDOVER_FILE): boolean {
+  if (!existsSync(file)) return false;
+  let contents = "";
+  try {
+    contents = readFileSync(file, "utf8");
+  } catch {
+    contents = "";
+  }
+  if (contents.includes(handoverStamp(branch, hash))) return false;
+  rmSync(file, { force: true });
+  return true;
+}
+
+/**
+ * The handover: the body a converged review earns, stamped with what it is a review OF.
+ *
+ * It writes nothing unless {@link validate} passes, and it REMOVES an existing body when it
+ * refuses — a refused handover has to leave no artefact behind, or the previous one stands in
+ * for the one it would not write.
+ */
+export function handover(receipt: Receipt | null, hash: string, body: string, branch: string, file = HANDOVER_FILE): Verdict {
+  const refuse = (reason: string): Verdict => {
+    rmSync(file, { force: true });
+    return { ok: false, reason };
+  };
   const verdict = validate(receipt, hash);
-  if (!verdict.ok) return verdict;
-  if (!body.trim()) return { ok: false, reason: "the PR body is empty — pipe the filled-in body in on stdin." };
+  if (!verdict.ok) return refuse(verdict.reason);
+  if (!body.trim()) return refuse("the PR body is empty — pipe the filled-in body in on stdin.");
   mkdirSync(dirname(file), { recursive: true });
-  // The curve goes IN the body. The receipt is gitignored — it is working state, not history —
-  // so a reader of the PR could see the claim "reviewed to convergence" and nothing behind it,
-  // while AGENTS.md says the value is that the claim is attributable and readable afterwards.
-  // Readable to whoever opens the PR, then, not only to whoever ran the review.
-  const withCurve = `${body.trimEnd()}\n\n---\n\n<details><summary>Review curve (\`npm run review:show\`)</summary>\n\n${summarize(receipt!)}\n\n</details>\n`;
+  // The curve and the identity go IN the body. The receipt is gitignored — it is working state,
+  // not history — so a reader of the PR could see the claim "reviewed to convergence" and
+  // nothing behind it, while AGENTS.md says the value is that the claim is attributable and
+  // readable afterwards. Readable to whoever opens the PR, then, not only to whoever ran the
+  // review: which branch, and which diff, so a body that has outlived either reads as stale to
+  // a human even in the case pruning cannot reach.
+  const attests = `Handover for \`${branch}\` at diff \`${hash.slice(0, 12)}\` (\`npm run review:hash\`).`;
+  const withCurve =
+    `${body.trimEnd()}\n\n---\n\n${attests}\n\n` +
+    `<details><summary>Review curve (\`npm run review:show\`)</summary>\n\n${summarize(receipt!)}\n\n</details>\n\n` +
+    `${handoverStamp(branch, hash)}\n`;
   writeFileSync(file, withCurve);
   return { ok: true };
 }
@@ -721,6 +783,12 @@ if (isEntryPoint) {
   const hash = diffHash();
   const branch = currentBranch();
   const receipt = readReceipt(branch);
+  // Before anything, not just before `handover`: the body file is the one piece of review state
+  // that is not keyed to a branch, and the command that would misuse it (`gh pr create`) does
+  // not run through here. Pruning on every command is the widest net this script can cast.
+  if (pruneStaleHandover(branch, hash)) {
+    console.error(`(removed ${HANDOVER_FILE}: it was written for a different branch or an older diff)`);
+  }
 
   if (cmd === "check") {
     const verdict = validate(receipt, hash);
@@ -765,13 +833,13 @@ if (isEntryPoint) {
     const verdict = validate(next, hash);
     console.log(verdict.ok ? "✓ gate satisfied" : `still blocked — ${verdict.reason}`);
   } else if (cmd === "handover") {
-    const verdict = handover(receipt, hash, await readStdin());
+    const verdict = handover(receipt, hash, await readStdin(), branch);
     if (!verdict.ok) {
       console.error(`✗ no handover: ${verdict.reason}`);
       process.exit(1);
     }
     console.log(`✓ ${receipt ? summarize(receipt) : ""}`);
-    console.log(`\nPR body written to ${HANDOVER_FILE}.`);
+    console.log(`\nPR body written to ${HANDOVER_FILE}, stamped for ${branch} at ${hash.slice(0, 12)}.`);
     console.log(`\nThe review converged, so this is now yours to run:\n`);
     console.log(`  gh pr create --base main --title "<title>" --body-file ${HANDOVER_FILE}\n`);
   } else {

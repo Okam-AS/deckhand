@@ -178,9 +178,19 @@ the body.** There is no hook stopping you any more. A PreToolUse hook used to re
 `gh pr create` with no override, and it was removed for the reason every other matcher
 in it was removed before: a text matcher over a shell cannot enumerate the spellings of
 a command, so it reserved a decision it could not actually reserve while reading as if
-it could. What reserves it now is the artefact. `review:handover` refuses to write
-`.claude/pr-body.md` unless the review converged, and `gh pr create --body-file` has
-nothing to open a PR with until it exists.
+it could.
+
+**Nothing replaced it, because nothing local can. This is a rule with a strong default,
+not an enforcement — say it that way and do not let it grow back into a claim.**
+`review:handover` refuses to write `.claude/pr-body.md` unless the review converged, so
+the DOCUMENTED route (`gh pr create --body-file`) has nothing to open a PR with until
+you have earned it; and every `review:*` command deletes a body file stamped for another
+branch or an older diff, so a converged body cannot be inherited by the next branch (it
+used to be: one fixed gitignored path that nothing ever cleaned up, so branch B found
+branch A's body and `--body-file` succeeded). But `gh pr create --body` and `--fill`
+never look at a file at all. The mechanism narrows the honest path; it does not close
+the dishonest one, and the body itself names the branch and diff it attests to precisely
+because the last line of defence is a human reading the PR.
 
 So the permission is exact, and it is a conjunction:
 
@@ -191,9 +201,10 @@ So the permission is exact, and it is a conjunction:
 4. The branch is pushed, and it is not `main`.
 
 All four, then run the command it printed. Any one of them missing and you have not
-earned it — say which one, in a line, and stop. Do not hand-write a body to route
-around step 3: the body file IS the receipt that the review happened, and forging it
-is the one thing here that cannot be caught by a later reader.
+earned it — say which one, in a line, and stop. Do not hand-write a body, and do not
+reach for `--body` or `--fill`, to route around step 3: those are exactly the paths
+nothing checks, which is why the rule is written here rather than enforced there.
+Forging the handover is the one thing in this workflow no later reader can catch.
 
 `main` is protected server-side, so a push at it is refused by GitHub whatever anything
 local thinks; the restart rule is prose below and nothing else.
@@ -211,9 +222,9 @@ npm run review:handover <<'BODY' …     # refuses unless the review converged
 ```
 
 `review:handover` writes `.claude/pr-body.md` and prints the `gh pr create` command.
-Run it. If the review has not converged there is no body file and so no PR — which is
-the design: skipping the review produces nothing to open, rather than a PR nobody
-reviewed.
+Run it. If the review has not converged it writes no body and deletes any it finds, so
+the documented route has nothing to open — skipping the review leaves you with nothing
+to hand over rather than a PR nobody reviewed.
 
 The review itself is a **loop with a receipt**, not a single pass:
 

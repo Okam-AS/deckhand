@@ -13,6 +13,7 @@ import {
   keepsCleanRun,
   handover,
   MIN_ROUNDS,
+  pruneStaleHandover,
   readReceipt,
   reclaimAbandonedGates,
   RECEIPT_DIR,
@@ -314,38 +315,106 @@ describe("recording a round", () => {
 
 describe("the handover to a human", () => {
   const file = () => join(dir, "pr-body.md");
+  const BRANCH = "feature/x";
 
   // The whole shape of the gate: the artefact needed to open a PR does not exist until the
   // review converged. Skipping the review produces no handover at all, rather than a PR someone
   // has to catch.
   it("writes nothing when the review has not converged", () => {
-    const v = handover(converged({ rounds: [round({ cold: true })] }), HASH, "a body", file());
+    const v = handover(converged({ rounds: [round({ cold: true })] }), HASH, "a body", BRANCH, file());
     assert.equal(v.ok, false);
     assert.throws(() => readFileSync(file(), "utf8"), /ENOENT/, "no body file may exist when the gate is red");
   });
 
   it("writes nothing when there is no receipt at all", () => {
-    assert.equal(handover(null, HASH, "a body", file()).ok, false);
+    assert.equal(handover(null, HASH, "a body", BRANCH, file()).ok, false);
     assert.throws(() => readFileSync(file(), "utf8"), /ENOENT/);
   });
 
   it("writes the body once the gate passes", () => {
-    assert.deepEqual(handover(converged(), HASH, "## What was wrong\n…", file()), { ok: true });
+    assert.deepEqual(handover(converged(), HASH, "## What was wrong\n…", BRANCH, file()), { ok: true });
     assert.match(readFileSync(file(), "utf8"), /What was wrong/);
   });
 
   it("refuses an empty body, so the human is never handed a blank PR", () => {
-    assert.equal(handover(converged(), HASH, "   \n", file()).ok, false);
+    assert.equal(handover(converged(), HASH, "   \n", BRANCH, file()).ok, false);
+  });
+
+  // The path is fixed and gitignored, so a body outlives the branch that earned it unless
+  // something removes it. A refusal that leaves the previous body standing hands the caller the
+  // artefact it just declined to write, and `--body-file` cannot tell the two apart.
+  it("removes an existing body when it refuses, so a refusal leaves nothing to open a PR with", () => {
+    assert.deepEqual(handover(converged(), HASH, "an earned body", BRANCH, file()), { ok: true });
+    assert.equal(handover(converged({ rounds: [round({ cold: true })] }), HASH, "a body", BRANCH, file()).ok, false);
+    assert.throws(() => readFileSync(file(), "utf8"), /ENOENT/, "the earlier body must not survive a refusal");
   });
 
   // The receipt is gitignored, so the person opening the PR cannot see it. A body claiming a
   // converged review with nothing behind it is exactly what AGENTS.md says this exists to avoid:
   // "explicit, attributable and readable afterwards" has to mean readable to THEM.
   it("embeds the curve, since the receipt itself never leaves this machine", () => {
-    assert.deepEqual(handover(converged(), HASH, "## What was wrong\nA thing.", file()), { ok: true });
+    assert.deepEqual(handover(converged(), HASH, "## What was wrong\nA thing.", BRANCH, file()), { ok: true });
     const written = readFileSync(file(), "utf8");
     assert.match(written, /^## What was wrong/, "the author's reasoning stays first");
     assert.match(written, /rounds →/, "and the curve travels with it");
+  });
+
+  // Pruning cannot reach a body someone names by hand, so the last defence is a human reading
+  // the PR: the branch and the diff are IN the body, in words, not only in the stamp.
+  it("names the branch and the diff it attests to, so a stale body reads as stale", () => {
+    assert.deepEqual(handover(converged(), HASH, "body", BRANCH, file()), { ok: true });
+    // With the HTML comments stripped: what GitHub RENDERS. Matching the raw file passed on the
+    // machine-readable stamp alone, which no reader of the PR ever sees — the assertion looked
+    // like it covered the visible line and did not.
+    const rendered = readFileSync(file(), "utf8").replace(/<!--[\s\S]*?-->/g, "");
+    assert.match(rendered, new RegExp(BRANCH), "whoever reads the PR must see which branch was reviewed");
+    assert.match(rendered, new RegExp(HASH.slice(0, 12)), "and which diff");
+  });
+});
+
+// The hole this closes, in one sentence: land branch A, cut branch B, and
+// `gh pr create --body-file .claude/pr-body.md` succeeds on B with A's converged body. The
+// receipts are branch-keyed (`receiptPath`); the body file is one fixed, gitignored path that
+// nothing used to clean up.
+describe("a body file that has outlived what it attests to", () => {
+  const file = () => join(dir, "pr-body.md");
+
+  const bodyFor = (branch: string, hash: string) => {
+    handover({ ...converged({ branch }), gates: { passed: true, command: "npm run ci", diff: hash, clean: true },
+      rounds: [round({ newFindings: 3, diff: OLD }), round({ lens: "cold-subagent", cold: true, diff: hash })] },
+      hash, "an earned body", branch, file());
+  };
+
+  it("does not satisfy the next branch", () => {
+    bodyFor("feature/a", HASH);
+    assert.equal(pruneStaleHandover("feature/b", HASH, file()), true, "another branch's body must be removed");
+    assert.throws(() => readFileSync(file(), "utf8"), /ENOENT/);
+  });
+
+  it("does not survive the code changing under it on the same branch", () => {
+    bodyFor("feature/a", HASH);
+    assert.equal(pruneStaleHandover("feature/a", OLD, file()), true);
+    assert.throws(() => readFileSync(file(), "utf8"), /ENOENT/);
+  });
+
+  // The other half, and the one that would make this net negative if it broke: an agent that
+  // genuinely converged must still get its body in one command. Every CLI command prunes, so a
+  // prune that could not recognise a FRESH body would delete the handover between writing it
+  // and reading it.
+  it("leaves the body for this branch and this diff alone", () => {
+    bodyFor("feature/a", HASH);
+    assert.equal(pruneStaleHandover("feature/a", HASH, file()), false);
+    assert.match(readFileSync(file(), "utf8"), /an earned body/);
+  });
+
+  it("removes a body it cannot read a stamp from at all", () => {
+    writeFileSync(file(), "a hand-written body with no stamp\n");
+    assert.equal(pruneStaleHandover("feature/a", HASH, file()), true);
+    assert.throws(() => readFileSync(file(), "utf8"), /ENOENT/);
+  });
+
+  it("reports nothing to prune when there is no body", () => {
+    assert.equal(pruneStaleHandover("feature/a", HASH, file()), false);
   });
 });
 

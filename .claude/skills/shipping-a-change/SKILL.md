@@ -15,12 +15,13 @@ npm run review:check    # exactly what the gate will say
 ```
 
 **You open the pull request yourself, but only after you have earned it.** Nothing blocks
-`gh pr create` any more — what gates it is that `--body-file` needs a file that does not
-exist yet. Review to convergence, run the gates on a clean checkout, then
-`npm run review:handover`, which writes `.claude/pr-body.md` **only if the gate passes**
-and prints the command. Skip the review and there is no body, so there is nothing to
-open — which is the point. AGENTS.md § "How work lands here" lists the four conditions;
-all of them, or you stop and say which one is missing.
+`gh pr create` any more, and nothing can: `--body` and `--fill` need no file. What you get
+instead is a strong default — the documented route, `--body-file`, needs a file that does
+not exist until you have earned it. Review to convergence, run the gates on a clean
+checkout, then `npm run review:handover`, which writes `.claude/pr-body.md` **only if the
+gate passes**, deletes any body left over from another branch or an older diff, and prints
+the command. Skip the review and there is nothing to open. AGENTS.md § "How work lands
+here" lists the four conditions; all of them, or you stop and say which one is missing.
 
 The rest is what the guardrails cannot see, and it still has to happen in a head.
 
@@ -189,14 +190,15 @@ npm run review:handover --silent <<'BODY'
 BODY
 ```
 
-It refuses unless `review:check` passes, writes `.claude/pr-body.md`, and prints the
-`gh pr create` command. Run it, then say in **one line** that the PR is open, with its
-URL. Don't restate the diff — they can read the PR.
+It refuses unless `review:check` passes, writes `.claude/pr-body.md` stamped with this
+branch and this diff, and prints the `gh pr create` command. Run it, then say in **one
+line** that the PR is open, with its URL. Don't restate the diff — they can read the PR.
 
-**If the gate refuses, do not route around it.** Writing the body file by hand, or passing
-`--body` instead of `--body-file`, opens a PR whose review receipt is a fiction — and that is
-the one thing here that makes everything else worthless, because no later reader can tell.
-If the gate is genuinely wrong, say which check is wrong and why, and let the user decide.
+**If the gate refuses, do not route around it. Nothing stops you, and that is the point of
+saying it.** Writing the body file by hand, or passing `--body` or `--fill` instead of
+`--body-file`, opens a PR whose review receipt is a fiction — and that is the one thing here
+that makes everything else worthless, because no later reader can tell. If the gate is
+genuinely wrong, say which check is wrong and why, and let the user decide.
 
 Merging, branch cleanup and the rest of the workflow are in `AGENTS.md` — branch from
 `main`, never from another PR's branch, squash-merge, delete the branch.
