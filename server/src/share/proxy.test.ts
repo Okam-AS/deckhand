@@ -625,8 +625,25 @@ describe("PIN gate (path-based share)", () => {
       const state = await fetch(`${base()}/s/share1/state`);
       assert.equal(state.status, 200);
       assert.equal(((await state.json()) as { locked?: boolean }).locked, false);
-      const leaked = (state.headers.getSetCookie?.() ?? []).find((c) => c.includes("Path=/s/paired-share"));
-      assert.equal(leaked, undefined, "a public share must never unlock its protected partner");
+      // REACH, not text. This used to look for the literal `Path=/s/paired-share`
+      // and assert it was not found — which passes when the scope is WIDER too,
+      // because `find` returns undefined for a reason that has nothing to do
+      // with the property. A leak scoped to `/` sailed straight through the
+      // assertion whose whole job was to catch it. A cookie with no Path at all
+      // counts as a leak here as well: its scope is then the browser's guess
+      // from the request URL, which is not ours to assume.
+      //
+      // What this does NOT catch, so do not read it as covering both: widening
+      // the scope while the minting guard holds mints nothing here at all, so
+      // there is no cookie to be wrongly scoped. That mutation belongs to
+      // "scopes each minted unlock cookie to one share, and never to a wider
+      // path". This one catches the minting bug, at any scope.
+      const partnerRoute = `/s/paired-share/dev/ios-0/stream.mjpeg`;
+      const leaked = (state.headers.getSetCookie?.() ?? []).filter((c) => {
+        const p = cookiePath(c);
+        return p === undefined || pathMatches(p, partnerRoute);
+      });
+      assert.deepEqual(leaked, [], "a public share must mint nothing that reaches its protected partner");
       assert.equal((await fetch(`${base()}/s/paired-share/dev/ios-0/stream.mjpeg`)).status, 401);
     } finally {
       pinState.others = [];
