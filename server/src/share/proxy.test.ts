@@ -13,7 +13,7 @@ interface SharePin {
   length: number;
   pin: string;
 }
-// `others` is the compare case: every extra pane carries its OWN PIN, so the
+// `others` is the several-panes case: every extra pane carries its OWN PIN, so the
 // page's own slot can't express "the other panes are locked too". A list rather
 // than one slot because a page can show more than two sources.
 const pinState: { current: SharePin | null; others: SharePin[] } = { current: null, others: [] };
@@ -151,8 +151,8 @@ before(async () => {
     pinInfoForShare: fakePinInfo,
     pinRecordForShare: fakePinRecord,
     verifyPin: fakeVerifyPin,
-    // "share1", "paired-share" and "third-share" stand in for a live compare
-    // session: unlocking any pane has to unlock the rest, or the others hang on
+    // "share1", "paired-share" and "third-share" stand in for one live page's
+    // panes: unlocking any pane has to unlock the rest, or the others hang on
     // "Connecting…". Three, not two, so a regression to single-partner minting
     // fails here instead of only showing up on a real three-source page.
     pairedShareIds: (shareId: string) =>
@@ -457,16 +457,17 @@ describe("PIN gate (path-based share)", () => {
     assert.equal(((await res.json()) as { locked?: boolean }).locked, false);
   });
 
-  it("one PIN unlocks both panes of a compare session", async () => {
-    // The compare viewer is ONE page showing two shares, but the reference pane
-    // streams from its OWN shareId, so its own path-scoped cookie. Before this,
-    // unlocking the working share left the reference pane refusing every WS
-    // upgrade ("share is PIN-locked") — the pane sat on "Connecting…" forever
-    // with no pad and no error. `paired-share` is wired as share1's reference.
+  it("one PIN unlocks a partner pane, not just the page's own share", async () => {
+    // A page is a set of panes. This one shows two — the smallest case that can
+    // go wrong, with the N case in the test directly below — and the partner
+    // pane streams from its OWN shareId, so from its own path-scoped cookie.
+    // Before this, unlocking the page's own share left the partner refusing
+    // every WS upgrade ("share is PIN-locked"): it sat on "Connecting…" forever
+    // with no pad and no error. `paired-share` is wired as share1's partner.
     pinState.others = [{ shareId: "paired-share", length: 4, pin: "4321" }];
     try {
       const locked = await fetch(`${base()}/s/paired-share/dev/ios-0/stream.mjpeg`);
-      assert.equal(locked.status, 401, "the reference pane starts gated");
+      assert.equal(locked.status, 401, "the partner pane starts gated");
 
       const good = await fetch(`${base()}/s/share1/unlock`, {
         method: "POST",
@@ -476,13 +477,16 @@ describe("PIN gate (path-based share)", () => {
       assert.equal(good.status, 200);
 
       // Two cookies, same name, distinct paths — so pick the partner's by Path.
+      // A SELECTOR, not an assertion about scoping: that claim is held by
+      // "scopes each minted unlock cookie to one share, and never to a wider
+      // path". Widen the scope and repair this line, and nothing stays red.
       const all = good.headers.getSetCookie?.() ?? [];
       const partner = all.find((c) => c.includes("Path=/s/paired-share"));
-      assert.ok(partner, `expected an unlock cookie scoped to the reference, got: ${all.join(" | ")}`);
+      assert.ok(partner, `expected an unlock cookie scoped to the partner, got: ${all.join(" | ")}`);
       const cookie = `deck_unlock=${/deck_unlock=([^;]+)/.exec(partner)![1]}`;
 
       const opened = await fetch(`${base()}/s/paired-share/dev/ios-0/stream.mjpeg`, { headers: { cookie } });
-      assert.notEqual(opened.status, 401, "the reference pane must no longer be PIN-gated");
+      assert.notEqual(opened.status, 401, "the partner pane must no longer be PIN-gated");
     } finally {
       pinState.others = [];
     }
@@ -507,6 +511,7 @@ describe("PIN gate (path-based share)", () => {
 
       const all = good.headers.getSetCookie?.() ?? [];
       for (const partner of ["paired-share", "third-share"]) {
+        // Again a selector, not a scoping assertion — see the note above.
         const set = all.find((c) => c.includes(`Path=/s/${partner}`));
         assert.ok(set, `expected an unlock cookie for ${partner}, got: ${all.join(" | ")}`);
         const cookie = `deck_unlock=${/deck_unlock=([^;]+)/.exec(set)![1]}`;
@@ -563,7 +568,7 @@ describe("PIN gate (path-based share)", () => {
   it("tops up the partner's cookie on /state when the pair formed after the unlock", async () => {
     // Unlocking mints the partner cookie — but only for a pair that EXISTS at
     // that moment. Two previews that only became a pair once the second booted
-    // (or a cookie carried over from an earlier session) left the reference pane
+    // (or a cookie carried over from an earlier session) left the partner pane
     // streaming from a shareId this browser had no cookie for, stuck on
     // "Connecting…" with no way to unlock it: the pad only renders for the
     // page's own share. /state is polled, so the pair self-heals in one poll.
@@ -588,7 +593,7 @@ describe("PIN gate (path-based share)", () => {
 
       const partnerCookie = `deck_unlock=${/deck_unlock=([^;]+)/.exec(partner)![1]}`;
       const opened = await fetch(`${base()}/s/paired-share/dev/ios-0/stream.mjpeg`, { headers: { cookie: partnerCookie } });
-      assert.notEqual(opened.status, 401, "the reference pane must stream after the top-up");
+      assert.notEqual(opened.status, 401, "the partner pane must stream after the top-up");
     } finally {
       pinState.others = [];
     }

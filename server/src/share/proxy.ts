@@ -495,7 +495,7 @@ export function createShareRouter(deps: ShareDeps): express.Router {
     // the partner's cookie too. /unlock does this at PIN time, but a pair can
     // form AFTER the unlock (two independently started previews that only became
     // a pair once the second one booted, or a cookie from an earlier session).
-    // The reference pane then streamed from a shareId this browser had no cookie
+    // The partner pane then streamed from a shareId this browser had no cookie
     // for and sat on "Connecting…" forever, with no way to unlock it: the pad
     // only ever renders for the page's own share. This route is polled, so the
     // pair self-heals within one poll.
