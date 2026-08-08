@@ -15,8 +15,11 @@ Hardest rules, each with the check that enforces it:
   /accessibility-tree`, `POST /action`, `POST /pasteboard` (the non-US iOS typing path) and
   `GET /screenshot.png`; adding a sixth REST call is fine, and none of the four above ever is.
   → `control.test.ts` "names no /input, /control, /webrtc or /refresh endpoint" and
-  `control.test.ts` "opens no WebSocket to SimDeck" — both source-text scans of this directory
-  and everything under it, with comments stripped, because the runtime check
+  `control.test.ts` "opens no WebSocket to SimDeck" — both source-text scans of every non-test
+  `.ts` in this directory and everything under it — `control.test.ts:290` filters test files out,
+  while the frontmatter above scopes every `.ts`, so a test file here is inside the RULE and
+  outside the SCAN, and a fixture that names `/input` is yours to judge — with comments stripped,
+  because the runtime check
   `control.test.ts` "never touches the input WebSocket / webrtc / refresh endpoints" sees only
   the methods it exercises, and a `new WebSocket(…)` never reaches the injected `fetch` at all,
   so no fake-fetch assertion can see the headline half of this rule.
@@ -33,10 +36,11 @@ Two facts about the daemon that no check in this repo can see, because it is not
 
 - **Never start SimDeck with `--bind 0.0.0.0`.** It binds loopback by default, and a LAN mode
   exists. Deckhand has never used it and must not: the surface at stake is tap, type and the
-  accessibility tree of a booted device, with nothing in front of it. The loopback guardrail
-  (`invariants.test.ts` "binds every listening socket to loopback") reads `.listen()` calls and
-  `new WebSocketServer({ port })` in THIS repo — a flag handed to a spawned daemon is invisible
-  to it.
+  accessibility tree of a booted device, with nothing in front of it. The nearest guardrail
+  reads `.listen()` calls and `new WebSocketServer({ port })` in THIS repo, so a flag handed to
+  a spawned daemon is invisible to it — which is why this rule is prose.
+  → `invariants.test.ts` "binds every listening socket to loopback" (what it DOES cover; this
+  bullet is the gap beside it)
 - **`/api/health` hands SimDeck's own token to any loopback caller** — a `simdeck_token` cookie,
   and token-bearing URLs in the body. The simulator shares the host's loopback, which is the same
   reason serve-sim's `/exec` is patched out. Deckhand reads `res.ok` from that endpoint and

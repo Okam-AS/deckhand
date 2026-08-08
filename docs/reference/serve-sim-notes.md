@@ -35,8 +35,11 @@ summary: the project moves, and the pin in `server/package.json` moves with it.
 - The Swift helper is a standalone binary embedded in the npm package — no Xcode dependency
   at runtime beyond simctl.
 - Helper state lives in `$TMPDIR/serve-sim/` (pid/port registry). `serve-sim --list` and
-  `serve-sim --kill [device]` manage running streams. Deckhand uses the kill form — from the BOOT sweep and `doctor --device-only`, not the janitor, which never reaps helpers
-  (`-k`) and its own `lsof` on the port; it never reads `--list`.
+  `serve-sim --kill [device]` manage running streams. Deckhand uses the kill form (`-k`) plus
+  its own `lsof` over the helper port range, and never reads `--list`. That pair is
+  `reapOrphans` in `server/src/streaming/serveSim.ts` — crash recovery, run once at boot from
+  `server.ts`. The marker-based janitor cannot help here: serve-sim daemonizes itself, so a
+  helper carries no env marker and the marker sweep cannot see it at all.
 
 ## CLI surface — serve-sim's own, NOT what Deckhand calls
 
