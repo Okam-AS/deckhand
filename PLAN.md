@@ -405,16 +405,26 @@ Key orchestration rules (rationale in `docs/reference/auto-mate-learnings.md`):
 
 | Type | iOS | Android | Launch |
 |---|---|---|---|
-| **expo** | `npx expo run:ios --device <udid> --no-bundler` | `npx expo run:android --device <serial> --no-bundler` | Start Metro (`npx expo start --dev-client --localhost --port 8081`, **never `--clear`**), pre-approve URL scheme in sim plist, open `exp+<slug>://expo-development-client/?url=…&disableOnboarding=1` |
+| **expo** | `npx expo run:ios --device <udid> --no-bundler` | `npx expo run:android --device <serial> --no-bundler` | Start Metro (`npx expo start --dev-client --port <allocated>`, **never `--clear`**, **never `--localhost`**), pre-approve URL scheme in sim plist, open `exp+<slug>://expo-development-client/?url=…&disableOnboarding=1` |
 | **react-native** (bare) | guarded `pod install` (skip when `Podfile.lock` == `Pods/Manifest.lock`), then `npx react-native run-ios --udid <udid> --mode Release --no-packager` | `npx react-native run-android --deviceId <serial>` | `simctl launch` (Release embeds the JS bundle; no Metro) |
 | **nativescript** | pre-resolve SPM out-of-band, then `ns run ios --no-hmr --no-watch --justlaunch --device <udid>` | `ns run android --no-hmr --no-watch --justlaunch --device <serial>` | ns launches as part of run |
 
 Dependency install: `[ -f package-lock.json ] && npm ci || npm install`, skipped when a
 `node_modules` marker is newer than the newest manifest/lockfile.
 
-Metro: fixed port 8081, one server reused across previews of the same app, keyed by an
-env-signature; restart only when env changes or health (`GET /status`) fails. Env:
-`REACT_NATIVE_PACKAGER_HOSTNAME=127.0.0.1`, `CI=1`.
+Metro: the port is **allocated** from `METRO_PORT_RANGE` (`engine/recipes.ts`), never fixed.
+It was hard-coded to 8081, and since every Metro answers `/status` the same way, a
+developer's own `expo start` on 8081 passed the health check and the previewed app's native
+shell silently loaded a FOREIGN JS bundle — so deckhand picks a port nothing is listening on
+and then verifies the listener is in its own process group. One server reused across previews
+of the same app, keyed by an env-signature; restart only when env changes or health
+(`GET /status`) fails. Env: `REACT_NATIVE_PACKAGER_HOSTNAME=127.0.0.1`. **Do not set `CI=1`
+on Metro** — verified on-device (Expo SDK 57) that CI mode puts Metro on a non-interactive
+path that never binds the dev server, so the app cannot load JS; `CI=1` belongs on the
+*build* steps. **Do not pass `--localhost`** — verified on-device it binds Metro to IPv6
+`::1` only, so both the 127.0.0.1 readiness check and the app's
+`REACT_NATIVE_PACKAGER_HOSTNAME=127.0.0.1` connection fail (§11 item 1 records what the
+default wildcard bind costs).
 
 ### Devices
 

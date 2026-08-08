@@ -83,13 +83,21 @@ bounded recovery, letterbox-corrected input — and apply directly to Deckhand's
 - Never send raw `scroll` controls — use short touch drag sequences (SimulatorKit scroll
   packets can destabilize iOS runtimes; SimDeck rejects them anyway).
 
-## 3. Build recipes (exact, battle-tested)
+## 3. Build recipes (the predecessor's, with deckhand's on-device corrections marked)
+
+Three flags in the predecessor's Expo recipe (`--localhost`, fixed port 8081, `CI=1`) were
+each disproven on deckhand's hardware; the corrections are inline below, and `engine/metro.ts`
+is the code that holds them. Do not restore them from an older copy of this file.
 
 ### Expo (dev-client) — detect: `expo` present in package.json dependencies
 
 - Build+install: `npx expo run:ios --device "<udid>" --no-bundler`.
-- Metro: `npx expo start --dev-client --localhost --port 8081`. **Never pass `--clear`** —
+- Metro: `npx expo start --dev-client --port <allocated>`. **Never pass `--clear`** —
   wiping the cache forces a full ~18 MB re-bundle that races anything waiting on the app.
+  **Never pass `--localhost`** either: the predecessor's recipe had it, and deckhand verified
+  on-device that it binds Metro to IPv6 `::1` ONLY — the 127.0.0.1 readiness probe and the
+  app's `REACT_NATIVE_PACKAGER_HOSTNAME=127.0.0.1` connection both fail. The default bind
+  covers 127.0.0.1 (`engine/metro.ts`).
 - Launch is a **deep link**, not `simctl launch`:
   `exp+<slug>://expo-development-client/?url=<metro-manifest-url>&disableOnboarding=1`
   opened via `simctl openurl` — after pre-approving the custom scheme with `PlistBuddy` in
@@ -130,9 +138,18 @@ bounded recovery, letterbox-corrected input — and apply directly to Deckhand's
 - **Env injection subtlety**: `EXPO_PUBLIC_*` values are inlined at Metro serve time for
   dev-client and at build time for Release — forward app env to the Metro process env
   *and* the native build env, or values silently disappear.
-- Metro management: fixed port 8081, one server per app reused across runs, keyed by an
-  env signature; restart only on env change or failed `GET /status`. Set
-  `REACT_NATIVE_PACKAGER_HOSTNAME=127.0.0.1`, `CI=1`.
+- Metro management: one server per app reused across runs, keyed by an env signature;
+  restart only on env change or failed `GET /status`. Set
+  `REACT_NATIVE_PACKAGER_HOSTNAME=127.0.0.1`. Two corrections deckhand paid for on real
+  hardware, against the predecessor's recipe:
+  - **Allocate the port; do not fix it at 8081.** Every Metro answers `/status` identically,
+    so a developer's own `expo start` on 8081 passed the health check and deckhand handed the
+    dev client a FOREIGN JS bundle inside the previewed app's native shell, silently. Pick a
+    free port and verify the listener is in your own process group (`engine/metro.ts`,
+    `METRO_PORT_RANGE` in `engine/recipes.ts`).
+  - **Do NOT set `CI=1` on Metro.** Verified on-device (Expo SDK 57): CI mode puts Metro on a
+    non-interactive path that never binds the dev server, so the app cannot load JS at all.
+    `CI=1` belongs on the *build* steps.
 
 ## 4. Git / worktree mechanics
 
