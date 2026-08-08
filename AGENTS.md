@@ -17,7 +17,8 @@ The server has config/auth/state/audit, GitHub App auth + git worktrees, build r
 detection (Expo/RN/NativeScript, iOS + Android), iOS simctl control, Android device layer
 (avdmanager/emulator/adb, uiautomator describe, toolEnv), the streaming router (serve-sim
 for iOS, H.264/screencap backend for Android), the preview engine (**platform-grouped,
-build-once-install-many, parallel boots/installs**), the MCP server (token auth) + scoped
+build-once-install-many, parallel boots/installs**), the MCP server (an OAuth grant or a
+local `tokens.yaml` token, both presented as `Authorization: Bearer`) + scoped
 share proxy, and the CLI. The viewer is one calm page with no platform switch: where the
 browser has WebCodecs it asks every device for `stream.avcc` (H.264) and falls back to
 `stream.mjpeg` on a 404; a browser without WebCodecs starts on `stream.mjpeg` and never
@@ -109,8 +110,9 @@ If you are here to **implement further**, your instructions are:
    rule not covered by `npm run ci` or the guardrails.
 4. The streaming layer is **decided** (PLAN.md §2/§8): iOS via **serve-sim** — its
    H.264 path is `stream.avcc` over a long-lived **chunked HTTP** response decoded with
-   WebCodecs, NOT a WebSocket (the WebSocket carries HID input only). The viewer probes
-   avcc and reads a 404 as "use `stream.mjpeg`" — a runtime answer about this machine,
+   WebCodecs, NOT a WebSocket (the WebSocket carries HID input only). A browser with
+   WebCodecs probes avcc and reads a 404 as "use `stream.mjpeg`"; one without starts on
+   MJPEG and never probes. Either way it is a runtime answer about this machine,
    never a claim written down in advance about what serve-sim can do. Android via
    **adb** — `screencap`
    for MJPEG and on-device `screenrecord` for H.264, NOT scrcpy, which was evaluated and
