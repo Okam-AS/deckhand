@@ -55,14 +55,47 @@ export interface ReapReport {
   keptPooled: string[];
 }
 
-/** Kill processes whose full command line matches `pattern` (best effort). */
-export type Killer = (pattern: string) => Promise<void>;
+/**
+ * Kill processes whose full command line matches `pattern`, and answer whether the
+ * pattern has stopped matching. `false` means something is STILL running: the caller
+ * must not delete anything that is the last handle on it.
+ *
+ * The answer is the whole point. `pkill` reports whether it matched, never whether
+ * anything died — it sends a signal and returns, while QEMU takes seconds to exit —
+ * so an exit code read as success is the "still running" and "gone" confusion this
+ * repo has paid for twice already (`AndroidManager.shutdown` returns a boolean for
+ * exactly this reason).
+ */
+export type Killer = (pattern: string) => Promise<boolean>;
 
-const defaultKiller: Killer = (pattern) =>
+/** Does anything still match? `pgrep` excludes itself, so the query cannot answer for itself. */
+const anyMatch = (pattern: string): Promise<boolean> =>
   new Promise((resolve) => {
-    // -f matches the full argv; a miss exits non-zero, which is fine.
-    execFile("pkill", ["-f", pattern], () => resolve());
+    execFile("pgrep", ["-f", pattern], (err, stdout) => resolve(!err && stdout.toString().trim() !== ""));
   });
+
+/**
+ * SIGTERM, then watch until the pattern stops matching. No escalation to SIGKILL: an
+ * emulator killed mid-write corrupts the AVD image, and a pooled one is kept on disk
+ * for the next preview to boot. Refusing to delete a name we cannot confirm dead costs
+ * one stale AVD until the next sweep; deleting it costs the only way to ever find the
+ * process again.
+ */
+export function makeKiller(graceMs = 10_000, pollMs = 250): Killer {
+  return async (pattern) => {
+    // -f matches the full argv; a miss exits non-zero, which is fine — the poll below
+    // is what decides, and "nothing matched" answers `true` on its first pass.
+    await new Promise<void>((resolve) => execFile("pkill", ["-f", pattern], () => resolve()));
+    const deadline = Date.now() + graceMs;
+    for (;;) {
+      if (!(await anyMatch(pattern))) return true;
+      if (Date.now() >= deadline) return false;
+      await new Promise((r) => setTimeout(r, pollMs));
+    }
+  };
+}
+
+const defaultKiller: Killer = makeKiller();
 
 /** Pids of processes whose environment carries `marker`. Injected for tests. */
 export type MarkedPidLister = (marker: string) => Promise<number[]>;
@@ -192,6 +225,10 @@ export class Reaper {
       // cannot collide, and allow any suffix on the binary name. `[^/]*` keeps
       // the suffix from running across a path separator into an unrelated arg,
       // and the trailing class stops `AAA` from matching a longer `AAA-2`.
+      // The answer is deliberately ignored here, unlike the AVD pass below: `simctl
+      // delete` addresses the simulator by udid whatever the helper is doing, and a
+      // helper outliving its device exits on its own next frame. Nothing about this
+      // deletion depends on the process being gone.
       await this.kill(`serve-sim[^/]*[[:space:]]${sim.udid}([[:space:]]|$)`).catch(() => {});
       await this.d.simctl.shutdown(sim.udid).catch(() => {});
       // Pooled devices are the point of the pool: keep them on disk, just make
@@ -219,9 +256,19 @@ export class Reaper {
       // The pattern is anchored at the end (pkill -f matches a substring of the
       // full argv), or `avd deckhand_pool_x` would also kill the process running
       // `-avd deckhand_pool_x_2`. No leading "-": pkill would read it as a flag.
-      await this.kill(`avd ${avd}([[:space:]]|$)`).catch(() => {});
+      const dead = await this.kill(`avd ${avd}([[:space:]]|$)`).catch(() => false);
       if (isPooled(avd)) {
         report.keptPooled.push(avd);
+        continue;
+      }
+      // Same rule the engine applies at teardown, and this is the place three comments
+      // there call the last line of defence: the AVD name is the only thing `pkill -f`
+      // has to go on, so deleting it while QEMU is alive retires the sole way anything
+      // can ever name that process again — the 418%-CPU class. A signal is not a death;
+      // only `dead` is. Left on disk, this AVD is reaped again at the next boot, by
+      // which time the process has usually gone.
+      if (!dead) {
+        this.d.log?.(`kept ${avd}: its emulator process did not exit, and the AVD name is the only handle on it`);
         continue;
       }
       await this.d.android.deleteAvd(avd).catch(() => {});
