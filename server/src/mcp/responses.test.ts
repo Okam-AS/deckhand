@@ -23,9 +23,14 @@ const TOOLS = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "tools.
  * result written the way a formatter would break it (`content: [\n  { type: "text"`), or
  * returned from anything other than a bare `return {`, was invisible while this comment
  * claimed "exactly three places". Verified by mutation: a fourth helper in that shape passed.
+ *
+ * Both quote characters, for the same reason. There is no lint and no formatter here, and
+ * tools.ts already writes single quotes elsewhere, so `type: 'text'` was a fourth hand-built
+ * result that this check could not see while the comment on `ok()` claimed it was the only
+ * funnel. Verified by mutation: a single-quoted fourth block passed.
  */
 test("only the two response helpers and screenshot's image build a result by hand", () => {
-  const blocks = [...TOOLS.matchAll(/content:\s*\[\s*\{\s*type:\s*"(\w+)"/g)].map((m) => m[1]!);
+  const blocks = [...TOOLS.matchAll(/content:\s*\[\s*\{\s*type:\s*["'](\w+)["']/g)].map((m) => m[1]!);
 
   assert.deepEqual(
     blocks,
