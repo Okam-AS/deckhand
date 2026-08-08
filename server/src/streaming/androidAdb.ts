@@ -390,9 +390,14 @@ export class AndroidAdbBackend implements StreamingBackend {
   /**
    * H.264 over the same `[len][tag][payload]` wire format serve-sim uses for
    * iOS, so the viewer decodes Android with the identical WebCodecs path and no
-   * platform switch. A device whose image cannot encode (the API 29 emulator
-   * throws inside MediaCodec) answers 404, which the player already treats as
-   * "go straight to MJPEG" — no watchdog wait, no black screen.
+   * platform switch. A 404 means this helper is not serving H.264 RIGHT NOW,
+   * which the player treats as "go straight to MJPEG" — no watchdog wait, no
+   * black screen. It is not a verdict on the device: `AvccSource.ready()` is
+   * false for the whole backoff window after ANY failed probe, so an image that
+   * cannot encode (the API 29 emulator throws inside MediaCodec) is one cause
+   * among several — contention for the host's single encoder is another, and so
+   * is `sweepDeviceRecorders` killing a live recorder in the race it accepts
+   * (see the staleness note in that method).
    */
   private async serveAvcc(source: AvccSource, res: import("node:http").ServerResponse): Promise<void> {
     let supported: boolean;
@@ -548,11 +553,14 @@ export class AndroidAdbBackend implements StreamingBackend {
   /**
    * Unlike serve-sim's detached daemons, these helpers are HTTP servers in THIS process — they
    * die with it, so the in-memory map really is their owner and a fresh process has nothing of
-   * ours to collect. Both callers run at process start — `server.ts` once, through
-   * `PreviewEngine.reapOrphans`, and `cli/doctor.ts` in a second process — and the janitor
-   * never calls this, so the helper prune below has an all-but-empty map to work on. Not
-   * provably empty: the boot sweep runs AFTER the port is bound, so a `start_preview` can
-   * attach while it runs, which is why the prune spares `keep` rather than clearing.
+   * ours to collect. `server.ts` calls it once at boot, through `PreviewEngine.reapOrphans`,
+   * and the janitor never calls it — so in the server's process the helper prune below has an
+   * all-but-empty map to work on. Not provably empty: the boot sweep runs AFTER the port is
+   * bound, so a `start_preview` can attach while it runs, which is why the prune spares `keep`
+   * rather than clearing. The OTHER caller is not at boot at all: `cli/doctor.ts` calls this in
+   * a second process, from a `finally` after its emulator teardown, minutes in and while the
+   * real server's previews are live — which is what makes the cross-process `ps` gate in
+   * `sweepDeviceRecorders` load-bearing rather than belt-and-braces.
    *
    * The one Android resource that DOES outlive us is the on-device `screenrecord`:
    * androidH264.ts pkills it from its own `stop()`, which is our graceful teardown only, so a

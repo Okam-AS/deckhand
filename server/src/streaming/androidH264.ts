@@ -160,14 +160,19 @@ export class AvccSource {
    * it starts is the same one subscribers then attach to.
    *
    * A TRUE is cached forever — a device that has encoded H.264 can encode it.
-   * A FALSE is only cached when it is a real verdict about the encoder (it died
-   * before producing anything usable). Every other route to false is a
-   * circumstance, not a capability: the readiness timer firing while an emulator
-   * is still coming up, a spawn that failed because adb was momentarily
-   * unreachable, or giving up because nobody was subscribed yet. Caching those
-   * pinned a perfectly good device to the ~4 MB/s MJPEG fallback for the rest of
-   * the server's life, with no way back short of a restart — and the first probe
-   * happens exactly when the device is at its busiest.
+   * EVERY false is cached, and only for `retryAfterMs`: `settle(false)` stamps
+   * `failedAt` whatever the cause, so the next probe inside that window reuses
+   * the answer and a viewer polling in a loop cannot respawn a recorder each
+   * time. No false is a verdict about the encoder. The cause is as often a
+   * circumstance — the readiness timer firing while an emulator is still coming
+   * up, a spawn that failed because adb was momentarily unreachable, another
+   * emulator holding the host's single H.264 encoder — and this used to cache
+   * false forever, which pinned a perfectly good device to the ~4 MB/s MJPEG
+   * fallback for the rest of the server's life, with no way back short of a
+   * restart. The first probe happens exactly when the device is at its busiest.
+   * → `androidH264.test.ts` "a spawn failure does not pin the device to MJPEG
+   * for the rest of the process" and "a dead-looking encoder is backed off, not
+   * written off"
    */
   ready(): Promise<boolean> {
     if (this.readyPromise) return this.readyPromise;

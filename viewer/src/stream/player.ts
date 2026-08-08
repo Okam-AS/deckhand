@@ -414,7 +414,9 @@ export class DevicePlayer {
    * on `isAvccSupported()` alone — there is no iOS/Android switch anywhere in the
    * viewer — so EITHER platform lands here when WebCodecs is missing, when a
    * decode errors, or when the server has no AVCC to give (the Android helper
-   * 404s /stream.avcc on system images with no working encoder).
+   * 404s /stream.avcc whenever it is not serving H.264 right now — an image that
+   * cannot encode is only one of the reasons; see `serveAvcc` in
+   * server/src/streaming/androidAdb.ts).
    */
   private streamIsHealthy(): void {
     this.recovery = 0;
