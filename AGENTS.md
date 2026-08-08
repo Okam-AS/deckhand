@@ -91,9 +91,9 @@ rules there, not in `App.tsx`, which has no tests of its own.
 See PLAN §6 "One page, several sources" and the accepted-risk note beside it.
 
 What remains to build is PLAN's, not this file's, to enumerate. The agent-led onboarding
-contract in PLAN §6 is built; what §6 still names as unbuilt, it names in place — building
-to physical hardware (`list_devices` reports `physical` but `targetable` is always false)
-and the `metro`/`app` `logs` sources, which are accepted and capture nothing. Outside §6,
+contract in PLAN §6 is built; what §6 still names as unbuilt, it names in place — the
+`metro`/`app` `logs` sources, which are accepted and capture nothing. Physical devices are
+not on that list: they are OUT, on both platforms, and PLAN §2 says why. Outside §6,
 PLAN §11 item 7's host hygiene (dedicated macOS user, no personal credentials, FileVault) is
 stated in PLAN and in no RUNBOOK: nothing tells an operator how to set it up or how to check
 it holds, and `ops/README.md` covers the LaunchAgents and not that.

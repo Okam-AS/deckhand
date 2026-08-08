@@ -337,10 +337,11 @@ export class AvccSource {
     // <RECORDER_PKILL_PATTERN>` (androidAdb.ts), which proves ownership four
     // ways because it may be looking at a device we do not own. This is our own
     // teardown of our own stream, and the serial can only be an emulator
-    // deckhand booted — physical devices are never targetable (`preview.ts`
-    // reports them `targetable: false`), so there is no third party's recorder
-    // on it to catch, and the encoder is single-instance across emulators, so
-    // one we fail to kill costs every other device its H.264.
+    // deckhand booted — deckhand never targets physical hardware (PLAN §2 "NO
+    // physical devices"), so
+    // there is no third party's recorder on it to catch, and the encoder is
+    // single-instance across emulators, so one we fail to kill costs every
+    // other device its H.264.
     try {
       spawn("adb", ["-s", this.serial, "shell", "pkill", "-INT", "screenrecord"], { stdio: "ignore" }).unref();
     } catch {

@@ -23,7 +23,6 @@ import { WorktreeManager } from "./engine/worktree.ts";
 import { MetroManager } from "./engine/metro.ts";
 import { Simctl } from "./devices/ios.ts";
 import { AndroidManager } from "./devices/android.ts";
-import { PhysicalDeviceScanner } from "./devices/physical.ts";
 import { ServeSimBackend, vendoredServeSimBin } from "./streaming/serveSim.ts";
 import { AndroidAdbBackend } from "./streaming/androidAdb.ts";
 import { WebBackend } from "./streaming/web.ts";
@@ -198,7 +197,6 @@ export function createServer(): DeckhandServer {
     }),
     simctl: new Simctl(),
     android: new AndroidManager(),
-    physical: new PhysicalDeviceScanner(),
     streaming,
     metro: new MetroManager(),
     store: new StateStore(),

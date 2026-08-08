@@ -185,7 +185,7 @@ describe("buildPlan — android", () => {
     // Looks the AVD name up rather than handing expo the serial, which it
     // cannot match against a device name.
     assert.match(script, /adb -s 'emulator-5554' emu avd name/);
-    // Physical devices (no AVD name) still fall back to the serial.
+    // An unusable `emu avd name` answer still falls back to the serial.
     assert.match(script, /_avd='emulator-5554'/);
     assert.match(script, /npx expo run:android --device "\$_avd" --no-bundler/);
   });

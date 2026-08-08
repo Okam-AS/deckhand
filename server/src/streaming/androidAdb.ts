@@ -614,9 +614,9 @@ export class AndroidAdbBackend implements StreamingBackend {
    * deckhand. Four tests have to pass before a device is touched, and each one
    * is load-bearing:
    *
-   *   1. the serial is an emulator. Physical devices are borrowed hardware
-   *      (devices/physical.ts) and deckhand never streams them, so a
-   *      `screenrecord` on a plugged-in phone is always somebody else's.
+   *   1. the serial is an emulator. Deckhand never targets or streams physical
+   *      hardware (PLAN §2 "NO physical devices"), so a `screenrecord` on a
+   *      plugged-in phone is always somebody else's.
    *   2. the AVD is deckhand-named. A developer's own emulator is out of
    *      bounds, and a console that will not tell us the name reads as "not
    *      provably ours" — the safe direction.

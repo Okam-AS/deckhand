@@ -17,7 +17,6 @@ import { WorktreeManager, worktreeKey, type RefSpec, refDescription } from "./wo
 import { pruneDerivedData } from "./derivedData.ts";
 import { Simctl, selectRuntime, selectDeviceType, deviceLabel, type SimDevice } from "../devices/ios.ts";
 import { AndroidManager, AVD_PREFIX, selectSystemImage, portForSerial, serialForPort } from "../devices/android.ts";
-import type { PhysicalDevices } from "../devices/physical.ts";
 import { resolveAndroidEnv } from "../devices/toolEnv.ts";
 import { Reaper, POOL_SIM_PREFIX, POOL_AVD_PREFIX } from "./reaper.ts";
 import { METRO_MARKER_ENV } from "./metro.ts";
@@ -374,14 +373,6 @@ export interface PreviewEngineDeps {
   worktrees: WorktreeManager;
   simctl: Simctl;
   android?: AndroidManager;
-  /**
-   * Physical-device detection (read-only, Phase 0). Optional: absent means the
-   * enumeration answers empty lists — every existing caller and fake keeps
-   * working unchanged, which is the backward-compatibility line this feature
-   * must never cross. Structural on purpose: only `list()` is consumed, so a
-   * test fake is a plain object literal with no cast to hide behind.
-   */
-  physical?: { list(): Promise<PhysicalDevices> };
   streaming: StreamingBackend;
   metro: MetroManager;
   store: StateStore;
@@ -2713,30 +2704,17 @@ export class PreviewEngine {
   }
 
   /**
-   * Enumerate available iOS runtimes/models, Android API levels, connected
-   * PHYSICAL devices, and current capacity. `physical.targetable` is the wire's
-   * own statement of whether start_preview can build to that hardware (false in
-   * Phase 0) — the claim lives here so tool descriptions cannot go stale on it.
+   * Enumerate available iOS runtimes/models, Android API levels, and current
+   * capacity. Simulators and emulators only: deckhand does not target hardware
+   * plugged into the machine, and does not report it either (PLAN §2 "NO
+   * physical devices").
    */
   async listDevices(): Promise<{
     ios: { runtimes: { version: string; name: string }[]; models: string[] };
     android: { apiLevels: number[] };
-    physical: PhysicalDevices & { targetable: boolean };
     capacity: { inUse: number; max: number };
   }> {
-    const [runtimes, deviceTypes, physical] = await Promise.all([
-      this.d.simctl.listRuntimes(),
-      this.d.simctl.listDeviceTypes(),
-      // The physical section is additive: a broken scanner must never take down
-      // the enumeration the simulator sections answer (tested with a rejecting
-      // scanner). Absent dep = empty answer, same as every pre-feature deployment.
-      (this.d.physical?.list() ?? Promise.resolve({ ios: [], android: [] } satisfies PhysicalDevices)).catch(
-        (e): PhysicalDevices => {
-          const msg = `physical device scan failed: ${e instanceof Error ? e.message : String(e)}`;
-          return { ios: [], android: [], errors: { ios: msg, android: msg } };
-        },
-      ),
-    ]);
+    const [runtimes, deviceTypes] = await Promise.all([this.d.simctl.listRuntimes(), this.d.simctl.listDeviceTypes()]);
     let apiLevels: number[] = [];
     try {
       apiLevels = [...new Set((await this.android().listSystemImages()).map((i) => i.api))].sort((a, b) => b - a);
@@ -2750,7 +2728,6 @@ export class PreviewEngine {
         models: deviceTypes.map((d) => d.name),
       },
       android: { apiLevels },
-      physical: { ...physical, targetable: false },
       capacity: { inUse, max: this.d.config.limits.maxTotalDevices },
     };
   }

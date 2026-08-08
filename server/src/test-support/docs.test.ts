@@ -287,10 +287,10 @@ describe("docs describe the code that exists", () => {
     //     keeps English out: "not at the top level: {…}" is prose, and a bare `X:\s*[[{]`
     //     pattern reads `level` as a parameter.
     //  2. `X.y` where `y` IS a real field — "parameter dot subfield". `against.worktree` is
-    //     caught because `worktree` is real and `against` is not, while `physical.targetable`
-    //     (a RESPONSE field named in list_devices' description) is left alone because
-    //     `targetable` is not an input field either. Descriptions legitimately name response
-    //     shapes, so a rule demanding every dotted owner be a parameter would be false.
+    //     caught because `worktree` is real and `against` is not. A dotted name whose
+    //     SUBFIELD is not an input field either is left alone: descriptions legitimately
+    //     name RESPONSE shapes, so a rule demanding every dotted owner be a parameter
+    //     would be false.
     //
     // Fields are collected at every nesting depth and across all tools, so a real name in the
     // wrong tool still passes — the check is "this name exists", not "this name belongs here".
