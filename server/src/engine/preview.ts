@@ -1325,6 +1325,11 @@ export class PreviewEngine {
     const added = specs.map((spec, i) => newLiveDevice(spec, start + i, p.devices.length + i + 1));
     p.nextDeviceIndex = start + specs.length;
     p.devices.push(...added);
+    // `p.record.devices` is a separate array (startPreview built it with `.map()`), and it
+    // is the one that reaches state.json. Pushing to `p.devices` alone left `persist()`
+    // writing the pre-add list — invisible through `getStatus`, which reads `p.devices`,
+    // and wrong for anything reading the file. `removeDevices` re-syncs the same way.
+    p.record.devices = p.devices.map((d) => d.record);
     this.persist();
     this.markActive(p);
 

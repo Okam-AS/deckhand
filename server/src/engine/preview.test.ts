@@ -1787,6 +1787,33 @@ describe("PreviewEngine idle sweep", () => {
     assert.deepEqual(h.engine.getStatus("pv1")!.devices.map((d) => d.deviceId), ["ios-0"], "nothing half-added");
   });
 
+  it("persists the device it just added, not the list from before it", async () => {
+    // `p.record.devices` is what reaches state.json, and it is a DIFFERENT array from
+    // `p.devices` — `startPreview` builds it with `.map()`. `removeDevices` re-syncs it;
+    // `addDevices` pushed to `p.devices` alone, so the `persist()` on the next line wrote
+    // the list from before the add. `getStatus` reads `p.devices` and looked right, which
+    // is what hid it — but the on-host poller AGENTS.md points an agent at reads
+    // state.json, so a device added to a live preview was invisible to it, and one that
+    // was added and then FAILED read as no device rather than as an error to relay.
+    const h = makeEngine({ config: { ...config, limits: { ...config.limits, maxTotalDevices: 6 } } });
+    h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+
+    h.engine.addDevices("pv1", [{ platform: "android" }]);
+
+    const persisted = h.store.load().previews.find((p) => p.previewId === "pv1")!;
+    assert.deepEqual(
+      persisted.devices.map((d) => d.deviceId),
+      ["ios-0", "android-1"],
+      "the persisted record carries the added device",
+    );
+    // And it keeps carrying it once the device reports — the record must be the same
+    // object the orchestration writes phases onto, not a snapshot taken at add time.
+    await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
+    const later = h.store.load().previews.find((p) => p.previewId === "pv1")!;
+    assert.deepEqual(later.devices.map((d) => `${d.deviceId}:${d.phase}`), ["ios-0:ready", "android-1:ready"]);
+  });
+
   it("stays quiet when the request is already satisfied", () => {
     // The daily loop must not grow a warning it does not need.
     const h = makeEngine();
