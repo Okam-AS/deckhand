@@ -34,6 +34,17 @@ const ANDROID_SMOKE_CONSOLE_PORT = 5680;
  * so the rule is "prefix + role", not "the same string on both".
  * → `doctor.test.ts` "names them inside the prefixes both sweeps select on", and
  * "spells no device name by hand anywhere in doctor.ts" for the next one.
+ *
+ * The cost, which is not nothing: being reapable means a `deckhand serve` starting up
+ * DURING a `--device-only` run will pkill and delete these two out from under it. Its
+ * boot sweep keeps what the SERVER holds, and a second process's devices are invisible
+ * to that — there is no cross-process keep, and inventing one (a lock file, a pid in
+ * state.json) would put a new persistent thing in the way of both. Taken deliberately:
+ * the leak is silent, common (any interrupted gate run) and expensive — one emulator
+ * holds the machine's single H.264 encoder — while the race needs a restart inside a
+ * few-minute window and costs one re-run of a check you are already watching. The
+ * simulator has always had exactly this exposure; the AVD is now symmetric with it
+ * rather than uniquely immune.
  */
 export const DOCTOR_SIM_NAME = `${SIM_PREFIX}doctor`;
 export const DOCTOR_AVD_NAME = `${AVD_PREFIX}doctor`;
@@ -421,11 +432,41 @@ async function smokeAndroid(): Promise<Check[]> {
       }
     }
   } finally {
-    if (serial) await android.shutdown(serial).catch(() => {});
-    await android.deleteAvd(avd).catch(() => {});
+    const kept = await releaseSmokeAvd(android, avd, serial);
+    if (kept) {
+      // Reported, not swallowed: the AVD is still on disk and an emulator is probably
+      // still holding the console port, so the NEXT gate run's leftover check (above)
+      // is what the operator will meet if nothing collects it first.
+      checks.push({ name: label("teardown"), ok: false, warn: true, detail: kept });
+    }
     await backend.reapOrphans().catch(() => {});
   }
   return checks;
+}
+
+/**
+ * Release the gate's emulator, and delete its AVD only if the emulator confirmed it
+ * had gone.
+ *
+ * Same rule as the engine's teardown, for the same reason: `avdmanager delete` takes
+ * the name out of `listAvds()`, and `pkill -f "avd <name>"` over those names is the
+ * only thing that can kill an emulator whose console port no longer answers. A
+ * `shutdown` that timed out means the process is very likely still running, so the
+ * name is the one thing that must survive.
+ *
+ * Returns what to tell the operator, or null when the AVD is gone. Extracted from
+ * `smokeAndroid` because that function only runs against real hardware — this is the
+ * decision, and `doctor.test.ts` can reach it.
+ */
+export async function releaseSmokeAvd(
+  android: Pick<AndroidManager, "shutdown" | "deleteAvd">,
+  avd: string,
+  serial?: string,
+): Promise<string | null> {
+  const stopped = serial ? await android.shutdown(serial).catch(() => false) : true;
+  if (!stopped) return `${serial} did not exit; ${avd} kept so the orphan sweep can still name it (\`pkill -f "avd ${avd}"\`)`;
+  await android.deleteAvd(avd).catch(() => {});
+  return null;
 }
 
 /**

@@ -11,8 +11,10 @@ import {
   deviceGateExit,
   freshnessVerdict,
   readTokens,
+  releaseSmokeAvd,
   type Check,
 } from "./doctor.ts";
+import { fakeAndroid } from "../test-support/fakes.ts";
 import { orphanAvds, orphanSims } from "../engine/reaper.ts";
 import type { Config } from "../config.ts";
 
@@ -308,6 +310,45 @@ describe("the device gate's own devices are reapable", () => {
     const scan = (s: string) => [...stripComments(s).matchAll(/["'`]deckhand[-_][^"'`]*/g)].map((m) => m[0].slice(1));
     assert.deepEqual(scan('// it used to be called "deckhand-doctor"\nconst x = 1;\n'), [], "a name quoted in prose is not a device name");
     assert.deepEqual(scan('/* was "deckhand-doctor" */\nconst avd = "deckhand_doctor";\n'), ["deckhand_doctor"], "and a real literal still fires");
+  });
+});
+
+describe("releaseSmokeAvd", () => {
+  /** `shutdown` answers `answer`; every call is recorded. */
+  const android = (calls: string[], answer: boolean) =>
+    fakeAndroid({
+      shutdown: async (serial: string) => {
+        calls.push(`shutdown ${serial}`);
+        return answer;
+      },
+      deleteAvd: async (name: string) => void calls.push(`deleteAvd ${name}`),
+    });
+
+  it("deletes the gate's AVD once the emulator has actually gone", async () => {
+    const calls: string[] = [];
+    assert.equal(await releaseSmokeAvd(android(calls, true), DOCTOR_AVD_NAME, "emulator-5680"), null);
+    assert.deepEqual(calls, ["shutdown emulator-5680", `deleteAvd ${DOCTOR_AVD_NAME}`]);
+  });
+
+  it("keeps it when the emulator would not exit, and says why", async () => {
+    // Deleting it here is what makes the leftover uncollectable: the sweep in
+    // `Reaper.reap` kills an emulator with `pkill -f "avd <name>"` over the names
+    // `listAvds()` returns, and `avdmanager delete` takes this one out of that list.
+    // The gate's own leftover check (`smokeAndroid`) has the same dependency — it
+    // tells the operator to kill a device that nothing can name any more.
+    const calls: string[] = [];
+    const kept = await releaseSmokeAvd(android(calls, false), DOCTOR_AVD_NAME, "emulator-5680");
+    assert.deepEqual(calls, ["shutdown emulator-5680"], "the AVD must survive an emulator that did not exit");
+    assert.match(kept ?? "", /emulator-5680/, "and the operator has to be told which device is still up");
+    assert.match(kept ?? "", new RegExp(DOCTOR_AVD_NAME));
+  });
+
+  it("deletes it when there was no emulator to stop at all", async () => {
+    // A createAvd that succeeded and a boot that never returned a serial: nothing is
+    // running, so keeping the image would leak ~2 GB per red gate run.
+    const calls: string[] = [];
+    assert.equal(await releaseSmokeAvd(android(calls, false), DOCTOR_AVD_NAME, undefined), null);
+    assert.deepEqual(calls, [`deleteAvd ${DOCTOR_AVD_NAME}`]);
   });
 });
 
