@@ -45,13 +45,17 @@ export interface ToolContext {
 }
 
 /**
- * Every successful tool response, and the one place the update notice can be attached
- * without anyone having to remember to.
+ * The JSON success response, and the funnel the update notice rides on.
  *
  * Attached only when there is genuinely something to say (this checkout is on main and main
  * has moved), so the normal case is byte-identical to before. Deliberately not restricted to
- * `start_preview`: whichever tool the agent reaches for next is the one that should tell it,
- * and a notice on a funnel cannot be forgotten by the next tool somebody adds.
+ * `start_preview`: whichever tool the agent reaches for next is the one that should tell it.
+ *
+ * The funnel has a hole, and it is a real one rather than a hypothesis: `screenshot` returns
+ * an image content block, which has nowhere to carry JSON, so it goes around this and carries
+ * no notice. It is the only such tool, and the guardrail below keeps it the only one — a
+ * SECOND tool building a response by hand fails `mcp/responses.test.ts`. Nothing anywhere
+ * exercises the notice itself; `deckhandUpdate` has no test.
  */
 function ok(data: Record<string, unknown>): CallToolResult {
   const version = versionStatus();
@@ -319,11 +323,6 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       : `Give the user this link NOW: ${url} — it's already live (it shows build progress) and is stable for this app; relay it before any other work, don't wait for ready. Then poll preview_status for readiness. After pushing new commits to ${ref ?? "the branch"}, call restart_preview to rebuild the same simulators at the new tip — the link stays the same. ${TEST_RUN_CONTRACT} ${linkFooter(url)}`;
 
   /**
-   * UI actions that change what the user sees, as opposed to the read-only verifiers
-   * (waitFor/assert/query). A bare `assert` moves nothing on screen, so it is not the thing
-   * the user is left guessing about.
-   */
-  /**
    * The actions that make a claim about the screen. A step reported `passed` right after one
    * of these FAILED is the shape of a verdict with no evidence behind it — see
    * `unevidencedPass`. `query` is absent: it returns matches, it does not assert anything.
@@ -516,8 +515,10 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         // ...but roll it back if the boot then throws (device caps, one-device-per-
         // platform): the share id is stable per app, so a failed call must not leave
         // an ALREADY-RUNNING share of this app newly public.
-        // Extra sources first, so their (public) panes exist before this app's
-        // share takes the chosen access — same order the old compare tool used.
+        // Extra sources first, so their panes exist before this app's share takes the
+        // chosen access. They are NOT public: `bootReference` is handed `args.share`, so
+        // every pane on the page carries the access the caller asked for.
+        // → server.test.ts "gives an extra pane the page's PIN instead of publishing it"
         const refs: { reference: CompareReference; previewId: string; booted: boolean }[] = [];
         // Undo the panes THIS call started; a reused running pane is left alone,
         // because another page may be showing it right now.
@@ -1126,7 +1127,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       }),
   );
 
-  // --- agent-driven test runs (surfaced live in the viewer, PLAN §8) ---------
+  // --- agent-driven test runs (surfaced live in the viewer, PLAN §6) ---------
 
   server.registerTool(
     "start_test_run",
