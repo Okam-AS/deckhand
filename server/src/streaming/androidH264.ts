@@ -333,6 +333,14 @@ export class AvccSource {
     }
     // `adb exec-out` dying does not always take the device-side recorder with
     // it; a stray screenrecord would hold the encoder against the next start.
+    // By NAME, deliberately broader than the orphan sweep's `pkill -f
+    // <RECORDER_PKILL_PATTERN>` (androidAdb.ts), which proves ownership four
+    // ways because it may be looking at a device we do not own. This is our own
+    // teardown of our own stream, and the serial can only be an emulator
+    // deckhand booted — physical devices are never targetable (`preview.ts`
+    // reports them `targetable: false`), so there is no third party's recorder
+    // on it to catch, and the encoder is single-instance across emulators, so
+    // one we fail to kill costs every other device its H.264.
     try {
       spawn("adb", ["-s", this.serial, "shell", "pkill", "-INT", "screenrecord"], { stdio: "ignore" }).unref();
     } catch {

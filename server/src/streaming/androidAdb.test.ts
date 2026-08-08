@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   parseWmSize,
   normToPixels,
@@ -147,5 +148,22 @@ describe("adbInputArgs", () => {
       "400",
       "300",
     ]);
+  });
+});
+
+describe("adb/ps exec seams", () => {
+  it("gives every execFile in this module a timeout", () => {
+    // `server.ts` awaits `engine.reapOrphans()` BEFORE `engine.startJanitor()`, so one
+    // wedged child here costs the process its idle sweep and its disk prune for the rest
+    // of its life. `defaultHostRecorderSerials` shipped without one while both its
+    // siblings had 5s; nothing failed, because a hang is not an error. Read as text
+    // because that is the only place the missing option is visible.
+    const src = readFileSync(new URL("./androidAdb.ts", import.meta.url), "utf8");
+    const calls = src.split(/\bexecFile\(/).slice(1);
+    assert.ok(calls.length >= 3, `expected the adb/ps exec seams to still be here, found ${calls.length}`);
+    for (const call of calls) {
+      const head = call.slice(0, call.indexOf("\n", call.indexOf("(err")) + 1);
+      assert.match(head, /timeout:/, `an execFile with no timeout can wedge the boot sweep:\n${head}`);
+    }
   });
 });

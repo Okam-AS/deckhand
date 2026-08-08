@@ -218,10 +218,16 @@ function defaultListSerials(): Promise<string[]> {
  * doctor --device-only` runs `reapOrphans()` from a SECOND process while the
  * server may be mid-preview, where the in-memory helper map is empty and `keep`
  * is empty too.
+ *
+ * Timed out like its siblings, and that is not cosmetic: `server.ts` awaits
+ * `engine.reapOrphans()` BEFORE `engine.startJanitor()`, so a `ps` that never
+ * returns costs the process its idle sweep and its disk prune for as long as it
+ * runs. A timeout arrives here as an error, which rejects — "unknown owners",
+ * the same direction as any other failure, and never "nothing is live".
  */
 function defaultHostRecorderSerials(): Promise<Set<string>> {
   return new Promise((resolve, reject) => {
-    execFile("ps", ["-ax", "-o", "command="], { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+    execFile("ps", ["-ax", "-o", "command="], { encoding: "utf8", timeout: 5_000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
       if (err) {
         // Unknown owners, NOT "no owners". The sweep abandons the whole pass on
         // a rejection; an empty set here would read as "nothing is live" and
