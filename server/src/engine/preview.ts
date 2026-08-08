@@ -1468,8 +1468,9 @@ export class PreviewEngine {
    * preview left one listening for the rest of the server's life and `freePort`
    * simply moved to the next port — the 8081-8099 range emptied out over a few
    * app switches and previews started failing with "no free Metro port".
-   * App-scoped on purpose: one manager, one Metro, and another app's live
-   * preview may be the one holding it.
+   * App-scoped, and no narrower: `stopApp` reaps every server this app has (one
+   * per checkout and env), and the guard above is what stops it running while
+   * another preview of the SAME app is still live.
    */
   private stopMetroIfUnused(appId: string): void {
     for (const other of this.previews.values()) if (other.app.id === appId) return;

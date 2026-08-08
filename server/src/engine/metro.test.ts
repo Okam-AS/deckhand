@@ -160,7 +160,7 @@ describe("MetroManager port allocation", () => {
     assert.equal(held, false, "port must actually be released before stop() returns");
   });
 
-  it("restarts Metro when the same app is previewed from a different checkout", async () => {
+  it("starts a second server for a second checkout of the same app", async () => {
     // Two live previews of one Expo app at different refs. Keyed on app+env
     // alone, the second one was handed the FIRST checkout's bundle — the
     // foreign-bundle failure this file exists to prevent, with deckhand as the

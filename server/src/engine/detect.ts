@@ -47,7 +47,12 @@ export function detectAppType(s: TypeSignals): AppType | null {
  * Which web dev server a `web` app runs. `vite` hosts path-based
  * (`--base=/s/<id>/web/`); `nuxt`/`next` can't set their base at runtime without
  * editing the checkout, so they host at the root of a per-share subdomain (see
- * docs/web-wildcard-hosting-plan.md). `static` = a built `dist/` with no dev server.
+ * docs/web-wildcard-hosting-plan.md).
+ *
+ * `static` is a placeholder for a case nobody built: no detector returns it, and
+ * nothing downstream treats it as static — `webHostingMode` puts it on a
+ * subdomain and `recipes.webRootDevRun` would try to start a dev server for it.
+ * Read it as "unreachable", not as "supported".
  */
 export type WebFramework = "vite" | "nuxt" | "next" | "static";
 
@@ -281,8 +286,9 @@ export function detectBundleIdFromDir(dir: string, type: AppType, platform: "ios
     }
     return null;
   }
-  // bare react-native: bundle id lives in Info.plist / build.gradle; deferred
-  // (Phase 1 targets Expo). Return null so the caller can require an override.
+  // bare react-native: the bundle id lives in Info.plist / build.gradle, which is not
+  // parsed here. Null on purpose, so the caller asks for an explicit bundleId rather
+  // than guessing one — an empty answer and a wrong answer must not look the same.
   return null;
 }
 
