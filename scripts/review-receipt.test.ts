@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -111,11 +111,61 @@ describe("the gate", () => {
     assert.match(!v.ok ? v.reason : "", /f\.ts::auth bypass/);
   });
 
-  it("counts it answered once the fix moves the diff the round reviewed", () => {
+  // The hole this replaced: `open` was computed only from rounds at the CURRENT diff, justified
+  // by "a fix is why the hash moved". Every edit moves the hash — including the fix for a
+  // different finding in the same round — so a `must` raised at one diff was cleared by any
+  // later edit, and a cold round that never mentioned it read as convergence.
+  it("keeps a blocking finding open when the diff moves under it and nobody answers it", () => {
     const raised = round({ cold: true, findings: [{ id: "f.ts::auth bypass", severity: "must" }], newFindings: 1, diff: OLD });
-    // The round after the fix is cold too — which the freshness rule below now requires, since
-    // the fix moved the hash the first cold round reviewed.
-    assert.deepEqual(validate(converged({ rounds: [raised, round({ lens: "after-the-fix", cold: true })] }), HASH), { ok: true });
+    const silent = round({ lens: "after-some-other-fix", cold: true });
+    const v = validate(converged({ rounds: [raised, silent] }), HASH);
+    assert.equal(v.ok, false, "an edit elsewhere is not an answer to this finding");
+    assert.match(!v.ok ? v.reason : "", /f\.ts::auth bypass/);
+  });
+
+  // The other direction, and the one that would make this net negative if it broke: an author
+  // who genuinely fixed it must converge by saying so, not by adding rounds.
+  it("counts it answered when a later round on changed code records it resolved", () => {
+    const raised = round({ cold: true, findings: [{ id: "f.ts::auth bypass", severity: "must" }], newFindings: 1, diff: OLD });
+    // The round after the fix is cold too — which the freshness rule below requires, since the
+    // fix moved the hash the first cold round reviewed.
+    const fixed = round({ lens: "after-the-fix", cold: true, resolved: ["f.ts::auth bypass"] });
+    assert.deepEqual(validate(converged({ rounds: [raised, fixed] }), HASH), { ok: true });
+  });
+
+  // "Resolved" has to mean something the receipt can check, and the only thing it can check is
+  // that the code moved after the finding was raised. A round resolving what it is itself
+  // looking at has fixed nothing, and would make a `must` cost one line of JSON.
+  it("ignores a resolution from a round that reviewed the same code the finding was raised against", () => {
+    const raised = round({ cold: true, findings: [{ id: "f.ts::boom", severity: "must" }], newFindings: 1, diff: OLD });
+    const sameCode = round({ lens: "same-diff", cold: true, diff: OLD, resolved: ["f.ts::boom"] });
+    const v = validate(converged({ rounds: [raised, sameCode, round({ lens: "last", cold: true })] }), HASH);
+    assert.equal(v.ok, false);
+    assert.match(!v.ok ? v.reason : "", /f\.ts::boom/);
+  });
+
+  // Ceremony must not scale with rounds: five findings fixed and recorded once must stay
+  // recorded, or every later round would have to re-list them and the honest path gets longer
+  // the more carefully you review.
+  it("carries a resolution forward, so later rounds need not repeat it", () => {
+    const MID = "c".repeat(64);
+    const raised = round({ cold: true, findings: [{ id: "f.ts::boom", severity: "must" }], newFindings: 1, diff: OLD });
+    const fixed = round({ lens: "after-the-fix", diff: MID, resolved: ["f.ts::boom"] });
+    assert.deepEqual(validate(converged({ rounds: [raised, fixed, round({ lens: "last", cold: true })] }), HASH), { ok: true });
+  });
+
+  // A resolution answers the report it came after, not one that came later. Re-reporting a
+  // finding the author already called fixed is exactly the case worth catching.
+  it("does not let an earlier resolution answer a later re-report of the same finding", () => {
+    const boom = { id: "f.ts::boom", severity: "must" as const };
+    const rounds = [
+      round({ cold: true, findings: [boom], newFindings: 1, diff: OLD }),
+      round({ lens: "after-the-fix", diff: "c".repeat(64), resolved: ["f.ts::boom"] }),
+      round({ lens: "cold-again", cold: true, findings: [boom] }),
+    ];
+    const v = validate(converged({ rounds }), HASH);
+    assert.equal(v.ok, false, "the fix did not hold, and the receipt must say so");
+    assert.match(!v.ok ? v.reason : "", /f\.ts::boom/);
   });
 
   it("accepts that same finding once it is waived with a reason", () => {
@@ -196,6 +246,10 @@ describe("the gate", () => {
       // `validate` for a number there — the same crash class, reintroduced by that rule.
       JSON.parse(`{"rounds":[${JSON.stringify(round({ newFindings: 1, diff: OLD }))},${JSON.stringify(round({ cold: true }))}],"waived":[{"finding":"f::x","why":12345}]}`),
       JSON.parse(`{"rounds":[${JSON.stringify(round({ newFindings: 1, diff: OLD }))},{"lens":"cold","cold":true,"diff":"${HASH}","newFindings":0,"findings":[null]}]}`),
+      // `resolved` is walked to decide whether a blocking finding is answered, so a non-list or
+      // a list of non-strings is the same crash class one field along.
+      JSON.parse(JSON.stringify({ ...converged(), rounds: [round({ newFindings: 1, diff: OLD }), { ...round({ cold: true }), resolved: "f::x" }] })),
+      JSON.parse(JSON.stringify({ ...converged(), rounds: [round({ newFindings: 1, diff: OLD }), { ...round({ cold: true }), resolved: [12345] }] })),
     ]) {
       const v = validate(bad as unknown as Receipt, HASH);
       assert.equal(v.ok, false, `expected a refusal for ${JSON.stringify(bad)}`);
@@ -288,6 +342,25 @@ describe("recording a round", () => {
       dir,
     );
     assert.equal(ok.waived.length, 1);
+  });
+
+  // A resolution that matches nothing silently leaves the real finding open — the exact failure
+  // the field exists to prevent — so a typo is an error where it is written, not an unexplained
+  // refusal at handover.
+  it("refuses a resolution no earlier round reported", () => {
+    recordRound({ lens: "one", findings: [{ file: "f.ts", claim: "boom", evidence: "f.ts:1" }] }, OLD, "feature/x", dir);
+    assert.throws(() => recordRound({ lens: "two", resolved: ["f.ts::typo"] }, HASH, "feature/x", dir), /no earlier round reported/);
+    assert.throws(() => recordRound({ lens: "two", resolved: ["  "] }, HASH, "feature/x", dir), /no earlier round reported/);
+    const ok = recordRound({ lens: "two", resolved: ["f.ts::boom"] }, HASH, "feature/x", dir);
+    assert.deepEqual(ok.rounds.at(-1)?.resolved, ["f.ts::boom"]);
+  });
+
+  // Every other claim here costs something; this one would cost one line of JSON if a round
+  // could resolve what it is itself looking at. A fix moves the diff, so the round after the fix
+  // is the one that can say it.
+  it("refuses to resolve a finding raised against the code as it stands", () => {
+    recordRound({ lens: "one", findings: [{ file: "f.ts", claim: "boom", evidence: "f.ts:1" }] }, HASH, "feature/x", dir);
+    assert.throws(() => recordRound({ lens: "two", resolved: ["f.ts::boom"] }, HASH, "feature/x", dir), /nothing has changed since/);
   });
 
   // Rounds happen in different sessions, so the curve has to accumulate on disk or round 4
@@ -413,9 +486,64 @@ describe("a body file that has outlived what it attests to", () => {
     assert.throws(() => readFileSync(file(), "utf8"), /ENOENT/);
   });
 
+  // "Unreadable counts as stale" was a comment with nothing behind it: making the read failure
+  // KEEP the file instead left every test green. The body here is otherwise perfectly current,
+  // so only the unreadability can remove it.
+  it("removes a body it cannot read AT ALL, even one stamped for this branch and diff", () => {
+    bodyFor("feature/a", HASH);
+    assert.equal(pruneStaleHandover("feature/a", HASH, file()), false, "readable and current: the premise of this test");
+    chmodSync(file(), 0o000);
+    assert.throws(() => readFileSync(file(), "utf8"), /EACCES/, "the file must actually be unreadable, or this test asserts nothing");
+    assert.equal(pruneStaleHandover("feature/a", HASH, file()), true);
+    assert.throws(() => readFileSync(file(), "utf8"), /ENOENT/);
+  });
+
   it("reports nothing to prune when there is no body", () => {
     assert.equal(pruneStaleHandover("feature/a", HASH, file()), false);
   });
+});
+
+// AGENTS.md promises that EVERY `review:*` command prunes a stale body, and nothing exercised
+// the CLI at all — the prune call could be deleted, or moved under one command, with the suite
+// green. So this RUNS the commands as package.json configures them rather than reading them: a
+// test that checks the wiring by reading it is a test of the string, not of the behaviour.
+describe("the commands a human actually runs", () => {
+  const scripts = () => (JSON.parse(readFileSync("package.json", "utf8")) as { scripts: Record<string, string> }).scripts;
+
+  /** A throwaway repo with an `origin/main` to hash against, so the CLI runs for real. */
+  const repoWithStaleBody = (): string => {
+    const repo = join(dir, "repo");
+    mkdirSync(join(repo, ".claude"), { recursive: true });
+    const git = (...args: string[]) => spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+    git("init", "-q");
+    git("config", "user.email", "t@example.com");
+    git("config", "user.name", "t");
+    writeFileSync(join(repo, "a.txt"), "a");
+    git("add", "a.txt");
+    git("commit", "-qm", "one");
+    // `diffHash` refuses to answer without one, and a refusal would prune nothing.
+    assert.equal(git("update-ref", "refs/remotes/origin/main", "HEAD").status, 0);
+    writeFileSync(join(repo, ".claude", "pr-body.md"), `earned elsewhere\n<!-- deckhand-handover branch=feature/other diff=${HASH} -->\n`);
+    return repo;
+  };
+
+  for (const verb of ["review:show", "review:check", "review:hash"]) {
+    it(`\`npm run ${verb}\` deletes a body written for another branch`, () => {
+      const configured = scripts()[verb]!;
+      assert.match(configured, /scripts\/review-receipt\.ts/, `${verb} must still run this script`);
+      const repo = repoWithStaleBody();
+      // The configured command, with only the paths relocated to the throwaway repo — the verb
+      // and the entry point come from package.json, which is the part that can drift.
+      const cmd = configured.replace("scripts/review-receipt.ts", join(process.cwd(), "scripts/review-receipt.ts"));
+      const run = spawnSync("sh", ["-c", cmd], {
+        cwd: repo,
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${join(process.cwd(), "node_modules/.bin")}:${process.env.PATH ?? ""}` },
+      });
+      assert.ok(!/Cannot find|not found/.test(run.stderr ?? ""), `the command did not run: ${run.stderr}`);
+      assert.equal(existsSync(join(repo, ".claude", "pr-body.md")), false, `${verb} left another branch's body in place: ${run.stderr}`);
+    });
+  }
 });
 
 // The comment on RECEIPT_DIR states this, and the whole mechanism rests on it: `diffHash`
@@ -549,6 +677,19 @@ describe("the summary a human reads", () => {
     assert.match(s, /cold-subagent \(cold\): 0/);
     assert.match(s, /checks added: 1/);
     assert.match(s, /nits \(non-blocking\): 1/);
+  });
+
+  // A curve that converged by FIXING things and one that converged by writing them off are
+  // different reviews, and this line is where a human tells them apart afterwards.
+  it("distinguishes what was fixed from what was waived", () => {
+    const s = summarize(
+      converged({
+        rounds: [round({ newFindings: 2, diff: OLD }), round({ cold: true, resolved: ["f.ts::boom", "f.ts::boom"] })],
+        waived: [{ finding: "g.ts::x", why: "not mechanisable: the platform exposes no hook" }],
+      }),
+    );
+    assert.match(s, /resolved: 1/, "counted per finding, not per mention");
+    assert.match(s, /waived: 1/);
   });
 });
 

@@ -17,9 +17,11 @@
  *   3. At least one round was cold AND against the current diff — a reviewer starting from
  *      the diff alone, carrying none of the context the code was written in, having read the
  *      code as it ships. Repeating one lens re-finds one lens's bugs.
- *   4. Nothing blocking is left standing against the current diff — in any round that reviewed
- *      it, not just the last one, since fixing a finding is what moves the diff and dropping
- *      one silently would otherwise be the cheapest way out. Fixed, or waived on the record.
+ *   4. Nothing blocking is left standing — in ANY round, at any diff. A blocking finding leaves
+ *      the record only by being written off it: `resolved` on a later round, or `waived` with a
+ *      reason. It is never cleared by the hash moving underneath it, because EVERY edit moves
+ *      the hash — including the fix for a different finding in the same round — so "the code
+ *      changed" cannot distinguish a fix from a drop, and silence is not a resolution.
  *   5. `npm run ci` passed, on a clean checkout, recorded by RUNNING it rather than by being
  *      told. Deckhand's CI is exactly `npm run ci`, and the pre-commit hook runs the same
  *      command, so there is one definition of green and this is it.
@@ -79,14 +81,19 @@ export const MIN_WAIVER_REASON = 20;
 /**
  * Where `handover` writes the PR body for `gh pr create --body-file`.
  *
- * ONE fixed path, not one per branch — deliberately, and it is the weaker of the two options.
- * Per-branch names (the way {@link receiptPath} does it) would scope the artefact by
- * construction, but the literal `.claude/pr-body.md` is keyed on in `.gitignore` and in three
- * checks that exclude it from the doc scanners, and a name they cannot predict would either
- * leak the body into the diff it attests to or silently drop those exclusions. So the scoping
- * is done by {@link handoverStamp} and {@link pruneStaleHandover} instead: the file names the
- * branch and the diff it was written for, and any review command run against a different one
- * deletes it.
+ * ONE fixed path, not one per branch — and it is the weaker of the two options, kept for one
+ * reason only: it is the path AGENTS.md, the `shipping-a-change` skill and every `gh pr create
+ * --body-file` line in them name, and a body file whose name the human cannot predict is one
+ * they cannot pass. Per-branch names (the way {@link receiptPath} does it) would scope the
+ * artefact by construction and would still be gitignored — `.gitignore` is the only place the
+ * literal is load-bearing, and a glob covers a family as easily as a name covers one file. The
+ * doc scanners need no change at all: they call `repoFiles()`, which asks git and so excludes
+ * whatever git ignores (`test-support/repoFiles.ts`); the three that mention this path do so in
+ * prose. So if the docs ever move to naming the file by branch, this can follow them.
+ *
+ * Until then the scoping is done by {@link handoverStamp} and {@link pruneStaleHandover}: the
+ * file names the branch and the diff it was written for, and any review command run against a
+ * different one deletes it.
  */
 export const HANDOVER_FILE = ".claude/pr-body.md";
 
@@ -149,6 +156,23 @@ export interface Round {
    * and so re-reporting one does not read as new — they just do not hold the PR open.
    */
   newFindings: number;
+  /**
+   * Fingerprints this round says are FIXED — the third and only other way a blocking finding
+   * leaves the record (`waived` is the second; the first is that it never blocked).
+   *
+   * It exists because the alternative was silence. The gate used to consider only rounds at the
+   * current diff, on the reasoning that fixing a finding is what moves the hash — true, and
+   * insufficient: every edit moves the hash, so fixing finding A cleared unfixed finding B
+   * raised in the same round, and a later round that simply never mentioned B opened the gate.
+   *
+   * Like everything else here, it is a claim, not proof: nothing in this file can see whether
+   * a fix landed. What it can see is that the code MOVED after the finding was raised — a fix
+   * does that, and re-reading the same bytes does not — so {@link validate} accepts a
+   * resolution only from a later round at a different diff. That leaves the claim explicit,
+   * attributable to a lens and a diff, and readable in `review:show`, which is this file's
+   * whole design and the whole of what it can offer.
+   */
+  resolved?: string[];
 }
 
 /**
@@ -351,7 +375,13 @@ export function validate(receipt: Receipt | null, hash: string): Verdict {
   const isObject = (v: unknown): boolean => !!v && typeof v === "object";
   if (
     !Array.isArray(receipt.rounds) ||
-    receipt.rounds.some((r) => !isObject(r) || !Array.isArray(r.findings) || r.findings.some((f) => !isObject(f)))
+    receipt.rounds.some(
+      (r) =>
+        !isObject(r) ||
+        !Array.isArray(r.findings) ||
+        r.findings.some((f) => !isObject(f)) ||
+        (r.resolved !== undefined && (!Array.isArray(r.resolved) || r.resolved.some((id) => typeof id !== "string"))),
+    )
   ) {
     return { ok: false, reason: "the receipt is malformed (rounds are not a list of rounds with findings). Re-run the review." };
   }
@@ -404,29 +434,41 @@ export function validate(receipt: Receipt | null, hash: string): Verdict {
   // the CHEAPER path, because fixing them changes the diff and costs another round. So the
   // last round must have nothing blocking left standing — fixed, or waived on the record.
   //
-  // "Left standing" spans rounds, not just the last one. Checking only the last round made
-  // SILENCE the cheapest exit: a cold round reports a must, the next round simply does not
-  // mention it, and the gate opens with nothing fixed. Dropping it is distinguishable from
-  // fixing it, because fixing it changes the diff — so a blocking finding counts as open when
-  // the round that raised it reviewed the code AS IT STANDS and no later round cleared it.
+  // "Left standing" spans every round at every diff, not just the ones that reviewed the code as
+  // it stands. Checking only the last round made SILENCE the cheapest exit: a cold round reports
+  // a must, the next round does not mention it, and the gate opens with nothing fixed. Checking
+  // only rounds at the CURRENT diff was the same hole one step along — "a fix is why the hash
+  // moved" is true of a fix and true of every other edit, so fixing one finding cleared its
+  // unfixed neighbours, and a cold round reporting nothing afterwards read as convergence.
+  //
+  // So a blocking finding is open until something on the record answers it, and the record is
+  // the only thing that can: `resolved` on a LATER round at a DIFFERENT diff (the code moved
+  // after it was raised, which a fix does and a re-read does not), or a waiver with a reason.
   // Only waivers that carry a reason count. `recordRound` refuses the rest, but the receipt is a
-  // file on disk and anything that can write it can write any shape — so the rule is enforced
-  // where it is READ as well as where it is written.
+  // file on disk and anything that can write it can write any shape — so the rules are enforced
+  // where they are READ as well as where they are written.
   const waived = new Set(
     (receipt.waived ?? []).filter((w) => (w.why ?? "").trim().length >= MIN_WAIVER_REASON).map((w) => w.finding),
   );
+  // Per OCCURRENCE, not per id: a finding re-reported after the fix that was supposed to answer
+  // it is raised again, and the earlier resolution says nothing about the later report.
+  const answered = (id: string, raisedIn: number, raisedAt: string): boolean =>
+    receipt.rounds.some((r, i) => i > raisedIn && r.diff !== raisedAt && (r.resolved ?? []).includes(id));
   const open = new Set<string>();
-  for (const round of receipt.rounds) {
-    if (round.diff !== hash) continue; // reviewed older code; a fix is why the hash moved
-    for (const f of round.findings) if (f.severity !== "nit" && !waived.has(f.id)) open.add(f.id);
-  }
+  receipt.rounds.forEach((round, i) => {
+    for (const f of round.findings) {
+      if (f.severity === "nit" || waived.has(f.id) || answered(f.id, i, round.diff)) continue;
+      open.add(f.id);
+    }
+  });
   if (open.size) {
     return {
       ok: false,
       reason:
-        `the review still has ${open.size} unresolved blocking ${open.size === 1 ? "finding" : "findings"} against this diff ` +
-        `(${[...open].join("; ")}). Fix them and review again, or waive each one with a reason ` +
-        `(\`waived\` takes the fingerprint).`,
+        `the review still has ${open.size} unresolved blocking ${open.size === 1 ? "finding" : "findings"} ` +
+        `(${[...open].join("; ")}). Fix each one and record it — \`resolved\` on the round after the fix takes the ` +
+        `fingerprint — or waive it with a reason (\`waived\` takes the fingerprint too). A finding nobody mentions ` +
+        `again stays open: the code changing is not an answer, because every edit changes it.`,
     };
   }
 
@@ -479,10 +521,15 @@ export function summarize(receipt: Receipt): string {
   // Defaulted, not asserted: this runs on the success path right after `validate`, and a
   // receipt missing an optional key would otherwise throw AFTER the handover body is written —
   // leaving a human with no printed command and a nonzero exit for a review that passed.
+  // The two ways a blocking finding leaves the record, side by side and both counted, because a
+  // curve that converged by fixing things and one that converged by writing them off are
+  // different reviews and the point of this line is that a human can tell them apart.
+  const resolved = new Set(receipt.rounds.flatMap((r) => r.resolved ?? []));
   return [
     `rounds → ${curve.join(" · ")}`,
     `checks added: ${receipt.conversions?.length ?? 0}`,
     nits.size ? `nits (non-blocking): ${nits.size}` : null,
+    resolved.size ? `resolved: ${resolved.size}` : null,
     receipt.waived?.length ? `waived: ${receipt.waived.length}` : null,
   ]
     .filter(Boolean)
@@ -500,6 +547,11 @@ export interface RoundInput {
   findings?: { file: string; claim: string; severity?: Severity; evidence?: string }[];
   conversions?: { finding: string; check: string }[];
   waived?: { finding: string; why: string }[];
+  /**
+   * Fingerprints (from `review:show`) that this round says are now fixed. See {@link
+   * Round.resolved}: a blocking finding does not stop blocking by being edited past.
+   */
+  resolved?: string[];
 }
 
 /**
@@ -526,6 +578,27 @@ export function recordRound(input: RoundInput, hash: string, branch: string, dir
     );
   }
   const base = loadOrCreate(branch, dir);
+  // Checked here as well as in `validate` so a mistyped fingerprint is an error at the moment it
+  // is written rather than an unexplained refusal at handover: a resolution that matches nothing
+  // silently leaves the real finding open, which is the failure this field exists to prevent.
+  const resolved = input.resolved ?? [];
+  for (const id of resolved) {
+    const raises = base.rounds.filter((r) => r.findings.some((f) => f.id === id.trim()));
+    if (!id.trim() || !raises.length) {
+      throw new Error(
+        `no earlier round reported \`${id}\` — quote the fingerprint exactly as \`npm run review:show\` prints it. ` +
+          `A resolution that matches nothing leaves the finding it meant to close standing.`,
+      );
+    }
+    // A fix moves the diff; re-reading the same bytes does not. A round cannot resolve a finding
+    // reported against the code it is itself looking at, or "fixed" would cost one line of JSON.
+    if (raises.some((r) => r.diff === hash)) {
+      throw new Error(
+        `\`${id}\` was reported against the code as it stands, so nothing has changed since it was raised. ` +
+          `Fix it and record the round AFTER the fix, or waive it with a reason.`,
+      );
+    }
+  }
   const next = appendRound(base, {
     lens: input.lens,
     cold: input.cold ?? false,
@@ -535,6 +608,7 @@ export function recordRound(input: RoundInput, hash: string, branch: string, dir
       severity: f.severity ?? "should",
       evidence: f.evidence,
     })),
+    ...(resolved.length ? { resolved: resolved.map((id) => id.trim()) } : {}),
   });
   next.conversions = [...base.conversions, ...(input.conversions ?? [])];
   // A waiver silences a blocking finding, so it costs at least as much as raising one. Reporting
