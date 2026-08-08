@@ -1044,6 +1044,43 @@ export class PreviewEngine {
   }
 
   /**
+   * Every LIVE pane this page shows, and whether its access is the page's to set.
+   *
+   * `synthetic` is an `alongside` pane: it runs under a content-keyed app id that
+   * is deliberately not in apps.yaml, so no tool call names it and the page that
+   * booted it is the only thing that can change its access. A migration-source
+   * pane is the opposite — it IS a registered app's own preview, with its own
+   * link and its own operator-set PIN, which a page must not rewrite.
+   *
+   * Mirrors `shareState`'s two pairing sources exactly (compare session wins,
+   * else `migratesFrom`): a pane this omits but shareState renders is one a
+   * page's PIN silently fails to reach.
+   * → `server.test.ts` "set_pin on a public page locks the panes whose shareIds it already disclosed"
+   */
+  panesOf(previewId: string): { appId: string; shareId: string; synthetic: boolean }[] {
+    const p = this.previews.get(previewId);
+    if (!p) return [];
+    const entry = (live: LivePreview) => ({
+      appId: live.record.appId,
+      shareId: live.record.shareId,
+      synthetic: live.record.reference === true,
+    });
+    if (p.compare) {
+      const out = [];
+      for (const r of p.compare.references) {
+        const live = this.liveByShareId(r.shareId);
+        if (live) out.push(entry(live));
+      }
+      return out;
+    }
+    if (p.app.migratesFrom) {
+      const src = this.livePreviewForApp(p.app.migratesFrom);
+      if (src) return [entry(src)];
+    }
+    return [];
+  }
+
+  /**
    * The stored PIN record for an app, for snapshot/restore around a boot that may
    * throw. Share ids are stable per app, so clearing a PIN and then failing to boot
    * would leave an already-live share open (see `restoreAppPin`).
@@ -2658,7 +2695,7 @@ export class PreviewEngine {
   }
 
   /** The working preview whose compare session shows this pane, if any. */
-  private pageShowingPane(paneId: string): string | null {
+  pageShowingPane(paneId: string): string | null {
     for (const p of this.previews.values()) {
       if (p.record.phase === "stopped") continue;
       if (p.compare?.references.some((r) => r.previewId === paneId)) return p.record.previewId;

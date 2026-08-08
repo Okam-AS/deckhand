@@ -33,6 +33,7 @@ const config: Config = {
 const localDir = mkdtempSync(join(tmpdir(), "deckhand-mcp-local-"));
 const webDir = mkdtempSync(join(tmpdir(), "deckhand-mcp-web-"));
 const webNuxtDir = mkdtempSync(join(tmpdir(), "deckhand-mcp-nuxt-"));
+const migDir = mkdtempSync(join(tmpdir(), "deckhand-mcp-mig-"));
 writeFileSync(join(webNuxtDir, "package.json"), JSON.stringify({ dependencies: { nuxt: "^2.14.11" } }));
 const apps: App[] = [
   { id: "app-a", repo: "github.com/ainfrastructure/a", type: "react-native", defaultBranch: "main", bundleId: "com.a", env: {} },
@@ -40,6 +41,10 @@ const apps: App[] = [
   { id: "app-local", path: localDir, type: "nativescript", defaultBranch: "main", bundleId: "org.ns.local", env: {} },
   { id: "app-web", path: webDir, type: "web", defaultBranch: "main", env: {} },
   { id: "app-web-nuxt", path: webNuxtDir, type: "web", defaultBranch: "main", env: {} },
+  // A migration TARGET: its source pane is a registered app's own preview, not an
+  // `alongside` pane, so a PIN on this page cannot gate it — the one case set_pin
+  // has to admit rather than report as protected.
+  { id: "app-mig", path: migDir, type: "nativescript", defaultBranch: "main", bundleId: "org.ns.mig", env: {}, migratesFrom: "app-local" },
 ];
 
 const ADMIN = "a".repeat(64);
@@ -142,6 +147,7 @@ after(() => {
   rmSync(localDir, { recursive: true, force: true });
   rmSync(webDir, { recursive: true, force: true });
   rmSync(webNuxtDir, { recursive: true, force: true });
+  rmSync(migDir, { recursive: true, force: true });
 });
 
 async function client(token: string): Promise<Client> {
@@ -240,7 +246,7 @@ describe("MCP server (end-to-end over HTTP)", () => {
     for (const token of [ADMIN, SECOND]) {
       const c = await client(token);
       const listed = parse(await c.callTool({ name: "list_apps", arguments: {} })) as { apps: { id: string }[] };
-      assert.deepEqual(listed.apps.map((a) => a.id).sort(), ["app-a", "app-b", "app-local", "app-web", "app-web-nuxt"]);
+      assert.deepEqual(listed.apps.map((a) => a.id).sort(), ["app-a", "app-b", "app-local", "app-mig", "app-web", "app-web-nuxt"]);
       await c.close();
     }
   });
@@ -410,17 +416,17 @@ describe("MCP server (end-to-end over HTTP)", () => {
     await admin.close();
   });
 
-  it("set_pin on a page does not reach its panes, and the pane refusal says so", async () => {
-    // A pane's access is decided by the start_preview that booted it, and by
-    // nothing afterwards: set_pin resolves the PAGE's app id, and setAppPin only
-    // touches previews whose record.appId matches it — a pane's synthetic,
-    // content-keyed id never can. So locking a public page leaves its panes
-    // public on shareIds start_preview already handed out.
-    //
-    // The refusal for a pane used to end "…every pane on it follows", which is
-    // the opposite of what happens, in the one message a model reads at the
-    // moment it has been told no. Both halves are asserted here: the behaviour,
-    // and the hint not claiming the reverse of it.
+  it("set_pin on a public page locks the panes whose shareIds it already disclosed", async () => {
+    // The regression this asserts against, end to end over HTTP, because the
+    // consequence is only visible at the gate. A page started PUBLIC with
+    // `alongside` advertises its panes' shareIds on an anonymous /state — so by
+    // the time the operator reaches for set_pin, those ids are out. set_pin used
+    // to resolve only the PAGE's app id, and setAppPin only touches previews
+    // whose record.appId matches: a pane's synthetic, content-keyed id never
+    // can. Locking the page therefore left every pane serving its own stream to
+    // anyone holding the disclosed id, under a response that said "The link is
+    // now PIN-protected". set_pin on the pane's own previewId is refused (it is
+    // the other half of the same hole), so nothing could lock it at all.
     const admin = await client(ADMIN);
     const page = parse(
       await admin.callTool({
@@ -431,22 +437,112 @@ describe("MCP server (end-to-end over HTTP)", () => {
     assert.equal(page.ok, true);
     const pane = (page.alongside as { shareId: string; previewId?: string }[])[0]!;
 
+    // 1. While public, an anonymous reader of the PAGE learns the pane's shareId.
+    const disclosed = (await (await fetch(`${base}/s/${page.shareId as string}/state`)).json()) as {
+      panes?: { shareId: string }[];
+    };
+    assert.ok(
+      (disclosed.panes ?? []).some((p) => p.shareId === pane.shareId),
+      "the public page discloses its pane's shareId — which is why locking it later has to reach the pane",
+    );
+
+    // 2. The operator locks the page.
     const locked = parse(await admin.callTool({ name: "set_pin", arguments: { previewId: page.previewId as string, pin: "1234" } }));
     assert.equal(locked.ok, true);
-    assert.equal(engine.pinInfoForShare(page.shareId as string).required, true, "the page's own link is now gated");
-    assert.equal(engine.pinInfoForShare(pane.shareId).required, false, "…and the pane is NOT — this is what the hint must not deny");
-    // Worse than merely unchanged: the padlocked page still advertises the pane,
-    // whose own gate serves it to anyone holding the shareId start_preview returned.
+    assert.equal(locked.protected, true);
+    assert.equal(engine.pinInfoForShare(page.shareId as string).required, true, "the page's own link is gated");
+
+    // 3. …and the pane is gated too, at the gate — not merely in a flag.
+    const paneState = (await (await fetch(`${base}/s/${pane.shareId}/state`)).json()) as { locked?: boolean; ready?: boolean };
+    assert.equal(paneState.locked, true, "the pane's /state must lock, not answer with the preview");
+    const paneStream = await fetch(`${base}/s/${pane.shareId}/dev/ios-0/stream.mjpeg`);
+    assert.equal(paneStream.status, 401, "an anonymous stream on the pane must be refused (502 means the gate let it through)");
+
+    // 4. And one PIN still reaches both, or the padlock is a different lie.
+    assert.equal(engine.verifyPin(pane.shareId, "1234"), true, "the page's PIN unlocks the pane");
     assert.deepEqual(engine.pairedShareIds(page.shareId as string), [pane.shareId]);
 
+    // 5. The pane's own previewId stays refused — that direction is the original
+    //    hole (remove:true published a protected page's pane), and the hint must
+    //    now point at the thing that DOES work.
     const refused = parse(await admin.callTool({ name: "set_pin", arguments: { previewId: pane.previewId!, pin: "9999" } }));
     assert.equal(refused.ok, false);
     assert.equal((refused.error as { code: string }).code, "preview_is_a_pane");
     const hint = String((refused.error as { hint?: string }).hint ?? "");
-    assert.doesNotMatch(hint, /pane[s]? .*follow/i, `the hint promises panes follow the page, and they do not: ${hint}`);
-    assert.match(hint, /start_preview/, "the hint must name the only thing that does set a pane's access");
+    assert.match(hint, new RegExp(page.previewId as string), "the hint must name the page whose set_pin reaches this pane");
+    assert.equal(engine.verifyPin(pane.shareId, "1234"), true, "and the refusal changed nothing");
+
+    // 6. The asymmetry that keeps the original hole shut: SET propagates, REMOVE
+    //    never does. Publishing a content-keyed pane is exactly what remove:true
+    //    on the pane's own previewId used to do, and a page must not get there by
+    //    the back door — the pane may be one a SECOND page is showing.
+    const opened = parse(await admin.callTool({ name: "set_pin", arguments: { previewId: page.previewId as string, remove: true } }));
+    assert.equal(opened.ok, true);
+    assert.equal(engine.pinInfoForShare(page.shareId as string).required, false, "the page's own link is public again");
+    assert.equal(engine.pinInfoForShare(pane.shareId).required, true, "…and the pane is NOT published with it");
 
     await admin.callTool({ name: "stop_preview", arguments: { previewId: page.previewId as string } });
+    await admin.close();
+  });
+
+  it("costs a second public page its shared pane rather than exposing it", async () => {
+    // The price of propagating. A pane's app id is keyed by content AND access
+    // class, so two PUBLIC pages naming the same source share one pane — and
+    // locking page A therefore locks a pane page B is showing. That is the
+    // deliberate half of the trade: `partnerIsReachable` stops advertising a pane
+    // the public page cannot unlock, so B loses a pane rather than A's padlock
+    // being a lie. Asserted so the trade cannot silently invert into the other one
+    // (B keeps the pane, gate-free) the next time this is touched.
+    const admin = await client(ADMIN);
+    const a = parse(
+      await admin.callTool({ name: "start_preview", arguments: { app: "app-a", alongside: [{ app: "app-local" }], share: { access: "public" } } }),
+    );
+    const b = parse(
+      await admin.callTool({ name: "start_preview", arguments: { app: "app-b", alongside: [{ app: "app-local" }], share: { access: "public" } } }),
+    );
+    const paneA = (a.alongside as { shareId: string }[])[0]!;
+    const paneB = (b.alongside as { shareId: string }[])[0]!;
+    assert.equal(paneA.shareId, paneB.shareId, "two public pages on the same source share one pane — this is the premise");
+
+    assert.equal(parse(await admin.callTool({ name: "set_pin", arguments: { previewId: a.previewId as string, pin: "1234" } })).ok, true);
+
+    assert.equal(engine.pinInfoForShare(paneA.shareId).required, true, "the pane follows page A");
+    assert.deepEqual(engine.pairedShareIds(b.shareId as string), [], "page B mints nothing for a pane it cannot unlock");
+    const openState = (await (await fetch(`${base}/s/${b.shareId as string}/state`)).json()) as { panes?: { shareId: string }[] };
+    assert.deepEqual(
+      (openState.panes ?? []).map((p) => p.shareId),
+      [b.shareId],
+      "…and stops advertising it: page B loses the pane, which is the acceptable direction. B keeping a pane it cannot unlock, or the pane staying public, are the two failures",
+    );
+
+    for (const r of [a, b]) await admin.callTool({ name: "stop_preview", arguments: { previewId: r.previewId as string } });
+    await admin.close();
+  });
+
+  it("admits the one pane a page's PIN cannot reach instead of reporting it protected", async () => {
+    // A migration source is NOT an `alongside` pane: it is a registered app's own
+    // preview, on its own share link, with its own operator-set PIN — so a page
+    // must not rewrite it, and this call genuinely cannot gate it. The rule the
+    // whole fix turns on is that set_pin's success text has to be TRUE, so the one
+    // case it cannot cover is the one it has to name.
+    const admin = await client(ADMIN);
+    const source = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
+    const page = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-mig", share: { access: "public" } } }));
+    assert.equal(page.ok, true);
+    assert.deepEqual(engine.pairedShareIds(page.shareId as string), [source.shareId], "the source is on this page as a pane");
+
+    const locked = parse(await admin.callTool({ name: "set_pin", arguments: { previewId: page.previewId as string, pin: "1234" } }));
+    assert.equal(locked.ok, true);
+    assert.equal(engine.pinInfoForShare(source.shareId as string).required, false, "the source app's own link is not this page's to change");
+    assert.match(String(locked.nextStep), /app-local/, "so the response must name it");
+    assert.match(String(locked.nextStep), /set_pin/, "and the call that does gate it");
+    assert.doesNotMatch(
+      String(locked.nextStep),
+      /^The link is now PIN-protected/,
+      "a bare success line here reads as a padlock over a share this call left public",
+    );
+
+    for (const r of [page, source]) await admin.callTool({ name: "stop_preview", arguments: { previewId: r.previewId as string } });
     await admin.close();
   });
 

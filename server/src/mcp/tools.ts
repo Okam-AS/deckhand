@@ -1110,7 +1110,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Set or remove a share PIN",
       description:
-        "Protect a running preview's share link with a numeric PIN, change it, or remove it (make the link public again) — the viewer URL stays the same. A web preview is the exception: its share is always PIN-protected, so remove:true is refused for one. Ask the user for a 4–6 digit PIN and NEVER repeat it back in chat. Pass previewId or app id. To remove protection, pass remove:true.",
+        "Protect a running preview's share link with a numeric PIN, change it, or remove it (make the link public again) — the viewer URL stays the same. Setting a PIN on a page protects every extra pane on it too, under the same PIN; removing one never publishes a pane. A web preview is the exception: its share is always PIN-protected, so remove:true is refused for one. Ask the user for a 4–6 digit PIN and NEVER repeat it back in chat. Pass previewId or app id. To remove protection, pass remove:true.",
       inputSchema: {
         previewId: z.string().optional().describe("from start_preview; or pass app instead"),
         app: z.string().optional().describe("app id — protects its running preview"),
@@ -1134,19 +1134,35 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         // sharing that content-keyed pane unlocks against.
         // → server.test.ts "refuses to set or remove a PIN on a pane"
         //
-        // The hint may not offer set_pin on the page as a way to reach this pane:
-        // setAppPin only touches previews whose record.appId is the page's, so a
-        // pane's access is fixed by the start_preview that booted it and by nothing
-        // after. A model told "lock the page and the panes follow" reports a padlock
-        // over a pane still streaming on a shareId start_preview already returned.
-        // → server.test.ts "set_pin on a page does not reach its panes, and the pane refusal says so"
+        // The remedy is set_pin on the PAGE, which propagates (below) — so the hint
+        // names that page. It must never read as "a pane's access can't be changed":
+        // that sentence is what left a public page's panes unlockable after the
+        // operator reached for the padlock, and it is the direction of the fix.
+        // → server.test.ts "set_pin on a public page locks the panes whose shareIds it already disclosed"
         if (engine.isReference(id)) {
+          const page = engine.pageShowingPane(id);
           return fail(
             "preview_is_a_pane",
-            `preview "${id}" is an extra pane on another page — its share access was fixed when that page booted it`,
-            "set_pin on the PAGE changes the page's own link only; a pane's access can't be changed while it runs. To change it, stop the page and call start_preview again with the access you want in share — every pane it boots takes that access.",
+            `preview "${id}" is an extra pane on another page — its access follows that page's, and is not separately settable`,
+            page
+              ? `Call set_pin on the PAGE instead — previewId "${page}". Its PIN covers the page and every pane on it, this one included.`
+              : "Its page is gone, so nothing shows this pane any more — stop it with stop_preview rather than re-gating it.",
           );
         }
+        // A page's PIN has to reach the panes it shows. `setAppPin` only touches
+        // previews whose record.appId is the page's, and a pane runs under a
+        // synthetic, content-keyed id that no tool call names — so locking a page
+        // left every pane serving its own stream on a shareId the page had already
+        // published anonymously while it was public, under a response that said the
+        // link was now protected.
+        //
+        // SET propagates; REMOVE never does. Publishing a pane is the direction that
+        // was the hole, and a pane is keyed by CONTENT, so it may be one a SECOND
+        // page is also showing. Propagating a SET can cost that other page the pane
+        // (its access class is the same, so `partnerIsReachable` stops advertising a
+        // pane the other page cannot unlock) — a pane that disappears, never one
+        // that is exposed. Propagating a REMOVE would be the reverse trade.
+        const panes = engine.panesOf(id);
         if (args.remove) {
           engine.setAppPin(appId, null);
           return ok({ app: appId, protected: false, nextStep: "The link is now public — anyone with the URL can open it." });
@@ -1158,11 +1174,25 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             "Ask the user for a 4–6 digit code; don't repeat it in chat.",
           );
         }
+        // Panes first: a throw partway leaves them MORE protected than the page,
+        // never less. (Only the remove path of setAppPin can throw today.)
+        for (const pane of panes) if (pane.synthetic) engine.setAppPin(pane.appId, args.pin!);
         engine.setAppPin(appId, args.pin!);
+        // A migration-source pane is a registered app's own preview on its own
+        // link, so this call cannot gate it — say which one rather than let
+        // "PIN-protected" stand for a page still showing a public share.
+        const stillOpen = panes.filter((p) => !p.synthetic && !engine.pinInfoForShare(p.shareId).required).map((p) => p.appId);
         return ok({
           app: appId,
           protected: true,
-          nextStep: "The link is now PIN-protected — viewers must enter the PIN the user set. The URL is unchanged; don't repeat the PIN in chat.",
+          ...(panes.length ? { panesProtected: panes.filter((p) => p.synthetic).length } : {}),
+          nextStep:
+            (stillOpen.length
+              ? `The page's own link is now PIN-protected, but it also shows ${stillOpen.map((a) => `"${a}"`).join(", ")} — a registered app with its own PUBLIC share link, which this call cannot gate. Call set_pin { app: "${stillOpen[0]}" } with the same PIN, or that pane stays open to anyone.`
+              : panes.length
+                ? "The link is now PIN-protected — viewers must enter the PIN the user set, and it covers every extra pane on the page."
+                : "The link is now PIN-protected — viewers must enter the PIN the user set.") +
+            " The URL is unchanged; don't repeat the PIN in chat.",
         });
       }),
   );
