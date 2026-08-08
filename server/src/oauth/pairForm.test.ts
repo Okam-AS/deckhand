@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { PAIR_FORM_SCRIPT } from "./router.js";
+import { PAIR_FORM_SCRIPT } from "./router.ts";
 
 type Listener = (e: { preventDefault: () => void }) => void;
 
@@ -57,14 +57,39 @@ class StubButton {
   }
 }
 
-function runForm(): { input: StubInput; button: StubButton; form: StubForm } {
+/** The browser hands back null for an id that is not on the page; here that is a test failure. */
+class StubDocument {
+  constructor(
+    private readonly input: StubInput,
+    private readonly button: StubButton,
+  ) {}
+
+  getElementById(id: string): StubInput | StubButton {
+    if (id === "c") return this.input;
+    if (id === "b") return this.button;
+    throw new Error(`the script asked for #${id}, which the page does not have`);
+  }
+}
+
+class StubWindow {
+  private listener: ((e: { persisted: boolean }) => void) | null = null;
+
+  addEventListener(type: string, fn: (e: { persisted: boolean }) => void): void {
+    if (type === "pageshow") this.listener = fn;
+  }
+
+  /** Coming back to this page from the session history, heap and all. */
+  restoreFromBfcache(): void {
+    this.listener?.({ persisted: true });
+  }
+}
+
+function runForm(): { input: StubInput; button: StubButton; form: StubForm; window: StubWindow } {
   const input = new StubInput();
   const button = new StubButton(input.form);
-  const document = {
-    getElementById: (id: string): StubInput | StubButton => (id === "c" ? input : button),
-  };
-  new Function("document", PAIR_FORM_SCRIPT)(document);
-  return { input, button, form: input.form };
+  const window = new StubWindow();
+  new Function("document", "window", PAIR_FORM_SCRIPT)(new StubDocument(input, button), window);
+  return { input, button, form: input.form, window };
 }
 
 describe("the pairing form", () => {
@@ -91,6 +116,16 @@ describe("the pairing form", () => {
     // attribute. The guard on the submit event is the only thing standing there.
     form.requestSubmit();
     assert.equal(form.posts, 1);
+  });
+
+  it("is usable again when the visitor comes back to a restored page", () => {
+    const { input, button, form, window } = runForm();
+    input.type("GGE-DYW");
+    window.restoreFromBfcache();
+    assert.equal(button.disabled, false, "a POST that never landed must not lock the form for good");
+    assert.equal(input.readOnly, false);
+    button.click();
+    assert.equal(form.posts, 2, "the second attempt is the visitor's retry, not the click that raced the first");
   });
 
   it("does not submit an incomplete code", () => {

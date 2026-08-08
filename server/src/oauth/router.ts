@@ -99,6 +99,15 @@ export const PAIR_FORM_SCRIPT = `
     b.disabled = true;
     c.readOnly = true;
   });
+  // A POST that never lands — the visitor hit Stop, or came back to a restored page — would
+  // otherwise leave the form locked for good, and that lands on the visitor whose pairing has
+  // already gone wrong. The lock is for the click that races the submit, not for the session.
+  window.addEventListener("pageshow", (e) => {
+    if (!e.persisted) return;
+    sent = false;
+    c.readOnly = false;
+    b.disabled = c.value.length !== 7;
+  });
   c.addEventListener("input", () => {
     if (sent) return;
     c.value = format(c.value);
