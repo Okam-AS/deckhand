@@ -17,9 +17,15 @@ const TOOLS = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "tools.
  * Text form on purpose — a response built by a helper this file cannot see would still slip
  * past. It fails SAFE: a comment that quotes the shape breaks the check rather than
  * satisfying it, which is the opposite of how the share-gate check was once fooled.
+ *
+ * The pattern is the CONTENT BLOCK, not the return statement wrapped round it. It used to
+ * require `return {` immediately before `content: [{`, all adjacent — so a fourth hand-built
+ * result written the way a formatter would break it (`content: [\n  { type: "text"`), or
+ * returned from anything other than a bare `return {`, was invisible while this comment
+ * claimed "exactly three places". Verified by mutation: a fourth helper in that shape passed.
  */
 test("only the two response helpers and screenshot's image build a result by hand", () => {
-  const blocks = [...TOOLS.matchAll(/return\s*\{\s*\n?\s*content:\s*\[\{\s*type:\s*"(\w+)"/g)].map((m) => m[1]!);
+  const blocks = [...TOOLS.matchAll(/content:\s*\[\s*\{\s*type:\s*"(\w+)"/g)].map((m) => m[1]!);
 
   assert.deepEqual(
     blocks,

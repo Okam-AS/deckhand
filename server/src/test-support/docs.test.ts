@@ -35,6 +35,108 @@ const TOOLS = read("server/src/mcp/tools.ts");
 
 const registered = registeredTools(TOOLS);
 
+/**
+ * Every `it("…")`/`test("…")` name in the repo, indexed BY FILE.
+ *
+ * By file, not as one pool: a citation names a file AND a check, and checking only the name
+ * accepts `docs.test.ts "pins serve-sim exactly"` — a citation that resolves while pointing a
+ * reader at the wrong file. Both shapes were verified by mutation.
+ *
+ * `test("…")` as well as `it("…")`: the viewer and landing workspaces write the flat form, so
+ * a citation into either could otherwise only ever read as dangling — which pushes the next
+ * author to drop the citation rather than fix it.
+ */
+function testChecksByFile(): Map<string, Set<string>> {
+  const byFile = new Map<string, Set<string>>();
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      // Symlinks skipped, never followed: a git worktree carries a dangling
+      // `server/node_modules` link, and reading through one kills the walk with an ENOENT
+      // nobody can act on. Every walk in this file does this the same way.
+      if (entry.isSymbolicLink()) continue;
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name.endsWith(".test.ts") || entry.name.endsWith(".test.tsx")) {
+        const names = new Set<string>();
+        for (const m of readFileSync(full, "utf8").matchAll(/\b(?:it|test)\(\s*"([^"]+)"/g)) names.add(m[1]!);
+        byFile.set(full.slice(REPO.length + 1), names);
+      }
+    }
+  };
+  // Every workspace, because `.claude/rules/` is scoped by path and those paths are not all
+  // under `server/`. A rule for `landing/**` citing a landing check must be checkable.
+  for (const ws of [SRC, join(REPO, "viewer", "src"), join(REPO, "landing", "src")]) if (existsSync(ws)) walk(ws);
+  return byFile;
+}
+
+/**
+ * The citations in one piece of text, as `<file>: "<name>"` findings for the ones that resolve
+ * to nothing.
+ *
+ * `→` marks where citations START; each `<file>.test.ts "<name>"` pair after it is one,
+ * wrapped across lines or not. Anchoring the whole citation to the arrow verified only the
+ * FIRST check after it, and one line here cites two — so renaming the second was silent.
+ *
+ * The window after each arrow is bounded because this also reads SOURCE files, where an arrow
+ * is usually ordinary prose (`build → install → launch`) and the rest of the file is not its
+ * citation. Every citation written here fits well inside it; a longer one reads as dangling,
+ * which is a visible failure rather than a silent pass.
+ */
+function danglingCitations(text: string, byFile: Map<string, Set<string>>): { found: number; dangling: string[] } {
+  const dangling: string[] = [];
+  let found = 0;
+  const paths = [...byFile.keys()];
+  const resolves = (path: string) => paths.some((k) => k === path || k.endsWith(`/${path}`));
+  for (const chunk of text.split("→").slice(1).map((c) => c.slice(0, 400))) {
+    // The FILE half of every citation, named or not. `→ `oauth/pairing.test.ts`` with no
+    // quoted check is a citation too, and it was unverified entirely.
+    for (const m of chunk.matchAll(/`([A-Za-z0-9_\-./]*\.test\.tsx?)`/g)) {
+      found++;
+      if (!resolves(m[1]!)) dangling.push(`${m[1]} (no such test file)`);
+    }
+    // The path character class is explicit rather than `\S*?`: a citation written inside
+    // brackets — `(`invariants.test.ts` "…")` — captured the bracket as part of the path.
+    // The quoted name is matched as a PREFIX of a real one, so a rule may cite a check by its
+    // first clause.
+    for (const m of chunk.matchAll(/`?([A-Za-z0-9_\-./]*\.test\.tsx?)`?\s+"([^"]+)"/g)) {
+      found++;
+      const path = m[1]!;
+      // Collapse the wrap. A citation may run onto the next line — several do — and comparing
+      // the raw capture then looks for a test name containing a newline and two spaces.
+      const cited = m[2]!.replace(/\s+/g, " ").trim();
+      const inFile = [...byFile.entries()].filter(([k]) => k === path || k.endsWith(`/${path}`)).flatMap(([, names]) => [...names]);
+      if (!inFile.some((n) => n.startsWith(cited))) dangling.push(`${path} "${cited}"`);
+    }
+  }
+  return { found, dangling };
+}
+
+/**
+ * The COMMENT text of a source file, with the block-comment gutter (` * `) stripped so a
+ * citation that wraps onto the next line reads as one sentence.
+ *
+ * Comments ONLY, because a string literal that happens to look like a citation is not one.
+ * Two cheap guards do that without a full lexer: a `//` preceded by `:` is a URL, and a `//`
+ * with an odd number of `"` or `` ` `` before it on the line is inside a string. Block
+ * comments must open at the start of a line, which every doc block in this repo does.
+ *
+ * The limit that leaves: a `//` inside a multi-line template literal, on a line that opens no
+ * quote of its own, reads as a comment. That costs a false finding only if such a string also
+ * contains an arrow and a `*.test.ts "name"` pair, and it is a loud failure, not a silent pass.
+ */
+function commentsOf(src: string): string {
+  const out: string[] = [];
+  for (const m of src.matchAll(/^[ \t]*\/\*[\s\S]*?\*\//gm)) out.push(m[0].replace(/^[ \t]*\*[ \t]?/gm, ""));
+  for (const line of src.split("\n")) {
+    const i = line.indexOf("//");
+    if (i < 0 || line[i - 1] === ":") continue;
+    const before = line.slice(0, i);
+    if ((before.match(/"/g)?.length ?? 0) % 2 || (before.match(/`/g)?.length ?? 0) % 2) continue;
+    out.push(line.slice(i + 2));
+  }
+  return out.join("\n");
+}
+
 describe("docs describe the code that exists", () => {
   it("finds tools to check", () => {
     assert.ok(registered.length > 5, `only ${registered.length} tools parsed — the registerTool pattern changed`);
@@ -178,80 +280,70 @@ describe("docs describe the code that exists", () => {
     // not leave it pointing at nothing. Same failure as a doc naming a file that does not
     // exist, one layer up.
     const rulesDir = join(REPO, ".claude", "rules");
-    // Indexed BY FILE, not as one pool of names. A citation names a file and a check, and
-    // checking only the name accepts `docs.test.ts "pins serve-sim exactly"` — a citation that
-    // resolves while pointing a reader at the wrong file, which is the same defect this check
-    // exists to catch one layer down. Both shapes were verified by mutation: the wrong-file
-    // citation and a citation naming a test file that does not exist both passed before this.
-    const byFile = new Map<string, Set<string>>();
-    const testNames = new Set<string>();
     // EVERY test file, not just test-support. A rule for an area cites the check that
     // enforces it, and for a security invariant that is often the area's own regression
     // test — `oauth/router.test.ts` proves a client mid-pairing survives a registration flood,
     // and no repo-wide guardrail can. Scanning only test-support made those citations
     // dangle, which pushes the next author to drop the citation rather than fix it.
-    const walk = (dir: string): void => {
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        // Symlinks skipped, never followed: a git worktree carries a dangling
-        // `server/node_modules` link, and reading through one kills the walk with an ENOENT
-        // nobody can act on. Every walk in this file does this the same way.
-        if (entry.isSymbolicLink()) continue;
-        const full = join(dir, entry.name);
-        if (entry.isDirectory()) walk(full);
-        else if (entry.name.endsWith(".test.ts") || entry.name.endsWith(".test.tsx")) {
-          // `test("…")` as well as `it("…")`. The viewer and landing workspaces write the flat
-          // form, so a rule scoped to either could only ever cite a check this scan calls
-          // dangling — which pushes the next author to drop the citation rather than write one.
-          const names = new Set<string>();
-          for (const m of readFileSync(full, "utf8").matchAll(/\b(?:it|test)\(\s*"([^"]+)"/g)) {
-            testNames.add(m[1]!);
-            names.add(m[1]!);
-          }
-          byFile.set(full.slice(REPO.length + 1), names);
-        }
-      }
-    };
-    // Every workspace, because `.claude/rules/` is scoped by path and those paths are not all
-    // under `server/`. A rule for `landing/**` citing a landing check must be checkable.
-    for (const ws of [SRC, join(REPO, "viewer", "src"), join(REPO, "landing", "src")]) if (existsSync(ws)) walk(ws);
-    assert.ok(testNames.size > 5, "no guardrail test names parsed — the `it(\"...\")` pattern changed");
+    const byFile = testChecksByFile();
+    assert.ok([...byFile.values()].reduce((n, s) => n + s.size, 0) > 5, "no guardrail test names parsed — the `it(\"...\")` pattern changed");
 
     const dangling: string[] = [];
+    let found = 0;
     for (const f of readdirSync(rulesDir)) {
-      const src = readFileSync(join(rulesDir, f), "utf8");
-      // `→ <file>.test.ts "<check name>"`, possibly abbreviated — match on the quoted name
-      // being a PREFIX of a real one, so a rule may cite a check by its first clause.
-      // The backticks are not optional decoration to skip: the first version of this regex
-      // required `\S+\.test\.ts` followed by whitespace, so it matched none of the
-      // backticked citations actually written here and the check was vacuous. It only
-      // showed up under mutation — renaming a cited check produced no failure at all.
-      // Anchoring the whole citation to the arrow verified only the FIRST check after it, and
-      // one line here cites two — so renaming the second was silent, while AGENTS.md says a
-      // check renamed out from under a citation fails this test. The arrow marks where
-      // citations START; each `<file>.test.ts "<name>"` pair after it is one, wrapped or not.
-      for (const chunk of src.split("→").slice(1)) {
-        // The FILE half of every citation, named or not. `→ `oauth/pairing.test.ts`` with no
-        // quoted check is a citation too, and it was unverified entirely.
-        for (const m of chunk.matchAll(/`([A-Za-z0-9_\-./]*\.test\.tsx?)`/g)) {
-          const path = m[1]!;
-          if (![...byFile.keys()].some((k) => k === path || k.endsWith(`/${path}`))) dangling.push(`${f}: ${path} (no such test file)`);
-        }
-        // The path character class is explicit rather than `\S*?`: a citation written inside
-        // brackets — `(\`invariants.test.ts\` "…")` — captured the bracket as part of the path.
-        for (const m of chunk.matchAll(/`?([A-Za-z0-9_\-./]*\.test\.tsx?)`?\s+"([^"]+)"/g)) {
-          // Collapse the wrap. A citation may run onto the next line — one does — and comparing
-          // the raw capture then looks for a test name containing a newline and two spaces.
-          const path = m[1]!;
-          const cited = m[2]!.replace(/\s+/g, " ").trim();
-          const inFile = [...byFile.entries()].filter(([k]) => k === path || k.endsWith(`/${path}`)).flatMap(([, names]) => [...names]);
-          if (!inFile.some((n) => n.startsWith(cited))) dangling.push(`${f}: ${path} "${cited}"`);
-        }
-      }
+      const r = danglingCitations(readFileSync(join(rulesDir, f), "utf8"), byFile);
+      found += r.found;
+      for (const d of r.dangling) dangling.push(`${f}: ${d}`);
     }
+    // Anti-vacuity. The first version of this regex matched none of the citations actually
+    // written here and the check was inert; only mutation showed it up, and nothing would have
+    // shown it up on its own. A count is the cheap standing version of that mutation.
+    assert.ok(found > 5, `only ${found} citations parsed in .claude/rules/ — the citation form changed, fix this check`);
     assert.deepEqual(
       dangling,
       [],
       "a rule in .claude/rules/ cites a guardrail check that no longer exists under that name",
+    );
+  });
+
+  it("keeps source-comment citations pointing at checks that exist", () => {
+    // The same citation form, in the same repo, three times as common — and unpoliced. The
+    // check above reads `.claude/rules/` only, while `→ preview.test.ts "…"` is written in
+    // source comments seventeen times, in preview.ts, proxy.ts, androidAdb.ts, androidH264.ts,
+    // reaper.ts, metro.ts, control.ts, tools.ts, configWrite.ts, setup.ts and devices/android.ts.
+    //
+    // That is not a lesser case. AGENTS.md's third un-checkable rule is that a comment stating
+    // a precondition needs a test that fails when the precondition breaks, and a citation IS
+    // that pairing written down. A rename that leaves it pointing at nothing turns the one
+    // mechanism holding those comments honest into decoration, silently.
+    //
+    // Comments only, and non-test files only: a test file naming its own checks in prose is
+    // not making a claim about somewhere else.
+    const byFile = testChecksByFile();
+    const dangling: string[] = [];
+    let found = 0;
+    const walk = (dir: string): void => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        if (e.isSymbolicLink() || e.name === "node_modules" || e.name === "dist") continue;
+        const full = join(dir, e.name);
+        if (e.isDirectory()) walk(full);
+        else if (/\.tsx?$/.test(e.name) && !/\.test\.tsx?$/.test(e.name)) {
+          const r = danglingCitations(commentsOf(readFileSync(full, "utf8")), byFile);
+          found += r.found;
+          for (const d of r.dangling) dangling.push(`${full.slice(REPO.length + 1)}: ${d}`);
+        }
+      }
+    };
+    for (const ws of [SRC, join(REPO, "viewer", "src"), join(REPO, "landing", "src"), join(REPO, "scripts")]) if (existsSync(ws)) walk(ws);
+    // Anti-vacuity, and it is load-bearing here: this reads comments through `commentsOf`, so
+    // a change that makes that return nothing would leave a green check that examines an empty
+    // string. There are seventeen citations today.
+    assert.ok(found > 12, `only ${found} source-comment citations parsed — the citation form or comment scan changed, fix this check`);
+    assert.deepEqual(
+      dangling,
+      [],
+      "a source comment cites a guardrail check that no longer exists under that name — the citation is what " +
+        "makes the comment above it verifiable, so a dangling one leaves an unverifiable claim reading as a verified one",
     );
   });
 

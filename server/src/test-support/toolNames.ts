@@ -52,9 +52,14 @@ export function schemaFieldNames(toolsSrc: string): Set<string> {
  * text" — quietly changes what it examines rather than failing. Telling a regex apart from
  * a division needs the previous significant token, and `)` is genuinely ambiguous
  * (`if (x) /re/` versus `(a + b) / c`), so the heuristic has its own silent-misread case:
- * the limit is stated rather than half-fixed. `mcp/tools.ts`, the only input today, has no
- * regex literal — if one is added there, extend this or scope the caller to the literals it
- * can trust.
+ * the limit is stated rather than half-fixed.
+ *
+ * So the precondition is NOT "the input has no regex literal" — `mcp/tools.ts`, the only
+ * input today, has three (the two in `slug()` and the id check beside it). It is narrower and
+ * it is what actually matters: no regex literal in the input contains a quote character. All
+ * three satisfy that. Adding one that does not — `/["']/`, a class with an apostrophe in it —
+ * desyncs this lexer silently, so extend it then, or scope the caller to the literals it can
+ * trust.
  */
 export function stringLiterals(src: string): string[] {
   const out: string[] = [];

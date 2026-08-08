@@ -58,6 +58,54 @@ function testFiles(dir = SRC, out: string[] = []): string[] {
 const read = (f: string) => readFileSync(f, "utf8");
 const rel = (f: string) => f.slice(REPO.length + 1);
 
+function allIndexesOf(src: string, needle: string): number[] {
+  const out: number[] = [];
+  for (let i = src.indexOf(needle); i >= 0; i = src.indexOf(needle, i + 1)) out.push(i);
+  return out;
+}
+
+/**
+ * The TOP-LEVEL text of an object literal starting at `from` (whitespace allowed before the
+ * `{`), with every nested `{}`/`[]`/`()` group and every string body blanked out. Returns null
+ * when the argument is not an object literal at all, which the caller treats as a finding
+ * rather than a pass: `new WebSocketServer(opts)` must not be a way round a rule about ports.
+ *
+ * Quotes are tracked so a brace inside a string cannot close the object. It does not lex regex
+ * literals — the same limit `test-support/toolNames.ts` states — so a regex containing an
+ * unbalanced brace or a quote inside an options object would desync it; none exists, and the
+ * failure mode is a loud null rather than a silent pass.
+ */
+function topLevelOptions(src: string, from: number): string | null {
+  let i = from;
+  while (i < src.length && /\s/.test(src[i]!)) i++;
+  if (src[i] !== "{") return null;
+  let depth = 0;
+  let out = "";
+  for (; i < src.length; i++) {
+    const c = src[i]!;
+    if (c === '"' || c === "'" || c === "`") {
+      const start = i;
+      for (i++; i < src.length && src[i] !== c; i++) if (src[i] === "\\") i++;
+      // Kept verbatim at the top level: `host: "127.0.0.1"` is the thing being asserted on.
+      out += depth === 1 ? src.slice(start, i + 1) : " ";
+      continue;
+    }
+    if (c === "{" || c === "[" || c === "(") {
+      depth++;
+      out += depth === 1 ? c : " ";
+      continue;
+    }
+    if (c === "}" || c === "]" || c === ")") {
+      depth--;
+      if (depth === 0) return out + c;
+      out += " ";
+      continue;
+    }
+    out += depth === 1 ? c : " ";
+  }
+  return null;
+}
+
 describe("PLAN §2 — locked decisions", () => {
   it("adds no dependency outside the approved set", () => {
     // "Keep the dependency list ruthlessly short" (PLAN.md:136-138) is the rule
@@ -243,12 +291,30 @@ describe("PLAN §11 — security model", () => {
     // either was invisible to the scan above while reading as covered by "every listening
     // socket". Verified by mutation: server.ts's `noServer: true` swapped for `port: 9999`
     // passed this test before this loop existed.
+    //
+    // Brace-BALANCED, not `\{([^}]*)\}`. That pattern stopped at the first `}` in the file,
+    // which server.ts's own options object reaches before its last property: it passes
+    // `handleProtocols: (protocols) => { … }`, so anything written after that callback was
+    // outside the capture entirely. `port: 9999` there found no `port:` and passed — the hole
+    // was in the constructor this check was written for. Verified by mutation, both orders.
+    //
+    // Nested braces/brackets/parens are BLANKED rather than kept, so `port:` and `host:` are
+    // read at the top level only: a `port` key inside a nested sub-object is not this
+    // constructor's port, and matching it would fire on correct code.
     for (const file of sourceFiles()) {
-      for (const m of read(file).matchAll(/new WebSocketServer\(\s*\{([^}]*)\}/g)) {
-        if (!/\bport\s*:/.test(m[1]!)) continue;
+      for (const at of allIndexesOf(read(file), "new WebSocketServer(")) {
+        const opts = topLevelOptions(read(file), at + "new WebSocketServer(".length);
+        assert.notEqual(
+          opts,
+          null,
+          `${rel(file)} constructs a WebSocketServer from something other than an object literal, so this ` +
+            `check cannot read its port or host. Pass the options inline — PLAN §11.1 is not opt-out-able ` +
+            `by moving the object to a variable.`,
+        );
+        if (!/\bport\s*:/.test(opts!)) continue;
         assert.match(
-          m[1]!,
-          /host\s*:\s*"127\.0\.0\.1"/,
+          opts!,
+          /\bhost\s*:\s*"127\.0\.0\.1"/,
           `${rel(file)} constructs a WebSocketServer with its own port and no loopback host — PLAN §11.1. ` +
             `Attach it to the HTTP server (\`noServer: true\`) or pass host: "127.0.0.1".`,
         );
