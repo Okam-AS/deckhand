@@ -37,7 +37,8 @@ describe("the pairing code", () => {
   });
 
   // The whole threat model: the URL is public, so anyone can submit. Guessing is the only move
-  // left, and it has to be bounded or ~4.8e8 possibilities is just a slow afternoon.
+  // left, and it has to be bounded or ~3.9e8 possibilities (27 characters over six positions)
+  // is just a slow afternoon.
   it("locks a source out after a handful of wrong guesses", () => {
     const store = new PairingStore();
     const { code } = store.mint();
