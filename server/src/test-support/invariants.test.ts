@@ -70,9 +70,14 @@ describe("PLAN §2 — locked decisions", () => {
     // The ROOT package.json is in this list because it was the cheapest way around the rule:
     // a dependency added there hoists into the shared node_modules and is importable from
     // every workspace, while a check that only read the three workspaces saw nothing.
+    // `optionalDependencies` and `peerDependencies` for the same reason one layer down: npm
+    // installs an optional dep exactly like a normal one, so reading only `dependencies` left
+    // a rename of the KEY as a way past the rule. Caught by mutation — lodash under
+    // `optionalDependencies` passed this check.
     for (const ws of ["", "server", "viewer", "landing"]) {
-      const pkg = JSON.parse(read(join(REPO, ws, "package.json"))) as { dependencies?: Record<string, string> };
-      for (const dep of Object.keys(pkg.dependencies ?? {})) {
+      const pkg = JSON.parse(read(join(REPO, ws, "package.json"))) as Record<string, Record<string, string> | undefined>;
+      const runtime = { ...pkg.dependencies, ...pkg.optionalDependencies, ...pkg.peerDependencies };
+      for (const dep of Object.keys(runtime)) {
         assert.ok(
           approved.has(dep),
           `${ws || "."}/package.json adds "${dep}", which is not in PLAN §3's approved list. ` +
@@ -151,7 +156,10 @@ describe("PLAN §8 — the streaming seam", () => {
     // `(\.\.?\/)+` rather than `\.{1,2}\/`: the old form only matched one level, so a file two
     // directories deep imported a backend directly and passed. `import(` covers the dynamic
     // form, which cli.ts already uses elsewhere and which has no `from` for a pattern to find.
-    const backends = /(?:from|import\()\s*"(?:\.\.?\/)+(?:streaming\/)?(?:serveSim|androidAdb|androidH264|web)\.ts"/;
+    // `import\(?` rather than `import\(`, and both quote characters: a side-effect import
+    // (`import "../streaming/serveSim.ts";`) has no `from` and no paren, and passed the whole
+    // check — verified by mutation. The specifier may be `.ts` or `.js` for the same reason.
+    const backends = /(?:from|import\(?)\s*["'](?:\.\.?\/)+(?:streaming\/)?(?:serveSim|androidAdb|androidH264|web)\.[tj]s["']/;
     for (const file of sourceFiles()) {
       if (rel(file).startsWith("server/src/streaming/") || roots.has(rel(file))) continue;
       assert.doesNotMatch(
@@ -202,6 +210,11 @@ describe("PLAN §11 — security model", () => {
     // Argument-less `.listen()` needs an exemption too, not a pass: `srv.listen()` really does
     // bind every interface on a random port. cli.ts's is a delegation to the server object,
     // whose own bind is the one checked below.
+    //
+    // The host must be the LITERAL, not a constant that holds it: `listen(port, LOOPBACK)` is
+    // refused even though it is correct. That is deliberate — a name can be reassigned in a
+    // second place and this check reads one line — but it means the fix for a red here is
+    // sometimes "inline the string", which is worth knowing before you argue with it.
     const exempt = new Map([
       ["server/src/engine/metro.ts", "port-availability probe, bound and closed immediately"],
       ["server/src/cli.ts", "delegates to createServer().listen(); the real bind is in server.ts"],
@@ -217,6 +230,23 @@ describe("PLAN §11 — security model", () => {
         );
       }
     }
+    // `.listen(` is not the only way to open a port. `new WebSocketServer({ port })` binds one
+    // itself, on every interface, and it is the constructor both of this repo's WebSocket
+    // servers already use — with `noServer: true`, which binds nothing. Adding `port:` to
+    // either was invisible to the scan above while reading as covered by "every listening
+    // socket". Verified by mutation: server.ts's `noServer: true` swapped for `port: 9999`
+    // passed this test before this loop existed.
+    for (const file of sourceFiles()) {
+      for (const m of read(file).matchAll(/new WebSocketServer\(\s*\{([^}]*)\}/g)) {
+        if (!/\bport\s*:/.test(m[1]!)) continue;
+        assert.match(
+          m[1]!,
+          /host\s*:\s*"127\.0\.0\.1"/,
+          `${rel(file)} constructs a WebSocketServer with its own port and no loopback host — PLAN §11.1. ` +
+            `Attach it to the HTTP server (\`noServer: true\`) or pass host: "127.0.0.1".`,
+        );
+      }
+    }
     // The composition root keeps its stricter rule: exactly one server socket.
     const listens = [...read(join(SRC, "server.ts")).matchAll(/\.listen\(([^)]*)\)/g)];
     assert.equal(listens.length, 1, `expected exactly one .listen() in server.ts, found ${listens.length}`);
@@ -225,10 +255,13 @@ describe("PLAN §11 — security model", () => {
   it("keeps secrets out of the MCP surface", () => {
     // PLAN.md:722 — "app secrets never through MCP or the viewer". The two write
     // channels are the CLI and the one-time setup URL.
+    // Any import of the module, at any depth and in any of the three spellings. The pattern was
+    // `from "../secrets.ts"` exactly, so a side-effect import and anything under a future
+    // `mcp/` subdirectory (`"../../secrets.ts"`) both passed — verified by mutation.
     for (const file of sourceFiles(join(SRC, "mcp"))) {
       assert.doesNotMatch(
         read(file),
-        /from "\.\.\/secrets\.ts"/,
+        /(?:from|import\(?)\s*["'][^"']*secrets\.ts["']/,
         `${rel(file)} imports secrets.ts — PLAN §11.5 keeps secrets off the MCP surface entirely`,
       );
     }
@@ -335,14 +368,26 @@ describe("deckhand ships nothing about one particular install", () => {
     // and the landing page was invisible to the first version of this check, which is exactly
     // where the offending string lived. Caught by mutation: putting the hostname back into a
     // component failed nothing.
+    //
+    // The roots below are whole workspaces plus the two script directories, not `*/src`:
+    // `viewer/index.html` IS the viewer page, `landing/index.html` IS the landing page, and
+    // `ops/` and `scripts/` are read by whoever is installing or reviewing. All four were
+    // outside the walk while this check's message said "shipped code and docs" — mutation put
+    // a hostname in `viewer/index.html`, in `scripts/review-receipt.ts` and in an `ops/`
+    // shell script, and all three passed.
+    // `withFileTypes`, and skipping symlinks rather than following them: a git worktree carries
+    // a DANGLING `server/node_modules` symlink, and `statSync` on it throws — the walk died
+    // with ENOENT instead of reporting anything, which is a check that fails for a reason
+    // nobody can act on.
     const shipped = (dir: string, out: string[] = []): string[] => {
-      for (const entry of readdirSync(dir)) {
-        const full = join(dir, entry);
-        if (statSync(full).isDirectory()) {
-          if (entry !== "node_modules" && entry !== "dist") shipped(full, out);
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === "node_modules" || entry.name === "dist" || entry.name === ".git" || entry.isSymbolicLink()) continue;
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          shipped(full, out);
           continue;
         }
-        if (/\.(ts|tsx|css|html)$/.test(entry) && !entry.includes(".test.")) out.push(full);
+        if (/\.(ts|tsx|css|html|mjs|sh|json|yml|yaml)$/.test(entry.name) && !entry.name.includes(".test.") && entry.name !== "package-lock.json") out.push(full);
       }
       return out;
     };
@@ -361,7 +406,7 @@ describe("deckhand ships nothing about one particular install", () => {
       return out;
     };
     const offenders: string[] = [];
-    for (const root of ["server/src", "viewer/src", "landing/src"]) {
+    for (const root of ["server", "viewer", "landing", "ops", "scripts"]) {
       for (const file of shipped(join(REPO, root))) {
         const m = banned.exec(read(file));
         if (m) offenders.push(`${rel(file)}: "${m[0]}"`);
@@ -390,7 +435,12 @@ describe("the connector URL is public by construction", () => {
   it("puts no credential in an MCP route path", () => {
     // A `:token`-shaped path parameter on the MCP router is the old design returning. The
     // legacy 404 catch-all is allowed precisely because it authenticates nothing.
-    const router = read(join(SRC, "mcp", "index.ts"));
+    // Comments stripped, like the share gate below: this file explains the rejected design at
+    // length, and a check that reads the explanation as the code cries wolf at the author who
+    // documents it. (Mutation: a comment reading `router.get("/:tok", …)` failed this test.)
+    const router = read(join(SRC, "mcp", "index.ts"))
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/.*$/gm, "");
     const offenders: string[] = [];
     for (const m of router.matchAll(/router\.(get|post|delete|put|all)\(\s*"([^"]*)"/g)) {
       const path = m[2]!;
@@ -418,8 +468,16 @@ describe("the connector URL is public by construction", () => {
   it("renders every server-side page in the viewer's palette, not the retired warm one", () => {
     const RETIRED = ["#241b20", "#2c2025", "#31242a", "#f2e8dc", "#c9baae", "#e0a971", "#d98873", "#e8b86d", "242,232,220"];
     const offenders: string[] = [];
-    for (const file of ["oauth/router.ts", "setup/router.ts", "share/proxy.ts"]) {
-      const source = read(join(SRC, ...file.split("/")));
+    // Every source file that renders a page, found by the doctype it must contain, rather than
+    // the three that did when this was written. A hardcoded list makes the NEXT page — the one
+    // nobody has written yet — exempt by construction, and this repo has already been bitten by
+    // a check whose scope was a literal list (the markdown walk below, and the shipped-code walk
+    // above). The three files it used to name are exactly the three this finds today.
+    const pages = sourceFiles().filter((f) => /<!doctype/i.test(read(f)));
+    assert.ok(pages.length >= 3, `only ${pages.length} server-rendered pages found — the doctype scan is wrong, fix this check`);
+    for (const full of pages) {
+      const file = rel(full);
+      const source = read(full);
       for (const hex of RETIRED) if (source.includes(hex)) offenders.push(`${file}: ${hex}`);
       // A USED custom property that nobody defines is the palette bug the hex list cannot see:
       // `color-mix(in srgb, var(--gone) …)` is invalid at computed-value time, so the whole
@@ -486,14 +544,35 @@ describe("fakes are complete", () => {
     // two-member interface (`audit`, `streaming`) is safe to write inline — the point is not
     // to ban a syntax, it is to stop hand-rolling a partial stand-in for a 14-method class
     // when a complete one is a function call away. Widen the alternation when you add a fake.
+    // Both spellings of the same cast, because a rule that only sees one of them is a rule
+    // about spelling. `PreviewDeps["simctl"]` is how the harness reaches the dep; `Simctl` is
+    // how anyone writing a standalone fake would name it, and that form passed until mutation
+    // put `{} as unknown as Simctl` in a test file and nothing failed. The quote class is for
+    // the same reason — `Deps['simctl']` is the same cast.
     const covered = "simctl|android|worktrees|reaper|metro|devProcs";
-    const banned = new RegExp(`as unknown as \\w*Deps\\["(${covered})"\\]`);
+    const classes = "Simctl|AndroidManager|WorktreeManager|Reaper|MetroManager|DevProcessManager";
+    const banned = new RegExp(`as unknown as (?:\\w*Deps\\[["'](${covered})["']\\]|(${classes})\\b)`);
+    const fakeFor: Record<string, string> = {
+      simctl: "fakeSimctl",
+      android: "fakeAndroid",
+      worktrees: "fakeWorktrees",
+      reaper: "fakeReaper",
+      metro: "fakeMetro",
+      devProcs: "fakeDevProcs",
+      Simctl: "fakeSimctl",
+      AndroidManager: "fakeAndroid",
+      WorktreeManager: "fakeWorktrees",
+      Reaper: "fakeReaper",
+      MetroManager: "fakeMetro",
+      DevProcessManager: "fakeDevProcs",
+    };
     for (const file of testFiles()) {
       const m = banned.exec(read(file));
+      const dep = m?.[1] ?? m?.[2] ?? "";
       assert.equal(
         m,
         null,
-        `${rel(file)} hand-rolls a fake for "${m?.[1]}" — use fake${(m?.[1] ?? "").replace(/^./, (c) => c.toUpperCase())}() ` +
+        `${rel(file)} hand-rolls a fake for "${dep}" — use ${fakeFor[dep] ?? "the fake"}() ` +
           `from test-support/fakes.ts, which is checked against the real class at compile time.`,
       );
     }
@@ -584,7 +663,21 @@ describe("source stays source", () => {
     // could read the diff of. Nothing else here looks at bytes, and a diff nobody
     // can read is exactly how the cross-page auth bypass survived its first review.
     // Tab, newline and carriage return are the legitimate ones.
-    for (const file of [...sourceFiles(), ...testFiles()]) {
+    //
+    // The viewer and landing workspaces too, and `.tsx` as well as `.ts`: sourceFiles() reads
+    // server/src and one extension, so a separator byte in a component was invisible while the
+    // suite is called "source stays source". Verified by mutation on viewer/src/App.tsx.
+    const others: string[] = [];
+    const walkAll = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === "node_modules" || entry.name === "dist" || entry.isSymbolicLink()) continue;
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) walkAll(full);
+        else if (/\.tsx?$/.test(entry.name)) others.push(full);
+      }
+    };
+    for (const ws of ["viewer/src", "landing/src", "scripts"]) walkAll(join(REPO, ws));
+    for (const file of [...sourceFiles(), ...testFiles(), ...others]) {
       const bad = [...read(file)].findIndex((ch) => {
         const c = ch.codePointAt(0)!;
         return (c < 0x20 && c !== 0x09 && c !== 0x0a && c !== 0x0d) || c === 0x7f;

@@ -14,4 +14,16 @@ Hardest rules:
 - **Secrets never cross this surface.** `mcp/` may not import `secrets.ts`; the two write channels are the CLI and the one-time setup URL. → `invariants.test.ts` "keeps secrets out of the MCP surface"
 - **Never echo a share PIN back.**
 
+Two limits of those checks, so you do not read a green run as more than it is. Both were
+found by mutation — the dead name was put back and nothing failed.
+
+- The ghost-tool checks read **PLAN.md, AGENTS.md and `mcp/tools.ts`**. A dead tool name in
+  a `.claude/rules/` file, in a skill, or in an agent-facing string somewhere else in
+  `server/src` (`engine/preview.ts` writes `nextStep` too) is nobody's job but yours. They
+  are not widened because those files legitimately name OAuth error codes and response
+  fields that have a tool's shape, and a guardrail that fires on correct writing gets
+  switched off rather than obeyed.
+- A tool's `description` is checked for dead NAMES and dead PARAMETERS, not for being true.
+  Nothing mechanical notices a description that describes last month's behaviour.
+
 A tool's `description` is a prompt. Say what the tool does, when to reach for it, and what the caller must do next — an empty-state `nextStep` is how a fresh agent gets a user from zero apps to a preview.

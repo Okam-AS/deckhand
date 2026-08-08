@@ -77,6 +77,14 @@ describe("docs describe the code that exists", () => {
     // the `*_test_run` family had shapes the old pattern could never see, so a dead name in
     // any of them was unpoliced. The allow-list below is for the handful of snake_case terms
     // in these docs that are genuinely not tools.
+    //
+    // Honest limit: PLAN and AGENTS only. `.claude/rules/*.md` and `.claude/skills/**` are read
+    // by an agent too, and a dead tool name in one of them is unpoliced — verified by mutation.
+    // Not widened on purpose: those files legitimately name OAuth error codes (`invalid_client`,
+    // `redirect_uri`) and settings keys, which have a tool's shape, so covering them means a
+    // growing allow-list of exemptions and a check that fails with a message about MCP tools
+    // when someone documents an error code. `.claude/rules/mcp-tools.md` carries the rule for
+    // a reader instead.
     const NOT_TOOLS = new Set(["app_is_a_pane", "deck_unlock", "github_auth_missing", "needs_access_choice", "node_modules", "web_needs_pin"]);
     const ghosts = [PLAN, AGENTS]
       .flatMap((doc) => [...doc.matchAll(/`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`/g)])
@@ -104,6 +112,13 @@ describe("docs describe the code that exists", () => {
     // that share the shape and are not tools. Names without an underscore (`describe`, `ui`,
     // `logs`) are ordinary English and stay out of reach; that is the honest limit of a
     // text scan.
+    //
+    // The other limit is the FILE: tools.ts, not every file that produces agent-facing text.
+    // `engine/preview.ts` writes `nextStep` strings an agent reads the same way. Widening
+    // there means allow-listing the snake_case error codes the rest of server/src is full of
+    // (`unknown_app`, `needs_pin`, `bad_request`, `invalid_client`), which trades a silent gap
+    // for a check that fires on correct code — so this stays scoped, and the rule for a reader
+    // is in `.claude/rules/mcp-tools.md`.
     const ghostsInSource = [...TOOLS.matchAll(/`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`/g)]
       .map((m) => m[1]!)
       .filter((name) => !registered.includes(name));
@@ -162,6 +177,12 @@ describe("docs describe the code that exists", () => {
     // not leave it pointing at nothing. Same failure as a doc naming a file that does not
     // exist, one layer up.
     const rulesDir = join(REPO, ".claude", "rules");
+    // Indexed BY FILE, not as one pool of names. A citation names a file and a check, and
+    // checking only the name accepts `docs.test.ts "pins serve-sim exactly"` — a citation that
+    // resolves while pointing a reader at the wrong file, which is the same defect this check
+    // exists to catch one layer down. Both shapes were verified by mutation: the wrong-file
+    // citation and a citation naming a test file that does not exist both passed before this.
+    const byFile = new Map<string, Set<string>>();
     const testNames = new Set<string>();
     // EVERY test file, not just test-support. A rule for an area cites the check that
     // enforces it, and for a security invariant that is often the area's own regression
@@ -176,7 +197,12 @@ describe("docs describe the code that exists", () => {
           // `test("…")` as well as `it("…")`. The viewer and landing workspaces write the flat
           // form, so a rule scoped to either could only ever cite a check this scan calls
           // dangling — which pushes the next author to drop the citation rather than write one.
-          for (const m of readFileSync(full, "utf8").matchAll(/\b(?:it|test)\(\s*"([^"]+)"/g)) testNames.add(m[1]!);
+          const names = new Set<string>();
+          for (const m of readFileSync(full, "utf8").matchAll(/\b(?:it|test)\(\s*"([^"]+)"/g)) {
+            testNames.add(m[1]!);
+            names.add(m[1]!);
+          }
+          byFile.set(full.slice(REPO.length + 1), names);
         }
       }
     };
@@ -199,11 +225,21 @@ describe("docs describe the code that exists", () => {
       // check renamed out from under a citation fails this test. The arrow marks where
       // citations START; each `<file>.test.ts "<name>"` pair after it is one, wrapped or not.
       for (const chunk of src.split("→").slice(1)) {
-        for (const m of chunk.matchAll(/`?\S*?\.test\.ts`?\s+"([^"]+)"/g)) {
+        // The FILE half of every citation, named or not. `→ `oauth/pairing.test.ts`` with no
+        // quoted check is a citation too, and it was unverified entirely.
+        for (const m of chunk.matchAll(/`([A-Za-z0-9_\-./]*\.test\.tsx?)`/g)) {
+          const path = m[1]!;
+          if (![...byFile.keys()].some((k) => k === path || k.endsWith(`/${path}`))) dangling.push(`${f}: ${path} (no such test file)`);
+        }
+        // The path character class is explicit rather than `\S*?`: a citation written inside
+        // brackets — `(\`invariants.test.ts\` "…")` — captured the bracket as part of the path.
+        for (const m of chunk.matchAll(/`?([A-Za-z0-9_\-./]*\.test\.tsx?)`?\s+"([^"]+)"/g)) {
           // Collapse the wrap. A citation may run onto the next line — one does — and comparing
           // the raw capture then looks for a test name containing a newline and two spaces.
-          const cited = m[1]!.replace(/\s+/g, " ").trim();
-          if (![...testNames].some((n) => n.startsWith(cited))) dangling.push(`${f}: "${cited}"`);
+          const path = m[1]!;
+          const cited = m[2]!.replace(/\s+/g, " ").trim();
+          const inFile = [...byFile.entries()].filter(([k]) => k === path || k.endsWith(`/${path}`)).flatMap(([, names]) => [...names]);
+          if (!inFile.some((n) => n.startsWith(cited))) dangling.push(`${f}: ${path} "${cited}"`);
         }
       }
     }
@@ -234,11 +270,22 @@ describe("docs describe the code that exists", () => {
     // being onboarded at the exact moment they cannot tell a broken instruction from their own
     // mistake. Three commands this branch deleted survived in setup's closing screen, in
     // `deckhand token`, and in doctor — all of them green.
-    for (const [name, body] of [
-      ["cli.ts", cli],
-      ["cli/setup.ts", readFileSync(join(SRC, "cli", "setup.ts"), "utf8")],
-      ["cli/doctor.ts", readFileSync(join(SRC, "cli", "doctor.ts"), "utf8")],
-    ] as const) {
+    // EVERY non-test source file, not the three that printed commands when this was written.
+    // `cli/configWrite.ts` throws "no token named X — `deckhand token list` shows them", and
+    // `mcp/tools.ts` tells an AGENT to run `deckhand app add <id> --path <dir>` — the two
+    // places a dead verb costs the most, and both were outside a three-file list while this
+    // check's own comment said "the CLI's OWN output is checked too". Green repo-wide today,
+    // so the widening costs nothing and the next printed command is covered by default.
+    const sources: [string, string][] = [];
+    const walkSrc = (dir: string): void => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, e.name);
+        if (e.isDirectory()) walkSrc(full);
+        else if (e.name.endsWith(".ts") && !e.name.endsWith(".test.ts")) sources.push([full.slice(REPO.length + 1), readFileSync(full, "utf8")]);
+      }
+    };
+    walkSrc(SRC);
+    for (const [name, body] of sources) {
       // Two shapes, because the biggest piece of CLI output is not backticked at all: the
       // usage screen, which is the first thing a lost user reads. So a verb counts when it is
       // quoted as a command AND when it is laid out as one — `deckhand pair` in prose, and
@@ -317,11 +364,24 @@ describe("docs describe the code that exists", () => {
     // eight lines above its own "do not attempt those steps" — the check was scoped to one file
     // while the class belongs to every document an agent is pointed at.
     const HUMAN_ONLY = [/cloudflared tunnel login/];
-    // PLAN.md is included because AGENTS.md orders an agent to read it end to end, and the skills
-    // because a slash command runs them — "every document an agent is pointed at" has to mean all
-    // of them, or the sentence is the same kind of claim this file exists to catch.
-    const shellBlocks = ["AGENTS.md", "README.md", "CONSTITUTION.md", "PLAN.md", ".claude/skills/shipping-a-change/SKILL.md", ".claude/skills/reviewing-deckhand/SKILL.md"].flatMap((doc) =>
-      [...readFileSync(join(REPO, doc), "utf8").matchAll(/```(?:sh|bash|console)\n([\s\S]*?)```/g)].map((m) => `${doc}: ${m[1]!}`),
+    // EVERY markdown file in the repo, not the six that were listed. The list was the check's
+    // own stated principle — "every document an agent is pointed at has to mean all of them, or
+    // the sentence is the same kind of claim this file exists to catch" — written next to a
+    // literal six, and `docs/**` and the third skill were outside it. Mutation put the login
+    // command in a shell block in `docs/reference/serve-sim-notes.md` and in
+    // `waiting-for-a-preview/SKILL.md`; both passed.
+    const mdFiles: string[] = [];
+    const walkMd = (dir: string): void => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        if (e.name === "node_modules" || e.name === "dist" || e.name === ".git") continue;
+        if (e.isDirectory()) walkMd(join(dir, e.name));
+        else if (e.name.endsWith(".md")) mdFiles.push(join(dir, e.name));
+      }
+    };
+    walkMd(REPO);
+    assert.ok(mdFiles.length > 8, `only ${mdFiles.length} markdown files walked — the walk is wrong, fix this check`);
+    const shellBlocks = mdFiles.flatMap((doc) =>
+      [...readFileSync(doc, "utf8").matchAll(/```(?:sh|bash|console)\n([\s\S]*?)```/g)].map((m) => `${doc.slice(REPO.length + 1)}: ${m[1]!}`),
     );
     for (const block of shellBlocks) {
       for (const banned of HUMAN_ONLY) {
