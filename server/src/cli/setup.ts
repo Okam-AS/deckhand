@@ -210,11 +210,19 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
       if (agentFixable.length) parts.push(`Run: ${agentFixable.map((c) => c.fix!.how).join(" && ")}`);
       if (human.blockers.length) parts.push("Relay the BLOCKED items to the user and stop — you cannot do those.");
       if (human.questions.length && !human.blockers.length && !stoppers.length) {
-        // Nothing is broken and nothing is blocked: the ONLY thing left is an answer. Say so
-        // in one line, so an agent asks a question instead of filing a status report.
+        // Nothing is broken and nothing is blocked: the ONLY thing left is the answers. Say so
+        // in one line, so an agent asks the questions instead of filing a status report — and
+        // name every question there is, not just the first: naming one made the optional
+        // web-host question unreachable in practice while the docs described it. Derived from
+        // `human.questions` rather than written out, so a question added in preflight.ts cannot
+        // go unmentioned again — nothing tests this string (it is built inside cmdSetup, which
+        // runs the real install), so that derivation is the guard.
+        const asks = human.questions.map((q) => `"${q.ask}"${q.optional ? " (optional)" : ""}`).join(" then ");
+        const invocation = human.questions.map((q) => `${q.flag} <their answer>`).join(" ");
         parts.push(
-          `Nothing is missing. Ask the user this, in these words: "${human.questions[0]!.ask}" — then run ` +
-            `\`setup --hostname <their answer>\`. That is the whole remaining step; do not report status.`,
+          `Nothing is missing. Ask the user ${human.questions.length > 1 ? "these, in these words" : "this, in these words"}: ` +
+            `${asks} — then run \`setup ${invocation}\`, dropping any flag they skipped. ` +
+            `That is the whole remaining step; do not report status.`,
         );
       } else if (human.questions.length) {
         parts.push("Then ask the ASK THE USER questions above and re-run with the answers.");
