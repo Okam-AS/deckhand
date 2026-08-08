@@ -84,6 +84,15 @@ describe("the pairing form", () => {
     assert.equal(input.readOnly, true);
   });
 
+  it("posts once even when the second submit never touches the button", () => {
+    const { input, form } = runForm();
+    input.type("GGE-DYW");
+    // Enter in a single-field form submits implicitly, reaching no button and so no disabled
+    // attribute. The guard on the submit event is the only thing standing there.
+    form.requestSubmit();
+    assert.equal(form.posts, 1);
+  });
+
   it("does not submit an incomplete code", () => {
     const { input, button, form } = runForm();
     input.type("GGE");

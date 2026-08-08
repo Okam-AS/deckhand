@@ -79,6 +79,9 @@ button[disabled]{opacity:.45;cursor:default;transform:none}
 /**
  * The pairing form's behaviour, as source rather than inline in the page, so a test can run it
  * against stub elements. It is browser code: no imports, no TypeScript.
+ *
+ * It goes into the page unescaped, and `esc()` would be the wrong tool inside a script body
+ * anyway — so nothing derived from the request may ever be interpolated here.
  */
 export const PAIR_FORM_SCRIPT = `
   const c = document.getElementById("c"), b = document.getElementById("b");
