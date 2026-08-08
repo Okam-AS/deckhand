@@ -139,6 +139,21 @@ export interface Round {
   /** The {@link diffHash} this round actually reviewed. */
   diff: string;
   /**
+   * The {@link diffHashes} `code` half — the tracked diff alone, with the untracked file list
+   * left out — of what this round reviewed.
+   *
+   * `diff` cannot answer "did the code change", which is the only question {@link Round.resolved}
+   * rests on: it folds the untracked list in (deliberately, so a new file is visible), so `touch
+   * scratch.tmp` moves it without moving a byte of code. That was a live bypass — raise a `must`,
+   * touch a file, record `resolved`, delete the file, and the gate opened on code byte-identical
+   * to what the finding was raised against.
+   *
+   * Optional because receipts on disk predate it. A round without it falls back to its `diff`,
+   * which restores the older, weaker rule for that round rather than failing a review already in
+   * flight — see {@link validate}.
+   */
+  code?: string;
+  /**
    * Everything this round reported — not just what was new, and not just what blocks.
    *
    * Stored rather than counted because rounds happen in DIFFERENT sessions: a cold round runs
@@ -291,23 +306,51 @@ const runGit: Run = (args) => {
  * hashed by concatenation collides on any change that merely moves bytes across the boundary.
  * Untracked files never appear in a diff, so their names are folded in — that catches a new
  * file appearing or going away, though not an edit to one that was already untracked.
+ *
+ * Two halves, because two different questions are asked of this. `diff` is identity: has ANYTHING
+ * about the code under review moved, new files included, so a round or a gate run is stale. `code`
+ * is the tracked diff only, and answers the narrower question {@link Round.resolved} rests on: did
+ * the CODE move. Folding untracked names into that one made `touch scratch.tmp` look like a fix.
  */
-export function diffHash(base = "origin/main", run: Run = runGit): string {
+export function diffHashes(base = "origin/main", run: Run = runGit): { diff: string; code: string } {
   const mergeBase = run(["merge-base", base, "HEAD"]).trim();
   // No merge base means git failed, or there is no `origin/main`. Either way the diff below
   // would be empty too, so every branch in every state would hash to one constant and the
   // freshness check would be comparing a constant to itself. Fail closed with a value no
   // receipt can hold.
-  if (!mergeBase) return UNRESOLVABLE_DIFF;
+  if (!mergeBase) return { diff: UNRESOLVABLE_DIFF, code: UNRESOLVABLE_DIFF };
   const diff = run(["diff", mergeBase]);
   const untracked = run(["ls-files", "--others", "--exclude-standard"]);
-  return createHash("sha256")
-    .update(diff)
-    .update(" ") // domain separator, so the two fields cannot trade bytes
-    .update(untracked)
-    .digest("hex");
+  return {
+    // The tracked diff alone. Untracked files are what makes `diff` cheap to move without
+    // touching the code, so the half that has to mean "the code changed" leaves them out — at
+    // the cost of being blind to a change in a file git has never seen, which is the same
+    // reason this file already tells you to review after `git add`, not before.
+    code: createHash("sha256").update(diff).digest("hex"),
+    diff: createHash("sha256")
+      .update(diff)
+      .update(" ") // domain separator, so the two fields cannot trade bytes
+      .update(untracked)
+      .digest("hex"),
+  };
 }
 
+export function diffHash(base = "origin/main", run: Run = runGit): string {
+  return diffHashes(base, run).diff;
+}
+
+/**
+ * The branch a receipt is keyed to — and `""` on a detached HEAD, which is a KNOWN limit rather
+ * than an oversight: every detached run on this machine shares one receipt file.
+ *
+ * Left as it is because it fails closed and cannot be handed over. {@link validate} pins the last
+ * round AND the gates to the current diff, so a curve some other detached checkout left behind
+ * cannot satisfy a different one — the shared file's foreign rounds either fail freshness or leave
+ * their own findings open, both refusals. And a detached HEAD is not a branch you can push, so it
+ * has no route to a PR anyway. Keying it to the HEAD sha instead would look tidier and be worse:
+ * the sha moves on every commit, so the curve would restart each time, which is the one thing
+ * per-branch keying exists to prevent.
+ */
 export function currentBranch(run: Run = runGit): string {
   return run(["branch", "--show-current"]).trim();
 }
@@ -380,6 +423,7 @@ export function validate(receipt: Receipt | null, hash: string): Verdict {
         !isObject(r) ||
         !Array.isArray(r.findings) ||
         r.findings.some((f) => !isObject(f)) ||
+        (r.code !== undefined && typeof r.code !== "string") ||
         (r.resolved !== undefined && (!Array.isArray(r.resolved) || r.resolved.some((id) => typeof id !== "string"))),
     )
   ) {
@@ -442,22 +486,48 @@ export function validate(receipt: Receipt | null, hash: string): Verdict {
   // unfixed neighbours, and a cold round reporting nothing afterwards read as convergence.
   //
   // So a blocking finding is open until something on the record answers it, and the record is
-  // the only thing that can: `resolved` on a LATER round at a DIFFERENT diff (the code moved
-  // after it was raised, which a fix does and a re-read does not), or a waiver with a reason.
+  // the only thing that can: `resolved` on a later round, or a waiver with a reason. The property
+  // a resolution has to satisfy, exactly:
+  //
+  //   it was recorded LATER, against code that had moved on from the code the finding was
+  //   raised against, AND the code under review now has not gone back to it.
+  //
+  // Both halves are load-bearing, and "different diff" was neither of them. `diff` folds in the
+  // untracked file list, so `touch scratch.tmp` moved it with no code change: raise a must, touch,
+  // resolve, delete, and the gate opened on the exact bytes the must was about. Comparing the
+  // raising round to the CURRENT code as well as to the resolving round is what makes a revert —
+  // and that shuffle — expire the resolution, rather than a resolution being a one-way ratchet
+  // that outlives whatever it was a claim about.
   // Only waivers that carry a reason count. `recordRound` refuses the rest, but the receipt is a
   // file on disk and anything that can write it can write any shape — so the rules are enforced
   // where they are READ as well as where they are written.
   const waived = new Set(
     (receipt.waived ?? []).filter((w) => (w.why ?? "").trim().length >= MIN_WAIVER_REASON).map((w) => w.finding),
   );
+  // A round recorded before `code` existed falls back to its `diff`, which is the older, weaker
+  // rule for that round. Not fail-closed, because the strict reading would reopen every finding
+  // already resolved on a branch mid-review and there is no migration for a gitignored file; and
+  // a receipt can be hand-edited anyway (see the header), so this is not the boundary that keeps
+  // anyone honest. `last.code` is the code under review NOW: the check above pinned `last.diff`
+  // to the current hash, and equal diff hashes mean an equal tracked diff.
+  const codeOf = (r: Round): string => r.code ?? r.diff;
+  const currentCode = codeOf(last);
   // Per OCCURRENCE, not per id: a finding re-reported after the fix that was supposed to answer
   // it is raised again, and the earlier resolution says nothing about the later report.
-  const answered = (id: string, raisedIn: number, raisedAt: string): boolean =>
-    receipt.rounds.some((r, i) => i > raisedIn && r.diff !== raisedAt && (r.resolved ?? []).includes(id));
+  const answered = (id: string, raisedIn: number, raisedAt: Round): boolean =>
+    // The code is not back at — and for a legacy round, the whole diff is not back at — what the
+    // finding was reported against. A resolution is a claim about code that moved on from the
+    // bug, so it expires the moment the code returns to it, whether by a revert or by the
+    // untracked-file shuffle that used to move the hash for free.
+    raisedAt.diff !== hash &&
+    codeOf(raisedAt) !== currentCode &&
+    // ... and the round making the claim had itself moved on from that code, so a resolution
+    // cannot be recorded against the very bytes the finding describes.
+    receipt.rounds.some((r, i) => i > raisedIn && codeOf(r) !== codeOf(raisedAt) && (r.resolved ?? []).includes(id));
   const open = new Set<string>();
   receipt.rounds.forEach((round, i) => {
     for (const f of round.findings) {
-      if (f.severity === "nit" || waived.has(f.id) || answered(f.id, i, round.diff)) continue;
+      if (f.severity === "nit" || waived.has(f.id) || answered(f.id, i, round)) continue;
       open.add(f.id);
     }
   });
@@ -562,7 +632,7 @@ export interface RoundInput {
  * on. Here it is derived from the fingerprints of every earlier round, so a second review in a
  * new session extends the curve instead of restarting it.
  */
-export function recordRound(input: RoundInput, hash: string, branch: string, dir = RECEIPT_DIR): Receipt {
+export function recordRound(input: RoundInput, hash: string, branch: string, dir = RECEIPT_DIR, code = hash): Receipt {
   // A round with no lens is one nobody can audit later, and it would still count toward the
   // floor — so it is rejected rather than recorded as `undefined`.
   if (!input.lens?.trim()) throw new Error("a round needs a `lens` naming the review that ran");
@@ -590,9 +660,15 @@ export function recordRound(input: RoundInput, hash: string, branch: string, dir
           `A resolution that matches nothing leaves the finding it meant to close standing.`,
       );
     }
-    // A fix moves the diff; re-reading the same bytes does not. A round cannot resolve a finding
-    // reported against the code it is itself looking at, or "fixed" would cost one line of JSON.
-    if (raises.some((r) => r.diff === hash)) {
+    // A fix moves the CODE; re-reading the same bytes does not, and neither does creating or
+    // deleting an untracked file — which moves `diff` alone, and used to be enough to buy a
+    // resolution here. A round cannot resolve a finding reported against the code it is itself
+    // looking at, or "fixed" would cost one line of JSON. Refused at write time as well as read
+    // time so the reviewer is told at the moment they try it, not at the handover.
+    // `r.diff === hash` as well, so a round recorded before `code` existed — whose fallback lives
+    // in the other hash space and so can never equal `code` — is still refused here, matching
+    // what {@link validate} will say about it.
+    if (raises.some((r) => (r.code ?? r.diff) === code || r.diff === hash)) {
       throw new Error(
         `\`${id}\` was reported against the code as it stands, so nothing has changed since it was raised. ` +
           `Fix it and record the round AFTER the fix, or waive it with a reason.`,
@@ -603,6 +679,7 @@ export function recordRound(input: RoundInput, hash: string, branch: string, dir
     lens: input.lens,
     cold: input.cold ?? false,
     diff: hash,
+    code,
     findings: (input.findings ?? []).map((f) => ({
       id: fingerprint(f.file, f.claim),
       severity: f.severity ?? "should",
@@ -859,7 +936,7 @@ const isEntryPoint = process.argv[1]?.endsWith("review-receipt.ts") ?? false;
 
 if (isEntryPoint) {
   const [cmd] = process.argv.slice(2);
-  const hash = diffHash();
+  const { diff: hash, code } = diffHashes();
   const branch = currentBranch();
   const receipt = readReceipt(branch);
   // Before anything, not just before `handover`: the body file is the one piece of review state
@@ -905,7 +982,7 @@ if (isEntryPoint) {
     console.log(next.gates?.passed ? `✓ gates green ${label}` : `✗ gates RED ${label}`);
     if (!next.gates?.passed) process.exit(1);
   } else if (cmd === "round") {
-    const next = recordRound(JSON.parse(await readStdin()) as RoundInput, hash, branch);
+    const next = recordRound(JSON.parse(await readStdin()) as RoundInput, hash, branch, RECEIPT_DIR, code);
     const last = next.rounds.at(-1);
     console.log(`recorded ${last?.lens}: ${last?.newFindings} new of ${last?.findings.length}`);
     console.log(summarize(next));

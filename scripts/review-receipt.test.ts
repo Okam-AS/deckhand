@@ -6,7 +6,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   appendRound,
+  currentBranch,
   diffHash,
+  diffHashes,
   fingerprint,
   gatesWorktree,
   HANDOVER_FILE,
@@ -165,6 +167,61 @@ describe("the gate", () => {
     ];
     const v = validate(converged({ rounds }), HASH);
     assert.equal(v.ok, false, "the fix did not hold, and the receipt must say so");
+    assert.match(!v.ok ? v.reason : "", /f\.ts::boom/);
+  });
+
+  // The bypass this rule replaced, reproduced end to end through the CLI in a throwaway repo:
+  // `diff` folds in the untracked file list, so `touch scratch.tmp` moves it without moving a byte
+  // of code. Raise a must, touch, record `resolved`, and the resolving round sits at a different
+  // diff — which was the whole of the old rule — while the code is exactly what the must was
+  // about. Leaving the scratch file in place is the shape that survives comparing the RAISING
+  // round to the current diff, and it is why the comparison is on `code`.
+  it("ignores a resolution recorded while only an untracked file moved the hash", () => {
+    const CODE = "d".repeat(64);
+    const raised = round({ cold: true, diff: "e".repeat(64), code: CODE, findings: [{ id: "f.ts::auth bypass", severity: "must" }], newFindings: 1 });
+    const shuffled = round({ lens: "touched-a-file", diff: OLD, code: CODE, resolved: ["f.ts::auth bypass"] });
+    const v = validate(converged({ rounds: [raised, shuffled, round({ lens: "cold-again", cold: true, code: CODE })] }), HASH);
+    assert.equal(v.ok, false, "no code moved between those rounds, so nothing was fixed");
+    assert.match(!v.ok ? v.reason : "", /f\.ts::auth bypass/);
+  });
+
+  // Rounds recorded before `code` existed fall back to their `diff`, so the same trick has to stay
+  // refused on a receipt already in flight — there, "raised against the code as it stands" is the
+  // only reading available and it is the one that blocks.
+  it("ignores that same shuffle on a receipt whose rounds predate the code hash", () => {
+    const raised = round({ cold: true, findings: [{ id: "f.ts::auth bypass", severity: "must" }], newFindings: 1 });
+    const shuffled = round({ lens: "touched-a-file", diff: OLD, resolved: ["f.ts::auth bypass"] });
+    const v = validate(converged({ rounds: [raised, shuffled, round({ lens: "cold-again", cold: true })] }), HASH);
+    assert.equal(v.ok, false);
+    assert.match(!v.ok ? v.reason : "", /f\.ts::auth bypass/);
+
+    // The mixed receipt is the one a live branch actually has: rounds from before this rule, then
+    // rounds from after it. The two fallbacks live in different hash spaces, so "the code moved"
+    // is trivially true across the boundary and only "raised against the code as it stands" is
+    // left to refuse it.
+    const CODE = "d".repeat(64);
+    const mixed = [raised, { ...shuffled, code: CODE }, round({ lens: "cold-again", cold: true, code: CODE })];
+    const m = validate(converged({ rounds: mixed }), HASH);
+    assert.equal(m.ok, false, "a legacy round raised against the current code cannot be resolved by a newer one");
+    assert.match(!m.ok ? m.reason : "", /f\.ts::auth bypass/);
+  });
+
+  // A resolution is a claim about code that moved on from the bug, so it expires when the code
+  // moves back — by a revert as much as by the untracked shuffle. Without the second half of the
+  // rule it is a one-way ratchet: fix, record, revert, and the record still reads "resolved".
+  it("expires a resolution when the code returns to what the finding was raised against", () => {
+    const BUGGY = "d".repeat(64);
+    const FIXED = "c".repeat(64);
+    const raised = round({ cold: true, diff: OLD, code: BUGGY, findings: [{ id: "f.ts::boom", severity: "must" }], newFindings: 1 });
+    const fixed = round({ lens: "after-the-fix", cold: true, diff: "e".repeat(64), code: FIXED, resolved: ["f.ts::boom"] });
+    assert.deepEqual(
+      validate(converged({ rounds: [raised, { ...fixed, diff: HASH }] }), HASH),
+      { ok: true },
+      "the honest fix must still converge in two rounds and no extra ceremony",
+    );
+    const reverted = round({ lens: "cold-after-revert", cold: true, code: BUGGY });
+    const v = validate(converged({ rounds: [raised, fixed, reverted] }), HASH);
+    assert.equal(v.ok, false, "the bug is back in the code the branch ships");
     assert.match(!v.ok ? v.reason : "", /f\.ts::boom/);
   });
 
@@ -363,6 +420,23 @@ describe("recording a round", () => {
     assert.throws(() => recordRound({ lens: "two", resolved: ["f.ts::boom"] }, HASH, "feature/x", dir), /nothing has changed since/);
   });
 
+  // ... and the diff moving is not the code moving. An untracked file appearing changes the hash
+  // the round is stamped with and nothing else, so the write-time check has to ask the same
+  // question the gate asks — otherwise the CLI records a resolution the handover will refuse, and
+  // says so a round later than it could have.
+  it("refuses to resolve one when only an untracked file moved the hash", () => {
+    const CODE = "d".repeat(64);
+    recordRound({ lens: "one", findings: [{ file: "f.ts", claim: "boom", evidence: "f.ts:1" }] }, HASH, "feature/x", dir, CODE);
+    assert.throws(() => recordRound({ lens: "two", resolved: ["f.ts::boom"] }, OLD, "feature/x", dir, CODE), /nothing has changed since/);
+    const ok = recordRound({ lens: "two", resolved: ["f.ts::boom"] }, OLD, "feature/x", dir, "c".repeat(64));
+    assert.deepEqual(ok.rounds.at(-1)?.resolved, ["f.ts::boom"], "a real code change still resolves it");
+  });
+
+  it("stamps each round with the code it reviewed, not only the diff", () => {
+    const r = recordRound({ lens: "one" }, HASH, "feature/x", dir, "d".repeat(64));
+    assert.equal(r.rounds.at(-1)?.code, "d".repeat(64));
+  });
+
   // Rounds happen in different sessions, so the curve has to accumulate on disk or round 4
   // re-reports what round 2 found and the gate never converges.
   it("extends a receipt written by an earlier session rather than restarting it", () => {
@@ -540,7 +614,14 @@ describe("the commands a human actually runs", () => {
         encoding: "utf8",
         env: { ...process.env, PATH: `${join(process.cwd(), "node_modules/.bin")}:${process.env.PATH ?? ""}` },
       });
-      assert.ok(!/Cannot find|not found/.test(run.stderr ?? ""), `the command did not run: ${run.stderr}`);
+      // The prune NOTICE, not a guess at what a failure would look like. Pruning happens before
+      // the verb is dispatched, so a command that crashes on every input still leaves the body
+      // deleted and the assertion below green — and grepping stderr for "Cannot find|not found"
+      // sees a module error but not a TypeError. What proves the command ran is its own output,
+      // and it says the thing this test is about. (`review:check` exits 1 here by design — there
+      // is no receipt in a throwaway repo — so the exit code cannot be the signal.)
+      assert.match(run.stderr ?? "", /removed \.claude\/pr-body\.md/, `${verb} did not run its prune step: ${run.stderr}`);
+      assert.doesNotMatch(run.stderr ?? "", /^\s+at .*\(/m, `${verb} crashed after pruning: ${run.stderr}`);
       assert.equal(existsSync(join(repo, ".claude", "pr-body.md")), false, `${verb} left another branch's body in place: ${run.stderr}`);
     });
   }
@@ -714,5 +795,45 @@ describe("what counts as the code under review", () => {
 
   it("fails closed when there is no merge base", () => {
     assert.equal(diffHash("origin/main", fake({})), UNRESOLVABLE_DIFF);
+    assert.equal(diffHashes("origin/main", fake({})).code, UNRESOLVABLE_DIFF, "the code half must fail closed too");
+  });
+
+  // The half a resolution rests on. If it moved when an untracked file appeared, `touch
+  // scratch.tmp` would buy a `must` its way off the record — which it did, until it had its own
+  // hash.
+  it("hashes the code without the untracked file list, so a scratch file is not a fix", () => {
+    const code = (untracked: string) => diffHashes("origin/main", fake({ "merge-base": "abc\n", diff: "D", "ls-files": untracked })).code;
+    assert.equal(code(""), code("scratch.tmp"), "an untracked file is not a code change");
+    assert.notEqual(code(""), diffHashes("origin/main", fake({ "merge-base": "abc\n", diff: "D2", "ls-files": "" })).code);
+    const both = diffHashes("origin/main", fake({ "merge-base": "abc\n", diff: "D", "ls-files": "scratch.tmp" }));
+    assert.notEqual(both.diff, diffHashes("origin/main", fake({ "merge-base": "abc\n", diff: "D", "ls-files": "" })).diff, "the identity half still sees it");
+  });
+});
+
+// `git branch --show-current` prints nothing on a detached HEAD, so every detached run shares one
+// receipt file. That is a stated limit in `currentBranch` rather than a bug — it fails closed,
+// since `validate` pins the last round and the gates to the current diff, and a detached HEAD
+// cannot be pushed or handed over. The test is here so the comment cannot quietly stop being true.
+describe("a detached HEAD has no branch", () => {
+  it("returns an empty name, and so one shared receipt path", () => {
+    const repo = join(dir, "detached");
+    mkdirSync(repo, { recursive: true });
+    const git = (...args: string[]) => spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+    git("init", "-q");
+    git("config", "user.email", "t@example.com");
+    git("config", "user.name", "t");
+    writeFileSync(join(repo, "a.txt"), "a");
+    git("add", "a.txt");
+    git("commit", "-qm", "one");
+    const run = (args: string[]) => {
+      const p = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+      return p.status === 0 ? (p.stdout ?? "") : "";
+    };
+    assert.equal(currentBranch(run), git("rev-parse", "--abbrev-ref", "HEAD").stdout.trim(), "on a branch it is the branch");
+    assert.equal(git("checkout", "-q", "--detach", "HEAD").status, 0);
+    assert.equal(currentBranch(run), "", "detached: no name to key a receipt to");
+    // One name, so one file for every detached run — but not a file any named branch would use,
+    // which is the part that would actually be dangerous.
+    assert.ok(!["feature/x", "main", "-"].some((b) => receiptPath(b, dir) === receiptPath("", dir)));
   });
 });
