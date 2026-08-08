@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DevicePlayer, type PlayerStatus } from "./stream/player.ts";
+import { streamBadge } from "./stream/badge.ts";
 import { DeviceInput, ORIENTATION_CYCLE, type SpecialKey } from "./stream/input.ts";
 import { deviceBase, deviceWsUrl, phaseBadge, phaseLabel, repoName, type ShareDevice } from "./api.ts";
 import { BranchIcon, CollapseIcon, ExpandIcon, HomeIcon, KeyboardIcon, PlatformGlyph, RepoGlyph, RotateIcon } from "./icons.tsx";
@@ -96,13 +97,10 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
   // The frame auto-fits each device: default shape from the model name, then the
   // exact aspect from the first real frame (so an iPad never sits in a phone frame).
   const isTablet = /ipad|tablet/i.test(device.label);
-  const isAndroid = /android/i.test(device.label);
   const [aspect, setAspect] = useState(isTablet ? "3 / 4" : "9 / 19.5");
   const ready = device.phase === "ready";
   const isThumb = variant === "thumb";
-  // Android streams via multipart-PNG (adb-screencap) — that's its normal path,
-  // not a degraded iOS H.264 fallback, so don't cry "Reduced quality" for it.
-  const showBadge = ready && !isThumb && status !== "streaming" && !(isAndroid && status === "fallback");
+  const badge = streamBadge(status, { ready, isThumb });
 
   const [aw, ah] = aspect.split("/").map((s) => parseFloat(s));
   // Keep the corner subtle: a big radius clips real screen content (the status-bar
@@ -378,7 +376,7 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
         {/* One pill, two sources: the boot/build phase before the stream exists,
             then the streaming state once it does. Same chip either way, so the
             frame's status never jumps between two different affordances. */}
-        {showBadge && <div className="badge">{status === "fallback" ? "Reduced quality" : "Connecting…"}</div>}
+        {badge && <div className="badge">{badge}</div>}
         {!ready && !isThumb && device.phase !== "failed" && <div className="badge">{phaseBadge(device.phase)}</div>}
       </div>
       {!isThumb && ready && (
