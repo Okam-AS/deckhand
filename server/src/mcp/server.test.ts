@@ -376,6 +376,40 @@ describe("MCP server (end-to-end over HTTP)", () => {
     await admin.close();
   });
 
+  it("refuses to set or remove a PIN on a pane", async () => {
+    // A pane's access is a property of the PAGE that booted it, not something
+    // separately settable: the pane runs under a synthetic, content-keyed app id,
+    // so set_pin{previewId: <pane>, remove:true} resolved that id and deleted the
+    // very PIN record the pane's share reads — publishing half of a protected page
+    // on a URL start_preview already handed the caller. And because the id is keyed
+    // by content, the pane may be the one a SECOND protected page is showing.
+    const admin = await client(ADMIN);
+    const page = parse(
+      await admin.callTool({
+        name: "start_preview",
+        arguments: { app: "app-a", alongside: [{ app: "app-a" }], share: { access: "pin", pin: "1234" } },
+      }),
+    );
+    assert.equal(page.ok, true);
+    const pane = (page.alongside as { shareId: string; previewId?: string }[])[0]!;
+    assert.equal(engine.pinInfoForShare(pane.shareId).required, true, "the pane starts protected");
+
+    const removed = parse(await admin.callTool({ name: "set_pin", arguments: { previewId: pane.previewId!, remove: true } }));
+    assert.equal(removed.ok, false, "removing a pane's PIN must be refused");
+    assert.equal((removed.error as { code: string }).code, "preview_is_a_pane");
+    assert.equal(engine.pinInfoForShare(pane.shareId).required, true, "and the pane is still protected");
+
+    // Setting one is the same hole from the other side: it re-hashes the record
+    // every page sharing this pane unlocks against, revoking their cookies.
+    const set = parse(await admin.callTool({ name: "set_pin", arguments: { previewId: pane.previewId!, pin: "9999" } }));
+    assert.equal(set.ok, false, "setting a pane's PIN must be refused too");
+    assert.equal((set.error as { code: string }).code, "preview_is_a_pane");
+    assert.equal(engine.verifyPin(pane.shareId, "1234"), true, "the page's PIN still unlocks the pane");
+
+    await admin.callTool({ name: "stop_preview", arguments: { previewId: page.previewId as string } });
+    await admin.close();
+  });
+
   it("never lets a public page reuse (and strip) a protected page's pane", async () => {
     // A pane's synthetic app id comes from its CONTENT, so two pages comparing
     // against the same source used to share one pane and one PIN. A public page

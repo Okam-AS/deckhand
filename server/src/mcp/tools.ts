@@ -516,9 +516,12 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         // platform): the share id is stable per app, so a failed call must not leave
         // an ALREADY-RUNNING share of this app newly public.
         // Extra sources first, so their panes exist before this app's share takes the
-        // chosen access. They are NOT public: `bootReference` is handed `args.share`, so
-        // every pane on the page carries the access the caller asked for.
+        // chosen access. `bootReference` is handed `args.share`, so every pane on the
+        // page BOOTS with the access the caller asked for, and nothing may change it
+        // afterwards: a pane's synthetic app id is never a registered app's, so the
+        // setAppPin below cannot reach one, and set_pin refuses a pane outright.
         // → server.test.ts "gives an extra pane the page's PIN instead of publishing it"
+        // → server.test.ts "refuses to set or remove a PIN on a pane"
         const refs: { reference: CompareReference; previewId: string; booted: boolean }[] = [];
         // Undo the panes THIS call started; a reused running pane is left alone,
         // because another page may be showing it right now.
@@ -773,10 +776,10 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     return {
       reference: { shareId: result.shareId, repo: base.repo ?? refApp.id, ref },
       previewId: result.previewId,
-      // Whether THIS call booted it. The reference app id is keyed by
-      // repo+ref alone, not by the working app, so a second compare against the
-      // same reference reuses the running one — and the rollback below must not
-      // tear down a pane another compare session is using.
+      // Whether THIS call booted it. The reference app id is keyed by content and
+      // access class, not by the working app, so a second page against the same
+      // source AND the same access reuses the running one — and the rollback must
+      // not tear down a pane another page is using.
       booted: !result.alreadyRunning,
     };
   };
@@ -1107,6 +1110,20 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         if (denied) return denied;
         const appId = engine.appIdFor(id);
         if (!appId) return fail("unknown_preview", `no active preview "${id}"`);
+        // A pane's access belongs to the PAGE that booted it, and is not
+        // separately settable. Its synthetic app id is what backs its share, so
+        // set_pin on a pane's previewId edited exactly the record the pane's gate
+        // reads — remove:true published half of a PIN-protected page on a URL the
+        // caller already holds, and a new PIN re-hashed the record every page
+        // sharing that content-keyed pane unlocks against.
+        // → server.test.ts "refuses to set or remove a PIN on a pane"
+        if (engine.isReference(id)) {
+          return fail(
+            "preview_is_a_pane",
+            `preview "${id}" is an extra pane on another page — its share access comes from that page`,
+            "call set_pin with the PAGE's previewId (or its app id) instead; every pane on it follows.",
+          );
+        }
         if (args.remove) {
           engine.setAppPin(appId, null);
           return ok({ app: appId, protected: false, nextStep: "The link is now public — anyone with the URL can open it." });
