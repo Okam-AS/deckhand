@@ -275,16 +275,26 @@ Two things it enforces that cost a round if you learn them late:
   you like", with nothing cold having read what ships.)
 - **A blocking finding leaves the record two ways: fixed, or waived with a reason.**
   `waived` takes the fingerprint from `review:show` and a sentence saying why it
-  cannot be mechanised or why it is acceptable — at least 20 characters, because
-  waiving used to cost nothing while reporting demanded evidence, which made
-  dismissing a bug cheaper than raising one. **"Fixed" means a LATER round lists the
-  fingerprint in `resolved`, and the TRACKED CODE has moved on from what the finding
-  was raised against — and has not since gone back to it.** Both halves matter. "A
-  different diff" was the first attempt and it was not enough: `diffHash` folds in
-  untracked files, so `touch scratch.tmp` moved it, and `rm` moved it back — three
-  rounds later the gate opened with the reported code byte-identical. The second half
-  is what makes a resolution **expire on a revert** rather than being a one-way
-  ratchet. Record it once and it carries forward; re-report it and it reopens.
+  cannot be mechanised or why it is acceptable — at least 20 characters, **and a cold
+  round after it**, because a waiver is exempt from the code rule below and so must
+  cost the other thing raising a finding costs: a round. The reason is printed verbatim
+  into the PR body, since the receipt never leaves this machine and the decision used to
+  reach a human as the digit in "waived: 1".
+
+  **"Fixed" means a LATER round lists the fingerprint in `resolved`, and the FILE the
+  finding names holds different bytes than when it was raised** — at that round and
+  still now, with the old bytes not merely moved to another path. Fixing it elsewhere is
+  `{"id": "…", "file": "the/file/you/changed.ts"}`, which is a readable claim rather
+  than a check: without it an honest fix in a callee would be refused, and refusing that
+  makes waiving cheaper than fixing.
+
+  It took three tries to get here, and the two failures are worth knowing. "A later
+  round at a different diff" fell to `touch scratch.tmp` … `resolved` … `rm` — `diffHash`
+  folds in untracked files. Hashing the tracked diff TEXT instead fell to `chmod +x`:
+  one commit, zero content bytes, blocking finding cleared. Hence *bytes of the named
+  file*. What is still not enforced, and is stated in the code: `file` is
+  author-supplied, so five findings in one file are cleared by one edit, and `cold` is
+  self-declared.
 
   A finding nobody mentions again stays open: silence is not a resolution. That
   sentence was prose until 2026-08-08 — `validate` skipped every round whose diff

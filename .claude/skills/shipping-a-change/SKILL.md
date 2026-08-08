@@ -146,11 +146,14 @@ surfaces **no blocking finding an earlier round hadn't already reported**.
    `should`, so the lazy path is the safe one, and a nit a later round raises to `should`
    **does** count as new — filing something small to defuse it doesn't work.
 3. **Fix a blocking finding, then SAY SO in the next round.** Put its fingerprint (from
-   `review:show`) in that round's `"resolved": [...]`. The TRACKED code has to have moved on
-   from what the finding was raised against, and must not have gone back to it — a fix moves
-   the code, so if it has not moved you have not fixed anything, and if it moved back you have
-   unfixed it. Record it once and it carries forward; re-report it and it reopens. Until you
-   record it the finding is open however many rounds pass without mentioning it.
+   `review:show`) in that round's `"resolved": [...]`. **The FILE the finding names has to hold
+   different bytes than when it was raised** — at that round and still now — so a mode bit, a
+   blank line elsewhere, or a rename does not count. Fixed it somewhere else? Say where:
+   `{"id": "…", "file": "the/file/you/changed.ts"}`. That is a readable claim, not a check, and
+   it exists so an honest fix in a callee is not refused. Record it once and it carries forward;
+   re-report it and it reopens. Until you record it the finding is open however many rounds
+   pass without mentioning it. **Waiving instead costs a cold round after the waiver**, and the
+   reason you write is printed verbatim into the PR body.
    Not bookkeeping for its own sake, and the wording is exact for a reason. `validate` first
    cleared a finding the moment ANY edit moved the hash, so fixing one finding silently
    cleared every other one raised beside it. The repair — "a later round at a DIFFERENT diff"
