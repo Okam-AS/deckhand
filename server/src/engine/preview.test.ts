@@ -1743,6 +1743,29 @@ describe("PreviewEngine idle sweep", () => {
     assert.deepEqual(cross.engine.getStatus("pv1")!.devices.map((d) => d.deviceId), ["ios-0", "android-2"]);
   });
 
+  it("labels a device by its place in the preview, not by the id counter", async () => {
+    // The fallback caption is what a user reads while a device is pending, and on a device
+    // whose boot failed before `bootIos`/`bootAndroid` could name the real model. It used to
+    // interpolate the same number as the device id — and that number is now a monotonic
+    // counter that skips retired ids, so a preview showing two devices captioned the third
+    // and the fourth is nonsense the user cannot resolve. The id and the caption want
+    // different things: uniqueness for the life of the preview, and a place a human can count
+    // to.
+    const lim = { config: { ...config, limits: { ...config.limits, maxTotalDevices: 6 } } };
+    const req = (devices: DeviceRequest[]): StartPreviewRequest =>
+      ({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices, access: "public" });
+
+    const h = makeEngine(lim);
+    const [first] = h.engine.startPreview(req([{ platform: "ios" }, { platform: "ios" }, { platform: "ios" }])).devices ?? [];
+    assert.equal(first?.label, "ios device 1", "the first device a user sees is the first, not the zeroth");
+
+    await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
+    await h.engine.removeDevices("pv1", ["ios-0", "ios-1"]);
+    const added = h.engine.addDevices("pv1", [{ platform: "android" }]);
+    assert.equal(added[0]!.record.deviceId, "android-3", "the id still comes off the counter that never repeats");
+    assert.equal(added[0]!.record.label, "android device 2", "but the caption counts the devices that are actually there");
+  });
+
   it("refuses to add beyond the machine's device budget, and says which limit", async () => {
     // Capacity is re-checked at ADD time rather than inherited: the budget is shared, and a
     // preview admitted an hour ago says nothing about what is free now. The link still comes

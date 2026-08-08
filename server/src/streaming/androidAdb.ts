@@ -60,9 +60,15 @@ export interface AndroidAdbOptions {
 /**
  * AVD names deckhand creates (`deckhand_<previewId>_<deviceId>`, and
  * `deckhand_pool_…`, which shares the prefix). Duplicated from
- * `engine/reaper.ts` rather than imported so the streaming seam keeps no
- * dependency on the engine; a drift between the two is a compile-time-invisible
- * bug, so a test asserts they are the same string.
+ * `engine/reaper.ts` rather than imported because the seam takes no dependency
+ * on the ENGINE — the orchestration layer that owns previews, worktrees and
+ * spawns, and that imports this backend's world rather than the reverse.
+ *
+ * `devices/` is NOT that layer, which is why `parseAdbDevices` above is a plain
+ * import and this is not: it is the shared low-level device layer, imported by
+ * `server.ts`, `cli/doctor.ts` and the engine alike and importing none of them.
+ * A constant naming AVDs would sit there quite happily; it lives in the reaper
+ * today, so this copy is the price, and a drift is compile-time invisible.
  * → `androidAdbBackend.test.ts` "owns the same AVD prefix the reaper does"
  */
 const DECKHAND_AVD_PREFIX = "deckhand_";
@@ -621,10 +627,20 @@ export class AndroidAdbBackend implements StreamingBackend {
         candidates.push(serial);
       }
       if (candidates.length === 0) return;
-      // Read the owners LAST. Every await between this read and the kill is a
-      // window in which a `start_preview` elsewhere attaches to one of these
-      // devices and starts a recorder we would then kill — the same window
-      // `liveDeviceHandles()` guards for devices, narrowed the same way.
+      // Read the owners LAST, which NARROWS the race and does not close it: the
+      // loop below awaits one 5 s-timeout pkill per candidate, so by candidate N
+      // this snapshot can be N × 5 s old, and a `start_preview` that attached in
+      // the meantime has a recorder we cannot see. Reading it before the `emu avd
+      // name` probes would only have made it staler.
+      //
+      // Tolerable because of where the cost lands, not because the window is
+      // small: the loser is one freshly started recorder, and `AvccSource` either
+      // restarts the segment (a device that had already produced) or settles a
+      // TIMED backoff — that device streams MJPEG until `retryAfterMs` expires,
+      // then tries H.264 again. Never a permanent verdict, and never somebody
+      // else's process: staleness can only make us kill one of OUR recorders on
+      // one of OUR emulators a moment too early — the candidate list already
+      // passed all four ownership tests, and the pkill matches our own argv.
       const busy = await this.hostRecorderSerials();
       for (const serial of candidates) {
         if (busy.has(serial)) continue;

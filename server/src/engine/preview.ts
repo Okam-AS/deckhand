@@ -92,7 +92,13 @@ const IOS_BUNDLE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*(\.[A-Za-z0-9][A-Za-z0-9_-]*
 const BUILD_VERBS =
   /^(compiling|packaging|linking|signing|executing|copying|installing|downloading|generating|bundling|building|analyzing|preparing|processing|fetching|resolving|planning|running|creating|writing|checking)\b/i;
 
-/** Longest caption the viewer's build overlay can show without wrapping. */
+/**
+ * Longest caption `buildStepDetail` will emit. A budget picked against a phone-sized
+ * frame, NOT a measured limit and NOT a precondition: nothing in `viewer/` reads this
+ * number or holds a width to it, so a longer caption would wrap rather than break
+ * anything, and no test can fail on the two sides disagreeing. Whether 40 is still right
+ * is a question for whoever is looking at the overlay.
+ */
 const DETAIL_MAX = 40;
 
 /**
@@ -275,11 +281,20 @@ export interface DeviceRequest {
  * devices — the add path grew from a copy of this, and a copy is where the two quietly
  * drift into "why does the added one have no label".
  *
- * `index` is the device's position in the preview, which is what deviceId is built from.
- * It must stay unique for the life of the preview: ids are how the viewer addresses a
- * stream, so reusing one after a device is removed would point a pane at the wrong device.
+ * `index` is the preview's monotonic device counter and NOT a position — it is what
+ * deviceId is built from, and it must stay unique for the life of the preview: ids are how
+ * the viewer addresses a stream, so reusing one after a device is removed would point a
+ * pane at the wrong device.
+ * → `preview.test.ts` "never re-mints a retired device id, on any platform"
+ *
+ * `position` is 1-based and separate for exactly that reason. A counter that skips retired
+ * ids reads as nonsense in a caption — a two-device preview captioned "android device 3".
+ * It is a placeholder only: `bootIos`/`bootAndroid` overwrite the label with the real model
+ * the moment boot starts, so it never has to track a later removal; what a user actually
+ * reads it for is a device still pending, or one whose boot failed before it was named.
+ * → `preview.test.ts` "labels a device by its place in the preview, not by the id counter"
  */
-export function newLiveDevice(dev: DeviceRequest, index: number): LiveDevice {
+export function newLiveDevice(dev: DeviceRequest, index: number, position: number): LiveDevice {
   return {
     record: {
       deviceId: `${dev.platform}-${index}`,
@@ -289,7 +304,7 @@ export function newLiveDevice(dev: DeviceRequest, index: number): LiveDevice {
           ? "Web app"
           : dev.model && dev.runtime
             ? `${dev.model} · ${dev.runtime}`
-            : `${dev.platform} device ${index}`,
+            : `${dev.platform} device ${position}`,
       runtime: dev.runtime,
       model: dev.model,
       phase: "pending",
@@ -1187,7 +1202,7 @@ export class PreviewEngine {
     // Web: detect the framework so orchestration/URL know whether it hosts
     // path-based (Vite) or at the root of a per-share subdomain (Nuxt/Next/…).
     const webFramework = req.app.type === "web" && req.app.path ? detectWebFrameworkFromDir(req.app.path) : null;
-    const devices: LiveDevice[] = req.devices.map((dev, i) => newLiveDevice(dev, i));
+    const devices: LiveDevice[] = req.devices.map((dev, i) => newLiveDevice(dev, i, i + 1));
 
     const record: PersistedPreview = {
       previewId,
@@ -1305,7 +1320,9 @@ export class PreviewEngine {
     // public, and a caller that does not filter gave two LIVE devices one id. A device id is
     // how a viewer pane addresses a stream, so that is one pane showing another's video.
     const start = p.nextDeviceIndex;
-    const added = specs.map((spec, i) => newLiveDevice(spec, start + i));
+    // The caption gets the position instead (see newLiveDevice): `p.devices` has not been
+    // pushed to yet, so its length is the count of devices already on the preview.
+    const added = specs.map((spec, i) => newLiveDevice(spec, start + i, p.devices.length + i + 1));
     p.nextDeviceIndex = start + specs.length;
     p.devices.push(...added);
     this.persist();
