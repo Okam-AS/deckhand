@@ -582,8 +582,10 @@ for the initial cut. The first cut was `streaming/androidAdb.ts` (`AndroidAdbBac
 which:
 
 - serves **`adb exec-out screencap -p` as a multipart PNG stream** on a loopback port — which
-  **reuses Deckhand's existing viewer verbatim** (the MJPEG parser slices by Content-Length;
-  `createImageBitmap` decodes PNG), so no new viewer code and zero scrcpy-protocol risk;
+  **reuses Deckhand's existing viewer verbatim** (the MJPEG parser slices by Content-Length,
+  and the frame is painted through an `<img>` + object URL, sniffing PNG vs JPEG from the
+  magic bytes — NOT `createImageBitmap`, whose `Blob` form fails in Safari on these PNG
+  frames and leaves the device black), so no new viewer code and zero scrcpy-protocol risk;
 - carries touch over the **same `/ws` protocol** (`[0x03][JSON {type,x,y}]`) translated to
   `adb shell input tap/swipe` (normalized → device pixels via `wm size`);
 - provides `describe` via `uiautomator dump`.
@@ -621,13 +623,24 @@ the proxy is the sole path in, with share auth enforced at upgrade time.
 paths, unlike the four-subpath device allow-list), plus a WebSocket branch under the
 same base for Vite HMR (the `vite-hmr` subprotocol is echoed and forwarded). This
 deliberately **inverts** the device proxy's narrow-allow-list posture (§11 item 6): the whole
-dev-server origin is exposed, gated only by the 144-bit `shareId` + the PIN a web share
-always carries (see §9).
+dev-server origin is exposed, gated by the PIN a web share always carries (see §9 and §11
+item 6 — the `shareId` is in the URL only on this path-hosted route).
 Every other invariant holds — the upstream is strictly **that share's own loopback
 dev-server port** (resolved via `findByShareId`; no SSRF to sibling ports, no path
 traversal), `X-Forwarded-Proto: https` is preserved (so Vite emits `wss://` HMR behind
 the tunnel), and the web preview is idle-reaped and torn down like any other (the source
 dir is never touched).
+
+**Host-based web hosting (the wildcard-hostname model).** A framework that cannot be told
+its base at runtime (Nuxt, Next) cannot be served under a path prefix without editing the
+checkout, which deckhand must never do. Those are served at the **root of a host of their
+own**: `detect.ts` classifies the framework and `webHostingMode` maps it to `path` (Vite, or
+an undetected `web` app — CLI flags only, zero source edits) or `subdomain`. A subdomain
+preview resolves by `Host` rather than `shareId` (`engine.resolveWebHost`, middleware and HMR
+upgrade in `share/proxy.ts`), with its own vanilla PIN pad because there is no React viewer
+on that host. One `webHost` from config serves the single active subdomain-web preview —
+per-preview subdomains would need a second wildcard level, which Cloudflare Universal SSL
+does not cover. Mechanics: `docs/web-wildcard-hosting-plan.md`.
 
 ## 9. Viewer & share links
 
@@ -810,8 +823,12 @@ change eases in/out — nothing snaps.
    share's own devices — serve-sim's other endpoints (camera, devtools, exec) are never
    forwarded. **Web previews (2026-07-15) are the deliberate exception:** a `web` app's
    share proxies the whole dev-server origin (a dev server serves arbitrary paths), so the
-   144-bit `shareId` (+ the PIN a web share always carries) is the gate rather than a
-   narrow allow-list. The upstream is confined to that share's own loopback dev-server port (no SSRF/traversal),
+   PIN a web share always carries is the gate rather than a narrow allow-list. **The
+   `shareId` is not part of that gate for every web share:** a path-hosted (Vite) share sits
+   under `/s/:shareId/web/`, but a subdomain-hosted framework (Nuxt/Next — §9) is served at
+   the ROOT of a bare public hostname with no `shareId` in the URL at all, discoverable from
+   DNS or certificate transparency, and `proxy.ts` resolves it by `Host` and admits it on the
+   PIN cookie alone. That is exactly why a web share cannot be `public`. The upstream is confined to that share's own loopback dev-server port (no SSRF/traversal),
    still binds `127.0.0.1`, and is still idle-reaped — see §8 "Web proxy".
 
    **Accepted risk — cookie isolation between web shares (2026-07-27).** The web proxy
