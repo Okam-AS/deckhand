@@ -124,6 +124,48 @@ describe("ServeSimBackend — surviving helpers", () => {
     assert.equal(again.origin, stream.origin, "the spared helper is still remembered after the sweep");
   });
 
+  it("spares a helper attached DURING the sweep", async () => {
+    // `keep` is a snapshot the engine took BEFORE this call, and the per-udid kills below it
+    // are awaits — so a start_preview can attach after the snapshot and before the port
+    // sweep. Its udid is in neither `keep` nor the condemned list, and both the kill loop and
+    // the port sweep have to re-read `this.helpers` to see it. Getting this wrong SIGKILLs a
+    // preview that just came up, on a port we then still believe is free.
+    const listening = new Map<number, number[]>();
+    const killArgs: string[][] = [];
+    const killedPids: number[] = [];
+    let attachedMidSweep: string | undefined;
+    const backend: ServeSimBackend = new ServeSimBackend({
+      portRange: [3100, 3102],
+      detachImpl: async (_bin, args) => {
+        const port = args[args.indexOf("-p") + 1]!;
+        return JSON.stringify({ port: Number(port), streamUrl: `http://127.0.0.1:${port}/helper/${args[args.length - 1]}/stream.mjpeg` });
+      },
+      killImpl: async (_bin, args) => {
+        killArgs.push([...args]);
+        if (args[1] !== "DEAD") return;
+        // The start_preview lands here: mid-sweep, after the keep-set was taken.
+        const s = await backend.attach({ platform: "ios", udid: "NEW" });
+        attachedMidSweep = new URL(s.origin).port;
+        listening.set(Number(attachedMidSweep), [9102]); // its daemon is now up
+      },
+      listenersImpl: async (port) => listening.get(port) ?? [],
+      killPidImpl: (pid) => killedPids.push(pid),
+    });
+
+    const live = await backend.attach({ platform: "ios", udid: "LIVE" });
+    await backend.attach({ platform: "ios", udid: "DEAD" });
+    listening.set(3101, [9101]); // DEAD's daemon ignores `-k`, which is what the port sweep is for
+
+    await backend.reapOrphans(new Set(["LIVE"]));
+
+    assert.equal(attachedMidSweep, "3102", "fixture sanity: the mid-sweep attach took a port inside the swept range");
+    assert.ok(!killArgs.some((a) => a[1] === "NEW"), `the mid-sweep attach must not be named to \`serve-sim -k\`: ${JSON.stringify(killArgs)}`);
+    assert.deepEqual(killedPids, [9101], "only DEAD's surviving daemon is signalled — not the helper that attached mid-sweep");
+    const again = await backend.attach({ platform: "ios", udid: "NEW" });
+    assert.equal(again.origin, `http://127.0.0.1:3102`, "and it is still remembered, so the next attach does not reallocate its port");
+    assert.equal(new URL(live.origin).port, "3100", "fixture sanity: the kept helper is inside the range too");
+  });
+
   it("a pid that dies between the scan and the signal is not an error", async () => {
     const backend = new ServeSimBackend({
       portRange: [3100, 3100],

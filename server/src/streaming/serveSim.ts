@@ -295,20 +295,34 @@ export class ServeSimBackend implements StreamingBackend {
    * everything, which is the point — but the sweep runs after the port is bound, so a
    * start_preview can be mid-attach, and `serve-sim -k` with no udid kills every helper on the
    * machine. Naming the survivors instead is what makes that window safe.
+   *
+   * `keep` is a snapshot the ENGINE took before calling, and several awaits run below it, so
+   * the condemned list is fixed up front from the helpers that existed when the sweep began
+   * and `this.helpers` is re-read before anything is deleted or SIGKILLed. A helper attached
+   * DURING the sweep is in neither, so it survives both the per-udid kill and the port sweep —
+   * the same guard `sweepDeviceRecorders` applies on the Android side.
+   * → `serveSim.test.ts` "spares a helper attached DURING the sweep"
+   *
+   * What that does NOT close is the blanket `-k` branch, taken only when we know of no helper
+   * at all (a fresh process): an attach landing inside that one await is killed by a `-k`
+   * already in flight, and no re-read can see the future. It stays narrowed to the boot case
+   * for exactly that reason.
    */
   async reapOrphans(keep: ReadonlySet<string> = new Set()): Promise<void> {
-    const spared = [...this.helpers].filter(([udid]) => keep.has(udid));
-    const sparedPorts = new Set(spared.map(([, h]) => h.port));
-    if (spared.length === 0) {
+    const known = new Map(this.helpers);
+    const doomed = [...known.keys()].filter((udid) => !keep.has(udid));
+    if (known.size === 0) {
       await this.killImpl(this.bin, ["-k"]);
     } else {
       // Per-udid, because the blanket `-k` would take the live ones with it. Helpers left
       // by a previous process have udids we do not know; the port sweep below is what
       // collects those, and SIGKILL is the stronger lever anyway.
-      for (const [udid] of this.helpers) if (!keep.has(udid)) await this.killImpl(this.bin, ["-k", udid]);
+      for (const udid of doomed) await this.killImpl(this.bin, ["-k", udid]);
     }
-    this.helpers.clear();
-    for (const [udid, helper] of spared) this.helpers.set(udid, helper);
+    for (const udid of doomed) this.helpers.delete(udid);
+    // Read fresh, not from the snapshot above: an attach that landed during those kills holds
+    // a port in this range, and SIGKILLing it would take down a preview that just came up.
+    const sparedPorts = new Set([...this.helpers.values()].map((h) => h.port));
     for (let port = this.range[0]; port <= this.range[1]; port++) {
       if (sparedPorts.has(port)) continue;
       for (const pid of await this.listenersImpl(port)) {
