@@ -440,6 +440,12 @@ export class AndroidManager {
    * <name>"` over those names is the only thing that kills an emulator process —
    * so a timeout that reads as success leaves a QEMU orphan no sweep can name.
    * "Still running" and "gone" must not be the same value.
+   *
+   * A returned boolean nobody reads is the same bug with more steps, so the callers
+   * are pinned too: → `preview.test.ts` "declines the delete", "keeps trimPool off it
+   * once the lease is released", and `doctor.test.ts` "keeps it when the emulator would
+   * not exit". Three of the four callers threw this answer away when it was introduced,
+   * and `trimPool` deleted AVDs without calling this at all.
    */
   async shutdown(serial: string, timeoutMs = 20_000): Promise<boolean> {
     await this.adb(serial, ["emu", "kill"]).catch(() => {});

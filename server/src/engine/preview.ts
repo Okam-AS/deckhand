@@ -515,7 +515,8 @@ export class PreviewEngine {
    * out of `listAvds()` for good. The lease is gone by then, so "leased" cannot
    * carry this — a released-but-still-running AVD is exactly what `trimPool`
    * would otherwise pick as the cheapest thing to reclaim.
-   * → `preview.test.ts` "keeps an AVD whose emulator would not die" (all three paths).
+   * → `preview.test.ts` "keeps trimPool off it once the lease is released", and
+   * "declines the delete" for each of the three paths that reach a `deleteAvd`.
    */
   private readonly unstoppedAvds = new Set<string>();
   /** Devices whose teardown is still in flight (they hold real resources until it finishes). */
