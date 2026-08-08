@@ -58,7 +58,8 @@ export const configSchema = z.object({
   // HMAC key for signing share unlock cookies (PIN gate). Omit and deckhand
   // auto-generates + persists one under ~/.deckhand/share-secret on first boot.
   shareSecret: z.string().min(1).optional(),
-  // Agent-driven testing backend (PLAN §8, describe/ui). deckhand drives SimDeck
+  // Agent-driven testing backend (describe/ui — the PLAN §6 amendment of
+  // 2026-07-17; §8 is the video seam, which SimDeck is NOT part of). deckhand drives SimDeck
   // control-only (REST /action + /accessibility-tree) on the same booted device;
   // it keeps serve-sim/adb-screencap for the human video. Loopback only. Omit and
   // the fields below default; the daemon is contacted lazily on the first

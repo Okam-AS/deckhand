@@ -9,8 +9,10 @@ import { androidProcessEnv } from "./toolEnv.ts";
 // serial is deterministic (`emulator-<port>`). Pure parsing/selection is
 // fixture-testable; the exec seam is injectable.
 //
-// NOTE: on-device validation is pending (needs an Android SDK + emulator on the
-// mini). The command shapes follow the documented adb/avdmanager/emulator CLIs.
+// Validated against real hardware by the Android leg of `npm run test:device`
+// and `deckhand doctor --device-only` (boot, first frame, describe) — that gate
+// is what found `describe`'s blank-tree bug below. Neither runs in CI, because
+// GitHub runners cannot boot an emulator; both are run by hand.
 // ---------------------------------------------------------------------------
 
 export interface ExecResult {

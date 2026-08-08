@@ -115,7 +115,7 @@ async function checkToolchains(): Promise<Check[]> {
 
 function checkServeSim(): Check {
   // Deckhand runs its OWN vendored serve-sim, patched to strip the host
-  // shell-exec routes (see server.ts). Check THAT copy — a serve-sim on PATH is
+  // shell-exec routes (see streaming/serveSim.ts). Check THAT copy — a serve-sim on PATH is
   // irrelevant, and would be unpatched. Verify it exists and that the patch is
   // actually applied (patch-package can silently no-op after a version bump).
   // Read the version from the vendored package itself, not config — config's

@@ -28,8 +28,14 @@ export function addTokenEntry(
 /**
  * Drop a token entry by name; throws when there is no such name.
  *
- * Removing the LAST token is allowed on purpose: a leaked connector URL has to be killable, and
- * `deckhand token` mints a fresh one on the spot. Refusing would leave the leak live.
+ * Removing the LAST token is allowed on purpose: a leaked credential has to be killable, and
+ * `deckhand token add <name>` mints a replacement. Refusing would leave the leak live.
+ *
+ * Note what a token is NOT: the connector URL carries no secret (`deckhand token` prints it
+ * and mints nothing). What gates a remote client is a pairing code from `deckhand pair`, and
+ * minting one needs a local credential — so with none left, nothing can be let in, which is
+ * why the caller prints that and doctor calls it a hard failure.
+ * → cli/tokenUrl.test.ts "agrees with doctor about what to run when the last credential goes"
  */
 export function removeTokenEntry(
   tokens: TokenEntry[],

@@ -230,8 +230,10 @@ export async function cmdSetup(opts: SetupOptions): Promise<void> {
     }
 
     step("Cloudflare tunnel");
-    // Unreachable: humanOnlySteps above already stops when there is no hostname. Stated
-    // rather than assumed, so the invariant survives someone editing the preflight.
+    // Unreachable: `humanInput` above raises a question when no hostname was given, and
+    // this function stops there. Stated rather than assumed, so the invariant survives
+    // someone editing the preflight.
+    // → preflight.test.ts "classifies the hostname as a QUESTION, not a blocker"
     const hostname = opts.hostname;
     if (!hostname) throw new SetupError("no --hostname given", "Pass --hostname deckhand.yourdomain.com");
     const tunnelId = ensureTunnel();

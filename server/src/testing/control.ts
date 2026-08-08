@@ -4,9 +4,13 @@ import { SimDeckDaemon, type SimDeckDaemonOptions } from "./simdeck.ts";
 // SimDeck control-only REST client. Backs deckhand's `describe` (accessibility
 // tree) and `ui` (tap/type/…) MCP tools by driving SimDeck's REST surface on a
 // device deckhand already booted. See simdeck.ts for the two hard rules (REST
-// only; same-origin auth, no token). Every request carries a matching `Origin`
-// so the loopback POST is accepted without a token — and this client never
-// touches the input WebSocket / webrtc / refresh endpoints.
+// only; same-origin auth, no token). Deckhand holds no SimDeck token: the POSTs
+// carry a matching `Origin` so loopback accepts them tokenless, and the GETs
+// (accessibility-tree, screenshot.png) send no headers at all — a loopback GET
+// needs neither. This client never touches the input WebSocket / webrtc /
+// refresh endpoints. → control.test.ts "translates tap to a normalized /action
+// POST with a same-origin Origin header" and "never touches the input WebSocket
+// / webrtc / refresh endpoints".
 // ---------------------------------------------------------------------------
 
 /** A booted device addressed the way SimDeck expects: iOS UDID, or `android:<avd>`. */
