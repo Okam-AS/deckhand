@@ -90,6 +90,10 @@ export const PAIR_FORM_SCRIPT = `
     return raw.length > 3 ? raw.slice(0, 3) + "-" + raw.slice(3) : raw;
   };
   let sent = false;
+  // A back-navigation restores the field's value whether or not the page comes from the bfcache,
+  // and the markup's disabled attribute is only right for an empty field. Without this the visitor
+  // is looking at their whole code above a dead button.
+  b.disabled = c.value.length !== 7;
   // The code is single-use, so a second POST spends nothing and tells the visitor "invalid code"
   // about a code that just worked. Auto-submit makes that easy to hit: pasting submits, and the
   // hand already on its way to Connect clicks a form that is mid-flight.
@@ -126,9 +130,8 @@ export const PAIR_FORM_SCRIPT = `
  * only missing piece is a string that exists on the operator's machine. The form carries the
  * request's own parameters so the POST can re-validate them rather than trust a session.
  *
- * The input does the tidying a person should not have to: upper-cases, inserts the hyphen, and
- * submits itself the moment six characters are in. Somebody is reading this off another screen
- * — every keystroke of ceremony is a chance to mistype the one string that matters.
+ * Somebody is reading the code off another screen, so the field spares them every keystroke of
+ * ceremony it can; PAIR_FORM_SCRIPT is where that behaviour lives.
  */
 function codeForm(
   res: express.Response,

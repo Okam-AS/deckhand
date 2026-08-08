@@ -84,8 +84,9 @@ class StubWindow {
   }
 }
 
-function runForm(): { input: StubInput; button: StubButton; form: StubForm; window: StubWindow } {
+function runForm(restoredValue = ""): { input: StubInput; button: StubButton; form: StubForm; window: StubWindow } {
   const input = new StubInput();
+  input.value = restoredValue;
   const button = new StubButton(input.form);
   const window = new StubWindow();
   new Function("document", "window", PAIR_FORM_SCRIPT)(new StubDocument(input, button), window);
@@ -126,6 +127,13 @@ describe("the pairing form", () => {
     assert.equal(input.readOnly, false);
     button.click();
     assert.equal(form.posts, 2, "the second attempt is the visitor's retry, not the click that raced the first");
+  });
+
+  it("enables Connect for a code the browser restored on its own", () => {
+    // A back-navigation puts the value back without running the page's script again, and the
+    // markup's disabled attribute is written for an empty field.
+    const { button } = runForm("GGE-DYW");
+    assert.equal(button.disabled, false, "the visitor would be looking at their code above a dead button");
   });
 
   it("does not submit an incomplete code", () => {
