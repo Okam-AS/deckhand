@@ -51,6 +51,11 @@ How to run it:
 - When you find one that is still true and load-bearing, **ask whether a test
   fails when it breaks.** If not, that is the finding — not the comment.
 
+**A false precondition is the only comment defect worth a finding.** Do not report
+comment wording, tone, over-claiming prose, or a rationale that could be phrased
+better: a review round spent on prose is a round the code did not get, and every
+edit to it voids the cold round.
+
 ## Pass 2 — Ordering: bookkeeping before the effect it records
 
 Look for a line that records an outcome above the line that produces it.
