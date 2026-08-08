@@ -153,3 +153,141 @@ describe("AndroidAdbBackend.attach — a port it cannot bind", () => {
     }
   });
 });
+
+/**
+ * The boot-time sweep of on-device `screenrecord` orphans.
+ *
+ * Until this existed the ONLY device-side `pkill screenrecord` was in
+ * `AvccSource.stop()` — our graceful teardown. A server killed with SIGKILL (or
+ * one that crashed) left the recorder running inside the emulator, and the next
+ * process swept only its own in-memory helper map, which is empty at boot. The
+ * cost is not one dead device: the host H.264 encoder is single-instance across
+ * emulators, so one orphan makes EVERY other emulator produce zero bytes with
+ * no error, which androidH264.ts can only read as "this device cannot encode"
+ * and answers by dropping the whole machine to the ~4 MB/s MJPEG fallback.
+ */
+function sweepHarness(opts: { serials: string[]; avds: Record<string, string>; busy?: string[]; psFails?: boolean }) {
+  const calls: { serial: string; args: string[] }[] = [];
+  const adb = async (serial: string, args: string[]) => {
+    calls.push({ serial, args });
+    if (args[0] === "emu") {
+      const name = opts.avds[serial];
+      return name ? { stdout: Buffer.from(`${name}\nOK\n`), code: 0 } : { stdout: Buffer.alloc(0), code: 1 };
+    }
+    if (args.includes("size")) return { stdout: Buffer.from("Physical size: 1080x2400"), code: 0 };
+    return { stdout: Buffer.alloc(0), code: 0 };
+  };
+  const backend = new AndroidAdbBackend({
+    portRange: [3400, 3410],
+    adb,
+    listSerials: async () => opts.serials,
+    hostRecorderSerials: async () => {
+      if (opts.psFails) throw new Error("ps unavailable");
+      return new Set(opts.busy ?? []);
+    },
+  });
+  const killed = () => calls.filter((c) => c.args[0] === "shell" && c.args[1] === "pkill").map((c) => c.serial);
+  return { backend, calls, killed };
+}
+
+describe("AndroidAdbBackend.reapOrphans — recorders left inside the emulator", () => {
+  it("kills a recorder nobody owns on a deckhand emulator", async () => {
+    const h = sweepHarness({ serials: ["emulator-5554"], avds: { "emulator-5554": "deckhand_p1_1" } });
+    await h.backend.reapOrphans();
+    assert.deepEqual(h.killed(), ["emulator-5554"], "the orphaned recorder is swept");
+    const kill = h.calls.find((c) => c.args[1] === "pkill")!;
+    assert.deepEqual(
+      kill.args,
+      ["shell", "pkill", "-INT", "-f", "'screenrecord --output-format=h264'"],
+      "matched on OUR recorder's argv — the only ownership evidence that crosses adb",
+    );
+  });
+
+  it("kills a pooled emulator's recorder too — the pool outlives the preview, the recorder must not", async () => {
+    const h = sweepHarness({ serials: ["emulator-5556"], avds: { "emulator-5556": "deckhand_pool_pixel_1" } });
+    await h.backend.reapOrphans();
+    assert.deepEqual(h.killed(), ["emulator-5556"]);
+  });
+
+  it("spares a device whose host-side `adb exec-out screenrecord` is still alive", async () => {
+    // `deckhand doctor --device-only` calls reapOrphans() from a SECOND process
+    // while the server may be streaming: empty helper map, empty keep-set. The
+    // host-side owner is the only signal that survives that boundary, and
+    // without it the doctor kills the live server's video.
+    const h = sweepHarness({
+      serials: ["emulator-5554", "emulator-5556"],
+      avds: { "emulator-5554": "deckhand_p1_1", "emulator-5556": "deckhand_p2_1" },
+      busy: ["emulator-5554"],
+    });
+    await h.backend.reapOrphans();
+    assert.deepEqual(h.killed(), ["emulator-5556"], "the owned recorder survives; the orphan does not");
+  });
+
+  it("spares a live preview's device, whether keep names the AVD or the serial", async () => {
+    // The boot sweep runs AFTER the port is bound, so a start_preview can be
+    // mid-attach. `keep` carries AVD names on Android (liveDeviceHandles fills
+    // it from record.udid) while the helper map is keyed by serial — reading
+    // only one of the two spares only half the live devices.
+    const byAvd = sweepHarness({ serials: ["emulator-5554"], avds: { "emulator-5554": "deckhand_p1_1" } });
+    await byAvd.backend.reapOrphans(new Set(["deckhand_p1_1"]));
+    assert.deepEqual(byAvd.killed(), [], "an AVD a live preview holds is not swept");
+
+    const bySerial = sweepHarness({ serials: ["emulator-5554"], avds: { "emulator-5554": "deckhand_p1_1" } });
+    await bySerial.backend.reapOrphans(new Set(["emulator-5554"]));
+    assert.deepEqual(bySerial.killed(), [], "a serial a live preview holds is not swept");
+  });
+
+  it("leaves a developer's own emulator alone, and one that will not name its AVD", async () => {
+    const h = sweepHarness({
+      serials: ["emulator-5554", "emulator-5556"],
+      avds: { "emulator-5554": "Pixel_7_API_34" }, // 5556 answers nothing at all
+    });
+    await h.backend.reapOrphans();
+    assert.deepEqual(h.killed(), [], "not deckhand's device, and an unnamed one is not provably deckhand's either");
+  });
+
+  it("never touches a physical device", async () => {
+    // Physical hardware is BORROWED (devices/physical.ts): deckhand does not
+    // stream it, so a screenrecord there is always somebody else's capture.
+    const h = sweepHarness({ serials: ["R5CT30ABCDE"], avds: {} });
+    await h.backend.reapOrphans();
+    assert.deepEqual(h.killed(), []);
+    assert.deepEqual(h.calls, [], "a physical serial is not even probed");
+  });
+
+  it("kills nothing when it cannot read who owns what", async () => {
+    const h = sweepHarness({ serials: ["emulator-5554"], avds: { "emulator-5554": "deckhand_p1_1" }, psFails: true });
+    await h.backend.reapOrphans();
+    assert.deepEqual(h.killed(), [], "an unreadable owner list means unknown, not unowned");
+  });
+
+  it("spares a recorder this process is streaming right now", async () => {
+    const { adb } = fakeAdb();
+    const seen: string[] = [];
+    const b = new AndroidAdbBackend({
+      portRange: [3420, 3430],
+      adb: async (serial, args, o) => {
+        if (args[0] === "shell" && args[1] === "pkill") seen.push(serial);
+        if (args[0] === "emu") return { stdout: Buffer.from("deckhand_p1_1\nOK\n"), code: 0 };
+        return adb(serial, args, o);
+      },
+      listSerials: async () => ["emulator-5554"],
+      hostRecorderSerials: async () => new Set<string>(),
+    });
+    await withStream(b, async () => {
+      await b.reapOrphans(new Set(["deckhand_p1_1"]));
+      assert.deepEqual(seen, [], "the helper we hold is live work, not an orphan");
+    });
+  });
+
+  it("owns the same AVD prefix the reaper does", async () => {
+    // The prefix is duplicated rather than imported, to keep the streaming seam
+    // free of an engine dependency. Nothing else would notice them drifting:
+    // the sweep would simply stop recognising deckhand's own emulators and go
+    // quietly back to sweeping nothing.
+    const { AVD_PREFIX } = await import("../engine/reaper.ts");
+    const h = sweepHarness({ serials: ["emulator-5554"], avds: { "emulator-5554": `${AVD_PREFIX}p1_1` } });
+    await h.backend.reapOrphans();
+    assert.deepEqual(h.killed(), ["emulator-5554"], "reaper's AVD prefix is the one this sweep recognises");
+  });
+});

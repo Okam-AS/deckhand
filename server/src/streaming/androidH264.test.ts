@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { AvccSource } from "./androidH264.ts";
+import { AvccSource, RECORDER_ARGV, RECORDER_PKILL_PATTERN } from "./androidH264.ts";
 import { AVCC_TAG_DELTA, AVCC_TAG_DESCRIPTION, AVCC_TAG_KEYFRAME } from "./h264.ts";
 
 const hdr = (t: number) => 0x60 | t;
@@ -374,4 +374,19 @@ test("a probe nobody subscribed to releases the recorder", async () => {
   await new Promise((r) => setTimeout(r, 3_100));
   assert.equal(spawned[0]!.killed, true, "and released once nobody arrived");
   source.dispose();
+});
+
+test("the pkill pattern is a prefix of the argv we actually spawn", () => {
+  // The device-side sweep (androidAdb.ts) has no env marker to hunt for — an
+  // `adb shell` process carries nothing from this side — so it matches this
+  // argv instead. If the spawn's flags are reordered and the pattern is not,
+  // the sweep silently stops matching our own recorders and goes back to
+  // sweeping nothing, which is the bug it was written to fix.
+  assert.ok(
+    RECORDER_ARGV.join(" ").startsWith(RECORDER_PKILL_PATTERN),
+    `${RECORDER_PKILL_PATTERN} no longer matches ${RECORDER_ARGV.join(" ")}`,
+  );
+  // And it must stay narrower than "any screenrecord": the bare name would also
+  // match a capture the developer started themselves.
+  assert.ok(RECORDER_PKILL_PATTERN.includes(" "), "the pattern names flags, not just the binary");
 });

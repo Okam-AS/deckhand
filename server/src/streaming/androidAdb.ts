@@ -2,7 +2,8 @@ import { createServer, type Server } from "node:http";
 import { execFile } from "node:child_process";
 import { WebSocketServer, type WebSocket } from "ws";
 import { allocatePort, helperBasePath, type AttachedStream, type StreamDeviceRef, type StreamingBackend } from "./backend.ts";
-import { AvccSource } from "./androidH264.ts";
+import { AvccSource, RECORDER_PKILL_PATTERN } from "./androidH264.ts";
+import { parseAdbDevices } from "../devices/android.ts";
 
 /**
  * How long to keep asking a freshly booted emulator for a frame. Matches the
@@ -45,12 +46,49 @@ const MAX_SOCKET_BACKLOG_BYTES = 2 * 1024 * 1024;
 export interface AndroidAdbOptions {
   portRange: [number, number];
   adb?: (serial: string, args: string[], opts?: { binary?: boolean; timeoutMs?: number }) => Promise<{ stdout: Buffer; code: number }>;
+  /** `adb devices` → every serial the shared adb daemon can see. Injected by tests. */
+  listSerials?: () => Promise<string[]>;
+  /**
+   * Serials that some HOST process is currently recording — i.e. an
+   * `adb -s <serial> exec-out screenrecord` is alive somewhere on this Mac.
+   * Injected by tests; see `sweepDeviceRecorders` for why it is not our own
+   * helper map.
+   */
+  hostRecorderSerials?: () => Promise<Set<string>>;
 }
+
+/**
+ * AVD names deckhand creates (`deckhand_<previewId>_<deviceId>`, and
+ * `deckhand_pool_…`, which shares the prefix). Duplicated from
+ * `engine/reaper.ts` rather than imported so the streaming seam keeps no
+ * dependency on the engine; a drift between the two is a compile-time-invisible
+ * bug, so a test asserts they are the same string.
+ * → `androidAdbBackend.test.ts` "owns the same AVD prefix the reaper does"
+ */
+const DECKHAND_AVD_PREFIX = "deckhand_";
 
 /** Parse `adb shell wm size` → device pixel dimensions. */
 export function parseWmSize(output: string): { w: number; h: number } | null {
   const m = /(\d+)x(\d+)/.exec(output);
   return m ? { w: Number(m[1]), h: Number(m[2]) } : null;
+}
+
+/**
+ * Parse `adb -s <serial> emu avd name` → the AVD this emulator was booted from.
+ *
+ * The console answers with the name and then its own `OK` status line, and
+ * either can be absent when the console refuses (no auth token, a device that
+ * is not an emulator at all). Anything that does not look like a name answers
+ * null rather than a guess: the one caller treats null as "not provably ours"
+ * and leaves the device alone.
+ */
+export function parseEmuAvdName(output: string): string | null {
+  for (const raw of output.split("\n")) {
+    const line = raw.trim();
+    if (!line || line === "OK" || line.startsWith("KO")) continue;
+    return line;
+  }
+  return null;
 }
 
 /** Map normalized 0..1 coordinates to device pixels. */
@@ -170,6 +208,48 @@ function defaultAdb(serial: string, args: string[], opts?: { timeoutMs?: number 
   });
 }
 
+function defaultListSerials(): Promise<string[]> {
+  return new Promise((resolve) => {
+    execFile("adb", ["devices"], { encoding: "utf8", timeout: 5_000 }, (err, stdout) =>
+      // A failed enumeration must sweep NOTHING, not everything: an empty list
+      // means "found no orphans", which is the safe direction here.
+      resolve(err ? [] : parseAdbDevices(String(stdout))),
+    );
+  });
+}
+
+/**
+ * Serials with a live host-side recorder, read from `ps`.
+ *
+ * A device-side `screenrecord` started by `adb exec-out` is owned by that adb
+ * process on THIS Mac; when the owner is alive the recorder is live work, and
+ * when it is gone the recorder is the orphan we are hunting. This is the only
+ * owner signal that survives a process boundary, and it has to: `deckhand
+ * doctor --device-only` runs `reapOrphans()` from a SECOND process while the
+ * server may be mid-preview, where the in-memory helper map is empty and `keep`
+ * is empty too.
+ */
+function defaultHostRecorderSerials(): Promise<Set<string>> {
+  return new Promise((resolve, reject) => {
+    execFile("ps", ["-ax", "-o", "command="], { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+      if (err) {
+        // Unknown owners, NOT "no owners". The sweep abandons the whole pass on
+        // a rejection; an empty set here would read as "nothing is live" and
+        // kill every recorder on the machine.
+        reject(err);
+        return;
+      }
+      const serials = new Set<string>();
+      for (const line of String(stdout).split("\n")) {
+        if (!line.includes("exec-out") || !line.includes("screenrecord")) continue;
+        const m = /(?:^|\s)-s\s+(\S+)/.exec(line);
+        if (m) serials.add(m[1]!);
+      }
+      resolve(serials);
+    });
+  });
+}
+
 interface Helper {
   serial: string;
   port: number;
@@ -182,11 +262,15 @@ interface Helper {
 export class AndroidAdbBackend implements StreamingBackend {
   private readonly range: [number, number];
   private readonly adb: NonNullable<AndroidAdbOptions["adb"]>;
+  private readonly listSerials: NonNullable<AndroidAdbOptions["listSerials"]>;
+  private readonly hostRecorderSerials: NonNullable<AndroidAdbOptions["hostRecorderSerials"]>;
   private readonly helpers = new Map<string, Helper>();
 
   constructor(opts: AndroidAdbOptions) {
     this.range = opts.portRange;
     this.adb = opts.adb ?? ((serial, args, o) => defaultAdb(serial, args, o));
+    this.listSerials = opts.listSerials ?? defaultListSerials;
+    this.hostRecorderSerials = opts.hostRecorderSerials ?? defaultHostRecorderSerials;
   }
 
   private usedPorts(): Set<number> {
@@ -475,18 +559,81 @@ export class AndroidAdbBackend implements StreamingBackend {
    * Unlike serve-sim's detached daemons, these helpers are HTTP servers in THIS process — they
    * die with it, so the in-memory map really is their owner and a fresh process has nothing of
    * ours to collect. This matters at boot (a no-op) and during the janitor sweep (not a no-op).
-   * What this sweeps is only the helpers in that map. The one Android resource that outlives
-   * us is the on-device `screenrecord`, and nothing here sweeps it: androidH264.ts pkills it
-   * from its own `stop()`, which is our GRACEFUL teardown — a recorder orphaned by a crashed
-   * or SIGKILLed server survives into the next process with no owner. Not cosmetic: the host
+   *
+   * The one Android resource that DOES outlive us is the on-device `screenrecord`:
+   * androidH264.ts pkills it from its own `stop()`, which is our graceful teardown only, so a
+   * crashed or SIGKILLed server leaves it running with no owner. Not cosmetic — the host
    * encoder is single-instance across emulators, so one orphan makes every other device
-   * produce zero bytes with no error at all. A boot-time device-side sweep is unbuilt.
+   * produce zero bytes with no error at all, which from inside androidH264.ts is
+   * indistinguishable from "this device cannot encode" and silently drops the whole machine to
+   * the ~4 MB/s MJPEG fallback. `sweepDeviceRecorders` is the second half of this sweep.
    */
   async reapOrphans(keep: ReadonlySet<string> = new Set()): Promise<void> {
     for (const [serial, helper] of [...this.helpers]) {
       if (keep.has(serial)) continue;
       helper.stop();
       this.helpers.delete(serial);
+    }
+    await this.sweepDeviceRecorders(keep);
+  }
+
+  /**
+   * Kill `screenrecord` processes left running INSIDE emulators by a previous
+   * deckhand. Four tests have to pass before a device is touched, and each one
+   * is load-bearing:
+   *
+   *   1. the serial is an emulator. Physical devices are borrowed hardware
+   *      (devices/physical.ts) and deckhand never streams them, so a
+   *      `screenrecord` on a plugged-in phone is always somebody else's.
+   *   2. the AVD is deckhand-named. A developer's own emulator is out of
+   *      bounds, and a console that will not tell us the name reads as "not
+   *      provably ours" — the safe direction.
+   *   3. neither the serial nor its AVD name is in `keep`, and no helper of
+   *      ours holds the serial. `keep` carries AVD names on Android
+   *      (`liveDeviceHandles` fills it from `record.udid`) while the helper map
+   *      is keyed by serial, so BOTH have to be consulted; matching one alone
+   *      would spare only half the live devices.
+   *   4. no host-side `adb -s <serial> exec-out screenrecord` is alive. This is
+   *      the only check that survives a process boundary, and it is what makes
+   *      `deckhand doctor --device-only` — a separate process, empty helper map,
+   *      empty `keep`, run routinely while the server is streaming — safe.
+   *
+   * Then the kill itself is narrowed once more, to our own recorder's argv
+   * (`RECORDER_PKILL_PATTERN`). An `adb shell` process carries no env marker
+   * from this side, so that argv is the closest thing to a marker that exists
+   * on the device; the graceful `stop()` path kills by name and can afford to,
+   * because it owns the recorder it is killing and this does not.
+   *
+   * Never throws, and fails towards killing nothing: a failed enumeration is
+   * "no orphans found", never "no live work found".
+   */
+  private async sweepDeviceRecorders(keep: ReadonlySet<string>): Promise<void> {
+    try {
+      const serials = (await this.listSerials()).filter((s) => s.startsWith("emulator-"));
+      const candidates: string[] = [];
+      for (const serial of serials) {
+        if (this.helpers.has(serial) || keep.has(serial)) continue;
+        const res = await this.adb(serial, ["emu", "avd", "name"], { timeoutMs: 5_000 });
+        if (res.code !== 0) continue;
+        const avd = parseEmuAvdName(res.stdout.toString());
+        if (!avd || !avd.startsWith(DECKHAND_AVD_PREFIX) || keep.has(avd)) continue;
+        candidates.push(serial);
+      }
+      if (candidates.length === 0) return;
+      // Read the owners LAST. Every await between this read and the kill is a
+      // window in which a `start_preview` elsewhere attaches to one of these
+      // devices and starts a recorder we would then kill — the same window
+      // `liveDeviceHandles()` guards for devices, narrowed the same way.
+      const busy = await this.hostRecorderSerials();
+      for (const serial of candidates) {
+        if (busy.has(serial)) continue;
+        await this.adb(serial, ["shell", "pkill", "-INT", "-f", deviceShellQuote(RECORDER_PKILL_PATTERN)], {
+          timeoutMs: 5_000,
+        });
+      }
+    } catch {
+      // adb missing, ps unreadable, a device that vanished mid-sweep: leave
+      // every recorder alone rather than guess at ownership.
     }
   }
 }

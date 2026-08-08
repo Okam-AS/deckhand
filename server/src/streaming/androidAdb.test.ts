@@ -9,6 +9,7 @@ import {
   orientationToUserRotation,
   usageToKeycode,
   adbTypeCharArgs,
+  parseEmuAvdName,
 } from "./androidAdb.ts";
 
 /** Encode a viewer HID frame: [tag:u8][JSON]. */
@@ -91,6 +92,23 @@ describe("parseWmSize", () => {
     assert.deepEqual(parseWmSize("Physical size: 1080x2340"), { w: 1080, h: 2340 });
     assert.deepEqual(parseWmSize("Override size: 720x1600\n"), { w: 720, h: 1600 });
     assert.equal(parseWmSize("garbage"), null);
+  });
+});
+
+describe("parseEmuAvdName", () => {
+  it("reads the AVD name out of the emulator console's reply", () => {
+    assert.equal(parseEmuAvdName("deckhand_p1_1\nOK\n"), "deckhand_p1_1");
+    assert.equal(parseEmuAvdName("\nPixel_7_API_34\r\nOK\n"), "Pixel_7_API_34");
+  });
+
+  it("answers null when the console refuses, rather than a name-shaped guess", () => {
+    // The one caller reads null as "not provably deckhand's" and leaves the
+    // device alone. A console error parsed as a name would be a name that does
+    // not start with `deckhand_`, so this direction is safe either way — but
+    // only by accident, and the next caller should not have to know that.
+    assert.equal(parseEmuAvdName("KO: unknown command\n"), null);
+    assert.equal(parseEmuAvdName("OK\n"), null);
+    assert.equal(parseEmuAvdName(""), null);
   });
 });
 

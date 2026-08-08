@@ -92,19 +92,34 @@ export interface AvccSubscriber {
 
 export type SpawnRecorder = (serial: string) => ChildProcessWithoutNullStreams;
 
-const defaultSpawnRecorder: SpawnRecorder = (serial) =>
-  spawn("adb", [
-    "-s",
-    serial,
-    "exec-out",
-    "screenrecord",
-    "--output-format=h264",
-    `--bit-rate=${BIT_RATE}`,
-    // 0 removes the 180 s cap (screenrecord v1.4+). Older devices reject it and
-    // exit, which the restart loop absorbs as a segment boundary.
-    "--time-limit=0",
-    "-",
-  ]);
+/**
+ * The device-side argv of our recorder. `adb exec-out <these>` runs them as a
+ * process INSIDE the emulator, so this is exactly what `ps` shows there.
+ */
+export const RECORDER_ARGV = [
+  "screenrecord",
+  "--output-format=h264",
+  `--bit-rate=${BIT_RATE}`,
+  // 0 removes the 180 s cap (screenrecord v1.4+). Older devices reject it and
+  // exit, which the restart loop absorbs as a segment boundary.
+  "--time-limit=0",
+  "-",
+] as const;
+
+/**
+ * What a device-side `pkill -f` matches to find one of OUR recorders.
+ *
+ * An `adb shell` process carries no env marker from this side — the marker
+ * mechanism the boot reaper uses for Metro and the livesync runners cannot
+ * cross adb — so this argv prefix is the only evidence of ownership available
+ * on the device. It stops at `--output-format=h264` on purpose: the bit-rate is
+ * a tunable, and an orphan left by an older build was started with whatever
+ * value that build used. → `androidH264.test.ts` "the pkill pattern is a prefix
+ * of the argv we actually spawn".
+ */
+export const RECORDER_PKILL_PATTERN = RECORDER_ARGV.slice(0, 2).join(" ");
+
+const defaultSpawnRecorder: SpawnRecorder = (serial) => spawn("adb", ["-s", serial, "exec-out", ...RECORDER_ARGV]);
 
 /** One screenrecord process per device, fanned out to every viewer. */
 export class AvccSource {
