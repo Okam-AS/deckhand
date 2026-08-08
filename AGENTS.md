@@ -108,9 +108,9 @@ If you are here to **implement further**, your instructions are:
    rule not covered by `npm run ci` or the guardrails.
 4. The streaming layer is **decided** (PLAN.md §2/§8): iOS via **serve-sim** — its
    H.264 path is `stream.avcc` over a long-lived **chunked HTTP** response decoded with
-   WebCodecs, NOT a WebSocket (the WebSocket carries HID input only), and the pinned
-   serve-sim does not serve it, so `stream.mjpeg` is the live iOS path today and the
-   AVCC probe in `streaming/serveSim.ts` is there for a future version. Android via
+   WebCodecs, NOT a WebSocket (the WebSocket carries HID input only). The viewer probes
+   avcc and reads a 404 as "use `stream.mjpeg`" — a runtime answer about this machine,
+   never a claim written down in advance about what serve-sim can do. Android via
    **adb** — `screencap`
    for MJPEG and on-device `screenrecord` for H.264, NOT scrcpy, which was evaluated and
    not taken — and web via a proxy to the dev server. All behind the `StreamingBackend`

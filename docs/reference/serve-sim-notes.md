@@ -69,9 +69,9 @@ Per-device helper routes are served under `{base}/helper/<udid>/` (in-process fr
 | `/helper/<udid>/ax` | SSE | accessibility tree → `describe` |
 
 The H.264 path is **`stream.avcc` over a long-lived chunked HTTP response**, not a
-WebSocket — the only WebSocket here is `/ws`, and it carries input. (The pinned version
-Deckhand ships does not serve `stream.avcc` at all, so MJPEG is the live iOS path today;
-`serveSim.ts` probes avcc first anyway, so a serve-sim that gains it needs no change.)
+WebSocket — the only WebSocket here is `/ws`, and it carries input. The pinned 0.1.44 does
+route `/stream.avcc`; whether it encodes on a given machine is a runtime answer, so the
+viewer probes avcc and falls back to MJPEG on a 404 rather than deciding in advance.
 Framing (`client/avcc-codec.ts`): repeating
 `[len:u32-be][tag:u8][payload]` where `len = payload.length + 1`. Tags: `0x01` description
 (avcC SPS/PPS → decoder config), `0x02` keyframe (IDR), `0x03` delta (P-frame), `0x04` seed

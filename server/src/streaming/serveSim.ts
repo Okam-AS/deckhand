@@ -31,8 +31,11 @@ export function vendoredServeSimBin(): string {
 // stream actually producing bytes. Teardown is `serve-sim -k <udid>` (the
 // detached daemon has no child handle to kill).
 //
-// (H.264/`stream.avcc` is not served in this version; MJPEG is the path. A
-// future serve-sim H.264 upgrade slots in behind this same seam.)
+// (The pinned 0.1.44 DOES route `/stream.avcc` — `src/middleware.ts` dispatches it to
+// `session.handleAvcc`, and the package ships an H264Encoder. Whether a given machine
+// encodes is a runtime answer, which is why the viewer probes avcc and reads a 404 as
+// "use MJPEG" rather than as a failure. This comment claimed the opposite for long
+// enough that two documents copied it: do not restate a capability here, probe it.)
 // ---------------------------------------------------------------------------
 
 export interface ServeSimOptions {
