@@ -392,8 +392,12 @@ Key orchestration rules (rationale in `docs/reference/auto-mate-learnings.md`):
   worktree — untracked build artifacts survive, so the rebuild is warm.
 - **Local source (dev mode)**: a `path` app skips all of the above — the preview builds
   in the developer's working copy in place. The dir is borrowed, never owned: teardown
-  never removes it, and dependency install is guarded (`node_modules` present → skipped;
-  a worktree-style `npm ci` would wipe it). One live preview per local app, one device
+  never removes it, and dependency install is guarded — skipped while `node_modules` exists
+  AND no manifest/lockfile is newer than it (presence alone is not enough: a dependency added
+  on the branch leaves `node_modules` present but incomplete, and the build then fails
+  downstream as a Metro "Unable to resolve module" that reads as the app's bug). When it does
+  install in a borrowed checkout it is the frozen, lockfile-preserving form; a worktree-style
+  updating install would rewrite the developer's lockfile. One live preview per local app, one device
   per platform (the livesync process targets a single device).
 - Tokens via ephemeral `GIT_ASKPASS` script (username `x-access-token`), `GIT_TERMINAL_PROMPT=0`,
   temp script removed in `finally`. Tokens must never appear in remote URLs, `.git/config`,
@@ -405,12 +409,16 @@ Key orchestration rules (rationale in `docs/reference/auto-mate-learnings.md`):
 
 | Type | iOS | Android | Launch |
 |---|---|---|---|
-| **expo** | `npx expo run:ios --device <udid> --no-bundler` | `npx expo run:android --device <serial> --no-bundler` | Start Metro (`npx expo start --dev-client --port <allocated>`, **never `--clear`**, **never `--localhost`**), pre-approve URL scheme in sim plist, open `exp+<slug>://expo-development-client/?url=…&disableOnboarding=1` |
+| **expo** | `npx expo run:ios --device <udid> --no-bundler` | `npx expo run:android --device <avd-name> --no-bundler` — the AVD NAME, resolved over `adb … emu avd name`, because `expo run:android --device` matches on device name and a serial fails with "Could not find device with name"; the serial is the fallback for physical devices | Start Metro (`npx expo start --dev-client --port <allocated>`, **never `--clear`**, **never `--localhost`**), pre-approve URL scheme in sim plist, open `exp+<slug>://expo-development-client/?url=…&disableOnboarding=1` |
 | **react-native** (bare) | guarded `pod install` (skip when `Podfile.lock` == `Pods/Manifest.lock`), then `npx react-native run-ios --udid <udid> --mode Release --no-packager` | `npx react-native run-android --deviceId <serial>` | `simctl launch` (Release embeds the JS bundle; no Metro) |
 | **nativescript** | pre-resolve SPM out-of-band, then `ns run ios --no-hmr --no-watch --justlaunch --device <udid>` | `ns run android --no-hmr --no-watch --justlaunch --device <serial>` | ns launches as part of run |
 
-Dependency install: `[ -f package-lock.json ] && npm ci || npm install`, skipped when a
-`node_modules` marker is newer than the newest manifest/lockfile.
+Dependency install dispatches on the **lockfile**, bun → yarn → pnpm → npm (`PACKAGE_MANAGERS`
+in `engine/recipes.ts`), because forcing a bun/pnpm project through npm misreports what its own
+manager would have tolerated. A lockfile whose manager is not on PATH exits 127 saying so
+rather than falling through to npm. Two policies, and the difference is an invariant, not a
+flag: a disposable worktree may use the updating form, a **borrowed** local checkout only ever
+the frozen one. Skipped when `node_modules` exists and no manifest/lockfile is newer than it.
 
 Metro: the port is **allocated** from `METRO_PORT_RANGE` (`engine/recipes.ts`), never fixed.
 It was hard-coded to 8081, and since every Metro answers `/status` the same way, a
@@ -549,7 +557,9 @@ Essentials:
   implementer's choice: a helper in its own process means a crashed capture kills one
   device rather than deckhand, and embedding couples the server's stability to a native
   addon. Helpers bind loopback ports from `helperPortRange`; deckhand tracks
-  pid/port per udid and reaps on detach. serve-sim also keeps a state file under
+  port and base path per udid — **not a pid**, since the daemon is detached and there is no
+  child handle, which is why teardown is `serve-sim -k <udid>` plus a port check rather than a
+  signal. serve-sim also keeps a state file under
   `$TMPDIR/serve-sim/`, but deckhand never reads it and never calls `--list`: **orphans**
   left by a crash are collected by `reapOrphans` (`streaming/serveSim.ts`), which calls the
   kill form (`-k [udid]`) and then sweeps `helperPortRange` with its own `lsof`, SIGKILLing
@@ -696,7 +706,10 @@ does not cover. Mechanics: `docs/web-wildcard-hosting-plan.md`.
   Do not invent a new wire format — speak exactly what the helper serves.
 - Apply the battle-tested, transport-agnostic behaviors from
   `docs/reference/auto-mate-learnings.md` §2: feed no deltas before a true IDR, monotonic
-  decode timestamps, decode-backlog reset (queue > 2 → reinit + keyframe), rAF-painted
+  decode timestamps, decode-backlog recovery (**sustained** depth — over `MAX_DECODE_QUEUE`
+  for longer than `BACKLOG_MS`, since tripping on instantaneous depth caused a 3-4 Hz
+  reconnect loop — answered by a **reconnect**, not a decoder reinit: serve-sim sends one
+  keyframe per connection and no mid-stream IDR, so a bare reset waits forever), rAF-painted
   single pending frame (close superseded frames), IntersectionObserver + visibilitychange
   gating (no decode when hidden), first-frame watchdog with bounded auto-recovery, and a
   single `disposed` flag guarding every async callback.

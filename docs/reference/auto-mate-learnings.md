@@ -157,9 +157,11 @@ is the code that holds them. Do not restore them from an older copy of this file
   `git reset --hard <ref>` + `git submodule update --init --recursive`.
 - PR refs: `git fetch origin refs/pull/<N>/head:<local-ref> --force --prune` — works for
   fork PRs against the **base** repo; no fork access needed.
-- **Local-first resolution**: before any network fetch, try `origin/<branch>`, `<branch>`,
-  the PR ref, and HEAD in the base clone. If it resolves, build with zero network and zero
-  token. Only remote-only refs mint a GitHub token.
+- **Local-first resolution was the predecessor's rule and deckhand does NOT follow it.**
+  Trying `origin/<branch>` before fetching builds the PREVIOUS push, which is the one thing a
+  "preview my branch" request never means. In deckhand a named branch and a PR ref **always**
+  fetch; only a full commit SHA resolves out of the local clone (`prepareRef` in
+  `engine/worktree.ts`). Do not reinstate the shortcut to save a network round trip.
 - Token injection: ephemeral `GIT_ASKPASS` script (username `x-access-token`),
   `GIT_TERMINAL_PROMPT=0`, temp dir removed in `finally`. Lazy resolver for submodule
   tokens — only invoked when `.gitmodules` exists.
@@ -188,9 +190,11 @@ is the code that holds them. Do not restore them from an older copy of this file
 - Share id: `crypto.randomBytes(18).toString("base64url")` (24-char URL-safe).
 - Password: `scryptSync(password, salt16hex, 64)` + `timingSafeEqual` on equal-length
   buffers. (Consider explicit scrypt cost params; defaults are N=16384.)
-- WS proxy authorization: share variants of the stream/input endpoints validate the share
-  (+ password from the WS URL query) at upgrade time; the password is **stripped** from
-  anything forwarded upstream. Unlock via POST (GET can't carry the gate).
+- WS proxy authorization: share variants of the stream/input endpoints validate the share at
+  upgrade time. **No credential travels in the WS URL query** in deckhand — the gate is the
+  HMAC-signed `deck_unlock` cookie, and it is the COOKIE that is stripped before anything is
+  forwarded upstream (`share/proxy.ts`), so the app never sees it. Unlock via POST (GET can't
+  carry the gate).
 - Proxy details: buffer up to ~16 client messages while the upstream WS is CONNECTING;
   mirror both directions; never forward close codes 1005/1006/1015 (use 1011).
 - Elegant expiry trick: bind the share to the preview/lease id at creation and return
