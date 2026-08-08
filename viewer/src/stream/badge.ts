@@ -25,9 +25,15 @@ export function streamBadge(status: PlayerStatus, opts: { ready: boolean; isThum
   if (status === "fallback") return "Reduced quality";
   // "error" is scheduleReconnect having spent MAX_RECOVERY tries: it sets the
   // status and arms no further timer, so NOTHING is retrying and the pill must
-  // not suggest otherwise. Only a fresh start() can move it — a reload, or the
-  // frame going off screen and back — and neither resets `recovery`, so the next
-  // failure gives up at once. Hence "reload", not "retrying".
+  // not suggest otherwise. The budget is per DevicePlayer instance (`recovery`,
+  // cleared only by streamIsHealthy() on a painted frame), which is why the pill
+  // says reload: a reload builds a new player at 0. Going off screen and back
+  // does not — setActive(false) tears the streams down but leaves `recovery`
+  // spent, so that restart gets one shot and gives up on its first failure, and
+  // only paints its way back to a full budget if it succeeds. Reload is the cure
+  // that does not depend on the thing that just failed working. Untestable here:
+  // the viewer has no DOM setup, so nothing pins this and it is a claim about
+  // player.ts a reader must re-check there.
   if (status === "error") return "Stream stopped — reload";
   return "Connecting…";
 }
