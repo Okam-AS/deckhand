@@ -33,9 +33,9 @@ implementation:
 
 | Area | Decision |
 |---|---|
-| Streaming (iOS) | **[serve-sim](https://github.com/EvanBacon/serve-sim)** (Apache-2.0, npm) — H.264-over-WebSocket decoded with WebCodecs, automatic MJPEG-over-HTTP fallback, input + accessibility tree + logs over the same helper. Free, no relay infrastructure, rides the tunnel as plain WSS/HTTPS. Captures via `simctl io` (a public Apple interface — survives new iOS runtimes as long as simctl does). Pin the npm version. |
+| Streaming (iOS) | **[serve-sim](https://github.com/EvanBacon/serve-sim)** (Apache-2.0, npm) — H.264 served as `stream.avcc`, AVCC-framed over a long-lived **chunked HTTP response** (not a WebSocket), decoded with WebCodecs; automatic MJPEG-over-HTTP fallback; input over the helper's WebSocket, plus accessibility tree + logs on the same helper. Free, no relay infrastructure, rides the tunnel as plain HTTPS/WSS. Captures via `simctl io` (a public Apple interface — survives new iOS runtimes as long as simctl does). Pin the npm version. |
 | Streaming (Android) | **adb-based**, not scrcpy. The decision gate (ws-scrcpy vs embedded scrcpy-server) resolved against both: scrcpy's raw H.264 wire protocol is version-specific and needs extensive on-device iteration, which cannot be validated without a live emulator. Shipped: `screencap` MJPEG plus on-device `screenrecord` H.264, behind the same `StreamingBackend` seam — see §8 for the full outcome. A scrcpy upgrade remains possible behind that seam; it is not planned. |
-| NOT WebRTC/TURN; SimDeck for CONTROL only | An earlier revision of this plan used SimDeck + WebRTC relayed through Cloudflare TURN. **Rejected (2026-07-09):** TURN costs $0.05/GB and adds a credential/relay subsystem; SimDeck removed its WS transport (v0.1.31) and its display bridge rides private CoreSimulator APIs (unhedgeable risk against future Xcode); most of the predecessor project's operational scar tissue (display-heal ladder, daemon port cleanup, token discovery) was SimDeck-specific pathology. WS-carried H.264 has none of these problems: free, and exactly as firewall-proof as claude.ai itself. What SimDeck IS used for, since 2026-07-17, is its control/inspection REST surface behind `describe` and `ui` — see `.claude/rules/testing-control.md`. |
+| NOT WebRTC/TURN; SimDeck for CONTROL only | An earlier revision of this plan used SimDeck + WebRTC relayed through Cloudflare TURN. **Rejected (2026-07-09):** TURN costs $0.05/GB and adds a credential/relay subsystem; SimDeck removed its WS transport (v0.1.31) and its display bridge rides private CoreSimulator APIs (unhedgeable risk against future Xcode); most of the predecessor project's operational scar tissue (display-heal ladder, daemon port cleanup, token discovery) was SimDeck-specific pathology. Serving H.264 over the ordinary HTTP tunnel has none of these problems: free, no relay to run or pay for, and exactly as firewall-proof as claude.ai itself — video and input ride the same HTTPS/WSS a browser already reaches claude.ai with. What SimDeck IS used for, since 2026-07-17, is its control/inspection REST surface behind `describe` and `ui` — see `.claude/rules/testing-control.md`. |
 | App types (day one) | React Native (Expo **and** bare) + NativeScript. Flutter / plain-Xcode later. **Amended (2026-07-15): `web`.** A fourth app type hosts a **frontend web project** (a Vite dev server). It is unlike the mobile types: no device/simulator, **local-`path` only** (registered on the machine via `deckhand app add <id> --path <dir> --type web`, never over MCP), and the "preview" IS the running dev server — `start_preview` starts `npm run dev` as a long-lived process (reusing `DevProcessManager`, like NativeScript livesync) on a loopback port and reverse-proxies it through the share URL. Ready = the dev server answers HTTP 200 (no first-frame/screenshot; `screenshot` returns a clear error for web). The dev server is started with Vite's `--base=/s/<shareId>/web/ --host 127.0.0.1 --port <p>` so every asset URL (and HMR) sits under the share path. Vite-first; Next.js/others and git-based web previews are follow-ups. |
 | Build strategy | Build locally on the mini: git worktree → install deps → native build. No CI artifacts. |
 | Local dev mode + daily-loop contract | **Amended (2026-07-15):** an app may declare a local `path` (instead of, or alongside, `repo`). Local previews build **in place** in the developer's working copy — no worktree, no push — and NativeScript runs as a long-lived **livesync** process (`ns run --no-hmr`, watch on, HMR off — NS HMR is unreliable) so file saves reach the running sim with no tool calls. The loop rides in the tools themselves: `start_preview` is **idempotent** per (app, source, ref), share ids are **stable per app** (persisted; a bookmarked viewer URL never rots), and `restart_preview` rebuilds in place (git: fetch new tip + reset worktree; local: re-run) on the same booted devices. Consequence: named branches/PRs now **always fetch** (the old local-first shortcut served stale commits; SHAs remain local-first). Local previews trade snapshot determinism for the loop — the build mirrors whatever is on disk; the source dir is borrowed, never wiped (`npm ci` guarded) and never removed. Local apps are registered on the machine itself (`deckhand app add <id> --path <dir>`), not over MCP. |
@@ -62,7 +62,7 @@ claude.ai / Claude Code / Routines / any MCP client        share-link viewers (a
 │  /mcp                      MCP Streamable HTTP (stateless), bearer-gated tools            │
 │  /s/<shareId>              viewer page (our built static assets + preview metadata)       │
 │  /s/<shareId>/dev/<id>/*   scoped proxy → that device's streaming helper                  │
-│                            (video WS / MJPEG, input WS — nothing else)                    │
+│                            (video avcc/MJPEG over HTTP, input WS — nothing else)          │
 │                                                                                           │
 │  auth ── mcp tools ── previewEngine ── deviceManager ── streaming backends                │
 │              │              │                │                  │                         │
@@ -500,16 +500,16 @@ only this interface:
 ```ts
 interface StreamingBackend {
   // Attach to an already-booted device; idempotent. Resolves when the stream
-  // endpoint is up and has produced a first frame.
+  // endpoint is up — a first frame is a separate wait (see AttachedStream).
   attach(device: { platform: "ios" | "android"; udid: string; serial?: string }): Promise<AttachedStream>;
 }
 interface AttachedStream {
-  endpoints: {
-    video: { kind: "h264-ws" | "mjpeg-http"; path: string };  // proxied, never public
-    input: { kind: "ws"; path: string };
-  };
+  origin: string;                   // loopback upstream, e.g. "http://127.0.0.1:3100"
+  helperBasePath: string;           // e.g. "/helper/<udid>" — the proxy exposes only
+                                    // stream.avcc (H.264 over chunked HTTP), stream.mjpeg,
+                                    // ws (input) and ax beneath it; never public
+  waitForFirstFrame(timeoutMs?: number): Promise<boolean>;
   describe(): Promise<string>;      // token-efficient a11y tree
-  logsTail(lines: number): Promise<string>;
   detach(): Promise<void>;          // kill helper, release port
 }
 ```
@@ -528,10 +528,14 @@ Essentials:
   pid/port per udid and reaps on detach. serve-sim also keeps a state file under
   `$TMPDIR/serve-sim/` and supports `--list`/`--kill` — the janitor uses these to find and
   kill **orphans** after crashes.
-- Video: H.264 over WebSocket decoded with WebCodecs when the browser supports it
+- Video: **`stream.avcc`** — H.264 in AVCC framing over a single long-lived **chunked HTTP
+  response**, NOT a WebSocket — decoded with WebCodecs when the browser supports it
   (`codec: auto`), with automatic **MJPEG-over-HTTP fallback** (`stream.mjpeg`) — this
-  replaces any hand-rolled screenshot-poll degradation; it is built in.
-- Input: pointer/keyboard over the helper's WebSocket control channel (plus CLI commands
+  replaces any hand-rolled screenshot-poll degradation; it is built in. The pinned helper
+  routes `/stream.avcc`; whether a given machine actually encodes is a runtime answer, so
+  the viewer probes it and reads a 404 as "use MJPEG" rather than as a failure.
+- Input: pointer/keyboard over the helper's `ws` channel — the only WebSocket it serves,
+  and it carries no video (plus CLI commands
   `gesture`/`button`/`type`/`rotate` used by the `ui` MCP tool).
 - `describe`: serve-sim's accessibility endpoints (`ax`); `logs`: its forwarded simulator
   log/event stream.
@@ -642,7 +646,8 @@ dir is never touched).
 
 ### Stream client (ours, in `viewer/`)
 
-- **H.264-over-WS + WebCodecs `VideoDecoder`** painted to a canvas, matching serve-sim's
+- **H.264 over chunked HTTP (`stream.avcc`, read with `fetch` + a body reader) + WebCodecs
+  `VideoDecoder`** painted to a canvas, matching serve-sim's
   own client. Built by adapting serve-sim's client utilities (Apache-2.0, attribution kept)
   into `viewer/src/stream/`: `avcc.ts` (codec + fallback), `mjpeg.ts` (frame parsing),
   `input.ts` (pointer/key encoding), `player.ts` (the decode loop and reconnect).

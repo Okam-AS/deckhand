@@ -58,7 +58,7 @@ the machine.
 | `server/src/mcp/` | The MCP surface: previews, screenshots, UI tree, test runs, app registration |
 | `server/src/engine/` | Preview state machine, build recipes (Expo / RN / NativeScript), app-type detection, worktrees, dev-server lifecycle |
 | `server/src/devices/` | iOS (`simctl`) and Android (`avdmanager`/`emulator`/`adb`) control, tool env resolution |
-| `server/src/streaming/` | Swappable `StreamingBackend` seam — serve-sim on iOS (MJPEG today; its H.264 `stream.avcc` path is probed for when a serve-sim release serves it), `adb screenrecord` repackaged Annex-B→AVCC on Android, with an `adb screencap` PNG fallback for system images whose encoder is broken |
+| `server/src/streaming/` | Swappable `StreamingBackend` seam — H.264 both sides: serve-sim on iOS (`stream.avcc`, AVCC over a chunked HTTP response, not a WebSocket; the viewer probes it and reads a 404 as "this helper isn't encoding — use `stream.mjpeg`"), `adb screenrecord` repackaged Annex-B→AVCC on Android, with an `adb screencap` PNG fallback for system images whose encoder is broken |
 | `server/src/share/` | Share ids, PIN protection, and the scoped HTTP+WS proxy (video + input, nothing else) |
 | `server/src/github/` | Credential ladder: PAT → GitHub App → ambient `gh` → anonymous (public repos) |
 | `server/src/cli.ts` | `deckhand` CLI: setup, serve, doctor, token, app, env |
