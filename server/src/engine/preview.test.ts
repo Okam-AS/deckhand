@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fakeMetro, fakeDevProcs, fakeSimctl, fakeAndroid, fakeWorktrees, fakeReaper } from "../test-support/fakes.ts";
-import { PreviewEngine, PreviewError, buildStepDetail, redactForShare, type PreviewEngineDeps } from "./preview.ts";
+import { PreviewEngine, PreviewError, buildStepDetail, redactForShare, type PreviewEngineDeps, type StartPreviewRequest, type DeviceRequest } from "./preview.ts";
 import type { SimDeckControl } from "../testing/control.ts";
 import type { App, Config } from "../config.ts";
 import type { RunResult } from "./procs.ts";
@@ -1709,17 +1709,19 @@ describe("PreviewEngine idle sweep", () => {
     // the platform is part of the id. Assert the property, not the arithmetic: a second caller
     // that skips the platform filter must fail here.
     //
-    // Note what is NOT asserted, because it is true today: the re-added android device gets
-    // the retired id back. A viewer pane still holding the old one addresses the new device.
+    // The second half asserts what is true today rather than what is nice: the re-added
+    // android device gets the RETIRED id back, so anything still holding the old id (a viewer
+    // pane that has not reloaded) addresses the new device by it.
     const lim = { config: { ...config, limits: { ...config.limits, maxTotalDevices: 6 } } };
 
     // Two of one platform: the index alone would hand ios-1 out twice.
     const same = makeEngine(lim);
-    const twoIos = { app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }, { platform: "ios" }], access: "public" } as const;
-    same.engine.startPreview({ ...twoIos });
+    const req = (devices: DeviceRequest[]): StartPreviewRequest =>
+      ({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices, access: "public" });
+    same.engine.startPreview(req([{ platform: "ios" }, { platform: "ios" }]));
     await waitForPhase(same.engine, "pv1", ["ready", "failed"]);
     await same.engine.removeDevices("pv1", ["ios-0"]);
-    same.engine.startPreview({ ...twoIos }); // idempotent start → addDevices, if anything is missing
+    same.engine.startPreview(req([{ platform: "ios" }, { platform: "ios" }])); // idempotent start → addDevices, if anything is missing
     const ids = same.engine.getStatus("pv1")!.devices.map((d) => d.deviceId);
     assert.equal(new Set(ids).size, ids.length, "no two LIVE devices may share an id");
     assert.deepEqual(ids, ["ios-1"], "ios is already live, so nothing is added");
@@ -1727,11 +1729,11 @@ describe("PreviewEngine idle sweep", () => {
     // Across platforms: the retired id IS handed back. Asserted so the re-mint is a decision
     // on the record rather than a surprise.
     const cross = makeEngine(lim);
-    const both = { ...twoIos, devices: [{ platform: "ios" }, { platform: "android" }] } as const;
-    cross.engine.startPreview({ ...both });
+    const both = (): StartPreviewRequest => req([{ platform: "ios" }, { platform: "android" }]);
+    cross.engine.startPreview(both());
     await waitForPhase(cross.engine, "pv1", ["ready", "failed"]);
     await cross.engine.removeDevices("pv1", ["android-1"]);
-    cross.engine.startPreview({ ...both });
+    cross.engine.startPreview(both());
     assert.deepEqual(cross.engine.getStatus("pv1")!.devices.map((d) => d.deviceId), ["ios-0", "android-1"]);
   });
 

@@ -92,18 +92,7 @@ const IOS_BUNDLE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*(\.[A-Za-z0-9][A-Za-z0-9_-]*
 const BUILD_VERBS =
   /^(compiling|packaging|linking|signing|executing|copying|installing|downloading|generating|bundling|building|analyzing|preparing|processing|fetching|resolving|planning|running|creating|writing|checking)\b/i;
 
-/**
- * A short "what is it doing right now" label from a build log line, or null for
- * a line that isn't progress. Feeds the viewer's build overlay: a spinner with
- * a frozen caption is indistinguishable from a hang, and the whole log is far
- * too wide for a phone-sized frame.
- *
- * Xcode/Expo lines look like `› Compiling react-native-svg Pods/RNSVG » RNSVGUse.mm`.
- * Keep the verb and the PACKAGE, not the file after `»`: a per-file caption
- * flickers many times a second and produces unbreakable 45-character tokens that
- * overflow a phone-sized frame, while the package name changes at a readable
- * pace and still proves the build is moving.
- */
+/** Longest caption the viewer's build overlay can show without wrapping. */
 const DETAIL_MAX = 40;
 
 /**
@@ -139,6 +128,18 @@ export function buildFailureCause(lines: readonly string[], max = 400): string |
 
 const clip = (s: string, max: number): string => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
 
+/**
+ * A short "what is it doing right now" label from a build log line, or null for
+ * a line that isn't progress. Feeds the viewer's build overlay: a spinner with
+ * a frozen caption is indistinguishable from a hang, and the whole log is far
+ * too wide for a phone-sized frame.
+ *
+ * Xcode/Expo lines look like `› Compiling react-native-svg Pods/RNSVG » RNSVGUse.mm`.
+ * Keep the verb and the PACKAGE, not the file after `»`: a per-file caption
+ * flickers many times a second and produces unbreakable 45-character tokens that
+ * overflow a phone-sized frame, while the package name changes at a readable
+ * pace and still proves the build is moving.
+ */
 export function buildStepDetail(line: string): string | null {
   const clean = line
     .replace(/\x1b\[[0-9;]*m/g, "") // ANSI colour
@@ -1244,19 +1245,6 @@ export class PreviewEngine {
   }
 
   /**
-   * Platforms the caller asked for that this live preview does not have.
-   *
-   * `findReusable` matches on app + source + ref and IGNORES the device list, which is right
-   * for the daily loop — asking again for what is already running should return it, not mint a
-   * second simulator. But it made a genuinely different request look satisfied: asking for
-   * iOS + Android while an iOS preview was live returned `alreadyRunning: true` and silently
-   * dropped Android. The caller saw success and no Android, and the only way anyone found to
-   * get it was `stop_preview` + start again — which reboots the iOS simulators that were
-   * working and pays for their build a second time.
-   *
-   * An empty result and a satisfied request must not look the same (CONSTITUTION §3).
-   */
-  /**
    * Add devices to a LIVE preview, without touching the ones already running.
    *
    * This was refused outright, and the advice was "stop_preview, then start again with the
@@ -1383,6 +1371,23 @@ export class PreviewEngine {
     return doomed.map((d) => d.record.deviceId);
   }
 
+  /**
+   * Platforms the caller asked for that this live preview does not have.
+   *
+   * `findReusable` matches on app + source + ref and IGNORES the device list, which is right
+   * for the daily loop — asking again for what is already running should return it, not mint a
+   * second simulator. But it made a genuinely different request look satisfied: asking for
+   * iOS + Android while an iOS preview was live returned `alreadyRunning: true` and silently
+   * dropped Android. The caller saw success and no Android, and the only way anyone found to
+   * get it was `stop_preview` + start again — which reboots the iOS simulators that were
+   * working and pays for their build a second time.
+   *
+   * An empty result and a satisfied request must not look the same (CONSTITUTION §3).
+   *
+   * `addDevices` relies on this filter for more than politeness: a device id is
+   * `<platform>-<index>`, so "the added platform is not live" is what keeps two live
+   * devices from sharing an id. See the note there.
+   */
   private missingPlatforms(p: LivePreview, req: StartPreviewRequest): Platform[] {
     const live = new Set(p.devices.map((d) => d.record.platform));
     return [...new Set(req.devices.map((d) => d.platform))].filter((pl) => !live.has(pl));
@@ -1452,16 +1457,6 @@ export class PreviewEngine {
   }
 
   /**
-   * Release everything a forgotten preview still holds — dev processes, devices,
-   * worktree — without blocking the caller (startPreview is synchronous). The
-   * device count is held in `tearingDown` for the duration so a preview starting
-   * right now can't claim capacity that is still occupied — but released one
-   * device at a time, not all at the end. Android's shutdown polls `get-state`
-   * for up to 20 s per device; charging the whole preview for that whole window
-   * made the immediate retry of a failed preview fail with "device capacity
-   * reached", which is precisely the flow this path exists to serve.
-   */
-  /**
    * Stop the app's Metro once nothing is using it any more.
    *
    * Teardown killed the dev processes but never Metro, so every finished Expo
@@ -1477,6 +1472,16 @@ export class PreviewEngine {
     void this.d.metro.stopApp(appId).catch(() => {});
   }
 
+  /**
+   * Release everything a forgotten preview still holds — dev processes, devices,
+   * worktree — without blocking the caller (startPreview is synchronous). The
+   * device count is held in `tearingDown` for the duration so a preview starting
+   * right now can't claim capacity that is still occupied — but released one
+   * device at a time, not all at the end. Android's shutdown polls `get-state`
+   * for up to 20 s per device; charging the whole preview for that whole window
+   * made the immediate retry of a failed preview fail with "device capacity
+   * reached", which is precisely the flow this path exists to serve.
+   */
   private releaseInBackground(p: LivePreview): () => number {
     let held = p.devices.length;
     this.tearingDown += held;
@@ -3240,13 +3245,12 @@ export class PreviewEngine {
   }
 
   /**
-   * Release every device of a preview: detach the stream, then shut down and
-   * delete the simulator/AVD deckhand created for it. Idempotent — the handles
-   * are cleared, so a second call (stop after an idle sweep) is a no-op.
-   */
-  /**
-   * Tear down SOME of a preview's devices. Defaults to all of them, which is what
-   * stopPreview wants; `removeDevices` passes a subset. Parameterised rather than
+   * Release a preview's devices: detach the stream, then shut down and delete the
+   * simulator/AVD deckhand created for it. Idempotent — the handles are cleared, so a
+   * second call (a stop after an idle sweep) is a no-op.
+   *
+   * `only` picks a subset; the default is all of them, which is what stopPreview
+   * wants, and `removeDevices` passes a subset. Parameterised rather than
    * copied — every simulator/emulator/pool release in this method is a place a second
    * version would drift, and a leaked pool lease or an un-freed adb port is invisible
    * until the machine runs out of them.
