@@ -41,6 +41,13 @@ export function orphanAvds(names: string[], keep: ReadonlySet<string> = new Set(
   return names.filter((n) => n.startsWith(AVD_PREFIX) && !keep.has(n));
 }
 
+/** What a caller still owns and must not lose: udids, AVD names, and leased device names. */
+export interface KeepHandles {
+  udids?: Iterable<string>;
+  avds?: Iterable<string>;
+  names?: Iterable<string>;
+}
+
 export interface ReapReport {
   sims: string[]; // udids deleted
   avds: string[]; // AVD names deleted
@@ -143,18 +150,37 @@ export class Reaper {
    * Shut down, unregister and delete every deckhand-owned simulator/AVD not in
    * `keep`, plus the helper processes bound to them. Never throws: a reap
    * failure must not stop the server from coming up.
+   *
+   * Pass `keep` as a FUNCTION. It is re-read immediately before each destructive
+   * call, so a device leased while the sweep is running is spared; a plain object
+   * is a snapshot and cannot spare anything that appears after this returns to
+   * the event loop.
    */
-  async reap(keep: { udids?: Iterable<string>; avds?: Iterable<string>; names?: Iterable<string> } = {}): Promise<ReapReport> {
-    const keepUdids = new Set(keep.udids ?? []);
-    const keepAvds = new Set(keep.avds ?? []);
+  async reap(keep: KeepHandles | (() => KeepHandles) = {}): Promise<ReapReport> {
+    // Read through the caller's thunk at every decision point, never once at
+    // entry. This sweep runs AFTER the HTTP port is bound (see the header), and
+    // it awaits a pkill, a shutdown and a delete per orphan — so a start_preview
+    // that lands mid-sweep leases names a snapshot taken here can never hold,
+    // and the AVD pass below reads its list after ALL of that. A by-value keep
+    // set made that unfixable from the caller's side; a caller that still passes
+    // a plain object gets exactly the old behaviour, which is the honest signal
+    // that it has not closed the window. → the two "DURING the sweep" tests in
+    // reaper.test.ts.
+    const read = typeof keep === "function" ? keep : () => keep;
     // A device being created right now has no UDID yet, but its name is already
     // leased. Sparing by name closes the window between `simctl create` and the
     // engine recording what it got back.
-    const keepNames = new Set(keep.names ?? []);
+    const sets = () => {
+      const k = read();
+      return { udids: new Set(k.udids ?? []), avds: new Set(k.avds ?? []), names: new Set(k.names ?? []) };
+    };
     const report: ReapReport = { sims: [], avds: [], keptPooled: [] };
 
-    const sims = orphanSims(await this.list(() => this.d.simctl.listDevices(), []), keepUdids, keepNames);
+    const first = sets();
+    const sims = orphanSims(await this.list(() => this.d.simctl.listDevices(), []), first.udids, first.names);
     for (const sim of sims) {
+      const now = sets();
+      if (now.udids.has(sim.udid) || now.names.has(sim.name)) continue;
       // The helper streams from the UDID; kill it before the device disappears.
       //
       // The pattern has to survive the helper's REAL argv, which is
@@ -179,8 +205,14 @@ export class Reaper {
       report.sims.push(sim.udid);
     }
 
-    const avds = orphanAvds(await this.list(() => this.d.android.listAvds(), []), new Set([...keepAvds, ...keepNames]));
+    const afterSims = sets();
+    const avds = orphanAvds(
+      await this.list(() => this.d.android.listAvds(), []),
+      new Set([...afterSims.avds, ...afterSims.names]),
+    );
     for (const avd of avds) {
+      const now = sets();
+      if (now.avds.has(avd) || now.names.has(avd)) continue;
       // `adb emu kill` needs a reachable console port; orphans often collide on
       // one (each process restarts port allocation at 5554), so kill the QEMU
       // process by its -avd argument instead — always exact, never ambiguous.

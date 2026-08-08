@@ -92,6 +92,69 @@ describe("Reaper.reap", () => {
     assert.ok(!calls.some((c) => c.includes("deckhand_pv1_android_0")));
   });
 
+  it("spares a simulator whose name is leased DURING the sweep, when keep is read lazily", async () => {
+    // The window the by-value form cannot close: `reap` awaits a pkill, a
+    // shutdown and a delete per orphan, so a start_preview landing after the
+    // first iteration leases a name that a snapshot taken at entry can never
+    // contain. Read through the thunk at the decision point and it survives.
+    const leased = new Set<string>();
+    const calls: string[] = [];
+    const reaper = new Reaper({
+      simctl: fakeSimctl({
+        listDevices: async () => sims,
+        shutdown: async (u: string) => {
+          calls.push(`sim shutdown ${u}`);
+          leased.add("deckhand-pv2-ios-0"); // an agent's start_preview lands mid-sweep
+        },
+        delete: async (u: string) => void calls.push(`sim delete ${u}`),
+      }),
+      android: fakeAndroid({ listAvds: async () => [], attachedSerials: async () => [] }),
+      kill: async (pattern: string) => void calls.push(`kill ${pattern}`),
+    });
+
+    const report = await reaper.reap(() => ({ names: [...leased] }));
+
+    assert.deepEqual(report.sims, ["AAA"], "only the device that was already an orphan is deleted");
+    assert.ok(!calls.some((c) => c.includes("BBB")), "the just-leased simulator is neither killed, shut down nor deleted");
+  });
+
+  it("spares an AVD created DURING the simulator pass, when keep is read lazily", async () => {
+    // Same window, one loop later and worse: the AVD list is read after every
+    // simulator await, so an emulator that booted in the meantime is live, in
+    // `listAvds()`, and in a keep-set snapshot taken before any of it happened.
+    // Reaping it pkills QEMU out from under a running preview and deletes the image.
+    const leased = new Set<string>();
+    const calls: string[] = [];
+    const reaper = new Reaper({
+      simctl: fakeSimctl({
+        listDevices: async () => sims,
+        shutdown: async (u: string) => {
+          calls.push(`sim shutdown ${u}`);
+          leased.add("deckhand_pv9_android_0");
+        },
+        delete: async (u: string) => void calls.push(`sim delete ${u}`),
+      }),
+      android: fakeAndroid({
+        listAvds: async () => [...avds, ...leased],
+        attachedSerials: async () => [],
+        deleteAvd: async (n: string) => void calls.push(`avd delete ${n}`),
+      }),
+      kill: async (pattern: string) => void calls.push(`kill ${pattern}`),
+    });
+
+    const report = await reaper.reap(() => ({ names: [...leased] }));
+
+    assert.ok(!report.avds.includes("deckhand_pv9_android_0"), "the in-flight AVD is not reported deleted");
+    assert.ok(!calls.some((c) => c.includes("deckhand_pv9_android_0")), "no QEMU kill, no image delete");
+  });
+
+  it("still accepts a plain keep-set, so the by-value callers keep working", async () => {
+    const { reaper, calls } = makeReaper();
+    const report = await reaper.reap({ udids: ["AAA"] });
+    assert.deepEqual(report.sims, ["BBB"]);
+    assert.ok(!calls.some((c) => c.includes("AAA")));
+  });
+
   it("shuts pooled devices down but leaves them on disk to be reused", async () => {
     const pooledSims: SimDevice[] = [{ udid: "PPP", name: "deckhand-pool-iphone-16-pro-ios-26-0", state: "Booted" }];
     const seen: string[] = [];
