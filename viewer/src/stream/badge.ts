@@ -19,9 +19,9 @@ import type { PlayerStatus } from "./player.ts";
  *
  * That 404 is not a verdict on the device: `serveAvcc` sends it whenever
  * `AvccSource.ready()` is false, which includes the whole backoff window after
- * any failed probe — and the commonest cause is another emulator holding the
- * host's single H.264 encoder, indistinguishable from a dead one from in there
- * (see `settle` in androidH264.ts). So the pill can be right that this device is
+ * any failed probe — one cause being another emulator holding the host's single
+ * H.264 encoder, indistinguishable from a dead one from in there (see `settle` in
+ * androidH264.ts). So the pill can be right that this device is
  * degraded now and wrong about why; it says "Reduced quality", which is true
  * either way, and claims nothing about the hardware.
  *
@@ -45,5 +45,13 @@ export function streamBadge(status: PlayerStatus, opts: { ready: boolean; isThum
   // the viewer has no DOM setup, so nothing pins this and it is a claim about
   // player.ts a reader must re-check there.
   if (status === "error") return "Stream stopped — reload";
+  if (status === "connecting") return "Connecting…";
+  // Every PlayerStatus decides its own copy, and a fifth one must too. A default arm
+  // that fell through to "Connecting…" is the bug e760dd9 fixed for Android: a device
+  // in a state nobody had thought about reads as one that is about to work. This
+  // assignment is the only thing that makes adding a status a compile error — no test
+  // can see a member that does not exist yet.
+  const unhandled: never = status;
+  void unhandled;
   return "Connecting…";
 }

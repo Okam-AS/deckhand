@@ -95,7 +95,7 @@ function resolveUpstream(engine: PreviewEngine, shareId: string, deviceId: strin
  * different: the upstream is strictly THIS share's own web dev server, resolved
  * via findByShareId (no SSRF to sibling ports, no path traversal), gated by the
  * 144-bit shareId. The dev server was started with --base=<helperBasePath>/, so
- * the full path is reconstructed to match its base. (PLAN §11.6 amendment.)
+ * the full path is reconstructed to match its base. (PLAN §11 item 6 amendment.)
  */
 function resolveWebUpstream(engine: PreviewEngine, shareId: string, rest: string): string | null {
   const found = engine.findByShareId(shareId);
@@ -160,7 +160,7 @@ const WEB_RESPONSE_HEADERS = ["content-type", "cache-control", "etag", "last-mod
 // A share can require a numeric PIN (set per app, via MCP). Content routes (the
 // device stream, the web app, the input/HMR WebSockets) require a valid HMAC
 // unlock cookie; the viewer shell, /state, and /unlock stay public so the pad
-// can render. Crypto lives in shares.ts. (PLAN §9/§11.6.)
+// can render. Crypto lives in shares.ts. (PLAN §9 / §11 item 6.)
 
 const UNLOCK_COOKIE = "deck_unlock";
 const UNLOCK_TTL_MS = 12 * 60 * 60_000;

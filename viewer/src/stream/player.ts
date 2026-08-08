@@ -187,10 +187,13 @@ export class DevicePlayer {
 
     fetch(`${this.baseUrl}/stream.avcc`, { signal: ac.signal })
       .then(async (res) => {
-        // serve-sim serves no H.264/avcc endpoint (404) — go straight to MJPEG
-        // instead of waiting out the first-frame watchdog (no 4s black screen).
+        // A 404 means "no H.264 from this helper RIGHT NOW", never "this helper has
+        // no such endpoint": serve-sim routes /stream.avcc, and the Android helper
+        // answers 404 for the whole backoff window after a failed encoder probe.
+        // Either way MJPEG is the answer, and taking it here rather than waiting out
+        // the first-frame watchdog is what avoids the 4s black screen.
         if (res.status === 404) {
-          this.report("avcc 404", "no H.264 endpoint on this helper — using mjpeg");
+          this.report("avcc 404", "helper is not serving H.264 right now — using mjpeg");
           this.fallbackToMjpeg();
           return;
         }
