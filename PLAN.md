@@ -251,7 +251,8 @@ backend than serve-sim-ax/uiautomator — especially for NativeScript (component
 classes, and **.ts/.html source locations** via `@nativescript/simdeck-inspector`, an
 opt-in). deckhand keeps its own backends (serve-sim on iOS, adb on Android) for the
 human **video**, and drives
-SimDeck **REST only** — `GET /accessibility-tree`, `POST /action`, `GET /screenshot.png` —
+SimDeck **REST only** — `GET /api/health`, `GET /accessibility-tree`, `POST /action`,
+`POST /pasteboard` (non-US iOS typing) and `GET /screenshot.png` —
 on the device it already booted (iOS by UDID, Android by `android:<avd>`). Two hard rules
 (enforced in `server/src/testing/`): **never** touch SimDeck's `/input`/`/control` WS,
 `/webrtc/offer`, or `/refresh` (they spin up the fragile private display/encoder session);
