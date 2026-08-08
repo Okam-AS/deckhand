@@ -50,7 +50,7 @@ export const configSchema = z.object({
     .optional(),
   // Fall back to the deckhand user's `gh` CLI session when neither a PAT nor a
   // GitHub App is configured — makes a dev-Mac install (deckhand on the machine
-  // you code on) work with zero credential setup. Tradeoff in PLAN §11.4: a gh
+  // you code on) work with zero credential setup. Tradeoff in PLAN §11 item 4: a gh
   // session token usually carries write scopes, so on ambient credentials the
   // read-only guarantee is behavioral, not capability-bounded.
   githubAmbient: z.boolean().default(true),

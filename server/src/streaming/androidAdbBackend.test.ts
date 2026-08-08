@@ -90,7 +90,7 @@ describe("AndroidAdbBackend.attach", () => {
     const b = new AndroidAdbBackend({ portRange: [3300, 3310], adb });
     await withStream(b, (s) => {
       assert.match(s.helperBasePath, /emulator-5554/, "the path names the device it streams");
-      assert.match(s.origin, /^http:\/\/127\.0\.0\.1:\d+$/, "helpers bind loopback only — PLAN §11.1");
+      assert.match(s.origin, /^http:\/\/127\.0\.0\.1:\d+$/, "helpers bind loopback only — PLAN §11 item 1");
     });
   });
 

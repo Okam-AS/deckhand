@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 
 // ---------------------------------------------------------------------------
-// One-time setup nonces (PLAN §6/§11.5). The agent guides the user to a
+// One-time setup nonces (PLAN §6/§11 item 5). The agent guides the user to a
 // `/setup/<nonce>` URL where they paste a credential directly into the mini —
 // never through MCP or the chat. Nonces are 128-bit, single-use, short-TTL, and
 // bound to a pending action. In-memory only: a restart invalidates outstanding

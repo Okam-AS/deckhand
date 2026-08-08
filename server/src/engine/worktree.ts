@@ -435,7 +435,7 @@ export class WorktreeManager {
    * detached, not a repo, or unreadable.
    *
    * Read-only, and deliberately so: deckhand borrows a developer's working copy
-   * and never writes to it (PLAN §11.4). This exists because "local" is a true
+   * and never writes to it (PLAN §11 item 4). This exists because "local" is a true
    * but useless thing to show a viewer — it names the SOURCE MODE, not what is
    * on screen. Two panes both reading "local" tell you nothing about which
    * branch each one is.

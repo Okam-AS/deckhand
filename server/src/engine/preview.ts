@@ -1269,7 +1269,7 @@ export class PreviewEngine {
     // soon as git answers: "local" names the SOURCE MODE, not what is on screen,
     // and two panes both reading "local" say nothing about which branch each one
     // is. The viewer polls, so it picks this up within a poll. Read-only —
-    // deckhand never writes to a borrowed checkout (PLAN §11.4).
+    // deckhand never writes to a borrowed checkout (PLAN §11 item 4).
     if (req.source === "local" && req.app.path) {
       // Wrapped: this is a cosmetic lookup, and nothing cosmetic may be able to
       // fail start_preview. (It did — a WorktreeManager without the method threw

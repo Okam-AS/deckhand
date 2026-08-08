@@ -26,7 +26,7 @@ test("architecture makes local ownership explicit", () => {
 
 // Nothing scopes a credential: `auth.ts` says there is no authorization step past
 // authentication, because one Mac serves one operator. So the page may claim a bounded
-// tool SURFACE — no shell tool (PLAN §11.3), every tool wrapped in `audited()`
+// tool SURFACE — no shell tool (PLAN §11 item 3), every tool wrapped in `audited()`
 // (invariants.test.ts) — and must never imply per-credential capabilities or roles.
 test("the security list claims a bounded tool surface, not scoped credentials", () => {
   const markup = renderToStaticMarkup(createElement(App));
