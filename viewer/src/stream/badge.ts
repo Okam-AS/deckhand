@@ -7,9 +7,12 @@ import type { PlayerStatus } from "./player.ts";
  * and this is the only shape a test can reach.
  *
  * It takes no platform, on purpose. `DevicePlayer.start()` branches on
- * `isAvccSupported()` and nothing in the viewer asks which platform a device is,
- * so "fallback" means the same degradation everywhere: WebCodecs is gone, or the
- * helper had no H.264 to give. This used to suppress the pill for Android on the
+ * `isAvccSupported()`, and nothing on the STREAM path asks which platform a
+ * device is. (Elsewhere in the viewer does: `App.tsx` branches on `web` for
+ * layout and `icons.tsx` on ios/android for the device chrome. Neither decides
+ * how a frame arrives, which is the only place the ban applies.) So "fallback"
+ * means the same degradation everywhere: WebCodecs is gone, or the helper had no
+ * H.264 to give. This used to suppress the pill for Android on the
  * grounds that MJPEG was Android's normal path; it stopped being that when the
  * Android helper started serving /stream.avcc, and until this was removed a
  * degraded Android device looked identical to a healthy one.

@@ -87,17 +87,26 @@ function testChecksByFile(): Map<string, Set<string>> {
  * is usually ordinary prose (`build → install → launch`) and the rest of the file is not its
  * citation. Every citation written here fits well inside it; a longer one reads as dangling,
  * which is a visible failure rather than a silent pass.
+ *
+ * The two counts are returned SEPARATELY, and every caller floors them separately. They used to
+ * be one sum, and the sum was load-bearing for neither loop: the file-only count alone cleared
+ * both callers' floors, so the named regex — the half that verifies a check NAME, which is the
+ * entire reason these checks exist — could stop matching altogether and the floor stayed green
+ * while `dangling` went empty. That is the exact regression both callers' comments describe as
+ * having already happened once. (A backticked named citation matches both loops, so the sum also
+ * double-counted and no single number could be stated honestly about it.)
  */
-function danglingCitations(text: string, byFile: Map<string, Set<string>>): { found: number; dangling: string[] } {
+function danglingCitations(text: string, byFile: Map<string, Set<string>>): { files: number; named: number; dangling: string[] } {
   const dangling: string[] = [];
-  let found = 0;
+  let files = 0;
+  let named = 0;
   const paths = [...byFile.keys()];
   const resolves = (path: string) => paths.some((k) => k === path || k.endsWith(`/${path}`));
   for (const chunk of text.split("→").slice(1).map((c) => c.slice(0, 400))) {
     // The FILE half of every citation, named or not. `→ `oauth/pairing.test.ts`` with no
     // quoted check is a citation too, and it was unverified entirely.
     for (const m of chunk.matchAll(/`([A-Za-z0-9_\-./]*\.test\.tsx?)`/g)) {
-      found++;
+      files++;
       if (!resolves(m[1]!)) dangling.push(`${m[1]} (no such test file)`);
     }
     // The path character class is explicit rather than `\S*?`: a citation written inside
@@ -105,7 +114,7 @@ function danglingCitations(text: string, byFile: Map<string, Set<string>>): { fo
     // The quoted name is matched as a PREFIX of a real one, so a rule may cite a check by its
     // first clause.
     for (const m of chunk.matchAll(/`?([A-Za-z0-9_\-./]*\.test\.tsx?)`?\s+"([^"]+)"/g)) {
-      found++;
+      named++;
       const path = m[1]!;
       // Collapse the wrap. A citation may run onto the next line — several do — and comparing
       // the raw capture then looks for a test name containing a newline and two spaces.
@@ -114,7 +123,7 @@ function danglingCitations(text: string, byFile: Map<string, Set<string>>): { fo
       if (!inFile.some((n) => n.startsWith(cited))) dangling.push(`${path} "${cited}"`);
     }
   }
-  return { found, dangling };
+  return { files, named, dangling };
 }
 
 /**
@@ -307,16 +316,24 @@ describe("docs describe the code that exists", () => {
     assert.ok([...byFile.values()].reduce((n, s) => n + s.size, 0) > 5, "no guardrail test names parsed — the `it(\"...\")` pattern changed");
 
     const dangling: string[] = [];
-    let found = 0;
+    let files = 0;
+    let named = 0;
     for (const f of readdirSync(rulesDir)) {
       const r = danglingCitations(readFileSync(join(rulesDir, f), "utf8"), byFile);
-      found += r.found;
+      files += r.files;
+      named += r.named;
       for (const d of r.dangling) dangling.push(`${f}: ${d}`);
     }
     // Anti-vacuity. The first version of this regex matched none of the citations actually
     // written here and the check was inert; only mutation showed it up, and nothing would have
     // shown it up on its own. A count is the cheap standing version of that mutation.
-    assert.ok(found > 5, `only ${found} citations parsed in .claude/rules/ — the citation form changed, fix this check`);
+    //
+    // One floor per LOOP, never a sum: the file half alone used to clear the combined floor, so
+    // the named half could match nothing and this still passed — verifying that a test file
+    // exists while the message claimed a check name had been verified. Today: 27 file citations,
+    // 26 named.
+    assert.ok(files > 12, `only ${files} test-file citations parsed in .claude/rules/ — the citation form changed, fix this check`);
+    assert.ok(named > 12, `only ${named} NAMED citations parsed in .claude/rules/ — the check-name half of the citation form changed, fix this check`);
     assert.deepEqual(
       dangling,
       [],
@@ -327,7 +344,7 @@ describe("docs describe the code that exists", () => {
   it("keeps source-comment citations pointing at checks that exist", () => {
     // The same citation form, in the same repo, three times as common — and unpoliced. The
     // check above reads `.claude/rules/` only, while `→ preview.test.ts "…"` is written in
-    // source comments seventeen times, in preview.ts, proxy.ts, androidAdb.ts, androidH264.ts,
+    // source comments eighteen times, in preview.ts, proxy.ts, androidAdb.ts, androidH264.ts,
     // reaper.ts, metro.ts, control.ts, tools.ts, configWrite.ts, setup.ts and devices/android.ts.
     //
     // That is not a lesser case. AGENTS.md's third un-checkable rule is that a comment stating
@@ -339,7 +356,8 @@ describe("docs describe the code that exists", () => {
     // not making a claim about somewhere else.
     const byFile = testChecksByFile();
     const dangling: string[] = [];
-    let found = 0;
+    let files = 0;
+    let named = 0;
     const walk = (dir: string): void => {
       for (const e of readdirSync(dir, { withFileTypes: true })) {
         if (e.isSymbolicLink() || e.name === "node_modules" || e.name === "dist") continue;
@@ -347,7 +365,8 @@ describe("docs describe the code that exists", () => {
         if (e.isDirectory()) walk(full);
         else if (/\.tsx?$/.test(e.name) && !/\.test\.tsx?$/.test(e.name)) {
           const r = danglingCitations(commentsOf(readFileSync(full, "utf8")), byFile);
-          found += r.found;
+          files += r.files;
+          named += r.named;
           for (const d of r.dangling) dangling.push(`${full.slice(REPO.length + 1)}: ${d}`);
         }
       }
@@ -355,8 +374,14 @@ describe("docs describe the code that exists", () => {
     for (const ws of [SRC, join(REPO, "viewer", "src"), join(REPO, "landing", "src"), join(REPO, "scripts")]) if (existsSync(ws)) walk(ws);
     // Anti-vacuity, and it is load-bearing here: this reads comments through `commentsOf`, so
     // a change that makes that return nothing would leave a green check that examines an empty
-    // string. There are seventeen citations today.
-    assert.ok(found > 12, `only ${found} source-comment citations parsed — the citation form or comment scan changed, fix this check`);
+    // string.
+    //
+    // One floor per LOOP, never a sum. The file half alone (14) used to clear the combined floor
+    // of 12, so the named half could match nothing and this stayed green while `dangling` went
+    // empty — the check would then be asserting only that a test FILE exists, which is not what
+    // its failure message says. Today: 14 file citations, 18 named, across eleven files.
+    assert.ok(files > 6, `only ${files} source-comment test-file citations parsed — the citation form or comment scan changed, fix this check`);
+    assert.ok(named > 8, `only ${named} NAMED source-comment citations parsed — the check-name half of the citation form or the comment scan changed, fix this check`);
     assert.deepEqual(
       dangling,
       [],

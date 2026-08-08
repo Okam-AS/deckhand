@@ -799,9 +799,14 @@ describe("the detached-spawn rule", () => {
     // `detached: true`, the guard was skipped entirely by `detached: !opts.foreground` or by
     // hiding the option in a spread — so the way to avoid the rule was to write the spawn
     // slightly differently, which is not a rule.
+    // The negative lookahead has to swallow the whitespace, not sit behind it: written
+    // `/detached:(?!\s*false\b)/`, `\s*` matches empty, the lookahead then sees `" false"`, and
+    // the ordinary spelling `detached: false` FIRED. Only `detached:false` was exempt. Nothing
+    // in the tree spells it that way today, so this cried wolf at nobody yet — and a guardrail
+    // that fails on correct code gets deleted rather than obeyed, which is the whole loss.
     for (const file of sourceFiles()) {
       const src = read(file);
-      if (!/detached:\s*(?!false\b)/.test(src)) continue;
+      if (!/detached:(?!\s*false\b)/.test(src)) continue;
       assert.match(
         src,
         /MARKER_ENV\]:/,

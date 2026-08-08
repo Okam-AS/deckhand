@@ -39,5 +39,16 @@ test("only the two response helpers and screenshot's image build a result by han
   const image = TOOLS.indexOf('type: "image"');
   const screenshot = TOOLS.indexOf('"screenshot"');
   const describe = TOOLS.indexOf('"describe"', screenshot);
-  assert.ok(screenshot > 0 && image > screenshot && image < describe, "the image response is no longer inside the screenshot tool");
+  // The upper bound is the next tool registered after screenshot, so this check depends on
+  // `describe` being registered after it. Asserted, not assumed: reorder the two and the search
+  // returns -1, `image < -1` is false, and the failure below would report the image response as
+  // having left the screenshot tool — a true-sounding message about something that did not
+  // happen, sending the reader to the wrong file.
+  assert.ok(screenshot > 0, 'tools.ts no longer registers a tool named "screenshot" — fix this check');
+  assert.ok(
+    describe > screenshot,
+    'no "describe" appears after "screenshot" in tools.ts, so this check has no upper bound for the ' +
+      "screenshot tool's span — pick the tool that now follows it as the anchor",
+  );
+  assert.ok(image > screenshot && image < describe, "the image response is no longer inside the screenshot tool");
 });

@@ -411,8 +411,9 @@ export class DevicePlayer {
    * consecutive-failure one, so a device that recovered fine seven times over an
    * afternoon gave up permanently on the eighth — reported as "gave up", with a
    * reload as the only cure. The image tier is no rare corner: `start()` branches
-   * on `isAvccSupported()` alone — there is no iOS/Android switch anywhere in the
-   * viewer — so EITHER platform lands here when WebCodecs is missing, when a
+   * on `isAvccSupported()` alone — nothing on the stream path switches on
+   * iOS vs Android; the viewer's platform branches are all chrome and layout
+   * (`icons.tsx`, `App.tsx`) — so EITHER platform lands here when WebCodecs is missing, when a
    * decode errors, or when the server has no AVCC to give (the Android helper
    * 404s /stream.avcc whenever it is not serving H.264 right now — an image that
    * cannot encode is only one of the reasons; see `serveAvcc` in
