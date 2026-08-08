@@ -36,8 +36,8 @@ the machine.
                             │
 ┌───────────────────────────▼── deckhand server (loopback only) ──┐
 │                                                                 │
-│  /mcp                    MCP tools, bearer-authenticated       │
-│  /oauth/*                per-client sign-in (you approve each one) │
+│  /mcp                    MCP tools, bearer-authenticated        │
+│  /oauth/*                per-client sign-in (pairing code)      │
 │  /s/<shareId>            viewer page (device grid + controls)   │
 │  /s/<shareId>/dev/<id>/* scoped proxy → that device's stream    │
 │                                                                 │
@@ -58,7 +58,7 @@ the machine.
 | `server/src/mcp/` | The MCP surface: previews, screenshots, UI tree, test runs, app registration |
 | `server/src/engine/` | Preview state machine, build recipes (Expo / RN / NativeScript), app-type detection, worktrees, dev-server lifecycle |
 | `server/src/devices/` | iOS (`simctl`) and Android (`avdmanager`/`emulator`/`adb`) control, tool env resolution |
-| `server/src/streaming/` | Swappable `StreamingBackend` seam — H.264 both sides: serve-sim on iOS, `adb screenrecord` repackaged Annex-B→AVCC on Android, with an `adb screencap` PNG fallback for system images whose encoder is broken |
+| `server/src/streaming/` | Swappable `StreamingBackend` seam — H.264 both sides: serve-sim on iOS (`stream.avcc`, AVCC over a chunked HTTP response, not a WebSocket; a browser with WebCodecs probes it and reads a 404 as "this helper isn't encoding — use `stream.mjpeg`", one without starts on MJPEG and never probes), `adb screenrecord` repackaged Annex-B→AVCC on Android, with an `adb screencap` PNG fallback for system images whose encoder is broken |
 | `server/src/share/` | Share ids, PIN protection, and the scoped HTTP+WS proxy (video + input, nothing else) |
 | `server/src/github/` | Credential ladder: PAT → GitHub App → ambient `gh` → anonymous (public repos) |
 | `server/src/cli.ts` | `deckhand` CLI: setup, serve, doctor, token, app, env |
@@ -80,25 +80,14 @@ viewer page, a ruthlessly short dependency list.
 
 - Everything binds **loopback**; the only way in is the Cloudflare named tunnel.
 - Nothing that touches a device or a repo is reachable without a credential: a
-  per-client MCP credential (an OAuth grant you approved at the machine, or a local
-  bearer token), per-app share links (optionally PIN-gated). The OAuth discovery,
+  per-client MCP credential (an OAuth grant, or a local bearer token), per-app share
+  links (optionally PIN-gated). The OAuth discovery,
   registration and sign-in endpoints are open by construction — a client with no
   credential has to start somewhere — and grant nothing on their own: a request that
   reaches them needs a pairing code minted on the Mac with `deckhand pair`.
 - The MCP surface is capability-bounded — no arbitrary commands, only pre-registered
   apps and their repos' refs. Every call lands in an append-only audit log.
 - Secrets never travel through MCP; tokens never appear in argv, URLs, or logs.
-
-## Status
-
-**Phases 0–2.5 done, most of Phase 3 landed** — iOS + Android multi-device previews,
-local dev mode, agent-driven test runs (`describe`/`ui`/`logs`), agent-led onboarding
-(`add_app`, PIN-gated shares), multi-source pages (`alongside`) with an app→app
-migration parity harness, and physical-device detection (paired iPhones/iPads and
-adb-connected Android hardware in `list_devices` — detection only; previews still run
-on simulators/emulators). Validated end-to-end on real hardware over a live tunnel
-(734 tests, CI green). Next: the rest of Phase 3, then Phase 4 (ops hardening + AI
-setup runbook).
 
 [PLAN.md](./PLAN.md) describes what the system is — architecture, the MCP surface,
 the security model; background knowledge in [docs/reference/](./docs/reference/).
@@ -132,11 +121,21 @@ npx tsx server/src/cli.ts setup \
 
 ### If you are the agent
 
-- Run `setup` with no arguments first. Relay its **NEEDS YOU** list verbatim and
-  stop; do not attempt those steps. `cloudflared tunnel login` opens a browser
-  and will hang you forever.
+- Run `setup` with no arguments first. It labels every line with who acts, and
+  `fix:` is the only one of the four you may run:
+  - `fix:` — yours to run.
+  - `you:` — a fix only a person at this Mac can do (an App Store install, an
+    Apple ID, a `sudo` licence accept, the machine's default Node). Relay the
+    line as written and stop; re-run `setup` once they say it is done.
+  - **BLOCKED** — also relay-and-stop, but an errand off this machine: a browser
+    and their Cloudflare account. Never attempt it — `cloudflared tunnel login`
+    opens a browser and will hang you forever.
+  - **ASK THE USER** — questions to ask in the words given, not a report to
+    paste at them. There is more than one: a fresh install asks for the hostname
+    and, marked `(optional)`, a second hostname for web previews.
 - Install what it says you can install. Then ask the user for a hostname on a
-  domain they have on Cloudflare, and run `setup --hostname <that>`.
+  domain they have on Cloudflare, and run `setup --hostname <that>` — adding
+  `--web-host <the second>` if they wanted web previews.
 - At the end, run `deckhand pair` yourself and give the user the code it prints;
   they type it into the page Claude opens. Typing the command is yours, typing the
   code into their own browser is theirs.
@@ -146,7 +145,10 @@ npx tsx server/src/cli.ts setup \
   `doctor` says so as a warning rather than a failure.
 
 `setup` creates the Cloudflare tunnel and DNS route, merges your cloudflared
-config (it never overwrites rules for other services), links `deckhand` onto your
+config (rules for other services are carried through the merge, and the previous
+file is copied to `config.yml.bak` before anything is written — so the one case
+the merge cannot preserve, a config.yml that will not parse and so comes back as
+nothing to merge with, is still recoverable by hand), links `deckhand` onto your
 PATH, writes deckhand's config, prints your **connector URL**, installs the
 LaunchAgents so it survives sleep and reboot, and runs `doctor`.
 

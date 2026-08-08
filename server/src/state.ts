@@ -98,8 +98,9 @@ const EMPTY: PersistedState = { version: 1, previews: [], shareIds: {}, pins: {}
 
 /**
  * Atomic JSON persistence for the set of previews, so a restart can reconcile
- * (see `staleOnBoot`). The engine owns the live in-memory previews and calls
- * `persist()` on every state transition; reads happen once at boot.
+ * (`PreviewEngine.reapOrphans` in engine/preview.ts is the live reader). The
+ * engine owns the live in-memory previews and calls `persist()` on every state
+ * transition; reads happen once at boot.
  */
 export class StateStore {
   constructor(private readonly file: string = paths.state()) {}
@@ -184,14 +185,4 @@ export class StateStore {
     writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
     renameSync(tmp, this.file);
   }
-}
-
-/**
- * On restart, any preview that was live is now orphaned: its serve-sim helpers
- * and (booted) simulators did not survive the process exit cleanly, so the
- * previews must be reconciled (torn down / recreated), never trusted as-is.
- * Phase 1 marks them for teardown; Phase 4 adds richer reconciliation.
- */
-export function staleOnBoot(state: PersistedState): PersistedPreview[] {
-  return state.previews.filter((p) => p.phase !== "stopped" && p.phase !== "failed");
 }

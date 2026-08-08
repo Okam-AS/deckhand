@@ -17,9 +17,14 @@
  *   3. At least one round was cold AND against the current diff — a reviewer starting from
  *      the diff alone, carrying none of the context the code was written in, having read the
  *      code as it ships. Repeating one lens re-finds one lens's bugs.
- *   4. Nothing blocking is left standing against the current diff — in any round that reviewed
- *      it, not just the last one, since fixing a finding is what moves the diff and dropping
- *      one silently would otherwise be the cheapest way out. Fixed, or waived on the record.
+ *   4. Nothing blocking is left standing — in ANY round, at any diff. A blocking finding leaves
+ *      the record only by being written off it: `resolved` on a later round, or `waived` with a
+ *      reason. It is never cleared by the hash moving underneath it, because EVERY edit moves
+ *      the hash — including the fix for a different finding in the same round — so "the code
+ *      changed" cannot distinguish a fix from a drop, and silence is not a resolution. What a
+ *      resolution rests on is stated exactly at {@link contentMoved}, and what a waiver costs at
+ *      {@link waiverAnswered} — both are narrower than they read, deliberately, so read them
+ *      before trusting either.
  *   5. `npm run ci` passed, on a clean checkout, recorded by RUNNING it rather than by being
  *      told. Deckhand's CI is exactly `npm run ci`, and the pre-commit hook runs the same
  *      command, so there is one definition of green and this is it.
@@ -32,9 +37,15 @@
  * contain. It raises the floor and the cost. It does not manufacture diligence, and
  * pretending otherwise would make it worse than nothing by inviting trust it has not earned.
  *
- * Which is exactly why the LAST step is not in here at all: `gh pr create` is blocked
- * outright for the agent (`scripts/hooks/bash-guard.ts`), and a human runs it. This file
- * decides when the agent is allowed to hand that command over; it never opens a PR.
+ * WHAT IT ALSO DOES NOT DO, and this one is easy to overclaim: it does not PREVENT a pull
+ * request. There used to be a PreToolUse hook refusing `gh pr create` outright; it was removed,
+ * and nothing local replaced it, because nothing local can — `gh pr create --body` and `--fill`
+ * never touch this file, and no matcher over a shell can enumerate the spellings of a command
+ * (that is why the hook went). So `handover` is a strong DEFAULT, not an enforcement: the
+ * documented route needs an artefact only a converged review produces, and {@link
+ * pruneStaleHandover} keeps that artefact from outliving the branch and diff it attests to.
+ * Someone determined to route around it will. The rule that they must not is prose, in
+ * AGENTS.md § "How work lands here" and the `shipping-a-change` skill, and prose is all it is.
  *
  * The part that compounds is `conversions`: each finding turned into a check that fires next
  * time (AGENTS.md § "The guardrails"). A receipt with findings and no conversions is a review
@@ -70,7 +81,23 @@ export const RECEIPT_DIR = ".claude/review-receipts";
  */
 export const MIN_WAIVER_REASON = 20;
 
-/** Where `handover` writes the PR body for a human to pass to `gh pr create --body-file`. */
+/**
+ * Where `handover` writes the PR body for `gh pr create --body-file`.
+ *
+ * ONE fixed path, not one per branch — and it is the weaker of the two options, kept for one
+ * reason only: it is the path AGENTS.md, the `shipping-a-change` skill and every `gh pr create
+ * --body-file` line in them name, and a body file whose name the human cannot predict is one
+ * they cannot pass. Per-branch names (the way {@link receiptPath} does it) would scope the
+ * artefact by construction and would still be gitignored — `.gitignore` is the only place the
+ * literal is load-bearing, and a glob covers a family as easily as a name covers one file. The
+ * doc scanners need no change at all: they call `repoFiles()`, which asks git and so excludes
+ * whatever git ignores (`test-support/repoFiles.ts`); the three that mention this path do so in
+ * prose. So if the docs ever move to naming the file by branch, this can follow them.
+ *
+ * Until then the scoping is done by {@link handoverStamp} and {@link pruneStaleHandover}: the
+ * file names the branch and the diff it was written for, and any review command run against a
+ * different one deletes it.
+ */
 export const HANDOVER_FILE = ".claude/pr-body.md";
 
 /**
@@ -95,6 +122,61 @@ export type Severity = "must" | "should" | "nit";
 
 const SEVERITY_RANK: Record<Severity, number> = { nit: 0, should: 1, must: 2 };
 
+/**
+ * A claim that a finding is fixed: its fingerprint, and — when the fix did not land in the file
+ * the finding names — the path it landed in instead. See {@link Round.resolved}.
+ */
+export type Resolution = string | { id: string; file: string };
+
+/** Tracked path → hash of its bytes, for every file the branch changes. */
+export type FileHashes = Record<string, string>;
+
+/** Everything hashed about the code under review at one moment. See {@link diffHashes}. */
+export interface Snapshot {
+  diff: string;
+  code: string;
+  files: FileHashes;
+}
+
+export const resolutionId = (r: Resolution): string => (typeof r === "string" ? r : r.id);
+
+/**
+ * The path a resolution says the fix landed in: the one it names, or the finding's own file.
+ *
+ * The fingerprint is `file::claim`, so the file is recoverable from the id — and it is
+ * AUTHOR-SUPPLIED, which is the honest limit of this whole rule. A reviewer who names the wrong
+ * file, or a prose label instead of a path, gets a resolution that cannot be accepted; an author
+ * willing to write a false one can point it at a file they were changing anyway. What it stops is
+ * the accidental and the cheap: an edit somewhere else in the branch no longer answers a finding
+ * by moving the hash out from under it.
+ */
+export function resolutionPath(r: Resolution): string {
+  if (typeof r !== "string") return r.file.trim();
+  const at = r.indexOf("::");
+  return at < 0 ? r.trim() : r.slice(0, at).trim();
+}
+
+/**
+ * Did the bytes at `path` move between two snapshots — and not merely get relabelled?
+ *
+ * THE PROPERTY, exactly, because three attempts at this one have overclaimed in a comment:
+ * `to[path]` differs from `from[path]`, AND the content `from` had there is not sitting at some
+ * other path in `to`. The second half is what a rename fails, since renaming carries the bytes
+ * across intact.
+ *
+ * What that buys, and no more: a file mode, a blank line elsewhere, an unrelated tracked file, an
+ * untracked scratch file and a rename all leave this false, where every one of them moved the
+ * whole-diff hash this replaced. What it does NOT say is that the change was a fix, or that it was
+ * even related to the finding — an author fixing five findings in one file resolves all five with
+ * one edit, which is the old repo-wide hole narrowed to a file rather than closed. Narrower is the
+ * most this can honestly claim.
+ */
+export function contentMoved(from: FileHashes, to: FileHashes, path: string): boolean {
+  const was = from[path];
+  if (to[path] === was) return false;
+  return was === undefined || !Object.values(to).includes(was);
+}
+
 /** One pass of review over the diff. */
 export interface Round {
   /** Which review ran — e.g. "shipping-a-change:inline", "cold-subagent", "reviewing-deckhand:pass3". */
@@ -115,6 +197,35 @@ export interface Round {
   /** The {@link diffHash} this round actually reviewed. */
   diff: string;
   /**
+   * The {@link diffHashes} `code` half — the tracked diff alone, with the untracked file list
+   * left out — of what this round reviewed.
+   *
+   * `diff` cannot answer "did the code change", which is the only question {@link Round.resolved}
+   * rests on: it folds the untracked list in (deliberately, so a new file is visible), so `touch
+   * scratch.tmp` moves it without moving a byte of code. That was a live bypass — raise a `must`,
+   * touch a file, record `resolved`, delete the file, and the gate opened on code byte-identical
+   * to what the finding was raised against.
+   *
+   * Optional because receipts on disk predate it. A round without it falls back to its `diff`,
+   * which restores the older, weaker rule for that round rather than failing a review already in
+   * flight — see {@link validate}.
+   */
+  code?: string;
+  /**
+   * The tracked content this round reviewed, per path: every file the branch changes, mapped to a
+   * hash of its bytes. See {@link diffHashes}.
+   *
+   * `code` cannot answer "did THIS code change", only "did the diff text change" — and the diff
+   * text moves for a file mode, a blank line, an unrelated file or a one-way rename, none of
+   * which touch the code a finding is about. That was a live bypass: `chmod +x` on the offending
+   * file produced `1 file changed, 0 insertions(+), 0 deletions(-)`, moved `code`, and bought a
+   * `must` its way off the record with the function it named unaltered.
+   *
+   * Optional because receipts on disk predate it; a round without it falls back to the older,
+   * weaker whole-diff rule for that round rather than failing a review already in flight.
+   */
+  files?: Record<string, string>;
+  /**
    * Everything this round reported — not just what was new, and not just what blocks.
    *
    * Stored rather than counted because rounds happen in DIFFERENT sessions: a cold round runs
@@ -132,6 +243,26 @@ export interface Round {
    * and so re-reporting one does not read as new — they just do not hold the PR open.
    */
   newFindings: number;
+  /**
+   * Fingerprints this round says are FIXED — the third and only other way a blocking finding
+   * leaves the record (`waived` is the second; the first is that it never blocked).
+   *
+   * It exists because the alternative was silence. The gate used to consider only rounds at the
+   * current diff, on the reasoning that fixing a finding is what moves the hash — true, and
+   * insufficient: every edit moves the hash, so fixing finding A cleared unfixed finding B
+   * raised in the same round, and a later round that simply never mentioned B opened the gate.
+   *
+   * Like everything else here, it is a claim, not proof: nothing in this file can see whether a
+   * fix landed. What it can see is that the FILE the claim points at holds different bytes than
+   * when the finding was raised — see {@link contentMoved} for exactly how far that goes.
+   *
+   * A bare string resolves a finding by its own file, the one in its fingerprint. The object form
+   * says the fix landed somewhere else (`{ id, file }`), which is ordinary — a finding about a
+   * caller is fixed in the callee — and is a claim in its own right: it is written down, in the
+   * receipt and in `review:show`, next to the finding it answers. That is the trade. A path
+   * nobody checks against the claim is a hole; a path nobody can read is a worse one.
+   */
+  resolved?: Resolution[];
 }
 
 /**
@@ -152,8 +283,14 @@ export interface Receipt {
   rounds: Round[];
   /** Findings that became a mechanical check — the half of the work that outlives the PR. */
   conversions: { finding: string; check: string }[];
-  /** Findings deliberately left unmechanised, each with the reason it cannot be. */
-  waived: { finding: string; why: string }[];
+  /**
+   * Findings deliberately left unmechanised, each with the reason it cannot be — and the index of
+   * the round it was recorded with, which is what {@link waiverAnswered} makes it cost.
+   *
+   * `round` is optional for receipts written before it existed; those fall back to the older rule,
+   * where a reason alone was the whole price.
+   */
+  waived: { finding: string; why: string; round?: number }[];
   /**
    * Whether {@link GATES_COMMAND} passed, and on which diff. There is no CLI path that takes
    * this as input: the gate runners write it from the command's own exit code, because "the
@@ -226,6 +363,17 @@ export function appendRound(receipt: Receipt, round: Omit<Round, "newFindings">)
 /** Run a command, returning stdout ("" if it fails). Injected in tests. */
 export type Run = (args: string[]) => string;
 
+/** Read a file's bytes, or `null` if it is not there. Injected in tests. */
+export type ReadFile = (path: string) => Buffer | null;
+
+const readIfPresent: ReadFile = (path) => {
+  try {
+    return readFileSync(path);
+  } catch {
+    return null;
+  }
+};
+
 const runGit: Run = (args) => {
   const p = spawnSync("git", args, { encoding: "utf8" });
   return p.status === 0 ? (p.stdout ?? "") : "";
@@ -250,23 +398,70 @@ const runGit: Run = (args) => {
  * hashed by concatenation collides on any change that merely moves bytes across the boundary.
  * Untracked files never appear in a diff, so their names are folded in — that catches a new
  * file appearing or going away, though not an edit to one that was already untracked.
+ *
+ * Three parts, because three different questions are asked of this. `diff` is identity: has
+ * ANYTHING about the code under review moved, new files included, so a round or a gate run is
+ * stale. `code` is the tracked diff only — coarser, and still the fallback for rounds recorded
+ * before `files` existed. `files` is content per path, and it is the only one of the three that
+ * can answer the question {@link Round.resolved} actually asks: did THIS file's code move.
+ *
+ * `files` hashes the bytes, not the diff text, which is the whole point: a mode change, a context
+ * line shifted by an edit above it, or a rebase onto a moved base all rewrite the diff text of a
+ * file whose content is what it was. `--no-renames` so a rename shows up as both paths — the pair
+ * is what lets {@link contentMoved} recognise one.
  */
-export function diffHash(base = "origin/main", run: Run = runGit): string {
+export function diffHashes(base = "origin/main", run: Run = runGit, readFile: ReadFile = readIfPresent): Snapshot {
   const mergeBase = run(["merge-base", base, "HEAD"]).trim();
   // No merge base means git failed, or there is no `origin/main`. Either way the diff below
   // would be empty too, so every branch in every state would hash to one constant and the
   // freshness check would be comparing a constant to itself. Fail closed with a value no
   // receipt can hold.
-  if (!mergeBase) return UNRESOLVABLE_DIFF;
+  if (!mergeBase) return { diff: UNRESOLVABLE_DIFF, code: UNRESOLVABLE_DIFF, files: {} };
   const diff = run(["diff", mergeBase]);
   const untracked = run(["ls-files", "--others", "--exclude-standard"]);
-  return createHash("sha256")
-    .update(diff)
-    .update(" ") // domain separator, so the two fields cannot trade bytes
-    .update(untracked)
-    .digest("hex");
+  // Paths come out relative to the repository root, so they are joined to it rather than read
+  // against the process cwd — `npm run review:round` from a subdirectory would otherwise record an
+  // empty map and silently fall back to the weaker rule.
+  const top = run(["rev-parse", "--path-format=absolute", "--show-toplevel"]).trim();
+  const files: FileHashes = {};
+  for (const path of run(["diff", "--name-only", "--no-renames", mergeBase]).split("\n")) {
+    if (!path.trim()) continue;
+    // Absent means deleted (or unreadable), and absent is the right answer for both: a path with
+    // no bytes has no content to match. `contentMoved` reads a missing key as "not there".
+    const bytes = readFile(join(top, path));
+    if (bytes !== null) files[path] = createHash("sha256").update(bytes).digest("hex");
+  }
+  return {
+    files,
+    // The tracked diff alone. Untracked files are what makes `diff` cheap to move without
+    // touching the code, so the half that has to mean "the code changed" leaves them out — at
+    // the cost of being blind to a change in a file git has never seen, which is the same
+    // reason this file already tells you to review after `git add`, not before.
+    code: createHash("sha256").update(diff).digest("hex"),
+    diff: createHash("sha256")
+      .update(diff)
+      .update(" ") // domain separator, so the two fields cannot trade bytes
+      .update(untracked)
+      .digest("hex"),
+  };
 }
 
+export function diffHash(base = "origin/main", run: Run = runGit): string {
+  return diffHashes(base, run).diff;
+}
+
+/**
+ * The branch a receipt is keyed to — and `""` on a detached HEAD, which is a KNOWN limit rather
+ * than an oversight: every detached run on this machine shares one receipt file.
+ *
+ * Left as it is because it fails closed and cannot be handed over. {@link validate} pins the last
+ * round AND the gates to the current diff, so a curve some other detached checkout left behind
+ * cannot satisfy a different one — the shared file's foreign rounds either fail freshness or leave
+ * their own findings open, both refusals. And a detached HEAD is not a branch you can push, so it
+ * has no route to a PR anyway. Keying it to the HEAD sha instead would look tidier and be worse:
+ * the sha moves on every commit, so the curve would restart each time, which is the one thing
+ * per-branch keying exists to prevent.
+ */
 export function currentBranch(run: Run = runGit): string {
   return run(["branch", "--show-current"]).trim();
 }
@@ -308,8 +503,40 @@ function loadOrCreate(branch: string, dir = RECEIPT_DIR): Receipt {
 }
 
 /**
- * The gate. Pure, so the hook, the CLI and the tests share one definition of "reviewed
- * enough" — and so the thresholds are covered by tests rather than by trying it on a real PR.
+ * What a waiver costs beyond its reason: a cold round recorded AFTER it, on the code as it ships.
+ *
+ * A waiver is deliberately exempt from the code-movement rule — it is a decision to ship WITH the
+ * defect, so demanding the code move would be demanding the opposite of what it says. That left
+ * twenty characters as the entire price, and twenty characters of filler cleared a `must` with the
+ * working tree untouched and no commit: `{"finding": "src/f.ts::auth always returns true", "why":
+ * "aaaaaaaaaaaaaaaaaaaaaaaa"}` and the gate moved past the findings check. Reporting that finding
+ * had cost the author a round; writing it off cost less than reporting it, which is exactly the
+ * inversion `MIN_WAIVER_REASON` was added to correct and did not.
+ *
+ * So a waiver costs the same round. The decision goes on the record, and then someone who is not
+ * the one who made it reads the branch with it standing — if they re-report the finding, that is
+ * their answer, in the receipt, for a human to weigh against the reason.
+ *
+ * THE PROPERTY, and it is narrower than it sounds: a round marked cold, at the current diff, sits
+ * after the waiver in the record. `cold` is self-declared (see the header), so this buys a round's
+ * delay and an explicit ordering, not an independent opinion. What it stops is waiving in the same
+ * breath as converging, which is the shape every cheap waiver has had. It does NOT reopen the
+ * finding if that later round re-reports it — the waiver stands, visibly, beside the re-report:
+ * requiring a fresh waiver per re-report loops forever between a reviewer who keeps raising it and
+ * an author who keeps writing it off, and a gate with no terminating honest path gets skipped.
+ */
+export function waiverAnswered(waiver: { round?: number }, rounds: Round[], hash: string): boolean {
+  // A waiver written before `round` existed is treated as recorded before every round: the older
+  // rule, where a reason was the whole price. Same reasoning as the `code`/`files` fallbacks —
+  // there is no migration for a gitignored file, and reviews are in flight.
+  const at = typeof waiver.round === "number" ? waiver.round : -1;
+  return rounds.some((r, i) => i > at && r?.cold && r?.diff === hash);
+}
+
+/**
+ * The gate. Pure, so the CLI (`check`, `round`, `handover`) and the tests share one definition
+ * of "reviewed enough" — and so the thresholds are covered by tests rather than by trying it
+ * on a real PR.
  */
 export function validate(receipt: Receipt | null, hash: string): Verdict {
   if (!receipt) {
@@ -319,17 +546,36 @@ export function validate(receipt: Receipt | null, hash: string): Verdict {
     };
   }
   // A receipt is a JSON file an agent can write, so it can be any shape at all. Reading a
-  // field off a malformed one used to throw, which took the PreToolUse hook down with a
-  // non-blocking error — a crash in the guard OPENS the gate it exists to close. Checking the
-  // top-level array was not enough: `rounds: [null]` and `waived: "x"` both still threw, one
-  // level in. Every field this function walks is checked before it is walked.
+  // field off a malformed one used to throw. Nothing catches that throw: `check`, `round` and
+  // `handover` all call this straight from the CLI, so it surfaces as a stack trace on a
+  // non-zero exit. That fails CLOSED — no handover is written — but it fails mute: the one
+  // thing that gets a stuck review moving ("the receipt is malformed, re-run the review") is
+  // what a verdict carries and an exception does not, and a tool that crashes reads as broken
+  // rather than as a state to fix. Checking the top-level array was not enough: `rounds:
+  // [null]` and `waived: "x"` both still threw, one level in. Every field this function walks
+  // is checked before it is walked.
   // Junk is REFUSED rather than skipped over. Filtering a null finding out and carrying on
   // would make the most permissive reading of a broken file the one the gate acts on, which is
   // the same failure in slower motion.
   const isObject = (v: unknown): boolean => !!v && typeof v === "object";
+  // A resolution is walked for an id AND a path, so both halves of both forms are checked before
+  // either is read — the object form added two more fields to the same crash class.
+  const wellFormedResolution = (r: unknown): boolean =>
+    typeof r === "string" ||
+    (isObject(r) && typeof (r as { id: unknown }).id === "string" && typeof (r as { file: unknown }).file === "string");
+  const wellFormedFiles = (f: unknown): boolean =>
+    f === undefined || (isObject(f) && !Array.isArray(f) && Object.values(f as object).every((v) => typeof v === "string"));
   if (
     !Array.isArray(receipt.rounds) ||
-    receipt.rounds.some((r) => !isObject(r) || !Array.isArray(r.findings) || r.findings.some((f) => !isObject(f)))
+    receipt.rounds.some(
+      (r) =>
+        !isObject(r) ||
+        !Array.isArray(r.findings) ||
+        r.findings.some((f) => !isObject(f)) ||
+        (r.code !== undefined && typeof r.code !== "string") ||
+        !wellFormedFiles(r.files) ||
+        (r.resolved !== undefined && (!Array.isArray(r.resolved) || !r.resolved.every(wellFormedResolution))),
+    )
   ) {
     return { ok: false, reason: "the receipt is malformed (rounds are not a list of rounds with findings). Re-run the review." };
   }
@@ -338,7 +584,13 @@ export function validate(receipt: Receipt | null, hash: string): Verdict {
   // crash class this whole guard block exists for, reintroduced by the waiver rule.
   if (
     receipt.waived !== undefined &&
-    (!Array.isArray(receipt.waived) || receipt.waived.some((w) => !isObject(w) || (w.why !== undefined && typeof w.why !== "string")))
+    (!Array.isArray(receipt.waived) ||
+      receipt.waived.some(
+        (w) =>
+          !isObject(w) ||
+          (w.why !== undefined && typeof w.why !== "string") ||
+          (w.round !== undefined && (typeof w.round !== "number" || !Number.isFinite(w.round))),
+      ))
   ) {
     return { ok: false, reason: "the receipt is malformed (`waived` is not a list of waivers). Re-run the review." };
   }
@@ -382,29 +634,102 @@ export function validate(receipt: Receipt | null, hash: string): Verdict {
   // the CHEAPER path, because fixing them changes the diff and costs another round. So the
   // last round must have nothing blocking left standing — fixed, or waived on the record.
   //
-  // "Left standing" spans rounds, not just the last one. Checking only the last round made
-  // SILENCE the cheapest exit: a cold round reports a must, the next round simply does not
-  // mention it, and the gate opens with nothing fixed. Dropping it is distinguishable from
-  // fixing it, because fixing it changes the diff — so a blocking finding counts as open when
-  // the round that raised it reviewed the code AS IT STANDS and no later round cleared it.
-  // Only waivers that carry a reason count. `recordRound` refuses the rest, but the receipt is a
-  // file on disk and anything that can write it can write any shape — so the rule is enforced
-  // where it is READ as well as where it is written.
-  const waived = new Set(
-    (receipt.waived ?? []).filter((w) => (w.why ?? "").trim().length >= MIN_WAIVER_REASON).map((w) => w.finding),
-  );
+  // "Left standing" spans every round at every diff, not just the ones that reviewed the code as
+  // it stands. Checking only the last round made SILENCE the cheapest exit: a cold round reports
+  // a must, the next round does not mention it, and the gate opens with nothing fixed. Checking
+  // only rounds at the CURRENT diff was the same hole one step along — "a fix is why the hash
+  // moved" is true of a fix and true of every other edit, so fixing one finding cleared its
+  // unfixed neighbours, and a cold round reporting nothing afterwards read as convergence.
+  //
+  // So a blocking finding is open until something on the record answers it, and the record is
+  // the only thing that can: `resolved` on a later round, or a waiver with a reason. The property
+  // a resolution has to satisfy, exactly:
+  //
+  //   it was recorded LATER, the FILE it points at holds different bytes than when the finding
+  //   was raised, and the code under review now has not gone back to those bytes.
+  //
+  // Every clause is load-bearing and each one replaced a bypass that had been run end to end. "A
+  // later round" alone: fixing anything cleared everything else by silence. "A different diff":
+  // `touch scratch.tmp` … `resolved` … `rm` moved the hash without moving code, because `diff`
+  // folds in untracked names. "A different tracked diff": `chmod +x` on the file the finding named
+  // moved the diff TEXT (`1 file changed, 0 insertions(+), 0 deletions(-)`) while the function it
+  // was about stayed exactly as reported — and so did a blank line, an unrelated tracked file, and
+  // a one-way rename. Hence bytes, per path: see {@link contentMoved} for what that does and does
+  // not establish. Comparing the raising round to the CURRENT files as well as to the resolving
+  // round is what makes a revert expire the resolution rather than ratchet it.
+  //
+  // Only waivers that carry a reason AND have been read past count — see {@link waiverAnswered}.
+  // `recordRound` refuses an unreasoned one, but the receipt is a file on disk and anything that
+  // can write it can write any shape, so the rules are enforced where they are READ as well.
+  const reasoned = (receipt.waived ?? []).filter((w) => (w.why ?? "").trim().length >= MIN_WAIVER_REASON);
+  const waived = new Set(reasoned.filter((w) => waiverAnswered(w, receipt.rounds, hash)).map((w) => w.finding));
+  // A round recorded before `code`/`files` existed falls back to its `diff`, which is the older,
+  // weaker rule for that round. Not fail-closed, because the strict reading would reopen every
+  // finding already resolved on a branch mid-review and there is no migration for a gitignored
+  // file; and a receipt can be hand-edited anyway (see the header), so this is not the boundary
+  // that keeps anyone honest. `last` stands in for the code under review NOW: the check above
+  // pinned `last.diff` to the current hash, and an equal diff hash means an equal tracked diff, so
+  // equal content in every file the branch touches — in a receipt this CLI wrote. It is READ from
+  // the file rather than recomputed, so a hand-edited map says whatever was typed into it. The
+  // header's limit, restated where it bites rather than a new one: `validate` is pure so that the
+  // CLI and the tests share one definition of the gate, and no part of it defends against whoever
+  // can write the receipt.
+  const codeOf = (r: Round): string => r.code ?? r.diff;
+  const currentCode = codeOf(last);
+  const resolutionHolds = (raisedAt: Round, by: Round, res: Resolution): boolean => {
+    // The whole-diff rule is kept as a floor rather than replaced: for a receipt this CLI wrote it
+    // is implied by the per-path one below — identical tracked diffs mean identical file content —
+    // so keeping it costs nothing and makes "strictly narrower than the rule it replaces" true of
+    // every receipt, including one whose file map was typed in by hand.
+    if (codeOf(by) === codeOf(raisedAt)) return false;
+    if (!raisedAt.files || !by.files || !last.files) return true;
+    const path = resolutionPath(res);
+    return contentMoved(raisedAt.files, by.files, path) && contentMoved(raisedAt.files, last.files, path);
+  };
+  // Per OCCURRENCE, not per id: a finding re-reported after the fix that was supposed to answer
+  // it is raised again, and the earlier resolution says nothing about the later report.
+  const answered = (id: string, raisedIn: number, raisedAt: Round): boolean =>
+    // The code is not back at — and for a legacy round, the whole diff is not back at — what the
+    // finding was reported against.
+    raisedAt.diff !== hash &&
+    codeOf(raisedAt) !== currentCode &&
+    // ... and the round making the claim had itself moved on from that code, so a resolution
+    // cannot be recorded against the very bytes the finding describes.
+    receipt.rounds.some(
+      (r, i) => i > raisedIn && (r.resolved ?? []).some((res) => resolutionId(res) === id && resolutionHolds(raisedAt, r, res)),
+    );
   const open = new Set<string>();
-  for (const round of receipt.rounds) {
-    if (round.diff !== hash) continue; // reviewed older code; a fix is why the hash moved
-    for (const f of round.findings) if (f.severity !== "nit" && !waived.has(f.id)) open.add(f.id);
+  receipt.rounds.forEach((round, i) => {
+    for (const f of round.findings) {
+      if (f.severity === "nit" || waived.has(f.id) || answered(f.id, i, round)) continue;
+      open.add(f.id);
+    }
+  });
+  // A waiver that has not been read past yet is a different state from a finding nobody answered,
+  // and the general message below would misdescribe it — telling someone to waive what they just
+  // waived is how a gate teaches people to stop reading it.
+  const unread = reasoned.filter((w) => open.has(w.finding));
+  if (unread.length) {
+    return {
+      ok: false,
+      reason:
+        `${unread.length === 1 ? "a waiver" : `${unread.length} waivers`} on this receipt ` +
+        `(${unread.map((w) => w.finding).join("; ")}) ${unread.length === 1 ? "was" : "were"} recorded after the last cold ` +
+        `round on this code, so nobody has reviewed the branch with that decision standing. Shipping a known defect costs ` +
+        `what raising one costs — a round: record one more cold round on the current diff. If it re-reports the finding, ` +
+        `that is the answer.`,
+    };
   }
   if (open.size) {
     return {
       ok: false,
       reason:
-        `the review still has ${open.size} unresolved blocking ${open.size === 1 ? "finding" : "findings"} against this diff ` +
-        `(${[...open].join("; ")}). Fix them and review again, or waive each one with a reason ` +
-        `(\`waived\` takes the fingerprint).`,
+        `the review still has ${open.size} unresolved blocking ${open.size === 1 ? "finding" : "findings"} ` +
+        `(${[...open].join("; ")}). Fix each one and record it — \`resolved\` on the round after the fix takes the ` +
+        `fingerprint, and the file it names has to hold different bytes than when the finding was raised (if the fix ` +
+        `landed elsewhere, say where: \`{"id": "<fingerprint>", "file": "<path you changed>"}\`) — or waive it with a ` +
+        `reason (\`waived\` takes the fingerprint too). A finding nobody mentions again stays open: the code changing ` +
+        `is not an answer, because every edit changes it.`,
     };
   }
 
@@ -457,10 +782,15 @@ export function summarize(receipt: Receipt): string {
   // Defaulted, not asserted: this runs on the success path right after `validate`, and a
   // receipt missing an optional key would otherwise throw AFTER the handover body is written —
   // leaving a human with no printed command and a nonzero exit for a review that passed.
+  // The two ways a blocking finding leaves the record, side by side and both counted, because a
+  // curve that converged by fixing things and one that converged by writing them off are
+  // different reviews and the point of this line is that a human can tell them apart.
+  const resolved = new Set(receipt.rounds.flatMap((r) => (r.resolved ?? []).map(resolutionId)));
   return [
     `rounds → ${curve.join(" · ")}`,
     `checks added: ${receipt.conversions?.length ?? 0}`,
     nits.size ? `nits (non-blocking): ${nits.size}` : null,
+    resolved.size ? `resolved: ${resolved.size}` : null,
     receipt.waived?.length ? `waived: ${receipt.waived.length}` : null,
   ]
     .filter(Boolean)
@@ -478,6 +808,12 @@ export interface RoundInput {
   findings?: { file: string; claim: string; severity?: Severity; evidence?: string }[];
   conversions?: { finding: string; check: string }[];
   waived?: { finding: string; why: string }[];
+  /**
+   * Fingerprints (from `review:show`) that this round says are now fixed — or `{ id, file }` when
+   * the fix landed somewhere other than the file the finding names. See {@link Round.resolved}: a
+   * blocking finding does not stop blocking by being edited past.
+   */
+  resolved?: Resolution[];
 }
 
 /**
@@ -488,7 +824,8 @@ export interface RoundInput {
  * on. Here it is derived from the fingerprints of every earlier round, so a second review in a
  * new session extends the curve instead of restarting it.
  */
-export function recordRound(input: RoundInput, hash: string, branch: string, dir = RECEIPT_DIR): Receipt {
+export function recordRound(input: RoundInput, snap: Snapshot, branch: string, dir = RECEIPT_DIR): Receipt {
+  const { diff: hash, code, files } = snap;
   // A round with no lens is one nobody can audit later, and it would still count toward the
   // floor — so it is rejected rather than recorded as `undefined`.
   if (!input.lens?.trim()) throw new Error("a round needs a `lens` naming the review that ran");
@@ -504,15 +841,59 @@ export function recordRound(input: RoundInput, hash: string, branch: string, dir
     );
   }
   const base = loadOrCreate(branch, dir);
+  // Checked here as well as in `validate` so a mistyped fingerprint is an error at the moment it
+  // is written rather than an unexplained refusal at handover: a resolution that matches nothing
+  // silently leaves the real finding open, which is the failure this field exists to prevent.
+  const resolved = (input.resolved ?? []).map((r): Resolution =>
+    typeof r === "string" ? r.trim() : { id: (r?.id ?? "").trim(), file: (r?.file ?? "").trim() },
+  );
+  for (const res of resolved) {
+    const id = resolutionId(res);
+    const path = resolutionPath(res);
+    const raises = base.rounds.filter((r) => r.findings.some((f) => f.id === id));
+    if (!id || !raises.length) {
+      throw new Error(
+        `no earlier round reported \`${id}\` — quote the fingerprint exactly as \`npm run review:show\` prints it. ` +
+          `A resolution that matches nothing leaves the finding it meant to close standing.`,
+      );
+    }
+    if (!path) {
+      throw new Error(`a resolution for \`${id}\` names an empty file — give the path the fix landed in, or drop the \`file\` key.`);
+    }
+    // The same question {@link validate} will ask, asked at the moment the claim is written: the
+    // file this points at has to hold different bytes than when the finding was raised. A round
+    // cannot resolve a finding reported against the code it is itself looking at, or "fixed" costs
+    // one line of JSON — and the three cheaper spellings of that (an untracked file, a mode bit,
+    // an edit elsewhere in the branch) are exactly what per-path bytes refuse. Refused here too so
+    // the reviewer is told now rather than at the handover, a round later than it could have been.
+    // The fallback for rounds recorded before `files` existed is the older whole-diff pair, `code`
+    // AND `diff`, since a legacy round's `code` falls back into the other hash space.
+    const stale = raises.filter(
+      // The whole-diff rule first, as a floor and as the only rule a pre-`files` round has, then
+      // the per-path one — the same conjunction {@link validate} will apply, so a round the CLI
+      // accepts is not one the handover then refuses.
+      (r) => (r.code ?? r.diff) === code || r.diff === hash || (r.files && files ? !contentMoved(r.files, files, path) : false),
+    );
+    if (stale.length) {
+      throw new Error(
+        `\`${id}\` is not answered by this round: \`${path}\` holds the same bytes it did when the finding was raised, ` +
+          `so nothing there has changed. Fix it and record the round AFTER the fix; if the fix landed in another file, ` +
+          `say which — \`{"id": "${id}", "file": "<path you changed>"}\` — or waive it with a reason.`,
+      );
+    }
+  }
   const next = appendRound(base, {
     lens: input.lens,
     cold: input.cold ?? false,
     diff: hash,
+    code,
+    files,
     findings: (input.findings ?? []).map((f) => ({
       id: fingerprint(f.file, f.claim),
       severity: f.severity ?? "should",
       evidence: f.evidence,
     })),
+    ...(resolved.length ? { resolved } : {}),
   });
   next.conversions = [...base.conversions, ...(input.conversions ?? [])];
   // A waiver silences a blocking finding, so it costs at least as much as raising one. Reporting
@@ -527,7 +908,13 @@ export function recordRound(input: RoundInput, hash: string, branch: string, dir
       );
     }
   }
-  next.waived = [...base.waived, ...(input.waived ?? [])];
+  // Stamped with the round it was recorded alongside, which is what {@link waiverAnswered} costs
+  // it: a waiver is answered by a cold round that came AFTER it, so the index has to be on record.
+  // Taken from the receipt being written, not from `base`, so a waiver recorded with a round is
+  // stamped with that round rather than with the one before it — off by one here would mean the
+  // round it arrived with could answer it, which is the shape it exists to refuse.
+  const at = next.rounds.length - 1;
+  next.waived = [...base.waived, ...(input.waived ?? []).map((w) => ({ ...w, round: at }))];
   writeReceipt(next, dir);
   return next;
 }
@@ -686,26 +1073,79 @@ export function runGatesClean(branch: string, dir = RECEIPT_DIR): Receipt | { di
 }
 
 /**
- * The handover: what a HUMAN pastes to open the PR.
+ * What the body attests to, in a form a later run can compare rather than guess at.
  *
- * This is the whole shape of the human gate. The agent cannot run `gh pr create` — the
- * PreToolUse hook refuses it with no override — so the last step is always a person's. What
- * this command adds is that the artefact that person needs only EXISTS once the review
- * converged: it refuses to write the body file unless {@link validate} passes.
- *
- * So skipping the review does not produce a PR the human has to catch; it produces no
- * handover at all, and an agent with nothing to hand over has to say so.
+ * An HTML comment because it has to survive being pasted into a PR — GitHub renders nothing,
+ * so the stamp costs the reader nothing, while the human-readable line beside it says the same
+ * two facts in words. One function produces both, so they cannot drift apart.
  */
-export function handover(receipt: Receipt | null, hash: string, body: string, file = HANDOVER_FILE): Verdict {
+export function handoverStamp(branch: string, hash: string): string {
+  return `<!-- deckhand-handover branch=${branch} diff=${hash} -->`;
+}
+
+/**
+ * Delete a body file that was written for a different branch, or for code that has since
+ * changed. Returns whether it removed one.
+ *
+ * The path is fixed and gitignored, so nothing ever cleaned it up: land branch A, cut branch B,
+ * and `gh pr create --body-file .claude/pr-body.md` succeeds on B with A's body — a PR whose
+ * review receipt describes someone else's diff, and nothing in the body said so. Every CLI
+ * command here prunes first, so following the workflow AT ALL clears a stale artefact before it
+ * can be used. Unreadable counts as stale: a body that cannot be shown to be current is not.
+ *
+ * This narrows the window; it does not close it. Nothing stops a caller naming the path
+ * directly, and `--body`/`--fill` never look at a file at all — see the header.
+ */
+export function pruneStaleHandover(branch: string, hash: string, file = HANDOVER_FILE): boolean {
+  if (!existsSync(file)) return false;
+  let contents = "";
+  try {
+    contents = readFileSync(file, "utf8");
+  } catch {
+    contents = "";
+  }
+  if (contents.includes(handoverStamp(branch, hash))) return false;
+  rmSync(file, { force: true });
+  return true;
+}
+
+/**
+ * The handover: the body a converged review earns, stamped with what it is a review OF.
+ *
+ * It writes nothing unless {@link validate} passes, and it REMOVES an existing body when it
+ * refuses — a refused handover has to leave no artefact behind, or the previous one stands in
+ * for the one it would not write.
+ */
+export function handover(receipt: Receipt | null, hash: string, body: string, branch: string, file = HANDOVER_FILE): Verdict {
+  const refuse = (reason: string): Verdict => {
+    rmSync(file, { force: true });
+    return { ok: false, reason };
+  };
   const verdict = validate(receipt, hash);
-  if (!verdict.ok) return verdict;
-  if (!body.trim()) return { ok: false, reason: "the PR body is empty — pipe the filled-in body in on stdin." };
+  if (!verdict.ok) return refuse(verdict.reason);
+  if (!body.trim()) return refuse("the PR body is empty — pipe the filled-in body in on stdin.");
   mkdirSync(dirname(file), { recursive: true });
-  // The curve goes IN the body. The receipt is gitignored — it is working state, not history —
-  // so a reader of the PR could see the claim "reviewed to convergence" and nothing behind it,
-  // while AGENTS.md says the value is that the claim is attributable and readable afterwards.
-  // Readable to whoever opens the PR, then, not only to whoever ran the review.
-  const withCurve = `${body.trimEnd()}\n\n---\n\n<details><summary>Review curve (\`npm run review:show\`)</summary>\n\n${summarize(receipt!)}\n\n</details>\n`;
+  // The curve and the identity go IN the body. The receipt is gitignored — it is working state,
+  // not history — so a reader of the PR could see the claim "reviewed to convergence" and
+  // nothing behind it, while AGENTS.md says the value is that the claim is attributable and
+  // readable afterwards. Readable to whoever opens the PR, then, not only to whoever ran the
+  // review: which branch, and which diff, so a body that has outlived either reads as stale to
+  // a human even in the case pruning cannot reach.
+  const attests = `Handover for \`${branch}\` at diff \`${hash.slice(0, 12)}\` (\`npm run review:hash\`).`;
+  // Waivers are printed in full, not counted. A waiver is a decision to ship a known defect, and
+  // the only reader who can weigh that against the reason is the human opening the PR — who cannot
+  // see the receipt, which is gitignored. Left as "waived: 2" in the summary line, the decision
+  // travelled as a number. This is the other half of what waiving costs (see `waiverAnswered`):
+  // the round is the delay, and this is the exposure.
+  const waivers = (receipt!.waived ?? []).filter((w) => w?.finding);
+  const waiverBlock = waivers.length
+    ? `\n**Shipping with ${waivers.length} known finding${waivers.length === 1 ? "" : "s"} waived:**\n\n` +
+      `${waivers.map((w) => `- \`${w.finding}\` — ${w.why}`).join("\n")}\n`
+    : "";
+  const withCurve =
+    `${body.trimEnd()}\n\n---\n\n${attests}\n${waiverBlock}\n` +
+    `<details><summary>Review curve (\`npm run review:show\`)</summary>\n\n${summarize(receipt!)}\n\n</details>\n\n` +
+    `${handoverStamp(branch, hash)}\n`;
   writeFileSync(file, withCurve);
   return { ok: true };
 }
@@ -720,9 +1160,16 @@ const isEntryPoint = process.argv[1]?.endsWith("review-receipt.ts") ?? false;
 
 if (isEntryPoint) {
   const [cmd] = process.argv.slice(2);
-  const hash = diffHash();
+  const snap = diffHashes();
+  const hash = snap.diff;
   const branch = currentBranch();
   const receipt = readReceipt(branch);
+  // Before anything, not just before `handover`: the body file is the one piece of review state
+  // that is not keyed to a branch, and the command that would misuse it (`gh pr create`) does
+  // not run through here. Pruning on every command is the widest net this script can cast.
+  if (pruneStaleHandover(branch, hash)) {
+    console.error(`(removed ${HANDOVER_FILE}: it was written for a different branch or an older diff)`);
+  }
 
   if (cmd === "check") {
     const verdict = validate(receipt, hash);
@@ -760,21 +1207,33 @@ if (isEntryPoint) {
     console.log(next.gates?.passed ? `✓ gates green ${label}` : `✗ gates RED ${label}`);
     if (!next.gates?.passed) process.exit(1);
   } else if (cmd === "round") {
-    const next = recordRound(JSON.parse(await readStdin()) as RoundInput, hash, branch);
+    // Every refusal `recordRound` raises is an instruction — which fingerprint, which file, what to
+    // write instead — and thrown from the entry point it arrived as a stack trace with the
+    // instruction buried in it. Same reasoning as the `gates` branch and as `validate`'s guard
+    // block: a tool that crashes reads as broken rather than as a state to fix, and the agent is
+    // one step from a gate it believes it cannot satisfy. A malformed JSON body lands here too,
+    // which is the other thing a caller gets wrong at exactly this step.
+    let next: Receipt;
+    try {
+      next = recordRound(JSON.parse(await readStdin()) as RoundInput, snap, branch, RECEIPT_DIR);
+    } catch (err) {
+      console.error(`✗ ${(err as Error).message}`);
+      process.exit(1);
+    }
     const last = next.rounds.at(-1);
     console.log(`recorded ${last?.lens}: ${last?.newFindings} new of ${last?.findings.length}`);
     console.log(summarize(next));
     const verdict = validate(next, hash);
     console.log(verdict.ok ? "✓ gate satisfied" : `still blocked — ${verdict.reason}`);
   } else if (cmd === "handover") {
-    const verdict = handover(receipt, hash, await readStdin());
+    const verdict = handover(receipt, hash, await readStdin(), branch);
     if (!verdict.ok) {
       console.error(`✗ no handover: ${verdict.reason}`);
       process.exit(1);
     }
     console.log(`✓ ${receipt ? summarize(receipt) : ""}`);
-    console.log(`\nPR body written to ${HANDOVER_FILE}.`);
-    console.log(`\nA HUMAN runs this — the agent is blocked from it, deliberately:\n`);
+    console.log(`\nPR body written to ${HANDOVER_FILE}, stamped for ${branch} at ${hash.slice(0, 12)}.`);
+    console.log(`\nThe review converged, so this is now yours to run:\n`);
     console.log(`  gh pr create --base main --title "<title>" --body-file ${HANDOVER_FILE}\n`);
   } else {
     console.error("usage: tsx scripts/review-receipt.ts <check|hash|show|round|gates|gates:quick|handover>");

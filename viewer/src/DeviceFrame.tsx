@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DevicePlayer, type PlayerStatus } from "./stream/player.ts";
+import { streamBadge } from "./stream/badge.ts";
 import { DeviceInput, ORIENTATION_CYCLE, type SpecialKey } from "./stream/input.ts";
 import { deviceBase, deviceWsUrl, phaseBadge, phaseLabel, repoName, type ShareDevice } from "./api.ts";
 import { BranchIcon, CollapseIcon, ExpandIcon, HomeIcon, KeyboardIcon, PlatformGlyph, RepoGlyph, RotateIcon } from "./icons.tsx";
@@ -37,14 +38,14 @@ interface Props {
   /** Report the cumulative rotation (deg) so app-level chrome can spin its icons to match. */
   onRotationChange?: (paneKey: string, deg: number) => void;
   /**
-   * Render but keep off screen. Used by the compare panes to show one device at a
+   * Render but keep off screen. Used by a source column to show one device at a
    * time without unmounting the others, so switching back doesn't rebuild the
    * canvas, the input socket or the control registration — only the video stream
    * is dropped while hidden and restarted on the way back.
    */
   hidden?: boolean;
   /**
-   * Extra control-row buttons, placed before Home. A compare pane puts its device
+   * Extra control-row buttons, placed before Home. A source column puts its device
    * picker here so it sits with Home/Rotate/Fullscreen rather than floating above
    * the sim as a separate, larger control.
    */
@@ -63,7 +64,7 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
   const frameRef = useRef<HTMLElement>(null); // the whole card is the fullscreen target
   const inputRef = useRef<DeviceInput | null>(null); // control buttons ride the same HID ws as touch
   // Streaming is gated on three independent signals, so they can't clobber each
-  // other: `hidden` (a compare pane showing a different device), on-screen (the
+  // other: `hidden` (a pane the stage is not currently showing), on-screen (the
   // IntersectionObserver), and tab visibility. setActive tears the stream DOWN,
   // so a single source getting this wrong leaves a permanently blank canvas.
   //
@@ -72,7 +73,11 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
   // the mobile stage uses it withheld activation on phones while desktop — which
   // has no containment there — worked fine. `hidden` is the complete truth about
   // whether a frame should stream, because every ancestor that can hide one
-  // folds its own visibility into that prop (see CompareView's refPaneOff).
+  // folds its own visibility into that prop: App.tsx passes
+  // `hidden={!visible.has(p.key)}` from computeStage's `visible` set, and the one
+  // ancestor that hides anything — the `pane-group--off` column — is switched off
+  // by that same set. Nothing guards that in a test (the viewer has no DOM test
+  // setup); a new way to hide a frame has to feed `hidden` too.
   const playerRef = useRef<DevicePlayer | null>(null);
   const onScreenRef = useRef(true);
   // Seeded from the first render, so the stream effect below sees the right value
@@ -92,13 +97,10 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
   // The frame auto-fits each device: default shape from the model name, then the
   // exact aspect from the first real frame (so an iPad never sits in a phone frame).
   const isTablet = /ipad|tablet/i.test(device.label);
-  const isAndroid = /android/i.test(device.label);
   const [aspect, setAspect] = useState(isTablet ? "3 / 4" : "9 / 19.5");
   const ready = device.phase === "ready";
   const isThumb = variant === "thumb";
-  // Android streams via multipart-PNG (adb-screencap) — that's its normal path,
-  // not a degraded iOS H.264 fallback, so don't cry "Reduced quality" for it.
-  const showBadge = ready && !isThumb && status !== "streaming" && !(isAndroid && status === "fallback");
+  const badge = streamBadge(status, { ready, isThumb });
 
   const [aw, ah] = aspect.split("/").map((s) => parseFloat(s));
   // Keep the corner subtle: a big radius clips real screen content (the status-bar
@@ -238,7 +240,7 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
     };
   }, [ready, shareId, device.deviceId, key, syncActive]);
 
-  // Showing/hiding a frame (compare pane device switch) starts or drops its
+  // Showing/hiding a frame (a source column switching device) starts or drops its
   // stream directly — the observer can't, since it ignores zero-area reports.
   // onScreenRef needs no forcing here: the zero-area guard means hiding never
   // set it false, so a false value predates the hide and is still correct.
@@ -374,7 +376,7 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
         {/* One pill, two sources: the boot/build phase before the stream exists,
             then the streaming state once it does. Same chip either way, so the
             frame's status never jumps between two different affordances. */}
-        {showBadge && <div className="badge">{status === "fallback" ? "Reduced quality" : "Connecting…"}</div>}
+        {badge && <div className="badge">{badge}</div>}
         {!ready && !isThumb && device.phase !== "failed" && <div className="badge">{phaseBadge(device.phase)}</div>}
       </div>
       {!isThumb && ready && (

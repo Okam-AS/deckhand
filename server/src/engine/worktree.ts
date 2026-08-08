@@ -431,16 +431,11 @@ export class WorktreeManager {
   }
 
   /**
-   * The repo's default branch (from `origin/HEAD`, set by clone), e.g. "master".
-   * Null if it can't be determined. Ensures the base clone first (so it can hit
-   * the same credential path as add_app and surface a missing-credential error).
-   */
-  /**
    * The branch a LOCAL (dev-mode) checkout is currently on, or null when it is
    * detached, not a repo, or unreadable.
    *
    * Read-only, and deliberately so: deckhand borrows a developer's working copy
-   * and never writes to it (PLAN §11.4). This exists because "local" is a true
+   * and never writes to it (PLAN §11 item 4). This exists because "local" is a true
    * but useless thing to show a viewer — it names the SOURCE MODE, not what is
    * on screen. Two panes both reading "local" tell you nothing about which
    * branch each one is.
@@ -453,6 +448,11 @@ export class WorktreeManager {
     return name && name !== "HEAD" ? name : null;
   }
 
+  /**
+   * The repo's default branch (from `origin/HEAD`, set by clone), e.g. "master".
+   * Null if it can't be determined. Ensures the base clone first (so it can hit
+   * the same credential path as add_app and surface a missing-credential error).
+   */
   async defaultBranch(app: App): Promise<string | null> {
     const base = await this.ensureBaseClone(app);
     const r = await this.git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], { cwd: base });

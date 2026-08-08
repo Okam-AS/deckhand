@@ -10,64 +10,44 @@ checkout is gone.
 
 ## 1. Driving the SimDeck daemon
 
-- Start: `simdeck daemon start --port 4310 --bind 127.0.0.1 --video-codec software
-  --stream-quality balanced --local-stream-fps 60`. Always `daemon stop` first. On
-  `EADDRINUSE`: `lsof -tiTCP:4310 -sTCP:LISTEN`, kill **only** PIDs whose command matches
-  `simdeck`/`SimDeck` (SIGTERM→SIGKILL), clean both 4310 and 4311, retry once.
-- Readiness: poll `GET /api/health` every 250 ms, ≤15 s.
-- Health gate before streaming: require software codec active, a stream-quality profile,
-  and fps > 0. Auto-mate hard-required the **software (x264) encoder** for realtime
-  previews — the hardware encoder stalled under multi-stream load. (SimDeck now handles
-  hardware/software failover in `auto` mode; still verify under 3+ concurrent streams.)
-- Auth: token discovered from `/api/health` (Set-Cookie `simdeck_token=…` or a
-  `?simdeckToken=` URL inside the body), then sent as `X-SimDeck-Token`.
+- Auto-mate started the daemon with a long option string. Deckhand does not: it runs
+  `simdeck -p <port>` (default 4310), which starts-or-reuses the local service and returns —
+  see `server/src/testing/simdeck.ts`. It does not await that command — depending on the
+  installed CLI it detaches or blocks — and gates readiness on `GET /api/health` answering,
+  polled until `START_TIMEOUT_MS`.
+- **Auto-mate's port-contention ladder was NOT ported**, and nothing replaced it: there is no
+  `EADDRINUSE` handling, no `lsof`, no kill and no retry. A daemon already on the port that
+  answers `/api/health` *is* the reuse path; one that does not answer times out and `describe`
+  reports the daemon unavailable. Rebuild the ladder only if that verdict starts being wrong.
+- Auto-mate streamed VIDEO through SimDeck and hard-required its **software (x264)
+  encoder**: the hardware one stalled once several previews streamed at once. Deckhand does
+  not stream through SimDeck — serve-sim for iOS, adb for Android (PLAN §2/§8), and SimDeck's
+  control REST surface only (`.claude/rules/testing-control.md`) — so there is no codec state
+  here to gate on and nothing to poll for one. What survives is a lesson about deckhand's OWN
+  streaming: an encoder that is fine for one stream is no evidence about three.
 - Cheap pre-flight worth copying: before showing a viewer, open the upstream stream WS
   with a 1.5 s timeout to confirm it upgrades; cache the verdict (60 s ok / 15 s fail).
-- iOS: auto-mate created/booted sims itself via `simctl`; SimDeck merely attaches display.
-  Android: **SimDeck owns boot** — `POST /api/simulators/android:<avdName>/boot`, then poll
-  `GET /api/simulators` until `isBooted && android.serial && privateDisplay.displayReady`.
-  The adb serial must always be read from SimDeck's simulator object, never guessed.
+- iOS: auto-mate created/booted sims itself via `simctl`; SimDeck merely attached display.
+  Android: auto-mate let **SimDeck own boot** and read the adb serial back off SimDeck's
+  simulator object. Deckhand does neither — it creates the AVD and boots the emulator itself
+  via avdmanager/emulator/adb (`server/src/devices/android.ts`) on a fixed console port, so
+  the serial is `emulator-<port>` and is derived rather than discovered. The durable lesson
+  is only the negative one: never guess an adb serial.
 - Useful simulator-object fields: `udid`, `platform` (`ios-simulator`|`android-emulator`),
   `isBooted`, `android.{avdName,serial,grpcPort}`,
   `privateDisplay.{displayReady,displayStatus,displayWidth,displayHeight,rotationQuarterTurns}`.
 
-## 2. Browser streaming client (legacy H.264-over-WS "SDH1" protocol + behaviors)
+## 2. Browser streaming client
 
-> **Transport note (updated 2026-07-09):** Deckhand streams **H.264 over WebSocket via
-> serve-sim** (PLAN.md §8–9) — the same *transport family* as this section, but a
-> **different wire format**: vendor serve-sim's own client parsing (`avcc-codec.ts`,
-> `mjpeg-frame-parser.ts`), do NOT implement the SDH1 framing below (it was SimDeck's,
-> removed upstream in v0.1.31; kept only as historical reference). The **client behaviors**
-> in this section (IDR gating, monotonic timestamps, backlog reset, rAF single-frame paint,
-> visibility gating, bounded recovery, letterbox-corrected input) are transport-agnostic
-> and apply **directly** to Deckhand's viewer.
+Auto-mate decoded H.264 with **WebCodecs `VideoDecoder`** onto a 2D canvas. That decode
+model is what Deckhand kept; the wire format underneath it is not. Auto-mate's framing was
+SimDeck's "SDH1" protocol, which was removed upstream and is deliberately **not** documented
+here — nothing should be implemented against it. Deckhand vendors serve-sim's own parsing
+instead (`viewer/src/stream/avcc.ts`, `viewer/src/stream/mjpeg.ts`).
 
-Auto-mate streamed via SimDeck's H.264-over-WebSocket endpoint decoded with **WebCodecs
-`VideoDecoder`** onto a 2D canvas. The behaviors below are the durable lessons; the framing
-spec is historical.
-
-### SDH1 binary framing (one WS binary message = one frame)
-
-40-byte big-endian header:
-
-| Offset | Size | Field |
-|---|---|---|
-| 0 | 4 | magic `0x53444831` ("SDH1") |
-| 4 | 1 | version = 1 |
-| 5 | 1 | flags: bit0 keyframe, bit1 config-present |
-| 6 | 2 | headerBytes (u16) |
-| 8 | 8 | sequence (u64) |
-| 16 | 8 | timestampUs (u64) |
-| 24 | 4 | width (u32) |
-| 28 | 4 | height (u32) |
-| 32 | 4 | configBytes (u32) |
-| 36 | 4 | payloadBytes (u32) |
-
-Layout: `[header][avcC config if flag][payload]`. Codec string: `avc1.<PP><LL><MM>` from
-avcC bytes 1–3 (fallback `avc1.42E01F`). Decoder config:
-`{codec, codedWidth, codedHeight, hardwareAcceleration: "prefer-hardware",
-optimizeForLatency: true, description: avcC}`. Canvas:
-`getContext("2d", {alpha: false, desynchronized: true})`.
+The **client behaviors** below are the durable lessons. They are transport-agnostic — IDR
+gating, monotonic timestamps, backlog reset, rAF single-frame paint, visibility gating,
+bounded recovery, letterbox-corrected input — and apply directly to Deckhand's viewer.
 
 ### Client behaviors that made it reliable (transport-agnostic — port all of these)
 
@@ -103,13 +83,21 @@ optimizeForLatency: true, description: avcC}`. Canvas:
 - Never send raw `scroll` controls — use short touch drag sequences (SimulatorKit scroll
   packets can destabilize iOS runtimes; SimDeck rejects them anyway).
 
-## 3. Build recipes (exact, battle-tested)
+## 3. Build recipes (the predecessor's, with deckhand's on-device corrections marked)
+
+Three flags in the predecessor's Expo recipe (`--localhost`, fixed port 8081, `CI=1`) were
+each disproven on deckhand's hardware; the corrections are inline below, and `engine/metro.ts`
+is the code that holds them. Do not restore them from an older copy of this file.
 
 ### Expo (dev-client) — detect: `expo` present in package.json dependencies
 
 - Build+install: `npx expo run:ios --device "<udid>" --no-bundler`.
-- Metro: `npx expo start --dev-client --localhost --port 8081`. **Never pass `--clear`** —
+- Metro: `npx expo start --dev-client --port <allocated>`. **Never pass `--clear`** —
   wiping the cache forces a full ~18 MB re-bundle that races anything waiting on the app.
+  **Never pass `--localhost`** either: the predecessor's recipe had it, and deckhand verified
+  on-device that it binds Metro to IPv6 `::1` ONLY — the 127.0.0.1 readiness probe and the
+  app's `REACT_NATIVE_PACKAGER_HOSTNAME=127.0.0.1` connection both fail. The default bind
+  covers 127.0.0.1 (`engine/metro.ts`).
 - Launch is a **deep link**, not `simctl launch`:
   `exp+<slug>://expo-development-client/?url=<metro-manifest-url>&disableOnboarding=1`
   opened via `simctl openurl` — after pre-approving the custom scheme with `PlistBuddy` in
@@ -150,9 +138,18 @@ optimizeForLatency: true, description: avcC}`. Canvas:
 - **Env injection subtlety**: `EXPO_PUBLIC_*` values are inlined at Metro serve time for
   dev-client and at build time for Release — forward app env to the Metro process env
   *and* the native build env, or values silently disappear.
-- Metro management: fixed port 8081, one server per app reused across runs, keyed by an
-  env signature; restart only on env change or failed `GET /status`. Set
-  `REACT_NATIVE_PACKAGER_HOSTNAME=127.0.0.1`, `CI=1`.
+- Metro management: one server per app reused across runs, keyed by an env signature;
+  restart only on env change or failed `GET /status`. Set
+  `REACT_NATIVE_PACKAGER_HOSTNAME=127.0.0.1`. Two corrections deckhand paid for on real
+  hardware, against the predecessor's recipe:
+  - **Allocate the port; do not fix it at 8081.** Every Metro answers `/status` identically,
+    so a developer's own `expo start` on 8081 passed the health check and deckhand handed the
+    dev client a FOREIGN JS bundle inside the previewed app's native shell, silently. Pick a
+    free port and verify the listener is in your own process group (`engine/metro.ts`,
+    `METRO_PORT_RANGE` in `engine/recipes.ts`).
+  - **Do NOT set `CI=1` on Metro.** Verified on-device (Expo SDK 57): CI mode puts Metro on a
+    non-interactive path that never binds the dev server, so the app cannot load JS at all.
+    `CI=1` belongs on the *build* steps.
 
 ## 4. Git / worktree mechanics
 
@@ -160,9 +157,11 @@ optimizeForLatency: true, description: avcC}`. Canvas:
   `git reset --hard <ref>` + `git submodule update --init --recursive`.
 - PR refs: `git fetch origin refs/pull/<N>/head:<local-ref> --force --prune` — works for
   fork PRs against the **base** repo; no fork access needed.
-- **Local-first resolution**: before any network fetch, try `origin/<branch>`, `<branch>`,
-  the PR ref, and HEAD in the base clone. If it resolves, build with zero network and zero
-  token. Only remote-only refs mint a GitHub token.
+- **Local-first resolution was the predecessor's rule and deckhand does NOT follow it.**
+  Trying `origin/<branch>` before fetching builds the PREVIOUS push, which is the one thing a
+  "preview my branch" request never means. In deckhand a named branch and a PR ref **always**
+  fetch; only a full commit SHA resolves out of the local clone (`prepareRef` in
+  `engine/worktree.ts`). Do not reinstate the shortcut to save a network round trip.
 - Token injection: ephemeral `GIT_ASKPASS` script (username `x-access-token`),
   `GIT_TERMINAL_PROMPT=0`, temp dir removed in `finally`. Lazy resolver for submodule
   tokens — only invoked when `.gitmodules` exists.
@@ -176,9 +175,11 @@ optimizeForLatency: true, description: avcC}`. Canvas:
 - AVD creation: pick device profile + system image from available options, install images
   on demand (`yes | sdkmanager --licenses; sdkmanager "platforms;android-<api>" "<image>"`),
   then `avdmanager create avd --force --name <Name> --package <sysimg> --device <profile>`.
-  After creating an AVD, tell SimDeck to rescan.
-- Boot via SimDeck; poll ≤240 s for `isBooted && android.serial`; screenshots via
-  `adb -s <serial> exec-out screencap -p`; launch via SimDeck's launch endpoint.
+- Auto-mate booted and launched through SimDeck, polling ≤240 s for `isBooted &&
+  android.serial`. Deckhand owns that itself: it starts the emulator on a fixed console
+  port and waits on adb (`server/src/devices/android.ts`), so nothing has to be discovered
+  from a daemon. What carried over unchanged is the ~240 s patience budget for a cold
+  emulator, and `adb -s <serial> exec-out screencap -p` for a still frame.
 - Tooling env is fiddly on macOS: resolve `JAVA_HOME` (Temurin 17/21 — reject broken
   Homebrew symlinks), `ANDROID_HOME`, and prepend
   `platform-tools`/`emulator`/`cmdline-tools/latest/bin` to PATH. Provide both an
@@ -189,9 +190,11 @@ optimizeForLatency: true, description: avcC}`. Canvas:
 - Share id: `crypto.randomBytes(18).toString("base64url")` (24-char URL-safe).
 - Password: `scryptSync(password, salt16hex, 64)` + `timingSafeEqual` on equal-length
   buffers. (Consider explicit scrypt cost params; defaults are N=16384.)
-- WS proxy authorization: share variants of the stream/input endpoints validate the share
-  (+ password from the WS URL query) at upgrade time; the password is **stripped** from
-  anything forwarded upstream. Unlock via POST (GET can't carry the gate).
+- WS proxy authorization: share variants of the stream/input endpoints validate the share at
+  upgrade time. **No credential travels in the WS URL query** in deckhand — the gate is the
+  HMAC-signed `deck_unlock` cookie, and it is the COOKIE that is stripped before anything is
+  forwarded upstream (`share/proxy.ts`), so the app never sees it. Unlock via POST (GET can't
+  carry the gate).
 - Proxy details: buffer up to ~16 client messages while the upstream WS is CONNECTING;
   mirror both directions; never forward close codes 1005/1006/1015 (use 1011).
 - Elegant expiry trick: bind the share to the preview/lease id at creation and return
@@ -199,13 +202,17 @@ optimizeForLatency: true, description: avcC}`. Canvas:
 
 ## 7. Reliability: display-heal ladder, warm pool, watchdogs
 
-- **Display-heal ladder** (fixes the #1 "stream is black but device is booted" failure):
-  if booted but display detached/not-ready, escalate cheapest-first, stopping when healthy:
-  (a) SimDeck boot/attach call (sub-second), (b) single-device shutdown+boot,
-  (c) SimDeck daemon restart — **rate-limited to 1/60 s globally** (it's host-wide;
-  concurrent previews must not stampede it). Never hand out a "ready" device without a
-  display-health check.
-- **Warm pool** (Phase 5 in deckhand): pre-created+booted bare devices pay the ~40 s boot
+- **"The stream is black but the device is booted" was auto-mate's #1 failure.** It healed
+  it with a ladder that escalated cheapest-first, ending in a SimDeck daemon restart —
+  deckhand cannot climb that ladder and must not try, since it neither attaches displays
+  through SimDeck nor restarts its daemon (control REST only, `.claude/rules/testing-control.md`).
+  Two lessons survive it. Never hand out a "ready" device without checking it actually
+  produced a frame — a device that boots and never streams is the most common failure on
+  this machine, which is why `npm run test:device` scores boot and stream separately. And
+  never let a host-wide restart run unthrottled: it is global, so concurrent previews
+  stampede it and kill each other's streams. Auto-mate rate-limited its to 1/60 s;
+  deckhand's equivalent is the `launchctl kickstart` rule — announce it, batch it.
+- **Warm pool**: pre-created+booted bare devices pay the ~40 s boot
   ahead of demand; adopt into a preview on request; erase back to bare on release so app A
   never leaks into preview B. Leases carried a token + TTL backstop, but the real reclaim
   signal was **heartbeat staleness** (bumped on observable progress), not TTL.
@@ -231,7 +238,7 @@ optimizeForLatency: true, description: avcC}`. Canvas:
 | 8 | Unbounded decode queue | Latency drift into unusability |
 | 9 | No letterbox correction on input | Taps land offset |
 | 10 | Guessing adb serials | Wrong-device installs when >1 emulator |
-| 11 | Global daemon restarts unthrottled | Concurrent previews kill each other's streams |
+| 11 | Host-wide restarts unthrottled | Concurrent previews kill each other's streams |
 | 12 | `git remote get-url` + insteadOf | Wrong repo-identity decisions |
 | 13 | Env only in launch args | `EXPO_PUBLIC_*` silently missing from bundle |
 | 14 | No display-health gate on "ready" | Black-screen links handed to users |

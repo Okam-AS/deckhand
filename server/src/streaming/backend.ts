@@ -3,13 +3,16 @@ import type { Platform } from "../state.ts";
 // ---------------------------------------------------------------------------
 // The swappable streaming seam (PLAN §8). Nothing outside server/src/streaming/
 // may import a concrete backend — the engine, proxy, and MCP tools see only
-// this interface. iOS = serve-sim (Phase 1); Android = scrcpy (Phase 2).
+// this interface. What it dispatches to: iOS = serve-sim, Android =
+// AndroidAdbBackend (on-device `screenrecord` H.264, `screencap` MJPEG as the
+// fallback), web = a proxy to the dev server. NOT scrcpy — it was evaluated and
+// rejected (PLAN §8), and remains only a hypothetical upgrade behind this seam.
 // ---------------------------------------------------------------------------
 
 export interface StreamDeviceRef {
   platform: Platform;
   udid: string;
-  serial?: string; // android (Phase 2)
+  serial?: string; // android: the adb serial (`emulator-<port>`)
   port?: number; // web: the dev server's loopback port
   basePath?: string; // web: the share base the dev server serves under (e.g. "/s/<id>/web")
 }

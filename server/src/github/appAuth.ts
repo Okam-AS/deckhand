@@ -4,9 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // ---------------------------------------------------------------------------
-// GitHub App auth: App JWT → installation access token. Deckhand's only GitHub
-// credential is the App private key; installation tokens are short-lived
-// (≈1 h) and minted per repo owner, then injected into git via an ephemeral
+// GitHub App auth: App JWT → installation access token. This is ONE rung of the
+// access ladder (PLAN §2, amended 2026-07-15): credentials resolve PAT → GitHub
+// App → ambient `gh` CLI session → anonymous git for a public repo, with the
+// one-time PAT setup URL as the last resort. github/credentials.ts owns that
+// order. Installation tokens are short-lived (≈1 h) and minted per repo owner,
+// narrowed to the requested repo, then injected into git via an ephemeral
 // GIT_ASKPASS script so they never touch argv, URLs, or .git/config.
 // ---------------------------------------------------------------------------
 

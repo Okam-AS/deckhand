@@ -146,7 +146,10 @@ export function fakeAndroid(over: Partial<AndroidManager> = {}, log: string[] = 
     screenshotPng: async () => Buffer.from([0x89, 0x50, 0x4e, 0x47]),
     describe: async () => "<hierarchy/>",
     findApk: async () => "/wt/app-debug.apk",
-    shutdown: async (serial: string) => void log.push(`emu kill ${serial}`),
+    shutdown: async (serial: string) => {
+      log.push(`emu kill ${serial}`);
+      return true; // the fake emulator always goes away; override to exercise a timeout
+    },
     deleteAvd: async (name: string) => void log.push(`avd delete ${name}`),
   };
   return Object.assign(complete as unknown as AndroidManager, over);

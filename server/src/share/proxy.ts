@@ -29,8 +29,6 @@ export interface ShareDeps {
   restartCooldownMs?: number;
 }
 
-/** Resolve the loopback upstream URL for a device subpath within a share, or null. */
-
 /**
  * Record a diagnostic line on the device's `stream` log. Wrapped: diagnostics
  * must never be able to fail a request they were only meant to explain.
@@ -81,6 +79,7 @@ function errLabel(e: unknown): string {
   return (code ? `${code} ${msg}` : msg).slice(0, 160);
 }
 
+/** Resolve the loopback upstream URL for a device subpath within a share, or null. */
 function resolveUpstream(engine: PreviewEngine, shareId: string, deviceId: string, sub: string): string | null {
   if (!isAllowedSubpath(sub)) return null;
   const found = engine.findByShareId(shareId);
@@ -96,7 +95,7 @@ function resolveUpstream(engine: PreviewEngine, shareId: string, deviceId: strin
  * different: the upstream is strictly THIS share's own web dev server, resolved
  * via findByShareId (no SSRF to sibling ports, no path traversal), gated by the
  * 144-bit shareId. The dev server was started with --base=<helperBasePath>/, so
- * the full path is reconstructed to match its base. (PLAN §11.6 amendment.)
+ * the full path is reconstructed to match its base. (PLAN §11 item 6 amendment.)
  */
 function resolveWebUpstream(engine: PreviewEngine, shareId: string, rest: string): string | null {
   const found = engine.findByShareId(shareId);
@@ -161,7 +160,7 @@ const WEB_RESPONSE_HEADERS = ["content-type", "cache-control", "etag", "last-mod
 // A share can require a numeric PIN (set per app, via MCP). Content routes (the
 // device stream, the web app, the input/HMR WebSockets) require a valid HMAC
 // unlock cookie; the viewer shell, /state, and /unlock stay public so the pad
-// can render. Crypto lives in shares.ts. (PLAN §9/§11.6.)
+// can render. Crypto lives in shares.ts. (PLAN §9 / §11 item 6.)
 
 const UNLOCK_COOKIE = "deck_unlock";
 const UNLOCK_TTL_MS = 12 * 60 * 60_000;
@@ -204,10 +203,23 @@ export interface PinGate {
   /** Try a PIN: on success returns the signed cookie value; on failure the lockout ms (0 = wrong PIN). */
   attempt(shareId: string, pin: string): { ok: true; cookie: string } | { ok: false; lockedMs: number };
   /**
-   * Mint an unlock cookie for a share WITHOUT a PIN attempt, for the paired
-   * share of a compare session the caller has already unlocked. Never reachable
-   * from a request path on its own — the unlock route calls it only after
-   * `attempt` succeeded on the partner, and only for a live pairing.
+   * Mint an unlock cookie for a share WITHOUT a PIN attempt, so proving the PIN
+   * on one pane of a page unlocks its partners.
+   *
+   * Two call sites, both in this file's share router, and each mints only for
+   * `engine.pairedShareIds(<the share in the URL>)` — never for that share
+   * itself:
+   *   - `POST /:shareId/unlock`, after `attempt` succeeded on THIS share;
+   *   - `GET /:shareId/state`, which performs no `attempt` at all and is
+   *     reachable anonymously. What stands in for one there is the early return
+   *     above it: control only reaches the minting loop when THIS share is
+   *     PIN-protected AND `allowed` accepted the caller's cookie for it.
+   *
+   * So the authority is always a PIN proven on the share being addressed, and a
+   * public or still-locked share must mint nothing. → `proxy.test.ts` "does not
+   * mint a partner cookie for a PUBLIC share's /state" and "does not mint a
+   * partner cookie for a LOCKED share's /state".
+   *
    * Returns null when the share has no PIN (nothing to unlock).
    */
   issue(shareId: string): string | null;
@@ -483,22 +495,35 @@ export function createShareRouter(deps: ShareDeps): express.Router {
     // the partner's cookie too. /unlock does this at PIN time, but a pair can
     // form AFTER the unlock (two independently started previews that only became
     // a pair once the second one booted, or a cookie from an earlier session).
-    // The reference pane then streamed from a shareId this browser had no cookie
+    // The partner pane then streamed from a shareId this browser had no cookie
     // for and sat on "Connecting…" forever, with no way to unlock it: the pad
     // only ever renders for the page's own share. This route is polled, so the
     // pair self-heals within one poll.
     //
     // `info.required` is the whole authorization check: we only get here having
-    // already returned above when the PIN was required and unmet. Without it a
-    // PUBLIC share would mint its protected partner's cookie to any caller —
-    // and every compare/migration reference pane is public by construction
-    // (bootReference), so `GET /s/<publicReferenceId>/state` would have handed
-    // out an unlock cookie for the protected working share.
+    // already returned above when the PIN was required and unmet, so reaching
+    // this line means the caller proved THIS share's PIN. Without it a PUBLIC
+    // share would mint its protected partner's cookie to any anonymous caller —
+    // the PIN bypassed with nothing but a public link.
+    //
+    // What no longer justifies it: extra panes are no longer forced public.
+    // A pane takes the PAGE's access and its synthetic app id is keyed by access
+    // class, so a public page and a PIN-protected one never land on the same
+    // pane (`bootReference`, mcp/tools.ts). That is a property of the caller
+    // and is NOT what makes this safe: this route cannot see how a pair was
+    // formed, so the check has to stand on its own. Do NOT reach for symmetry
+    // to justify it — `pairedShareIds` is forward only on purpose (a page mints
+    // for its panes, never a pane for its page, `engine/preview.ts`), and
+    // believing it symmetric is what the cross-page bypass was built on.
+    // → `proxy.test.ts` "does not mint a partner cookie for a PUBLIC share's /state"
     if (info.required) {
       // The `allowed` term is belt-and-braces, not an optimisation: each
       // partner's cookie is path-scoped to `/s/<partner>`, so the browser never
       // sends it here and this is in practice always true — every partner's
-      // cookie is re-minted on each poll, identical each time.
+      // cookie is re-minted on each poll, identical each time. The scoping half
+      // of that is a claim about what `setUnlockCookie` emits, so it is held:
+      // → `proxy.test.ts` "scopes each minted unlock cookie to one share, and
+      // never to a wider path".
       for (const partner of deps.engine.pairedShareIds(shareId)) {
         if (!deps.pinGate.info(partner).required || deps.pinGate.allowed(req.headers.cookie, partner)) continue;
         const cookie = deps.pinGate.issue(partner);
@@ -522,8 +547,8 @@ export function createShareRouter(deps: ShareDeps): express.Router {
     if (r.ok) {
       const setUnlock = (id: string, cookie: string) => setUnlockCookie(res, req, id, cookie);
       setUnlock(shareId, r.cookie);
-      // A compare session is one page showing several shares side by side. Each
-      // extra pane streams from its OWN shareId, so its own path-scoped cookie:
+      // A page is a set of panes, and each pane streams from its OWN shareId,
+      // so from its own path-scoped cookie:
       // without this, a PIN on any pane left the others stuck on "Connecting…"
       // while their WS was refused once a second. Unlocking one pane of a live
       // page unlocks the rest — the operator asked for one PIN, and the panes

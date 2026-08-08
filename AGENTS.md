@@ -17,9 +17,14 @@ The server has config/auth/state/audit, GitHub App auth + git worktrees, build r
 detection (Expo/RN/NativeScript, iOS + Android), iOS simctl control, Android device layer
 (avdmanager/emulator/adb, uiautomator describe, toolEnv), the streaming router (serve-sim
 for iOS, H.264/screencap backend for Android), the preview engine (**platform-grouped,
-build-once-install-many, parallel boots/installs**), the MCP server (token auth) + scoped
-share proxy, and the CLI. The viewer is the calm WebCodecs page (reused for Android via
-multipart-PNG).
+build-once-install-many, parallel boots/installs**), the MCP server (an OAuth grant or a
+local `tokens.yaml` token, both presented as `Authorization: Bearer`) + scoped
+share proxy, and the CLI. The viewer is one calm page with no platform switch: where the
+browser has WebCodecs it asks every device for `stream.avcc` (H.264) and falls back to
+`stream.mjpeg` on a 404; a browser without WebCodecs starts on `stream.mjpeg` and never
+probes. MJPEG is boundary-framed JPEG on iOS, `adb screencap` PNG on Android,
+both painted through an `<img>`. Android's primary path is the WebCodecs one; the PNG
+stream is its fallback, not its normal route.
 
 **The daily dev loop:** apps can have a local `path` (built in place — no worktree, no
 push; NativeScript runs as a long-lived livesync process, HMR off), `start_preview` is
@@ -51,7 +56,7 @@ the code would hand a stranger a way to shred every code the operator mints. `de
 <client-id>` takes a client back, effective on its next call, no restart. Claude Code on the machine
 uses a local `tokens.yaml` bearer token instead and needs no approval.
 
-**The GitHub access ladder** (PLAN §2/§6/§11.4): credentials resolve PAT → GitHub App →
+**The GitHub access ladder** (PLAN §2/§6/§11 item 4): credentials resolve PAT → GitHub App →
 ambient `gh` CLI session (`githubAmbient`, default on) → anonymous git for public repos
 (gated on `allowPublicRepos`) → one-time PAT setup URL as last resort. Onboarding
 responses (`list_apps` empty state, `github_auth_missing`) carry `host: {hostname, user}`
@@ -81,13 +86,17 @@ construction reference pane is gone. Panes still stream from their **own** share
 streaming seam is untouched and no new route is forwarded — the one proxy change is the
 unlock minting fanning out from a single partner to the set. The viewer has ONE stage:
 `computeStage` in `viewer/src/panes.ts` decides grouping and visibility as a pure function
-(one source → all its devices; several → one each; mobile → one), and it is the only
-tested code in `viewer/` — keep new layout rules there, not in `App.tsx`.
+(one source → all its devices; several → one each; mobile → one) — keep new layout
+rules there, not in `App.tsx`, which has no tests of its own.
 See PLAN §6 "One page, several sources" and the accepted-risk note beside it.
 
-What remains to build is PLAN's, not this file's, to enumerate — see PLAN §6 (the
-agent-led onboarding contract: password shares, describe/ui/logs, add_app, relayable
-errors) and the ops runbook work that follows it.
+What remains to build is PLAN's, not this file's, to enumerate. The agent-led onboarding
+contract in PLAN §6 is built; what §6 still names as unbuilt, it names in place — the
+`metro`/`app` `logs` sources, which are accepted and capture nothing. Physical devices are
+not on that list: they are OUT, on both platforms, and PLAN §2 says why. Outside §6,
+PLAN §11 item 7's host hygiene (dedicated macOS user, no personal credentials, FileVault) is
+stated in PLAN and in no RUNBOOK: nothing tells an operator how to set it up or how to check
+it holds, and `ops/README.md` covers the LaunchAgents and not that.
 
 If you are here to **implement further**, your instructions are:
 
@@ -98,14 +107,19 @@ If you are here to **implement further**, your instructions are:
    or viewer code, read
    [docs/reference/auto-mate-learnings.md](./docs/reference/auto-mate-learnings.md)
    (14 concrete pitfalls that cost the predecessor project weeks).
-   `docs/reference/simdeck-notes.md` is historical — do not implement against it.
 3. Deckhand is built. PLAN describes what it IS — architecture, the MCP surface, the
    streaming seam, the security model — not a build order; do not add a phase list or a
    risk register back. Add to PLAN when you change what the system is; git holds how it
    got here. **Every bug fixed gets a regression test in the closest layer** — the one
    rule not covered by `npm run ci` or the guardrails.
-4. The streaming layer is **decided** (PLAN.md §2/§8): iOS via **serve-sim**
-   (H.264-over-WebSocket + WebCodecs, MJPEG fallback), Android via **adb** — `screencap`
+4. The streaming layer is **decided** (PLAN.md §2/§8): iOS via **serve-sim** — its
+   H.264 path is `stream.avcc` over a long-lived **chunked HTTP** response decoded with
+   WebCodecs, NOT a WebSocket (the WebSocket carries **no video** — HID input up, and a
+   size/orientation config frame down, which deckhand's viewer ignores). A browser with
+   WebCodecs probes avcc and reads a 404 as "use `stream.mjpeg`"; one without starts on
+   MJPEG and never probes. Either way it is a runtime answer about this machine,
+   never a claim written down in advance about what serve-sim can do. Android via
+   **adb** — `screencap`
    for MJPEG and on-device `screenrecord` for H.264, NOT scrcpy, which was evaluated and
    not taken — and web via a proxy to the dev server. All behind the `StreamingBackend`
    seam. **No WebRTC, no TURN, and no SimDeck for VIDEO** —
@@ -120,7 +134,8 @@ Non-negotiables while implementing:
   dependencies without a strong reason. When in doubt, re-read PLAN.md §2.
 - Security invariants (PLAN.md §11) are acceptance criteria, not suggestions — especially:
   loopback-only binding, no credentialless path to a device or a repo (PLAN §11 item 1
-  names the four open-by-construction OAuth endpoints), no secrets through MCP, tokens never in
+  tabulates the seven open-by-construction OAuth handlers and what stands in front of each —
+  count them against `server/src/oauth/router.ts` before you trust the list), no secrets through MCP, tokens never in
   argv/URLs/logs.
 - Structured, actionable MCP errors: the model relaying the error to a human must be able
   to say exactly what to do next.
@@ -130,6 +145,49 @@ Non-negotiables while implementing:
   precondition breaks (see the three rules below). When a file you are already editing
   carries narration, restatements or before/after changelog notes, delete them as you pass.
 
+## HOW WE WORK — the lead agent delegates, it does not code
+
+**Standing law for every task a human hands the lead agent in this repo.** The human's time with
+the agent is the scarce resource; the lead agent stays free to talk, decide, and untangle. It
+therefore does NOT do the work itself:
+
+1. **One task in, one subagent out.** Each thing the human asks for is handed to its own
+   subagent (`Agent` tool) with a self-contained brief: what to change, which files/packages,
+   which rule files and gates apply. The human feeds tasks one at a time; the lead agent
+   dispatches them the same way.
+2. **The lead agent stays available.** While subagents run, the lead agent is in conversation
+   with the human — clarifying the next task, reviewing what came back, answering questions.
+   It never disappears into a long edit of its own.
+3. **Conflicts are the lead agent's job.** When two subagents touch the same file, or their
+   results contradict (different constants, competing abstractions, merge conflicts), the lead
+   agent resolves it — by deciding, or by asking the human when the call is theirs. Subagents
+   never resolve each other's conflicts.
+4. **Subagents ship their own slice.** Each subagent runs the gates for what it touched
+   (`npm run ci`, and § "Nothing is \"tested\" until this is green" for anything on the device,
+   streaming or control path) and reports evidence. The lead agent re-runs the full gate after
+   conflict resolution, since a merge can break what each half proved green.
+5. **Commit per landed slice**, not per batch — a long uncommitted run is how work gets lost.
+   **Never `git add -A` / `git add .`** — with several agents in one tree that sweeps another
+   agent's half-finished file into your commit. Stage the exact paths you changed, always. This
+   happened twice on 2026-08-07 — two commits each swallowed another agent's in-flight file;
+   nothing was lost, but the authorship and the revert boundary were. (No hashes cited here on
+   purpose: this repo squash-merges, so a feature-branch hash stops resolving the moment its PR
+   lands, and the citation then reads as a typo rather than as evidence.)
+   **`git commit -a`, and a pre-populated index, are the same hazard by another route.** Another
+   agent may have already run `git add` on its own files before you commit, so `git commit -m`
+   with no paths ships them too — that happened again on 2026-08-08 and had to be unpicked with
+   a soft reset. `git commit --only <your paths>` is the form that cannot do it, and it is the
+   one to use in a shared tree. After committing, read `git show --stat` and confirm the file
+   list is yours alone; if it is not, `git reset --soft HEAD~1` and re-commit with `--only`.
+   **And never `git commit --amend`.** `HEAD` is not yours in a shared tree: another agent can
+   commit between your commit and your amend, and then you are rewriting THEIR commit, not
+   yours. That happened on 2026-08-08 — an amend folded fifteen lines into a commit its author
+   had just made, and was unpicked with `git reset --mixed <their sha>`. Nothing was lost
+   because the agent noticed; nothing would have caught it if it had not. Make a second commit
+   instead. Tidy history is not worth another agent's work.
+6. **Exceptions the lead agent may do inline:** answering a question, reading/searching to brief
+   a subagent, a one-line fix, and the conflict resolution itself.
+
 ## How work lands here
 
 **Run the `shipping-a-change` skill before you open the PR. Every time, including
@@ -138,15 +196,41 @@ you to — that is exactly why it is written down, and why step 5 of it turns wh
 you caught into a check that fires next time. Four of this repo's guardrails exist
 because that step was skipped and a user found the defect instead.
 
-**You do not open the pull request. A human does.** `gh pr create` is refused by the
-PreToolUse hook (`scripts/hooks/bash-guard.ts`), and unlike every other gate here it
-has **no override** — opening a PR is the point where the work stops being cheap to
-change, and that decision is reserved for a person. What you can do is earn the
-handover. That is the hook's ONLY rule: it used to also refuse commits and pushes at
-`main` and a `launchctl kickstart`, and both were dropped because a text matcher over a
-shell cannot enumerate the spellings of a command — three review rounds in a row found
-another one. `main` is protected server-side, so a push at it is refused by GitHub
-whatever a hook thinks; the restart rule is prose below and nothing else.
+**You may open the pull request — once, and only once, `review:handover` has written
+the body.** There is no hook stopping you any more. A PreToolUse hook used to refuse
+`gh pr create` with no override, and it was removed for the reason every other matcher
+in it was removed before: a text matcher over a shell cannot enumerate the spellings of
+a command, so it reserved a decision it could not actually reserve while reading as if
+it could.
+
+**Nothing replaced it, because nothing local can. This is a rule with a strong default,
+not an enforcement — say it that way and do not let it grow back into a claim.**
+`review:handover` refuses to write `.claude/pr-body.md` unless the review converged, so
+the DOCUMENTED route (`gh pr create --body-file`) has nothing to open a PR with until
+you have earned it; and every `review:*` command deletes a body file stamped for another
+branch or an older diff, so a converged body cannot be inherited by the next branch (it
+used to be: one fixed gitignored path that nothing ever cleaned up, so branch B found
+branch A's body and `--body-file` succeeded). But `gh pr create --body` and `--fill`
+never look at a file at all. The mechanism narrows the honest path; it does not close
+the dishonest one, and the body itself names the branch and diff it attests to precisely
+because the last line of defence is a human reading the PR.
+
+So the permission is exact, and it is a conjunction:
+
+1. `npm run ci` is green, and `npm run review:gates` is green on a clean checkout of HEAD.
+2. `npm run review:check` says the review converged — at least two rounds, one of them
+   cold against the code AS IT SHIPS, nothing blocking left standing.
+3. `npm run review:handover` exited 0 and wrote `.claude/pr-body.md`.
+4. The branch is pushed, and it is not `main`.
+
+All four, then run the command it printed. Any one of them missing and you have not
+earned it — say which one, in a line, and stop. Do not hand-write a body, and do not
+reach for `--body` or `--fill`, to route around step 3: those are exactly the paths
+nothing checks, which is why the rule is written here rather than enforced there.
+Forging the handover is the one thing in this workflow no later reader can catch.
+
+`main` is protected server-side, so a push at it is refused by GitHub whatever anything
+local thinks; the restart rule is prose below and nothing else.
 
 **Never commit to `main`.** Every change — including a one-line fix — goes:
 
@@ -161,9 +245,9 @@ npm run review:handover <<'BODY' …     # refuses unless the review converged
 ```
 
 `review:handover` writes `.claude/pr-body.md` and prints the `gh pr create` command.
-Hand that command to the user in one line and stop. If the review has not converged
-there is nothing to hand over — which is the design: skipping the review produces no
-PR for someone else to catch, rather than a PR nobody reviewed.
+Run it. If the review has not converged it writes no body and deletes any it finds, so
+the documented route has nothing to open — skipping the review leaves you with nothing
+to hand over rather than a PR nobody reviewed.
 
 The review itself is a **loop with a receipt**, not a single pass:
 
@@ -191,10 +275,31 @@ Two things it enforces that cost a round if you learn them late:
   you like", with nothing cold having read what ships.)
 - **A blocking finding leaves the record two ways: fixed, or waived with a reason.**
   `waived` takes the fingerprint from `review:show` and a sentence saying why it
-  cannot be mechanised or why it is acceptable — at least 20 characters, because
-  waiving used to cost nothing while reporting demanded evidence, which made
-  dismissing a bug cheaper than raising one. A finding nobody mentions again stays
-  open: silence is not a resolution.
+  cannot be mechanised or why it is acceptable — at least 20 characters, **and a cold
+  round after it**, because a waiver is exempt from the code rule below and so must
+  cost the other thing raising a finding costs: a round. The reason is printed verbatim
+  into the PR body, since the receipt never leaves this machine and the decision used to
+  reach a human as the digit in "waived: 1".
+
+  **"Fixed" means a LATER round lists the fingerprint in `resolved`, and the FILE the
+  finding names holds different bytes than when it was raised** — at that round and
+  still now, with the old bytes not merely moved to another path. Fixing it elsewhere is
+  `{"id": "…", "file": "the/file/you/changed.ts"}`, which is a readable claim rather
+  than a check: without it an honest fix in a callee would be refused, and refusing that
+  makes waiving cheaper than fixing.
+
+  It took three tries to get here, and the two failures are worth knowing. "A later
+  round at a different diff" fell to `touch scratch.tmp` … `resolved` … `rm` — `diffHash`
+  folds in untracked files. Hashing the tracked diff TEXT instead fell to `chmod +x`:
+  one commit, zero content bytes, blocking finding cleared. Hence *bytes of the named
+  file*. What is still not enforced, and is stated in the code: `file` is
+  author-supplied, so five findings in one file are cleared by one edit, and `cold` is
+  self-declared.
+
+  A finding nobody mentions again stays open: silence is not a resolution. That
+  sentence was prose until 2026-08-08 — `validate` skipped every round whose diff
+  was not the current one, so fixing ANY finding moved the hash and cleared the
+  others by silence. It is enforced now, which is why `resolved` exists.
 
 Merging is still yours once the PR exists:
 
@@ -303,8 +408,12 @@ dev overlay and reported a working app as having "critical UI bugs".
 
 ### Nothing is "tested" until this is green
 
-`npm run test:device` is the only check that touches hardware. It verifies three
-capabilities on **both** platforms, as six independent checks:
+`npm run test:device` is the hardware pass. It is one spelling of one run:
+`deckhand doctor --device-only`, and `deckhand doctor --smoke` runs the same
+device checks — the difference is the exit code, not the work (`cli.ts`, and
+PLAN §10 says which is for what). Nothing else in the repo touches a device;
+plain `doctor` and `npm run ci` are paperwork. It verifies three capabilities on
+**both** platforms, as six independent checks:
 
 |  | boot | stream | describe |
 |---|---|---|---|
@@ -334,13 +443,17 @@ screen. That is the class this exists to catch.
 An agent on THIS machine should read `~/.deckhand/state.json` rather than
 sleep-looping `preview_status` — and must check every device for an `error`
 before trusting the preview phase, because a preview with one failed device and
-one ready device reports `ready` (`preview.ts:952`). The how-to, including a
+one ready device reports `ready` (`recomputePreviewPhase` in
+`server/src/engine/preview.ts`). The how-to, including a
 ready-to-paste poller, is the `waiting-for-a-preview` skill in `.claude/skills/`.
 
 ## If a tool response carries `deckhandUpdate`
 
-Every successful tool response carries `deckhandUpdate` when the code the server
-is RUNNING is not the newest — in one of two states, which need different words:
+Every successful tool response that returns JSON carries `deckhandUpdate` when the
+code the server is RUNNING is not the newest — in one of two states, which need
+different words. (`screenshot` is the one exception: it returns an image block,
+which has nowhere to put JSON, so it carries no notice. `mcp/responses.test.ts`
+keeps it the only one.)
 
 - `action: "restart"` — the checkout was already pulled and the process is still
   on the old code. Ask: **"deckhand has been updated on disk but is still running
@@ -354,9 +467,15 @@ preview you cannot see. Offer it in one sentence, at the top of your reply — n
 buried under a status list.
 
 The version is the commit (`version.ts`) — nothing to bump, so nothing to forget.
-It only speaks when the checkout is a clean `main`; a feature branch or a dirty
-tree gets a factual note instead of a nag, because a notice that fires when it
-should not is one nobody reads when it should.
+The two actions are gated differently, and only one of them is quiet off `main`:
+`pull-and-restart` compares against `origin/main` and speaks **only** on a clean
+`main` checkout, because a feature branch is not "out of date" and a nag that
+fires when it should not is one nobody reads when it should. `restart` compares
+the sha this process booted on against the sha on disk, so it fires on any branch
+and on a dirty tree — the running code being stale is true regardless. When neither
+holds, nothing is attached: `version.ts` still composes a factual note for a dirty
+or off-`main` checkout, but `ok()` in `mcp/tools.ts` only ships one alongside a
+`deckhandUpdate`, so no tool response ever carries it.
 
 ## Setting a user up, or unsticking one
 
@@ -379,17 +498,30 @@ can fix it**, and — this is the part to get right — it distinguishes an erra
 from a question:
 
 - `fix: <command>` — yours to run. Run it.
-- **BLOCKED** — an errand needing a browser or their Cloudflare account. Relay it
-  and stop. **Never attempt these**; `cloudflared tunnel login` opens a browser
-  and will hang you forever, and retrying changes nothing.
-- **ASK THE USER** — an input, not an obstacle. Ask the one question in the words
-  given, take the answer, and carry on yourself.
+- `you: <what to do>` — a fix only a person at this Mac can perform: an App Store
+  install, an Apple ID, a `sudo` licence accept, a decision about the machine's
+  default Node. **Never attempt these either** — relay the line as written (it
+  already says what it needs and why you cannot) and stop. Setup is safe to
+  re-run, so pick up from `setup` again once they say it is done.
+- **BLOCKED** — also relay-and-stop, but an errand off this machine: a browser and
+  their Cloudflare account. **Never attempt these**; `cloudflared tunnel login`
+  opens a browser and will hang you forever, and retrying changes nothing.
+- **ASK THE USER** — an input, not an obstacle. Ask each question in the words
+  given, take the answers, and carry on yourself. There is more than one: a fresh
+  install asks for the hostname and, marked `(optional)`, a second hostname for web
+  previews.
+
+`fix:` is the only one of the four you may run. The other three are the user's, and
+the two labels that look alike differ only in where the work happens — say `you:`
+items as the local chores they are, rather than reporting them as blocked.
 
 **Do not paste the report at the user.** When nothing is missing and nothing is
-blocked, the only thing left is one answer — so ask one question. An agent that
-files a status report there has turned a ten-second exchange into a puzzle.
+blocked, the only thing left is the ASK THE USER questions — so ask those, and
+nothing else. An agent that files a status report there has turned a ten-second
+exchange into a puzzle.
 
-Then run `setup --hostname <their answer>`. It does the rest — tunnel, DNS, the cloudflared config
+Then run `setup --hostname <their answer>` (adding `--web-host <their answer>` if
+they wanted web previews). It does the rest — tunnel, DNS, the cloudflared config
 (merged, never overwritten), the `deckhand` command, the LaunchAgents, doctor —
 and is safe to re-run, so it is also the repair tool.
 
@@ -435,8 +567,9 @@ Local is the default when they are working in a project. See the `nextStep` that
 
 **When something is wrong:** `deckhand doctor` first, always. It names the missing
 piece and the command that fixes it. `deckhand doctor --device-only` boots a real
-simulator and emulator; it takes minutes and is the only check that touches
-hardware. Restarting the server to unstick one is subject to the same rule as
+simulator and emulator; it takes minutes, and it is the same run as `npm run
+test:device` (see "Nothing is 'tested' until this is green"), so do not treat
+running one as a reason to skip the other. Restarting the server to unstick one is subject to the same rule as
 deploying — say so first (see "Deploy after merging, not before").
 
 ## Before you change an area, read its rule
@@ -454,24 +587,69 @@ from under a citation fails `docs.test.ts`.
 | `share-proxy.md` | `server/src/share/**` — the public surface; both auth bypasses lived here |
 | `connector-auth.md` | `server/src/oauth/**`, `auth.ts` — who may drive this Mac; the connector URL is public |
 | `mcp-tools.md` | `server/src/mcp/**` — the agent-facing surface, where a description IS a prompt |
+| `testing-control.md` | `server/src/testing/**` — the SimDeck control seam; REST only, no token, no LAN bind |
+| `landing.md` | `landing/**` — the public page; what it depicts is a claim about the product |
 | `tests.md` | every `*.test.ts` — see it fail first; fakes are complete or they lie |
+
+## A claim you leave behind is a claim someone will act on
+
+**Every sentence in this repo — comment, doc, tool description, test name, landing
+copy — is read by someone who cannot see what you saw.** They will act on it. That
+makes an obsolete claim more expensive than no claim, because a false map is trusted
+and an absent one is not.
+
+The rules, learned by finding thirty-odd of these in one sweep:
+
+1. **Delete it; do not annotate it.** "Superseded", "no longer used", "kept for
+   historical reference" — a reader lands mid-file via grep and acts on the thing you
+   labelled dead. If it is gone, remove every trace of it. The one exception is the
+   next rule.
+2. **A rejected design is load-bearing exactly when it stops someone rebuilding it.**
+   Test: *would deleting this make it likely the next agent reintroduces the bug?* If
+   yes, it does not belong in a document that rots — move it into the `.claude/rules/`
+   file for that area, once, where an agent is handed it on opening the file.
+3. **Put the past tense IN the sentence, never only in the heading.** "A document said
+   `token list` shows the connector URL, while it showed masked names" survives a grep
+   landing. "It did not" under a heading six lines up does not. Never delete the
+   example itself — the example is the evidence a principle was paid for.
+4. **Do not restate what you can point at.** The install steps, a dependency's
+   capabilities, a line number, a test count, a file tree: all of these rotted here,
+   some within a day of being written. Point at the command, probe the capability,
+   name the method instead of the line. `serveSim.ts` claimed the pinned serve-sim
+   could not serve avcc; two documents copied it during the cleanup PR that was
+   removing claims exactly like it.
+5. **A comment stating a precondition needs a test that fails when it breaks** — and
+   if none exists, say so IN the comment. The worst finding of a recent audit was
+   "Symmetric on purpose" sitting above a body that is forward-only, where the
+   symmetry it invited had been a cross-page authentication bypass. The code was
+   guarded; the comment was the hazard.
+6. **When you change behaviour, re-read the comments you did NOT touch.** The
+   dangerous one is never in the diff. A rationale ages while the code it justifies
+   stays correct, which is the shape no reviewer catches by reading the change alone.
+7. **Whatever you caught this way, make it a check** (see the skill's step 5). If it
+   cannot be mechanised, write it into the area's rule file so the next reader is told
+   what no test can tell them.
 
 ## The guardrails — read this before you change anything
 
 `server/src/test-support/` holds checks that fail the build when a decision this
 project already made gets broken. They exist because prose did not work — PLAN §2
-and §11 were broken repeatedly by agents who had not read 885 lines.
+and §11 were broken repeatedly by agents who had not read them.
 
 If one of these fails, it is telling you about a decision — not asking you to
 make the check pass.
+
+The table below is the decisions most often broken, not the full set — there are
+three dozen checks in that directory and every one of them fails the build. Read
+the file, not this list, before concluding something is unchecked.
 
 | Check | What it protects |
 |---|---|
 | dependency allow-list (runtime + dev, incl. the root package.json) · no DB driver | PLAN §2 "keep the list ruthlessly short". Adding a dep is a PLAN decision — argue it there, then widen the set. The root and `devDependencies` are in scope because a dep added there hoists into the shared `node_modules` and is importable everywhere |
 | serve-sim pinned exactly + a matching patch file | The pin is a SECURITY control: serve-sim ships `/exec`, reachable from inside the simulator, which shares the host's loopback. `patch-package` strips it. A caret range drifts past the patch |
 | no concrete backend imported outside `streaming/` | PLAN §8's seam. Two composition roots are named explicitly, so the exception is a decision rather than an erosion |
-| every MCP tool wrapped in `audited()` | PLAN §11.2. A tool added without it is invisible to the audit trail and nothing else fails |
-| every `.listen()` binds 127.0.0.1, and server.ts has exactly one | PLAN §11.1. A wildcard bind puts the whole MCP surface on the LAN. Repo-wide: the per-device Android helper binds a socket too. One exemption, by file and reason: metro.ts's port-availability probe, which must bind every interface to mean anything |
+| every MCP tool wrapped in `audited()` | PLAN §11 item 2. A tool added without it is invisible to the audit trail and nothing else fails |
+| every `.listen()` binds 127.0.0.1, and server.ts has exactly one | PLAN §11 item 1. A wildcard bind puts the whole MCP surface on the LAN. Every source file under `server/src`, because the per-device Android helper binds a socket too — and `new WebSocketServer({ port })`, which opens one without a `.listen()` at all. Two exemptions, by file and reason: metro.ts's port-availability probe, which must bind every interface to mean anything, and cli.ts's delegation to `createServer().listen()` |
 | the share gate keeps its `i` flag | Express dispatches routes case-insensitively. Losing it was a live auth bypass. Checked on every matching line with comments stripped — quoting the pattern in a comment used to satisfy it |
 | every detached spawn stamps a marker (any `detached:` that is not `false`) | Four resources outlive the server; three leaked, one to 36 orphans at 418% CPU that starved the emulators. An in-memory Map is not an owner |
 | docs name only tools and files that exist | PLAN documented a tool nobody built, and the dead name leaked into a tool *description* — text a model reads as instructions. There is no "but I'm recording history" exemption: PLAN and this file describe what exists now, and git holds the past |

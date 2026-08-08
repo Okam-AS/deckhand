@@ -1209,9 +1209,11 @@ button:focus-visible {
 
 .pricing-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.8rem;
   margin-top: 1rem;
+  width: min(100%, 52rem);
+  margin-inline: auto;
 }
 
 .price-card {
@@ -1533,18 +1535,8 @@ button:focus-visible {
     gap: 2rem;
   }
 
-  .pricing-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
-
   .price-card.featured {
     transform: none;
-  }
-
-  .pricing-grid .price-card:last-child {
-    width: calc(50% - 0.4rem);
-    grid-column: 1 / -1;
-    justify-self: center;
   }
 
   .price-head p {
@@ -1804,11 +1796,6 @@ button:focus-visible {
 
   .price-card {
     padding: 1.5rem;
-  }
-
-  .pricing-grid .price-card:last-child {
-    width: 100%;
-    grid-column: auto;
   }
 
   .final-cta {

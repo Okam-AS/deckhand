@@ -2,8 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
+import { readFileSync } from "node:fs";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { AvccSource } from "./androidH264.ts";
+import { AvccSource, RECORDER_ARGV, RECORDER_PKILL_PATTERN } from "./androidH264.ts";
 import { AVCC_TAG_DELTA, AVCC_TAG_DESCRIPTION, AVCC_TAG_KEYFRAME } from "./h264.ts";
 
 const hdr = (t: number) => 0x60 | t;
@@ -374,4 +375,40 @@ test("a probe nobody subscribed to releases the recorder", async () => {
   await new Promise((r) => setTimeout(r, 3_100));
   assert.equal(spawned[0]!.killed, true, "and released once nobody arrived");
   source.dispose();
+});
+
+test("the device-side sweep hunts for the argv we actually spawn", () => {
+  // The device-side sweep (androidAdb.ts) has no env marker to hunt for — an
+  // `adb shell` process carries nothing from this side — so it matches this
+  // argv instead, and a mismatch makes it sweep nothing at all, silently, which
+  // is the bug it was written to fix.
+  //
+  // The pattern is derived from RECORDER_ARGV, so "is it a prefix" is true by
+  // construction and asserting it proves nothing. The two ways the coupling can
+  // actually break are below.
+
+  // 1. The spawn stops going through RECORDER_ARGV. Nothing at runtime can see
+  //    that — an inlined argv list is a perfectly good recorder, it is just one
+  //    the sweep cannot recognise — so this reads the declaration. The literal
+  //    list is closed on purpose: a spread that ALSO carries inline flags moves
+  //    the argv out from under the pattern just as thoroughly as replacing it.
+  const src = readFileSync(new URL("./androidH264.ts", import.meta.url), "utf8");
+  const decl = /const defaultSpawnRecorder[\s\S]*?;/.exec(src)?.[0];
+  assert.ok(decl, "defaultSpawnRecorder is gone or renamed — this check needs updating with it");
+  assert.match(decl, /\.\.\.RECORDER_ARGV/, "the default recorder must spawn RECORDER_ARGV, not its own copy of the flags");
+  const literals = [...decl.matchAll(/"([^"]*)"|'([^']*)'|`([^`]*)`/g)].map((m) => m[1] ?? m[2] ?? m[3]);
+  assert.deepEqual(
+    literals,
+    ["adb", "-s", "exec-out"],
+    "the only string literals in the spawn are adb's own; a device-side flag here is invisible to RECORDER_PKILL_PATTERN",
+  );
+
+  // 2. RECORDER_ARGV is reordered. The pattern follows it, so the sweep keeps
+  //    matching THIS build — and stops matching orphans left by every earlier
+  //    one, which is who the sweep is for. Pinned, so a reorder has to be a
+  //    decision rather than a side effect.
+  assert.equal(RECORDER_PKILL_PATTERN, "screenrecord --output-format=h264");
+  // Narrower than "any screenrecord", which would also match a capture the
+  // developer started themselves.
+  assert.ok(RECORDER_PKILL_PATTERN.includes(" "), "the pattern names flags, not just the binary");
 });

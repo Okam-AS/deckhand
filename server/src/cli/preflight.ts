@@ -8,7 +8,9 @@
 //
 // So every prerequisite carries its own answer to one question: can a non-interactive process
 // with no sudo and no browser fix this? If yes, the fix is a command we print (or run). If no,
-// it goes in the NEEDS YOU list, which is the whole point of this module.
+// it is labelled `you:` when a person can fix it on this machine, or listed under BLOCKED when
+// it needs a browser and their Cloudflare account. Those are the words the formatter prints,
+// and an agent's instructions in AGENTS.md are written against them.
 // ---------------------------------------------------------------------------
 
 export type Who = "agent" | "human";

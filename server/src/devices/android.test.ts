@@ -107,6 +107,27 @@ describe("AndroidManager.describe", () => {
   });
 });
 
+describe("AndroidManager.shutdown", () => {
+  it("reports false when QEMU outlives the deadline, instead of looking like a clean exit", async () => {
+    // The caller deletes the AVD next. If the emulator is still running, deleting
+    // the AVD takes its NAME out of `listAvds()` — and the reaper's only way to
+    // kill an emulator is `pkill -f "avd <name>"` over the names it lists. So a
+    // silent timeout produces an orphan with no collector left: the 418%-CPU class.
+    const { mgr, calls } = fakeManager(() => ({ code: 0, stdout: buf("device") })); // never leaves
+    assert.equal(await mgr.shutdown("emulator-5554", 1_200), false);
+    assert.ok(calls.some((c) => c.includes("emu kill")));
+  });
+
+  it("reports true once adb no longer knows the serial", async () => {
+    let states = 0;
+    const { mgr } = fakeManager((args) => {
+      if (args.includes("get-state")) return ++states < 2 ? { code: 0, stdout: buf("device") } : { code: 1 };
+      return {};
+    });
+    assert.equal(await mgr.shutdown("emulator-5554", 5_000), true);
+  });
+});
+
 describe("AndroidManager.findApk", () => {
   const withApk = (layout: string[]): { wt: string; apk: string } => {
     const wt = mkdtempSync(join(tmpdir(), "dh-apk-"));

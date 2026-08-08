@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   parseWmSize,
   normToPixels,
@@ -9,6 +10,7 @@ import {
   orientationToUserRotation,
   usageToKeycode,
   adbTypeCharArgs,
+  parseEmuAvdName,
 } from "./androidAdb.ts";
 
 /** Encode a viewer HID frame: [tag:u8][JSON]. */
@@ -94,6 +96,23 @@ describe("parseWmSize", () => {
   });
 });
 
+describe("parseEmuAvdName", () => {
+  it("reads the AVD name out of the emulator console's reply", () => {
+    assert.equal(parseEmuAvdName("deckhand_p1_1\nOK\n"), "deckhand_p1_1");
+    assert.equal(parseEmuAvdName("\nPixel_7_API_34\r\nOK\n"), "Pixel_7_API_34");
+  });
+
+  it("answers null when the console refuses, rather than a name-shaped guess", () => {
+    // The one caller reads null as "not provably deckhand's" and leaves the
+    // device alone. A console error parsed as a name would be a name that does
+    // not start with `deckhand_`, so this direction is safe either way — but
+    // only by accident, and the next caller should not have to know that.
+    assert.equal(parseEmuAvdName("KO: unknown command\n"), null);
+    assert.equal(parseEmuAvdName("OK\n"), null);
+    assert.equal(parseEmuAvdName(""), null);
+  });
+});
+
 describe("normToPixels", () => {
   it("maps and clamps normalized coords to device pixels", () => {
     assert.deepEqual(normToPixels(0.5, 0.5, { w: 1000, h: 2000 }), { px: 500, py: 1000 });
@@ -129,5 +148,22 @@ describe("adbInputArgs", () => {
       "400",
       "300",
     ]);
+  });
+});
+
+describe("adb/ps exec seams", () => {
+  it("gives every execFile in this module a timeout", () => {
+    // `server.ts` awaits `engine.reapOrphans()` BEFORE `engine.startJanitor()`, so one
+    // wedged child here costs the process its idle sweep and its disk prune for the rest
+    // of its life. `defaultHostRecorderSerials` shipped without one while both its
+    // siblings had 5s; nothing failed, because a hang is not an error. Read as text
+    // because that is the only place the missing option is visible.
+    const src = readFileSync(new URL("./androidAdb.ts", import.meta.url), "utf8");
+    const calls = src.split(/\bexecFile\(/).slice(1);
+    assert.ok(calls.length >= 3, `expected the adb/ps exec seams to still be here, found ${calls.length}`);
+    for (const call of calls) {
+      const head = call.slice(0, call.indexOf("\n", call.indexOf("(err")) + 1);
+      assert.match(head, /timeout:/, `an execFile with no timeout can wedge the boot sweep:\n${head}`);
+    }
   });
 });

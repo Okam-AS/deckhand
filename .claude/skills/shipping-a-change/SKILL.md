@@ -14,13 +14,14 @@ npm run review:show     # this branch's review curve so far
 npm run review:check    # exactly what the gate will say
 ```
 
-**You cannot open the pull request.** `gh pr create` is refused by the PreToolUse hook
-(`scripts/hooks/bash-guard.ts`, its one rule) and there is no override — opening a PR is a
-person's decision, and a gate you can talk your way past is not one. What you can do is
-earn the handover: review to convergence, run the gates on a clean checkout, then
-`npm run review:handover`, which writes the PR body **only if the gate passes** and
-prints the command for a human to run. Skip the review and there is no handover to give,
-which is the point — no PR appears for someone to catch.
+**You open the pull request yourself, but only after you have earned it.** Nothing blocks
+`gh pr create` any more, and nothing can: `--body` and `--fill` need no file. What you get
+instead is a strong default — the documented route, `--body-file`, needs a file that does
+not exist until you have earned it. Review to convergence, run the gates on a clean
+checkout, then `npm run review:handover`, which writes `.claude/pr-body.md` **only if the
+gate passes**, deletes any body left over from another branch or an older diff, and prints
+the command. Skip the review and there is nothing to open. AGENTS.md § "How work lands
+here" lists the four conditions; all of them, or you stop and say which one is missing.
 
 The rest is what the guardrails cannot see, and it still has to happen in a head.
 
@@ -144,13 +145,27 @@ surfaces **no blocking finding an earlier round hadn't already reported**.
    `review:show`, so a round that is mostly quibbles reads as one. Severity defaults to
    `should`, so the lazy path is the safe one, and a nit a later round raises to `should`
    **does** count as new — filing something small to defuse it doesn't work.
-3. **Don't count "new" yourself.** `review:round` deduplicates against every earlier round,
+3. **Fix a blocking finding, then SAY SO in the next round.** Put its fingerprint (from
+   `review:show`) in that round's `"resolved": [...]`. **The FILE the finding names has to hold
+   different bytes than when it was raised** — at that round and still now — so a mode bit, a
+   blank line elsewhere, or a rename does not count. Fixed it somewhere else? Say where:
+   `{"id": "…", "file": "the/file/you/changed.ts"}`. That is a readable claim, not a check, and
+   it exists so an honest fix in a callee is not refused. Record it once and it carries forward;
+   re-report it and it reopens. Until you record it the finding is open however many rounds
+   pass without mentioning it. **Waiving instead costs a cold round after the waiver**, and the
+   reason you write is printed verbatim into the PR body.
+   Not bookkeeping for its own sake, and the wording is exact for a reason. `validate` first
+   cleared a finding the moment ANY edit moved the hash, so fixing one finding silently
+   cleared every other one raised beside it. The repair — "a later round at a DIFFERENT diff"
+   — was then bypassed with `touch scratch.tmp` … `resolved` … `rm scratch.tmp`, because
+   `diffHash` folds in untracked files. Hence "tracked", and hence the revert clause.
+4. **Don't count "new" yourself.** `review:round` deduplicates against every earlier round,
    including rounds recorded in sessions you never saw. That is the number the gate rests
    on, so it is computed, not asserted.
-4. If the round found something new, **change the lens** and go again: a different pass
+5. If the round found something new, **change the lens** and go again: a different pass
    emphasis, a fresh subagent with no session context, a different model. Repeating one
    lens re-finds one lens's bugs.
-5. **At least one round must be cold, and it must have read the code as it SHIPS** — a
+6. **At least one round must be cold, and it must have read the code as it SHIPS** — a
    reviewer starting from the diff alone, carrying none of the context this code was written
    in. A cold round against an older diff does not count, because fixing something moves the
    hash: `cold → fix → inline` is refused, and the shape that passes is `cold → fix → cold`. Your own session has the blind spot built
@@ -159,7 +174,7 @@ surfaces **no blocking finding an earlier round hadn't already reported**.
    When you spawn one, give it the diff and **nothing else** — no summary of your reasoning,
    or you have handed it your blind spot along with the code. Never mark your own re-read as
    cold.
-6. The curve accumulates on disk, so a later session extends it rather than starting over.
+7. The curve accumulates on disk, so a later session extends it rather than starting over.
 
 ## 7. The gates, last
 
@@ -177,7 +192,7 @@ lockfile, and build output nobody committed. `npm run ci` in place cannot see an
 because all of it is present. It refuses to run on a dirty tree for the same reason — CI
 tests what you push.
 
-## 8. The handover — a human opens the PR
+## 8. The handover — you open the PR, from the body the gate wrote
 
 Body carries the reasoning, not a changelog: what was wrong, why this is the fix, what you
 verified, and **what you did not**. Name which check covers which half when a fix has two.
@@ -189,20 +204,15 @@ npm run review:handover --silent <<'BODY'
 BODY
 ```
 
-**If the hook blocks that command, read what it says before rewording anything.** The hook has
-one rule and it is about RUNNING `gh pr create`, never about writing about it — quoted spans and
-heredoc bodies are blanked before it matches, so a body that quotes the command is fine. If it
-does refuse anyway, write the body to a file and pass the path
-(`npm run review:handover --silent < body.md`) rather than rewording the reasoning.
+It refuses unless `review:check` passes, writes `.claude/pr-body.md` stamped with this
+branch and this diff, and prints the `gh pr create` command. Run it, then say in **one
+line** that the PR is open, with its URL. Don't restate the diff — they can read the PR.
 
-It refuses unless `review:check` passes, writes `.claude/pr-body.md`, and prints the
-command. Then say, in **one line**, that the user needs to run it. Don't restate the diff
-at them — they can read the PR.
-
-**Do not try `gh pr create`.** The hook refuses it, there is no override, and reaching for
-one reads as looking for a way around the person you are meant to be asking. If the gate is
-genuinely wrong, say which check is wrong and why, and let the user decide — a fabricated
-round is the one thing here that makes everything else worthless.
+**If the gate refuses, do not route around it. Nothing stops you, and that is the point of
+saying it.** Writing the body file by hand, or passing `--body` or `--fill` instead of
+`--body-file`, opens a PR whose review receipt is a fiction — and that is the one thing here
+that makes everything else worthless, because no later reader can tell. If the gate is
+genuinely wrong, say which check is wrong and why, and let the user decide.
 
 Merging, branch cleanup and the rest of the workflow are in `AGENTS.md` — branch from
 `main`, never from another PR's branch, squash-merge, delete the branch.

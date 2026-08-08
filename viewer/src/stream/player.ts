@@ -187,10 +187,13 @@ export class DevicePlayer {
 
     fetch(`${this.baseUrl}/stream.avcc`, { signal: ac.signal })
       .then(async (res) => {
-        // serve-sim serves no H.264/avcc endpoint (404) — go straight to MJPEG
-        // instead of waiting out the first-frame watchdog (no 4s black screen).
+        // A 404 means "no H.264 from this helper RIGHT NOW", never "this helper has
+        // no such endpoint": serve-sim routes /stream.avcc, and the Android helper
+        // answers 404 for the whole backoff window after a failed encoder probe.
+        // Either way MJPEG is the answer, and taking it here rather than waiting out
+        // the first-frame watchdog is what avoids the 4s black screen.
         if (res.status === 404) {
-          this.report("avcc 404", "no H.264 endpoint on this helper — using mjpeg");
+          this.report("avcc 404", "helper is not serving H.264 right now — using mjpeg");
           this.fallbackToMjpeg();
           return;
         }
@@ -410,8 +413,14 @@ export class DevicePlayer {
    * cleared it: the budget was a LIFETIME allowance rather than a
    * consecutive-failure one, so a device that recovered fine seven times over an
    * afternoon gave up permanently on the eighth — reported as "gave up", with a
-   * reload as the only cure. Android is MJPEG by default, and iOS falls back to
-   * it, so this was the common path, not the rare one.
+   * reload as the only cure. The image tier is no rare corner: `start()` branches
+   * on `isAvccSupported()` alone — nothing on the stream path switches on
+   * iOS vs Android; the viewer's platform branches are all chrome and layout
+   * (`icons.tsx`, `App.tsx`) — so EITHER platform lands here when WebCodecs is missing, when a
+   * decode errors, or when the server has no AVCC to give (the Android helper
+   * 404s /stream.avcc whenever it is not serving H.264 right now — an image that
+   * cannot encode is only one of the reasons; see `serveAvcc` in
+   * server/src/streaming/androidAdb.ts).
    */
   private streamIsHealthy(): void {
     this.recovery = 0;

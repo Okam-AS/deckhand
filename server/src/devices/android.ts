@@ -9,9 +9,36 @@ import { androidProcessEnv } from "./toolEnv.ts";
 // serial is deterministic (`emulator-<port>`). Pure parsing/selection is
 // fixture-testable; the exec seam is injectable.
 //
-// NOTE: on-device validation is pending (needs an Android SDK + emulator on the
-// mini). The command shapes follow the documented adb/avdmanager/emulator CLIs.
+// Validated against real hardware by the Android leg of `npm run test:device`
+// and `deckhand doctor --device-only` (boot, first frame, describe) — that gate
+// is what found `describe`'s blank-tree bug below. Neither runs in CI, because
+// GitHub runners cannot boot an emulator; both are run by hand.
 // ---------------------------------------------------------------------------
+
+/**
+ * AVD names deckhand creates: `deckhand_<previewId>_<deviceId>`, and
+ * `deckhand_pool_…`, which shares the prefix.
+ *
+ * The underscore is a CONVENTION, not a constraint. This said "avdmanager forbids
+ * `-`" and that is false — it answers an invalid name with "Allowed characters are:
+ * a-z A-Z 0-9 . _ -", and creating `deckhand-hyphen-probe` succeeds. Believing the
+ * false version is what let `cli/doctor.ts` name the gate's AVD `deckhand-doctor`,
+ * outside this prefix and therefore outside every sweep. Nothing in CI can pin the
+ * real rule (no emulator on a GitHub runner), so treat this paragraph as the record
+ * of one hand-run probe rather than as a checked fact — but do not restore the claim
+ * that a hyphen is rejected.
+ *
+ * It lives here, in the shared low-level device layer, because both the engine
+ * (`engine/reaper.ts`) and the streaming seam (`streaming/androidAdb.ts`) have
+ * to recognise deckhand's own emulators, and the seam takes no dependency on
+ * the engine. Two copies of the string could drift with nothing to notice.
+ *
+ * `POOL_AVD_PREFIX` lives in `engine/reaper.ts` and must stay INSIDE this one:
+ * both sweeps select by this prefix, so a pooled AVD that falls outside it is
+ * never reaped and its recorder never swept.
+ * → `reaper.test.ts` "names pooled devices INSIDE the general prefix"
+ */
+export const AVD_PREFIX = "deckhand_";
 
 export interface ExecResult {
   stdout: Buffer;
@@ -407,15 +434,28 @@ export class AndroidManager {
    * immediately while QEMU takes seconds to exit, still holding its console port
    * and the AVD's lock file — reusing either before then fails the next boot
    * ("AVD is already running") or lands two emulators on one serial.
+   *
+   * Returns whether it actually went away. A caller that deletes the AVD after a
+   * false takes the emulator's NAME out of `listAvds()`, and `pkill -f "avd
+   * <name>"` over those names is the only thing that kills an emulator process —
+   * so a timeout that reads as success leaves a QEMU orphan no sweep can name.
+   * "Still running" and "gone" must not be the same value.
+   *
+   * A returned boolean nobody reads is the same bug with more steps, so the callers
+   * are pinned too: → `preview.test.ts` "declines the delete", "keeps trimPool off it
+   * once the lease is released", and `doctor.test.ts` "keeps it when the emulator would
+   * not exit". Three of the four callers threw this answer away when it was introduced,
+   * and `trimPool` deleted AVDs without calling this at all.
    */
-  async shutdown(serial: string, timeoutMs = 20_000): Promise<void> {
+  async shutdown(serial: string, timeoutMs = 20_000): Promise<boolean> {
     await this.adb(serial, ["emu", "kill"]).catch(() => {});
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const res = await this.adb(serial, ["get-state"]).catch(() => ({ code: 1 }) as ExecResult);
-      if (res.code !== 0) return; // adb no longer knows the serial: the emulator is gone
+      if (res.code !== 0) return true; // adb no longer knows the serial: the emulator is gone
       await new Promise((r) => setTimeout(r, 500));
     }
+    return false;
   }
 
   async deleteAvd(name: string): Promise<void> {

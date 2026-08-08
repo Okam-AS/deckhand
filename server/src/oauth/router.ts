@@ -18,7 +18,12 @@ import type { PairingStore } from "./pairing.ts";
 
 export interface OAuthRouterDeps {
   store: OAuthStore;
-  /** Requests waiting for the operator. See `pairing.ts` for why the wait is the whole design. */
+  /**
+   * The code the operator minted at the machine. Nothing incoming is stored and nothing waits
+   * for approval: the park-and-approve direction was tried and rejected, because parking is
+   * unauthenticated and a stranger parks faster than a person can walk to the Mac. See
+   * `pairing.ts` for the full argument.
+   */
   pairing: PairingStore;
   /**
    * The clock the in-flight deadlines are read against. Injected only so a test can prove the

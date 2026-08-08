@@ -31,8 +31,11 @@ export function vendoredServeSimBin(): string {
 // stream actually producing bytes. Teardown is `serve-sim -k <udid>` (the
 // detached daemon has no child handle to kill).
 //
-// (H.264/`stream.avcc` is not served in this version; MJPEG is the path. A
-// future serve-sim H.264 upgrade slots in behind this same seam.)
+// (The pinned 0.1.44 DOES route `/stream.avcc` — `src/middleware.ts` dispatches it to
+// `session.handleAvcc`, and the package ships an H264Encoder. Whether a given machine
+// encodes is a runtime answer, which is why the viewer probes avcc and reads a 404 as
+// "use MJPEG" rather than as a failure. This comment claimed the opposite for long
+// enough that two documents copied it: do not restate a capability here, probe it.)
 // ---------------------------------------------------------------------------
 
 export interface ServeSimOptions {
@@ -122,6 +125,14 @@ export class ServeSimBackend implements StreamingBackend {
   private readonly killPidImpl: NonNullable<ServeSimOptions["killPidImpl"]>;
   private readonly fetchImpl: typeof fetch;
   private readonly helpers = new Map<string, Helper>();
+  /**
+   * Ports an attach has claimed but not yet recorded a helper for. `attach` allocates a port,
+   * then awaits `serve-sim --detach` — and the daemon binds the port DURING that await, before
+   * `this.helpers` learns of it. Without this the sweep sees a listener nothing claims and
+   * SIGKILLs a helper that is seconds from serving a preview.
+   * → `serveSim.test.ts` "spares a port an in-flight attach has already claimed"
+   */
+  private readonly pendingPorts = new Set<number>();
 
   constructor(opts: ServeSimOptions) {
     this.bin = opts.bin ?? "serve-sim";
@@ -141,13 +152,22 @@ export class ServeSimBackend implements StreamingBackend {
    * helpers from the previous one are still alive on their ports. Allocating over one of those
    * hands the new device a daemon bound to a simulator that no longer exists — it answers, and
    * serves that dead simulator's last framebuffer forever.
+   *
+   * The loop below is one `lsof` per port, so every claim staked while it runs has to be
+   * re-read AFTER it — a sibling attach on the same engine group allocates during exactly
+   * that window, and `allocatePort` returns the lowest free port, so a stale snapshot hands
+   * both devices the same one every time rather than now and then.
+   * → `serveSim.test.ts` "never hands two concurrent attaches the same port"
    */
   private async usedPorts(): Promise<Set<number>> {
     const used = new Set([...this.helpers.values()].map((h) => h.port));
+    for (const port of this.pendingPorts) used.add(port);
     for (let port = this.range[0]; port <= this.range[1]; port++) {
       if (used.has(port)) continue;
       if ((await this.listenersImpl(port)).length) used.add(port);
     }
+    for (const helper of this.helpers.values()) used.add(helper.port);
+    for (const port of this.pendingPorts) used.add(port);
     return used;
   }
 
@@ -167,19 +187,27 @@ export class ServeSimBackend implements StreamingBackend {
     }
     if (!helper) {
       const want = allocatePort(this.range[0], this.range[1], await this.usedPorts());
-      // Spawn the streaming helper (daemon) and read the URLs it reports.
-      const stdout = await this.detachImpl(this.bin, ["--detach", "-p", String(want), device.udid]);
-      const parsed = this.parseDetach(stdout);
-      // Believe the port serve-sim REPORTS, never the one we asked for. When a
-      // helper for this udid is already running — a detached daemon outlives the
-      // server that spawned it, so this is the normal case after any restart —
-      // serve-sim ignores `-p` and hands back the existing one. Recording our
-      // requested port instead pointed every probe at a port nothing served, and
-      // no amount of cleanup fixes that because the race reopens the moment a
-      // helper survives. Trusting the answer makes an orphan harmless: `--detach`
-      // is already an adopt-or-spawn, so this is the whole reconciliation.
-      helper = { udid: device.udid, port: portFromDetach(parsed, want), base: basePathFromStreamUrl(parsed.streamUrl) };
-      this.helpers.set(device.udid, helper);
+      this.pendingPorts.add(want);
+      try {
+        // Spawn the streaming helper (daemon) and read the URLs it reports.
+        const stdout = await this.detachImpl(this.bin, ["--detach", "-p", String(want), device.udid]);
+        const parsed = this.parseDetach(stdout);
+        // Believe the port serve-sim REPORTS, never the one we asked for. When a
+        // helper for this udid is already running — a detached daemon outlives the
+        // server that spawned it, so this is the normal case after any restart —
+        // serve-sim ignores `-p` and hands back the existing one. Recording our
+        // requested port instead pointed every probe at a port nothing served, and
+        // no amount of cleanup fixes that because the race reopens the moment a
+        // helper survives. Trusting the answer makes an orphan harmless: `--detach`
+        // is already an adopt-or-spawn, so this is the whole reconciliation.
+        helper = { udid: device.udid, port: portFromDetach(parsed, want), base: basePathFromStreamUrl(parsed.streamUrl) };
+        this.helpers.set(device.udid, helper);
+      } finally {
+        // Released only once the helper is in `this.helpers`, so the port is claimed by one
+        // or the other at every instant. A detach that THREW leaves nothing to claim it, and
+        // a daemon it may still have spawned is exactly what the sweep is for.
+        this.pendingPorts.delete(want);
+      }
     }
 
     const origin = `http://127.0.0.1:${helper.port}`;
@@ -205,8 +233,8 @@ export class ServeSimBackend implements StreamingBackend {
 
   private async probeFirstFrame(origin: string, base: string, timeoutMs = FIRST_FRAME_TIMEOUT_MS): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
-    // Try H.264 first (future versions), then MJPEG (current). Retry until a
-    // frame lands or the window closes — the daemon needs a moment to attach.
+    // Try H.264 first, then MJPEG — this machine answers which one it is. Retry until a
+    // frame lands or the window closes; the daemon needs a moment to attach.
     while (Date.now() < deadline) {
       if (await this.probeStream(`${origin}${base}/stream.avcc`, 1500)) return true;
       if (await this.probeStream(`${origin}${base}/stream.mjpeg`, 2000)) return true;
@@ -292,23 +320,55 @@ export class ServeSimBackend implements StreamingBackend {
    * everything, which is the point — but the sweep runs after the port is bound, so a
    * start_preview can be mid-attach, and `serve-sim -k` with no udid kills every helper on the
    * machine. Naming the survivors instead is what makes that window safe.
+   *
+   * `keep` is a snapshot the ENGINE took before calling, and every step below it awaits, so
+   * the condemned list is fixed up front from the helpers that existed when the sweep began
+   * and every decision to delete or SIGKILL re-reads `this.helpers` AT that decision — never
+   * from a set computed before the await it is used after. A helper attached DURING the sweep
+   * is in neither list, so it survives the per-udid kill and the port sweep — the same guard
+   * `sweepDeviceRecorders` applies on Android.
+   * → `serveSim.test.ts` "spares a helper attached DURING the `serve-sim -k` kills",
+   *   `serveSim.test.ts` "spares a helper attached DURING the port sweep",
+   *   `serveSim.test.ts` "spares a port an in-flight attach has already claimed",
+   *   `serveSim.test.ts` "forgets only the condemned RECORD, not whatever now sits under its udid",
+   *   `serveSim.test.ts` "never blanket-kills while an attach already holds a port"
+   *
+   * The blanket `-k` takes every helper on the machine, so it is taken only when we know of no
+   * helper at all — and `this.helpers` is not the whole of what we know. An attach still inside
+   * `serve-sim --detach` has claimed a port and recorded nothing, which is a helper we know
+   * about, so `pendingPorts` gates that branch too. With an attach in flight the branch is
+   * simply skipped: the port sweep below is the stronger lever anyway, and it spares the same
+   * set. What is left open is the instant AFTER the re-read, which no read can close:
+   * - The instant between the last re-read and `killPidImpl`. Nothing closes that — the only
+   *   real fix is that an attach one instant later than a signal loses a helper, not a port:
+   *   `attach` verifies a remembered helper is still listening and respawns if it is not.
+   * - An adopt: when serve-sim ignores `-p` and hands back an EXISTING daemon on another port,
+   *   only the port we asked for was reserved in advance, so the adopted one is unspared until
+   *   the record lands. That daemon is by definition one a previous process left behind, which
+   *   is what the sweep is for; the attach that adopted it re-checks and respawns.
    */
   async reapOrphans(keep: ReadonlySet<string> = new Set()): Promise<void> {
-    const spared = [...this.helpers].filter(([udid]) => keep.has(udid));
-    const sparedPorts = new Set(spared.map(([, h]) => h.port));
-    if (spared.length === 0) {
+    const known = new Map(this.helpers);
+    const doomed = [...known.keys()].filter((udid) => !keep.has(udid));
+    if (known.size === 0 && this.pendingPorts.size === 0) {
       await this.killImpl(this.bin, ["-k"]);
     } else {
       // Per-udid, because the blanket `-k` would take the live ones with it. Helpers left
       // by a previous process have udids we do not know; the port sweep below is what
       // collects those, and SIGKILL is the stronger lever anyway.
-      for (const [udid] of this.helpers) if (!keep.has(udid)) await this.killImpl(this.bin, ["-k", udid]);
+      for (const udid of doomed) await this.killImpl(this.bin, ["-k", udid]);
     }
-    this.helpers.clear();
-    for (const [udid, helper] of spared) this.helpers.set(udid, helper);
+    // Identity, not membership: a re-attach for a condemned udid during those awaits put a
+    // NEW record under the same key, and that record is not the one we condemned.
+    for (const udid of doomed) if (this.helpers.get(udid) === known.get(udid)) this.helpers.delete(udid);
     for (let port = this.range[0]; port <= this.range[1]; port++) {
-      if (sparedPorts.has(port)) continue;
-      for (const pid of await this.listenersImpl(port)) {
+      if (this.isSpared(port)) continue;
+      const pids = await this.listenersImpl(port);
+      // Re-read AFTER the lsof await as well. Checking once before the loop made the check a
+      // snapshot again: an attach landing in any of these awaits takes a port that was free
+      // when the snapshot was taken, and the sweep then SIGKILLs a daemon seconds old.
+      if (this.isSpared(port)) continue;
+      for (const pid of pids) {
         try {
           this.killPidImpl(pid);
         } catch {
@@ -316,5 +376,12 @@ export class ServeSimBackend implements StreamingBackend {
         }
       }
     }
+  }
+
+  /** Is this port claimed right now — by a live helper, or by an attach still in flight? */
+  private isSpared(port: number): boolean {
+    if (this.pendingPorts.has(port)) return true;
+    for (const h of this.helpers.values()) if (h.port === port) return true;
+    return false;
   }
 }

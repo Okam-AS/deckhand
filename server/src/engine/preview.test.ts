@@ -4,9 +4,10 @@ import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fakeMetro, fakeDevProcs, fakeSimctl, fakeAndroid, fakeWorktrees, fakeReaper } from "../test-support/fakes.ts";
-import { PreviewEngine, PreviewError, buildStepDetail, redactForShare, type PreviewEngineDeps } from "./preview.ts";
+import { PreviewEngine, PreviewError, buildStepDetail, redactForShare, type PreviewEngineDeps, type StartPreviewRequest, type DeviceRequest } from "./preview.ts";
 import type { SimDeckControl } from "../testing/control.ts";
 import type { App, Config } from "../config.ts";
+import type { AndroidManager } from "../devices/android.ts";
 import type { RunResult } from "./procs.ts";
 import type { CommandStep } from "./recipes.ts";
 import type { DevRunSpec } from "./devProcess.ts";
@@ -80,7 +81,7 @@ interface Harness {
  * (`...androidFake(calls), attachedSerials: …`) instead of restating a whole
  * device manager to change a single answer.
  */
-function androidFake(calls: string[] = []) {
+function androidFake(calls: string[] = [], over: Partial<AndroidManager> = {}) {
   return fakeAndroid({
     // No emulator is attached in the fake world, so every console port is free.
     // Tests about port collisions override this.
@@ -101,9 +102,10 @@ function androidFake(calls: string[] = []) {
     launch: async () => {},
     screenshotPng: async () => Buffer.from([0x89, 0x50]),
     findApk: async () => "/wt/app-debug.apk",
-    shutdown: async () => {},
+    shutdown: async () => true,
     deleteAvd: async () => {},
     describe: async () => "tree",
+    ...over,
   });
 }
 
@@ -189,8 +191,11 @@ function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (
 
   const android = androidFake(simctlCalls);
   // Named so a test can read back what was persisted; the engine has no snapshot accessor
-  // and should not grow one just for tests.
-  const store = new StateStore(`/tmp/deckhand-noop-${Math.random().toString(36).slice(2)}.json`);
+  // and should not grow one just for tests. It has to be the SAME store the engine got:
+  // returning a second one made `h.store.load()` read a file nothing ever wrote, so it
+  // answered EMPTY (ENOENT) and an assertion that state was cleared passed without the
+  // clearing ever happening.
+  const store = overrides.store ?? new StateStore(`/tmp/deckhand-noop-${Math.random().toString(36).slice(2)}.json`);
 
   const deps: PreviewEngineDeps = {
     config: overrides.config ?? config,
@@ -881,9 +886,10 @@ describe("PreviewEngine migration pairing", () => {
   });
 
   it("hides a migration source the target's viewer could never unlock", async () => {
-    // Two REGISTERED apps with independent PINs — unlike a compare reference,
-    // which is synthetic and always public. A public target must not carry a
-    // PIN-protected source's pane: unlock only propagates out of a proven PIN on
+    // Two REGISTERED apps with independent PINs — unlike an `alongside` pane,
+    // which is synthetic and inherits the page's access class at boot rather
+    // than being public. A public target must not carry a PIN-protected
+    // source's pane: unlock only propagates out of a proven PIN on
     // the page's own share, so that pane would be refused every retry with no
     // pad to type into, and minting its cookie anyway would hand the source's
     // stream to anyone holding the target's public link.
@@ -1690,8 +1696,9 @@ describe("PreviewEngine idle sweep", () => {
 
   it("keeps device ids unique and ordered when one is added later", async () => {
     // Ids are how a viewer pane addresses a stream, so a repeat would point a pane at the
-    // wrong device with both ends agreeing on the name. Safe today only because a device is
-    // never removed from a live preview; see the note in addDevices if that changes.
+    // wrong device with both ends agreeing on the name. This covers the add-only case; the
+    // remove-then-add case is the test below, and the note in addDevices says what actually
+    // keeps two live ids apart.
     const h = makeEngine({ config: { ...config, limits: { ...config.limits, maxTotalDevices: 6 } } });
     h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }, { platform: "ios" }], access: "public" });
     await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
@@ -1699,6 +1706,70 @@ describe("PreviewEngine idle sweep", () => {
     const ids = h.engine.getStatus("pv1")!.devices.map((d) => d.deviceId);
     assert.deepEqual(ids, ["ios-0", "ios-1", "android-2"]);
     assert.equal(new Set(ids).size, ids.length, "no id may repeat");
+  });
+
+  it("never re-mints a retired device id, on any platform", async () => {
+    // A device id is how a viewer pane addresses a stream, so an id must mean one device for
+    // the whole life of the preview — not merely one LIVE device. The counter is per preview
+    // and only ever goes up; it is not the device list's length, which shrinks on
+    // `removeDevices` and used to hand the retired index straight back.
+    const lim = { config: { ...config, limits: { ...config.limits, maxTotalDevices: 6 } } };
+    const req = (devices: DeviceRequest[]): StartPreviewRequest =>
+      ({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices, access: "public" });
+
+    // Same platform, via addDevices directly — the caller shape `missingPlatforms()` does not
+    // cover. Indexing off the length gave the new device the id of the one still running.
+    const same = makeEngine(lim);
+    same.engine.startPreview(req([{ platform: "ios" }, { platform: "ios" }]));
+    await waitForPhase(same.engine, "pv1", ["ready", "failed"]);
+    await same.engine.removeDevices("pv1", ["ios-0"]);
+    same.engine.addDevices("pv1", [{ platform: "ios" }]);
+    const ids = same.engine.getStatus("pv1")!.devices.map((d) => d.deviceId);
+    assert.equal(new Set(ids).size, ids.length, "no two LIVE devices may share an id");
+    assert.deepEqual(ids, ["ios-1", "ios-2"], "the added device gets a fresh index, not the free one");
+
+    // Removing the HIGHEST id must not free it either — so the counter cannot be derived from
+    // the ids that are still live.
+    await same.engine.removeDevices("pv1", ["ios-2"]);
+    same.engine.addDevices("pv1", [{ platform: "ios" }]);
+    assert.deepEqual(
+      same.engine.getStatus("pv1")!.devices.map((d) => d.deviceId),
+      ["ios-1", "ios-3"],
+      "ios-2 is retired for good",
+    );
+
+    // Across platforms, through the idempotent start_preview path: the platform is part of the
+    // id, so this one never collided while live — but it did re-mint the retired name.
+    const cross = makeEngine(lim);
+    const both = (): StartPreviewRequest => req([{ platform: "ios" }, { platform: "android" }]);
+    cross.engine.startPreview(both());
+    await waitForPhase(cross.engine, "pv1", ["ready", "failed"]);
+    await cross.engine.removeDevices("pv1", ["android-1"]);
+    cross.engine.startPreview(both());
+    assert.deepEqual(cross.engine.getStatus("pv1")!.devices.map((d) => d.deviceId), ["ios-0", "android-2"]);
+  });
+
+  it("labels a device by its place in the preview, not by the id counter", async () => {
+    // The fallback caption is what a user reads while a device is pending, and on a device
+    // whose boot failed before `bootIos`/`bootAndroid` could name the real model. It used to
+    // interpolate the same number as the device id — and that number is now a monotonic
+    // counter that skips retired ids, so a preview showing two devices captioned the third
+    // and the fourth is nonsense the user cannot resolve. The id and the caption want
+    // different things: uniqueness for the life of the preview, and a place a human can count
+    // to.
+    const lim = { config: { ...config, limits: { ...config.limits, maxTotalDevices: 6 } } };
+    const req = (devices: DeviceRequest[]): StartPreviewRequest =>
+      ({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices, access: "public" });
+
+    const h = makeEngine(lim);
+    const [first] = h.engine.startPreview(req([{ platform: "ios" }, { platform: "ios" }, { platform: "ios" }])).devices ?? [];
+    assert.equal(first?.label, "ios device 1", "the first device a user sees is the first, not the zeroth");
+
+    await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
+    await h.engine.removeDevices("pv1", ["ios-0", "ios-1"]);
+    const added = h.engine.addDevices("pv1", [{ platform: "android" }]);
+    assert.equal(added[0]!.record.deviceId, "android-3", "the id still comes off the counter that never repeats");
+    assert.equal(added[0]!.record.label, "android device 2", "but the caption counts the devices that are actually there");
   });
 
   it("refuses to add beyond the machine's device budget, and says which limit", async () => {
@@ -1720,6 +1791,33 @@ describe("PreviewEngine idle sweep", () => {
     assert.match(again.nextStep ?? "", /maxDevicesPerPreview/, "and names the limit that stopped it");
     assert.match(again.nextStep ?? "", /untouched/, "and reassures that the running ones are fine");
     assert.deepEqual(h.engine.getStatus("pv1")!.devices.map((d) => d.deviceId), ["ios-0"], "nothing half-added");
+  });
+
+  it("persists the device it just added, not the list from before it", async () => {
+    // `p.record.devices` is what reaches state.json, and it is a DIFFERENT array from
+    // `p.devices` — `startPreview` builds it with `.map()`. `removeDevices` re-syncs it;
+    // `addDevices` pushed to `p.devices` alone, so the `persist()` on the next line wrote
+    // the list from before the add. `getStatus` reads `p.devices` and looked right, which
+    // is what hid it — but the on-host poller AGENTS.md points an agent at reads
+    // state.json, so a device added to a live preview was invisible to it, and one that
+    // was added and then FAILED read as no device rather than as an error to relay.
+    const h = makeEngine({ config: { ...config, limits: { ...config.limits, maxTotalDevices: 6 } } });
+    h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+
+    h.engine.addDevices("pv1", [{ platform: "android" }]);
+
+    const persisted = h.store.load().previews.find((p) => p.previewId === "pv1")!;
+    assert.deepEqual(
+      persisted.devices.map((d) => d.deviceId),
+      ["ios-0", "android-1"],
+      "the persisted record carries the added device",
+    );
+    // And it keeps carrying it once the device reports — the record must be the same
+    // object the orchestration writes phases onto, not a snapshot taken at add time.
+    await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
+    const later = h.store.load().previews.find((p) => p.previewId === "pv1")!;
+    assert.deepEqual(later.devices.map((d) => `${d.deviceId}:${d.phase}`), ["ios-0:ready", "android-1:ready"]);
   });
 
   it("stays quiet when the request is already satisfied", () => {
@@ -1798,9 +1896,10 @@ describe("PreviewEngine idle sweep", () => {
     // so the orphan that motivated it (a helper 2h48m old serving a dead simulator's last
     // frame forever) survived every restart. Nothing failed, because nothing asked.
     const reapKeep: (readonly string[])[] = [];
+    const attached: string[] = [];
     const h = makeEngine({
       streaming: {
-        attach: async () => ({
+        attach: async (d: StreamDeviceRef) => (attached.push(d.udid), {
           origin: "http://127.0.0.1:3100",
           helperBasePath: "/helper/x",
           waitForFirstFrame: async () => true,
@@ -1821,6 +1920,76 @@ describe("PreviewEngine idle sweep", () => {
     assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
     await h.engine.reapOrphans();
     assert.ok(reapKeep[1]!.length > 0, "a live preview's device must be named, or the sweep kills its own helper");
+    // By the identifier the backend actually keys its helper map on — which is the one it
+    // was handed on attach. A keep-set that names the device some OTHER way spares nothing.
+    assert.equal(attached.length, 1, "the fixture has to reach a real attach, or this asserts nothing");
+    assert.ok(reapKeep[1]!.includes(attached[0]!), `spared by the udid serve-sim keys on (${attached[0]})`);
+  });
+
+  it("spares a live ANDROID helper at boot — the keep-set carries adb serials, not just AVD names", async () => {
+    // AndroidAdbBackend keys `this.helpers` by adb SERIAL (`emulator-5554`) and its sweep
+    // asks `keep.has(serial)`. The engine used to fill the keep-set from `record.udid`,
+    // which holds the AVD NAME on Android — so that test was false for every live device
+    // and the boot sweep stopped the helper of a start_preview that landed after the port
+    // was bound (the sweep runs after the bind on purpose; see reapOrphans). Nothing
+    // failed loudly: the preview stayed `ready` with a dead stream.
+    const reapKeep: (readonly string[])[] = [];
+    const attached: string[] = [];
+    const h = makeEngine({
+      streaming: {
+        attach: async (d: StreamDeviceRef) => {
+          attached.push(d.serial ?? d.udid);
+          return {
+            origin: "http://127.0.0.1:3100",
+            helperBasePath: "/helper/x",
+            waitForFirstFrame: async () => true,
+            describe: async () => "tree",
+            detach: async () => {},
+          };
+        },
+        reapOrphans: async (keep?: ReadonlySet<string>) => void reapKeep.push([...(keep ?? [])]),
+      },
+    });
+
+    h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "android" }], access: "public" });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+    await h.engine.reapOrphans();
+
+    assert.equal(attached.length, 1, "the fixture has to reach a real attach, or this asserts nothing");
+    assert.ok(
+      reapKeep[0]!.includes(attached[0]!),
+      `the serial the helper is keyed by (${attached[0]}) must be in the keep-set, got ${JSON.stringify(reapKeep[0])}`,
+    );
+  });
+
+  it("reaps a FAILED preview at boot, not just a running one", async () => {
+    // A failed preview still holds a booted simulator and a worktree — counting it as using
+    // zero devices was one of the two original resource leaks (PLAN §"Device lifecycle").
+    // So "stale on boot" is `phase !== "stopped"` and nothing narrower. There used to be a
+    // second, unreachable definition of it in state.ts that also excluded `failed`; this is
+    // what fails if anyone consolidates onto that one.
+    const file = `/tmp/deckhand-stale-${Math.random().toString(36).slice(2)}.json`;
+    writeFileSync(
+      file,
+      JSON.stringify({
+        version: 1,
+        previews: [
+          { previewId: "old-failed", shareId: "s1", appId: rnApp.id, ref: "main", source: "git", phase: "failed", devices: [], createdAt: 1, updatedAt: 1, passwordProtected: false },
+          { previewId: "old-ready", shareId: "s2", appId: rnApp.id, ref: "main", source: "git", phase: "ready", devices: [], createdAt: 1, updatedAt: 1, passwordProtected: false },
+          { previewId: "old-stopped", shareId: "s3", appId: rnApp.id, ref: "main", source: "git", phase: "stopped", devices: [], createdAt: 1, updatedAt: 1, passwordProtected: false },
+        ],
+        shareIds: {},
+        pins: {},
+      }),
+    );
+    const h = makeEngine({ store: new StateStore(file) });
+    try {
+      const report = await h.engine.reapOrphans();
+      assert.equal(report.previews, 2, "the failed preview is stale too — it kept its devices");
+      assert.deepEqual(h.store.load().previews, [], "and every one of them is dropped from state");
+    } finally {
+      rmSync(file, { force: true });
+    }
   });
 
   it("never allocates a console port an emulator already holds", async () => {
@@ -1911,8 +2080,11 @@ describe("PreviewEngine idle sweep", () => {
     const h = makeEngine({
       config: { ...config, limits: { ...config.limits, reuseDevices: false } },
       reaper: fakeReaper({
-        reap: async (keep: typeof keepSeen = {}) => {
-          keepSeen = keep;
+        // `reap` takes the handles LAZILY now, so it can re-read them before each destructive
+        // call. What arrives here is the reader, not a snapshot — calling it is the point, and
+        // a fake that just recorded the argument would record a function and assert nothing.
+        reap: async (keep: typeof keepSeen | (() => typeof keepSeen) = {}) => {
+          keepSeen = typeof keep === "function" ? keep() : keep;
           return { sims: [], avds: [], keptPooled: [] };
         },
       }),
@@ -1967,7 +2139,10 @@ describe("PreviewEngine idle sweep", () => {
           androidCalls.push("bootEmulator");
           throw new Error("did not finish booting");
         },
-        shutdown: async (serial: string) => void androidCalls.push(`shutdown ${serial}`),
+        shutdown: async (serial: string) => {
+          androidCalls.push(`shutdown ${serial}`);
+          return true;
+        },
         deleteAvd: async (n: string) => void androidCalls.push(`deleteAvd ${n}`),
         packagePath: async () => "/data/app/base.apk",
         installApk: async () => {},
@@ -2143,7 +2318,10 @@ describe("device pool", () => {
       installApk: async () => {},
       launch: async () => {},
       findApk: async () => "/wt/app-debug.apk",
-      shutdown: async () => void calls.push("avd shutdown"),
+      shutdown: async () => {
+        calls.push("avd shutdown");
+        return true;
+      },
       deleteAvd: async (n: string) => {
         calls.push(`avd delete ${n}`);
         const i = avds.indexOf(n);
@@ -2484,66 +2662,261 @@ describe("buildStepDetail", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Physical-device detection in listDevices (Phase 0). Two invariants: the
-// section is purely ADDITIVE (an engine with no scanner answers exactly the
-// old shape plus empty lists), and a scanner's answer passes through
-// untouched. Nothing here may affect capacity, booting, or the simulator
-// sections — that is the backward-compatibility contract.
+// listDevices enumerates what deckhand can actually BOOT — simulator runtimes
+// and models, emulator API levels, and capacity. Hardware plugged into the
+// machine is neither targeted nor reported (PLAN §2 "NO physical devices"), so
+// the response has no `physical` section to read.
 // ---------------------------------------------------------------------------
 
-describe("listDevices physical section", () => {
-  it("answers empty physical lists when no scanner is configured — every existing deployment's shape", async () => {
+describe("listDevices", () => {
+  it("reports simulator runtimes/models, emulator API levels and capacity — and nothing about attached hardware", async () => {
     const h = makeEngine();
     const out = await h.engine.listDevices();
-    assert.deepEqual(out.physical, { ios: [], android: [], targetable: false });
-    // The pre-existing sections are untouched by the feature.
     assert.deepEqual(out.ios.models, ["iPhone 16 Pro"]);
     assert.equal(out.ios.runtimes[0]!.name, "iOS 26.0");
+    assert.deepEqual(out.android, { apiLevels: [34] });
     assert.deepEqual(out.capacity, { inUse: 0, max: config.limits.maxTotalDevices });
+    // The wire shape IS the decision: a physical-device scan reported hardware
+    // start_preview could never build to, which reads to an agent as an offer.
+    assert.deepEqual(Object.keys(out).sort(), ["android", "capacity", "ios"]);
   });
+});
 
-  it("passes the scanner's answer through verbatim", async () => {
-    const ipad = {
-      identifier: "ABBF991E-8F0F-522F-9B7C-EB1C94571984",
-      udid: "00008030-00122D3C26BA202E",
-      name: "iPad",
-      model: "iPad (9th generation)",
-      deviceType: "iPad",
-      osVersion: "18.7.8",
-      transport: "network" as const,
-      developerMode: true,
-    };
-    const galaxy = { serial: "R58M12ABCDE", state: "device" as const, model: "SM_G973F" };
-    const h = makeEngine({
-      physical: { list: async () => ({ ios: [ipad], android: [galaxy] }) },
-    });
-    const out = await h.engine.listDevices();
-    assert.deepEqual(out.physical.ios, [ipad]);
-    assert.deepEqual(out.physical.android, [galaxy]);
-    // Phase 0: nothing can target physical hardware; the wire says so, so the
-    // agent-facing claim lives in the response rather than in a tool description
-    // that can go stale.
-    assert.equal(out.physical.targetable, false);
-    // Physical hardware is NOT deckhand capacity — it must never count as in use.
-    assert.equal(out.capacity.inUse, 0);
-  });
+// ---------------------------------------------------------------------------
+// An emulator that would not die keeps its AVD.
+//
+// `AndroidManager.shutdown` polls `adb get-state` to a deadline and answers
+// whether the device actually went away. Every caller that then deletes the AVD
+// regardless throws away the ONLY handle on the surviving QEMU: `pkill -f "avd
+// <name>"` in the reaper draws its names from `listAvds()`, and `avdmanager
+// delete` takes the name out of that list for good. The orphan holds the
+// machine's single H.264 encoder and drops every other emulator to MJPEG.
+//
+// Three paths reach a delete, and the guard on one of them was undone by the
+// next: teardown declined the delete, released the pool lease, and `trimPool`
+// then deleted the now-unleased AVD with no shutdown of its own.
+// ---------------------------------------------------------------------------
 
-  it("survives a rejecting scanner: the simulator sections still answer, and the failure is reported as an error", async () => {
-    const h = makeEngine({
-      physical: {
-        list: async () => {
-          throw new Error("scanner exploded");
-        },
+describe("an emulator that would not die keeps its AVD", () => {
+  /** `shutdown` times out (false), and every AVD deletion is recorded. */
+  const stubborn = (calls: string[], over: Partial<AndroidManager> = {}) =>
+    androidFake(calls, {
+      shutdown: async (serial: string) => {
+        calls.push(`shutdown ${serial}`);
+        return false;
       },
+      deleteAvd: async (name: string) => void calls.push(`deleteAvd ${name}`),
+      ...over,
     });
-    const out = await h.engine.listDevices();
-    // The additive contract: a broken physical scan must never take down the
-    // enumeration a machine's simulators depend on.
-    assert.deepEqual(out.ios.models, ["iPhone 16 Pro"]);
-    assert.equal(out.ios.runtimes[0]!.name, "iOS 26.0");
-    assert.deepEqual(out.physical.ios, []);
-    assert.deepEqual(out.physical.android, []);
-    assert.match(out.physical.errors!.ios!, /scanner exploded/);
-    assert.match(out.physical.errors!.android!, /scanner exploded/);
+
+  const startAndroid = (h: Harness) =>
+    h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "android", runtime: "34" }],
+      access: "public",
+    });
+
+  it("declines the delete on teardown when the emulator never confirmed it was gone", async () => {
+    const calls: string[] = [];
+    const h = makeEngine({ android: stubborn(calls) });
+    startAndroid(h);
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+
+    await h.engine.stopPreview("pv1");
+
+    assert.ok(calls.some((c) => c.startsWith("shutdown ")), `teardown must try to stop it — saw ${JSON.stringify(calls)}`);
+    assert.deepEqual(
+      calls.filter((c) => c.startsWith("deleteAvd ")),
+      [],
+      "the AVD name is the reaper's only handle on the live emulator; it must survive",
+    );
+  });
+
+  it("keeps trimPool off it once the lease is released", async () => {
+    // The guard above lasts seven lines. Teardown declines the delete, releases the
+    // pool lease, and calls trimPool — which deletes pooled AVDs over budget with no
+    // shutdown and no ownership check. An AVD that has just stopped being leased is
+    // exactly what it reaches for first.
+    const calls: string[] = [];
+    const leased = "deckhand_pool_pixel_7_api34"; // the name leaseName builds for this shape
+    // Listed with the stuck AVD PAST the keep slot: `listAvds` order is avdmanager's,
+    // so the stuck one can sit anywhere, and only the position where it is over budget
+    // asks trimPool the question. First in the list, it survives by luck.
+    const kept = "deckhand_pool_spare_1"; // fills the single keep slot
+    const overBudget = "deckhand_pool_spare_2"; // and this one is what a trim is for
+    const h = makeEngine({
+      // Pooling on, and room for exactly one idle AVD.
+      config: { ...config, limits: { ...config.limits, reuseDevices: true, maxTotalDevices: 1 } },
+      android: stubborn(calls, { listAvds: async () => [kept, leased, overBudget] }),
+    });
+    startAndroid(h);
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+
+    await h.engine.stopPreview("pv1");
+
+    assert.ok(!calls.includes(`deleteAvd ${leased}`), `trimPool deleted a live emulator's AVD — saw ${JSON.stringify(calls)}`);
+    // …and the trim still happens: a guard that switched trimming off entirely would
+    // pass the line above while filling the disk with 2 GB images.
+    assert.ok(calls.includes(`deleteAvd ${overBudget}`), `an idle spare over budget must still be trimmed — saw ${JSON.stringify(calls)}`);
+  });
+
+  it("declines the delete when an aborted preview cannot stop the emulator it just booted", async () => {
+    // start_preview aborted while `bootEmulator` was in flight: the boot succeeds
+    // moments later and `abandonIfAborted` has to give the device back. Same rule —
+    // an emulator that will not die keeps its name.
+    const calls: string[] = [];
+    let releaseBoot!: () => void;
+    const booting = new Promise<void>((r) => (releaseBoot = r));
+    const h = makeEngine({
+      android: stubborn(calls, {
+        bootEmulator: async () => {
+          calls.push("emu boot");
+          await booting;
+          return "emulator-5554";
+        },
+      }),
+    });
+    startAndroid(h);
+    while (!calls.includes("emu boot")) await new Promise((r) => setTimeout(r, 5));
+
+    // Teardown runs FIRST, while QEMU is already up — `bootEmulator` spawns the
+    // emulator before its first await, so the process exists from the moment the fake
+    // records "emu boot". This device has no serial yet, so teardown has nothing to
+    // shut down and no answer to record; that must not read as "nothing to keep".
+    // Discarding the calls here (which this test used to do) hid a delete of the AVD
+    // whose emulator is mid-boot — the same name, the same guard, three lines above
+    // the assertion that no delete happened.
+    await h.engine.stopPreview("pv1");
+    assert.deepEqual(
+      calls.filter((c) => c.startsWith("deleteAvd ")),
+      [],
+      `teardown deleted the AVD of an emulator whose boot is still in flight — saw ${JSON.stringify(calls)}`,
+    );
+    releaseBoot();
+    // The abandon path is not awaited by anything the test holds; wait for its own
+    // trace rather than for a phase, and give a delete that should not happen time
+    // to land after it.
+    for (let i = 0; i < 200 && !calls.some((c) => c.startsWith("shutdown ")); i++) await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.ok(calls.some((c) => c.startsWith("shutdown ")), `the abandoned emulator must be stopped — saw ${JSON.stringify(calls)}`);
+    assert.deepEqual(
+      calls.filter((c) => c.startsWith("deleteAvd ")),
+      [],
+      "an emulator that outlived its shutdown must keep its AVD name here too",
+    );
+  });
+
+  it("keeps the AVD when an aborted boot's kill-by-port answers `true`", async () => {
+    // `true` from THIS shutdown is not a death. `shutdown` returns as soon as `adb
+    // get-state` fails, and an aborted boot never got past `adb wait-for-device` — the
+    // one step that would have made adb know the serial — so `true` here says only "adb
+    // never heard of it". Deleting the AVD on that takes the name out of `listAvds()`,
+    // and `pkill -f "avd <name>"` is the only thing that can ever name the QEMU this
+    // boot spawned detached: the uncollectable-orphan class.
+    //
+    // The image is not leaked, only left for the reaper, which kills by name and deletes
+    // at the next boot — by which time the process has usually gone.
+    const calls: string[] = [];
+    let failBoot!: () => void;
+    const booting = new Promise<void>((_ok, fail) => (failBoot = () => fail(new Error("boot aborted"))));
+    const h = makeEngine({
+      android: androidFake(calls, {
+        shutdown: async (serial: string) => {
+          calls.push(`shutdown ${serial}`);
+          return true; // what real adb answers for a serial it was never told about
+        },
+        deleteAvd: async (name: string) => void calls.push(`deleteAvd ${name}`),
+        bootEmulator: async () => {
+          calls.push("emu boot");
+          await booting;
+          return "emulator-5554";
+        },
+      }),
+    });
+    startAndroid(h);
+    while (!calls.includes("emu boot")) await new Promise((r) => setTimeout(r, 5));
+
+    await h.engine.stopPreview("pv1");
+    assert.deepEqual(calls.filter((c) => c.startsWith("deleteAvd ")), [], "teardown still must not delete a booting AVD");
+
+    failBoot();
+    for (let i = 0; i < 200 && !calls.some((c) => c.startsWith("shutdown ")); i++) await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setTimeout(r, 20));
+
+    // The kill by port still has to happen: the port goes straight back in the pool, and
+    // a survivor on a reused port is streamed to the next preview.
+    assert.ok(
+      calls.includes("shutdown emulator-5554"),
+      `the abandoned emulator must still be killed by its port — saw ${JSON.stringify(calls)}`,
+    );
+    assert.deepEqual(
+      calls.filter((c) => c.startsWith("deleteAvd ")),
+      [],
+      `nothing here witnessed a death, so the AVD name must survive — saw ${JSON.stringify(calls)}`,
+    );
+  });
+
+  it("keeps a pooled AVD when an aborted boot is killed by a port adb never knew", async () => {
+    // The same false confirmation, and the case where it is a regression: `stopPreview`
+    // aborts, `teardownDevices` runs to completion for a device with no serial — clearing
+    // `dev.poolName` — and only THEN does the boot's rejection land, so a `!dev.poolName`
+    // read in the catch sees "not pooled" for a device that was pooled, and destroys the
+    // ~2 GB image the pool exists to avoid re-paying for.
+    const calls: string[] = [];
+    let failBoot!: () => void;
+    const booting = new Promise<void>((_ok, fail) => (failBoot = () => fail(new Error("boot aborted"))));
+    const h = makeEngine({
+      config: { ...config, limits: { ...config.limits, reuseDevices: true } },
+      android: androidFake(calls, {
+        shutdown: async (serial: string) => {
+          calls.push(`shutdown ${serial}`);
+          return true; // adb was never told about this serial; it fails get-state at once
+        },
+        deleteAvd: async (name: string) => void calls.push(`deleteAvd ${name}`),
+        bootEmulator: async () => {
+          calls.push("emu boot");
+          await booting;
+          return "emulator-5554";
+        },
+      }),
+    });
+    startAndroid(h);
+    while (!calls.includes("emu boot")) await new Promise((r) => setTimeout(r, 5));
+
+    await h.engine.stopPreview("pv1");
+    failBoot();
+    for (let i = 0; i < 200 && !calls.some((c) => c.startsWith("shutdown ")); i++) await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.deepEqual(
+      calls.filter((c) => c.startsWith("deleteAvd ")),
+      [],
+      `a pooled AVD must survive an aborted boot — saw ${JSON.stringify(calls)}`,
+    );
+  });
+
+  it("declines the delete when the emulator that outlived a boot TIMEOUT cannot be killed by port", async () => {
+    // The fourth path, and the one with no second chance: `bootEmulator` threw, so
+    // `record.serial` was never set — teardown cannot re-ask this device whether its
+    // emulator went away, and read its own silence as "nothing to keep". The kill by
+    // console port is the only place that answer exists, so it has to be recorded there.
+    const calls: string[] = [];
+    const h = makeEngine({
+      android: stubborn(calls, {
+        bootEmulator: async () => {
+          calls.push("emu boot");
+          throw new Error("did not finish booting");
+        },
+      }),
+    });
+    startAndroid(h);
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "failed");
+    await h.engine.stopPreview("pv1");
+
+    assert.ok(calls.some((c) => c.startsWith("shutdown ")), `the abandoned emulator must be killed by its port — saw ${JSON.stringify(calls)}`);
+    assert.deepEqual(calls.filter((c) => c.startsWith("deleteAvd ")), [], "a boot timeout that would not die keeps its AVD too");
   });
 });

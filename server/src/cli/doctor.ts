@@ -9,7 +9,8 @@ import { ghCliToken } from "../github/credentials.ts";
 import { Simctl, selectRuntime, selectDeviceType } from "../devices/ios.ts";
 import { ServeSimBackend, vendoredServeSimBin } from "../streaming/serveSim.ts";
 import { AndroidAdbBackend } from "../streaming/androidAdb.ts";
-import { AndroidManager, selectSystemImage, serialForPort } from "../devices/android.ts";
+import { AndroidManager, AVD_PREFIX, selectSystemImage, serialForPort } from "../devices/android.ts";
+import { SIM_PREFIX } from "../engine/reaper.ts";
 import { detectWebFrameworkFromDir, webHostingMode } from "../engine/detect.ts";
 import { repoRoot } from "../version.ts";
 
@@ -17,6 +18,41 @@ import { repoRoot } from "../version.ts";
 const ANDROID_SMOKE_PORTS: [number, number] = [3290, 3299];
 /** Console port for the gate's emulator, clear of the 5554-5584 band a developer's own AVD lands in. */
 const ANDROID_SMOKE_CONSOLE_PORT = 5680;
+/**
+ * The serial that port answers on. Known BEFORE the boot, which is the point: it is the
+ * only handle on the gate's emulator when `bootEmulator` throws without returning one.
+ */
+export const DOCTOR_SMOKE_SERIAL = serialForPort(ANDROID_SMOKE_CONSOLE_PORT);
+
+/**
+ * The gate's own two devices, DERIVED from the prefixes every sweep selects on —
+ * never spelled out, which is the whole point.
+ *
+ * Both were hand-written as the same literal `"deckhand-doctor"`, and that put the
+ * AVD outside `AVD_PREFIX` ("deckhand_"): `orphanAvds` never reaped it and
+ * `sweepDeviceRecorders`' second ownership gate never matched it, so an interrupted
+ * `--device-only` run left an emulator holding the machine's single H.264 encoder and
+ * every other emulator silently dropped to MJPEG. The simulator's literal happened to
+ * match `SIM_PREFIX`, so the two platforms reaped differently for no reason anyone chose.
+ *
+ * The separator differs per platform on purpose: each sweep selects by ITS OWN prefix,
+ * so the rule is "prefix + role", not "the same string on both".
+ * → `doctor.test.ts` "names them inside the prefixes both sweeps select on", and
+ * "spells no device name by hand anywhere in doctor.ts" for the next one.
+ *
+ * The cost, which is not nothing: being reapable means a `deckhand serve` starting up
+ * DURING a `--device-only` run will pkill and delete these two out from under it. Its
+ * boot sweep keeps what the SERVER holds, and a second process's devices are invisible
+ * to that — there is no cross-process keep, and inventing one (a lock file, a pid in
+ * state.json) would put a new persistent thing in the way of both. Taken deliberately:
+ * the leak is silent, common (any interrupted gate run) and expensive — one emulator
+ * holds the machine's single H.264 encoder — while the race needs a restart inside a
+ * few-minute window and costs one re-run of a check you are already watching. The
+ * simulator has always had exactly this exposure; the AVD is now symmetric with it
+ * rather than uniquely immune.
+ */
+export const DOCTOR_SIM_NAME = `${SIM_PREFIX}doctor`;
+export const DOCTOR_AVD_NAME = `${AVD_PREFIX}doctor`;
 
 // ---------------------------------------------------------------------------
 // `deckhand doctor` — independently-reportable checks. Default runs the fast
@@ -115,7 +151,7 @@ async function checkToolchains(): Promise<Check[]> {
 
 function checkServeSim(): Check {
   // Deckhand runs its OWN vendored serve-sim, patched to strip the host
-  // shell-exec routes (see server.ts). Check THAT copy — a serve-sim on PATH is
+  // shell-exec routes (see streaming/serveSim.ts). Check THAT copy — a serve-sim on PATH is
   // irrelevant, and would be unpatched. Verify it exists and that the patch is
   // actually applied (patch-package can silently no-op after a version bump).
   // Read the version from the vendored package itself, not config — config's
@@ -280,13 +316,16 @@ function checkWebHost(config: Config, apps: App[]): Check {
 async function smokeIos(config: Config): Promise<Check[]> {
   const label = (cap: string) => `smoke ios: ${cap}`;
   const simctl = new Simctl();
-  const backend = new ServeSimBackend({ portRange: config.streaming.serveSim.helperPortRange });
+  // `bin` is not optional in practice: without it the backend spawns whatever PATH calls
+  // "serve-sim", which is an unpatched build with a live /exec shell route — or nothing.
+  // → invariants.test.ts "makes every composition root name the vendored serve-sim binary"
+  const backend = new ServeSimBackend({ portRange: config.streaming.serveSim.helperPortRange, bin: vendoredServeSimBin() });
   let udid: string | undefined;
   const checks: Check[] = [];
   try {
     const runtime = selectRuntime(await simctl.listRuntimes());
     const deviceType = selectDeviceType(await simctl.listDeviceTypes());
-    udid = await simctl.create("deckhand-doctor", deviceType.identifier, runtime.identifier);
+    udid = await simctl.create(DOCTOR_SIM_NAME, deviceType.identifier, runtime.identifier);
     await simctl.bootAndWait(udid);
     checks.push({ name: label("boot"), ok: true, gate: true, smoke: "ios", detail: `${deviceType.name}, ${runtime.name}` });
 
@@ -344,7 +383,7 @@ async function smokeAndroid(): Promise<Check[]> {
   const label = (cap: string) => `smoke android: ${cap}`;
   const android = new AndroidManager();
   const backend = new AndroidAdbBackend({ portRange: ANDROID_SMOKE_PORTS });
-  const avd = "deckhand-doctor";
+  const avd = DOCTOR_AVD_NAME;
   let serial: string | undefined;
   const checks: Check[] = [];
   try {
@@ -353,7 +392,7 @@ async function smokeAndroid(): Promise<Check[]> {
     // would answer INSTANTLY against it and every check after would be aimed at a machine that
     // is shutting down — the same class as the console-port hijack in the engine, which is why
     // that one consults adb rather than trusting its own bookkeeping. Wait it out.
-    const leftover = serialForPort(ANDROID_SMOKE_CONSOLE_PORT);
+    const leftover = DOCTOR_SMOKE_SERIAL;
     if ((await android.attachedSerials()).includes(leftover)) {
       await android.shutdown(leftover).catch(() => {});
       for (let i = 0; i < 30 && (await android.attachedSerials()).includes(leftover); i++) {
@@ -401,11 +440,48 @@ async function smokeAndroid(): Promise<Check[]> {
       }
     }
   } finally {
-    if (serial) await android.shutdown(serial).catch(() => {});
-    await android.deleteAvd(avd).catch(() => {});
+    const kept = await releaseSmokeAvd(android, avd, serial);
+    if (kept) {
+      // Reported, not swallowed: the AVD is still on disk and an emulator is probably
+      // still holding the console port, so the NEXT gate run's leftover check (above)
+      // is what the operator will meet if nothing collects it first.
+      checks.push({ name: label("teardown"), ok: false, warn: true, detail: kept });
+    }
     await backend.reapOrphans().catch(() => {});
   }
   return checks;
+}
+
+/**
+ * Release the gate's emulator, and delete its AVD only if the emulator confirmed it
+ * had gone.
+ *
+ * Same rule as the engine's teardown, for the same reason: `avdmanager delete` takes
+ * the name out of `listAvds()`, and `pkill -f "avd <name>"` over those names is the
+ * only thing that can kill an emulator whose console port no longer answers. A
+ * `shutdown` that timed out means the process is very likely still running, so the
+ * name is the one thing that must survive.
+ *
+ * Returns what to tell the operator, or null when the AVD is gone. Extracted from
+ * `smokeAndroid` because that function only runs against real hardware — this is the
+ * decision, and `doctor.test.ts` can reach it.
+ */
+export async function releaseSmokeAvd(
+  android: Pick<AndroidManager, "shutdown" | "deleteAvd">,
+  avd: string,
+  serial?: string,
+): Promise<string | null> {
+  // No serial means the boot never got one, NOT that nothing is running: `bootEmulator`
+  // launches QEMU detached and only then waits, so a timeout or an abort throws with the
+  // emulator alive. The console port is known before the boot, so ask that instead of
+  // reading the missing serial as an absence — `preview.ts` kills by `serialForPort(port)`
+  // in exactly this case. adb answers the question either way: `shutdown` returns true as
+  // soon as it stops knowing the serial, so a device that never came up still deletes.
+  const target = serial ?? DOCTOR_SMOKE_SERIAL;
+  const stopped = await android.shutdown(target).catch(() => false);
+  if (!stopped) return `${target} did not exit; ${avd} kept so the orphan sweep can still name it (\`pkill -f "avd ${avd}"\`)`;
+  await android.deleteAvd(avd).catch(() => {});
+  return null;
 }
 
 /**

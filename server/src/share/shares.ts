@@ -1,9 +1,9 @@
 import { scryptSync, randomBytes, timingSafeEqual, createHmac } from "node:crypto";
 
 // ---------------------------------------------------------------------------
-// Share password + unlock-cookie helpers (auto-mate-learnings.md §6). Pure and
-// dependency-free so they're unit-testable. Phase 1 uses public shares; the
-// password gate is wired into the proxy in Phase 3, but the crypto lives here.
+// Share PIN + unlock-cookie helpers (auto-mate-learnings.md §6). Pure and
+// dependency-free so they're unit-testable; the gate that uses them lives in
+// proxy.ts (`createPinGate`).
 // ---------------------------------------------------------------------------
 
 const SCRYPT_KEYLEN = 64;
@@ -34,16 +34,6 @@ export function verifyPassword(password: string, stored: PasswordHash): boolean 
 /** A share PIN is 4–6 numeric digits (drives the viewer's fixed-length pad). */
 export function isValidPin(s: string): boolean {
   return /^\d{4,6}$/.test(s);
-}
-
-/** A human-friendly random password (for auto-generated password shares). */
-export function generatePassword(): string {
-  // base32-ish, no ambiguous chars; ~50 bits.
-  const alphabet = "abcdefghjkmnpqrstuvwxyz23456789";
-  const bytes = randomBytes(10);
-  let out = "";
-  for (let i = 0; i < 10; i++) out += alphabet[bytes[i]! % alphabet.length];
-  return `${out.slice(0, 5)}-${out.slice(5)}`;
 }
 
 // --- signed unlock cookie ---------------------------------------------------

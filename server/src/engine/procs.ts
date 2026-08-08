@@ -40,7 +40,6 @@ function killTree(pid: number, signal: NodeJS.Signals): void {
 /** Env marker on every build step, so a restart mid-build can collect the tree. */
 export const BUILD_MARKER_ENV = "DECKHAND_BUILD";
 
-/** Run a single build step to completion, killing the tree on idle-timeout or abort. */
 /**
  * Pids of build steps this process is running right now.
  *
@@ -57,6 +56,7 @@ export function buildPids(): number[] {
   return [...liveBuildPids];
 }
 
+/** Run a single build step to completion, killing the tree on idle-timeout or abort. */
 export function runStep(step: CommandStep, opts: RunOptions = {}): Promise<RunResult> {
   const idleMs = opts.idleTimeoutMs ?? step.idleTimeoutMs;
   const killGraceMs = opts.killGraceMs ?? 5_000;

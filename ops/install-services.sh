@@ -76,6 +76,9 @@ load "no.deckhand.server" "$AGENTS/no.deckhand.server.plist"
 
 # --- cloudflare tunnel -----------------------------------------------------
 if [ -n "$CLOUDFLARED" ] && [ -n "$TUNNEL_ID" ]; then
+  # Only a hand-started copy, as documented in ops/README.md. It deliberately does
+  # not match deckhand's own agent, whose argv is `tunnel --protocol http2 run <id>`;
+  # that one is stopped by the `launchctl bootout` in load(), by label, not by argv.
   pkill -f "cloudflared tunnel run" 2>/dev/null || true
   fill "$TEMPLATES/no.deckhand.tunnel.plist.template" "$AGENTS/no.deckhand.tunnel.plist"
   load "no.deckhand.tunnel" "$AGENTS/no.deckhand.tunnel.plist"

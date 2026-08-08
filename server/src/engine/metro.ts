@@ -42,7 +42,9 @@ interface RunningMetro {
    * alone handed the second one the FIRST checkout's bundle — the same
    * foreign-bundle failure the port-ownership checks above exist to prevent,
    * only with deckhand as the intruder, so no pgid check can catch it. A
-   * changed checkout restarts Metro (one manager, one server).
+   * different checkout gets its OWN server on its own port; the first one keeps
+   * running, because its preview is still live. → `metro.test.ts` "starts a
+   * second server for a second checkout of the same app".
    */
   worktreePath: string;
   sig: string;
@@ -213,12 +215,12 @@ export class MetroManager {
   }
 
   /**
-   * Serialize everything that touches `this.current`.
+   * Serialize everything that touches `this.running`.
    *
-   * `ensure` reads `this.current`, then awaits (`healthyImpl`, `stop`,
+   * `ensure` reads `this.running`, then awaits (`healthyImpl`, `stop`,
    * `freePort`) before writing it — and PreviewEngine.launch calls it
    * CONCURRENTLY, once per device, from its install-many `Promise.all`. Two
-   * callers that both saw `null` would each pick a different free port, both
+   * callers that both missed the same key would each pick a different free port, both
    * spawn, and the second would overwrite the first: an orphaned Metro nothing
    * ever kills, holding a port out of the range forever. (Under the old fixed
    * port they collided on bind and the loser simply died.)
@@ -359,7 +361,7 @@ export class MetroManager {
    * genuinely unreclaimable.
    *
    * Signals go to a process GROUP, so ownership is checked before every one of
-   * them — `this.current` can hold a child that died hours ago (exactly the case
+   * them — an entry in `this.running` can hold a child that died hours ago (exactly the case
    * `ownsPort(reuse)` exists to catch) whose pid the OS may since have recycled
    * onto an unrelated job. Two independent proofs of ownership are accepted:
    * our direct child is still running, or the listener on our port is still in

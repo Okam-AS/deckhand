@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { computeStage, stillUnlocked, paneKey, pollDecision, RECONNECT_AFTER_FAILURES, sourceLabel, shortDeviceName, MIN_PANE_WIDTH } from "./panes.ts";
+import { computeStage, stagePicker, stillUnlocked, paneKey, pollDecision, RECONNECT_AFTER_FAILURES, sourceLabel, shortDeviceName, MIN_PANE_WIDTH } from "./panes.ts";
 import type { SharePane } from "./api.ts";
 
 const dev = (deviceId: string, platform: string, label = deviceId) => ({ deviceId, platform, label, phase: "ready" });
@@ -123,7 +123,7 @@ describe("computeStage — which device each source shows", () => {
   it("lets each source choose its device independently", () => {
     // An earlier version made the other columns follow whichever platform you
     // last picked. It spent a click every time the guess was wrong, and which
-    // two things to hold up against each other is the user's call, not the
+    // devices to hold up against each other is the user's call, not the
     // stage's.
     const s = computeStage(twoSources, { isMobile: false, choices: { old: paneKey("old", "android-1") } });
     assert.deepEqual(
@@ -224,6 +224,81 @@ describe("computeStage — headings", () => {
     assert.deepEqual(s.groups, []);
     assert.equal(s.visible.size, 0);
     assert.equal(s.multiSource, false);
+  });
+});
+
+describe("stagePicker — the only control when the stage is down to one pane", () => {
+  // Both bugs below were reachability dead ends on a NARROW DESKTOP (701–1019px):
+  // wide enough that the mobile dock is not rendered, too narrow for everything
+  // to fit. `computeStage` shows one pane there, so this picker is the only way
+  // back to the rest of the page.
+  const soloThree = [
+    pane("s1", "github.com/acme/app", "main", [dev("ios-0", "ios"), dev("android-1", "android"), dev("ios-2", "ios")], {
+      self: true,
+    }),
+  ];
+  const threeSources = [
+    pane("old", "github.com/acme/legacy", "dev", [dev("ios-0", "ios")]),
+    pane("mid", "github.com/acme/mid", "dev", [dev("ios-0", "ios")]),
+    pane("new", "github.com/acme/app", "feature/x", [dev("ios-0", "ios")], { self: true }),
+  ];
+  const narrow = MIN_PANE_WIDTH * 3 - 120; // three panes wanted, only two fit
+
+  it("ticks the pane that is on screen, not the one a group would have shown", () => {
+    // The shipped bug: the picker wrote `focusKey` and read `choices` (via
+    // group.activeKey), which that call site never wrote. So picking device 2
+    // switched the stage and left the tick on device 1 — and DevicePicker treats
+    // a click on an already-ticked row as a no-op, so device 1 could not be
+    // reached again without a reload.
+    const focus = paneKey("s1", "android-1");
+    const s = computeStage(soloThree, { isMobile: false, viewportWidth: narrow, focusKey: focus });
+    assert.deepEqual([...s.visible], [focus], "the stage moved…");
+    assert.equal(stagePicker(s).activeKey, focus, "…so the tick must move with it");
+  });
+
+  it("lists every source's panes, because nothing else on desktop switches source", () => {
+    // With three sources at this width, sources 2 and 3 were mounted and
+    // unreachable: the per-column picker lists ONE group's devices and
+    // MobileChrome is gated on ≤700px.
+    const s = computeStage(threeSources, { isMobile: false, viewportWidth: narrow });
+    assert.equal(s.visible.size, 1, "one pane on stage — the rest need a control");
+    assert.deepEqual(
+      stagePicker(s).rows.map((r) => r.key),
+      [paneKey("old", "ios-0"), paneKey("mid", "ios-0"), paneKey("new", "ios-0")],
+      "every pane on the page is reachable",
+    );
+  });
+
+  it("names the source on each row when there are several, and only the device when there is one", () => {
+    const multi = stagePicker(computeStage(threeSources, { isMobile: false, viewportWidth: narrow }));
+    assert.deepEqual(multi.rows.map((r) => r.label), ["legacy · ios-0", "mid · ios-0", "app · ios-0"]);
+    const single = stagePicker(computeStage(soloThree, { isMobile: false, viewportWidth: narrow }));
+    assert.deepEqual(single.rows.map((r) => r.label), ["ios-0", "android-1", "ios-2"]);
+  });
+
+  it("picking another source's pane is what puts it on stage", () => {
+    // The round trip the picker relies on: its row keys are pane keys, and
+    // computeStage accepts one from ANY group as the focus.
+    const rows = stagePicker(computeStage(threeSources, { isMobile: false, viewportWidth: narrow })).rows;
+    const third = rows[2]!.key;
+    const s = computeStage(threeSources, { isMobile: false, viewportWidth: narrow, focusKey: third });
+    assert.deepEqual([...s.visible], [third]);
+    assert.equal(stagePicker(s).activeKey, third);
+  });
+
+  it("offers nothing while the stage already shows everything", () => {
+    // Above the threshold each group carries its own in-frame picker and
+    // `choices` is what decides; a second, page-level control would write the
+    // other channel and disagree with it. Emptiness here is what keeps the two
+    // apart.
+    for (const panes of [soloThree, threeSources]) {
+      assert.deepEqual(stagePicker(computeStage(panes, { isMobile: false, viewportWidth: 4000 })).rows, []);
+    }
+  });
+
+  it("offers nothing when the page has a single device to begin with", () => {
+    const one = [pane("s1", "r/a", "main", [dev("ios-0", "ios")], { self: true })];
+    assert.deepEqual(stagePicker(computeStage(one, { isMobile: false, viewportWidth: 300 })).rows, []);
   });
 });
 

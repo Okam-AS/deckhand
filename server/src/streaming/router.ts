@@ -2,9 +2,9 @@ import type { AttachedStream, StreamDeviceRef, StreamingBackend } from "./backen
 
 // ---------------------------------------------------------------------------
 // Streaming backend router: dispatches by platform. iOS → serve-sim,
-// Android → adb backend (scrcpy H.264 upgrade slots in here later), web → the
-// dev-server proxy backend. The engine, proxy, and MCP tools only ever see the
-// StreamingBackend interface.
+// Android → the adb backend (`screenrecord` H.264, `screencap` MJPEG fallback),
+// web → the dev-server proxy backend. The engine, proxy, and MCP tools only ever
+// see the StreamingBackend interface.
 // ---------------------------------------------------------------------------
 
 export class StreamingRouter implements StreamingBackend {

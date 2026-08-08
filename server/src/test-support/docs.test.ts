@@ -3,7 +3,14 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { registeredTools, registerToolCallCount } from "./toolNames.ts";
+import {
+  quotedRegexLiterals,
+  registeredTools,
+  registerToolCallCount,
+  schemaFieldNames,
+  stringLiterals,
+} from "./toolNames.ts";
+import { repoFilesEndingWith } from "./repoFiles.ts";
 
 /**
  * PLAN.md and AGENTS.md, checked against the code they claim to describe.
@@ -33,6 +40,127 @@ const AGENTS = read("AGENTS.md");
 const TOOLS = read("server/src/mcp/tools.ts");
 
 const registered = registeredTools(TOOLS);
+
+/**
+ * Every `it("…")`/`test("…")` name in the repo, indexed BY FILE.
+ *
+ * By file, not as one pool: a citation names a file AND a check, and checking only the name
+ * accepts `docs.test.ts "pins serve-sim exactly"` — a citation that resolves while pointing a
+ * reader at the wrong file. Both shapes were verified by mutation.
+ *
+ * `test("…")` as well as `it("…")`: the viewer and landing workspaces write the flat form, so
+ * a citation into either could otherwise only ever read as dangling — which pushes the next
+ * author to drop the citation rather than fix it.
+ */
+function testChecksByFile(): Map<string, Set<string>> {
+  const byFile = new Map<string, Set<string>>();
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      // Symlinks skipped, never followed: a git worktree carries a dangling
+      // `server/node_modules` link, and reading through one kills the walk with an ENOENT
+      // nobody can act on. Every walk in this file does this the same way.
+      if (entry.isSymbolicLink()) continue;
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name.endsWith(".test.ts") || entry.name.endsWith(".test.tsx")) {
+        const names = new Set<string>();
+        for (const m of readFileSync(full, "utf8").matchAll(/\b(?:it|test)\(\s*"([^"]+)"/g)) names.add(m[1]!);
+        byFile.set(full.slice(REPO.length + 1), names);
+      }
+    }
+  };
+  // Every workspace, because `.claude/rules/` is scoped by path and those paths are not all
+  // under `server/`. A rule for `landing/**` citing a landing check must be checkable.
+  for (const ws of [SRC, join(REPO, "viewer", "src"), join(REPO, "landing", "src")]) if (existsSync(ws)) walk(ws);
+  return byFile;
+}
+
+/**
+ * The citations in one piece of text, as `<file>: "<name>"` findings for the ones that resolve
+ * to nothing.
+ *
+ * `→` marks where citations START; each `<file>.test.ts "<name>"` pair after it is one,
+ * wrapped across lines or not. Anchoring the whole citation to the arrow verified only the
+ * FIRST check after it, and one line here cites two — so renaming the second was silent.
+ *
+ * The window after each arrow is bounded because this also reads SOURCE files, where an arrow
+ * is usually ordinary prose (`build → install → launch`) and the rest of the file is not its
+ * citation. Every citation written here fits well inside it; a longer one reads as dangling,
+ * which is a visible failure rather than a silent pass.
+ *
+ * The two counts are returned SEPARATELY, and every caller floors them separately. They used to
+ * be one sum, and the sum was load-bearing for neither loop: the file-only count alone cleared
+ * both callers' floors, so the named regex — the half that verifies a check NAME, which is the
+ * entire reason these checks exist — could stop matching altogether and the floor stayed green
+ * while `dangling` went empty. That is the exact regression both callers' comments describe as
+ * having already happened once. (A backticked named citation matches both loops, so the sum also
+ * double-counted and no single number could be stated honestly about it.)
+ */
+function danglingCitations(text: string, byFile: Map<string, Set<string>>): { files: number; named: number; dangling: string[] } {
+  const dangling: string[] = [];
+  let files = 0;
+  let named = 0;
+  const paths = [...byFile.keys()];
+  const resolves = (path: string) => paths.some((k) => k === path || k.endsWith(`/${path}`));
+  for (const chunk of text.split("→").slice(1).map((c) => c.slice(0, 400))) {
+    // The FILE half of every citation, named or not. `→ `oauth/pairing.test.ts`` with no
+    // quoted check is a citation too, and it was unverified entirely.
+    for (const m of chunk.matchAll(/`([A-Za-z0-9_\-./]*\.test\.tsx?)`/g)) {
+      files++;
+      if (!resolves(m[1]!)) dangling.push(`${m[1]} (no such test file)`);
+    }
+    // The path character class is explicit rather than `\S*?`: a citation written inside
+    // brackets — `(`invariants.test.ts` "…")` — captured the bracket as part of the path.
+    // The quoted name is matched as a PREFIX of a real one, so a rule may cite a check by its
+    // first clause.
+    for (const m of chunk.matchAll(/`?([A-Za-z0-9_\-./]*\.test\.tsx?)`?\s+"([^"]+)"/g)) {
+      named++;
+      const path = m[1]!;
+      // Collapse the wrap. A citation may run onto the next line — several do — and comparing
+      // the raw capture then looks for a test name containing a newline and two spaces.
+      const cited = m[2]!.replace(/\s+/g, " ").trim();
+      const inFile = [...byFile.entries()].filter(([k]) => k === path || k.endsWith(`/${path}`)).flatMap(([, names]) => [...names]);
+      if (!inFile.some((n) => n.startsWith(cited))) dangling.push(`${path} "${cited}"`);
+    }
+  }
+  return { files, named, dangling };
+}
+
+/**
+ * The COMMENT text of a source file, with the block-comment gutter (` * `) stripped so a
+ * citation that wraps onto the next line reads as one sentence.
+ *
+ * Comments ONLY, because a string literal that happens to look like a citation is not one.
+ * Two cheap guards do that without a full lexer: a `//` preceded by `:` is a URL, and a `//`
+ * with an odd number of `"` or `` ` `` before it on the line is inside a string. Block
+ * comments must open at the start of a line, which every doc block in this repo does.
+ *
+ * Both guards SKIP THAT `//` and keep looking along the line — they used to abandon the whole
+ * line, which is a silent pass in the direction that matters: a fabricated citation written
+ * after a URL, or after a string containing `//`, was invisible to the check that keeps every
+ * precondition citation in this repo honest. Verified by mutation, in engine/metro.ts:
+ * `const _u = "http://example.com"; // → \`preview.test.ts\` "no such check"` left docs.test.ts
+ * 15/15 green, while the same citation on its own line failed it.
+ *
+ * The limit that leaves: a `//` inside a multi-line template literal, on a line that opens no
+ * quote of its own, reads as a comment. That costs a false finding only if such a string also
+ * contains an arrow and a `*.test.ts "name"` pair — that one IS a loud failure rather than a
+ * silent pass.
+ */
+function commentsOf(src: string): string {
+  const out: string[] = [];
+  for (const m of src.matchAll(/^[ \t]*\/\*[\s\S]*?\*\//gm)) out.push(m[0].replace(/^[ \t]*\*[ \t]?/gm, ""));
+  for (const line of src.split("\n")) {
+    for (let i = line.indexOf("//"); i >= 0; i = line.indexOf("//", i + 2)) {
+      if (line[i - 1] === ":") continue; // a URL's own slashes; the comment may still follow
+      const before = line.slice(0, i);
+      if ((before.match(/"/g)?.length ?? 0) % 2 || (before.match(/`/g)?.length ?? 0) % 2) continue;
+      out.push(line.slice(i + 2));
+      break;
+    }
+  }
+  return out.join("\n");
+}
 
 describe("docs describe the code that exists", () => {
   it("finds tools to check", () => {
@@ -64,7 +192,7 @@ describe("docs describe the code that exists", () => {
 
   it("mentions no MCP tool that does not exist", () => {
     // PLAN documented `start_migration_preview` — a tool that never existed — for two weeks,
-    // and §11.3 gated a `compare_start` it never defined. Worse, the dead name leaked into a
+    // and §11 item 3 gated a `compare_start` it never defined. Worse, the dead name leaked into a
     // tool DESCRIPTION, i.e. into text an agent reads as instructions.
     //
     // There is no escape hatch for "recording history". There was one — any line containing
@@ -77,11 +205,27 @@ describe("docs describe the code that exists", () => {
     // the `*_test_run` family had shapes the old pattern could never see, so a dead name in
     // any of them was unpoliced. The allow-list below is for the handful of snake_case terms
     // in these docs that are genuinely not tools.
+    //
+    // Honest limit: PLAN and AGENTS only. `.claude/rules/*.md` and `.claude/skills/**` are read
+    // by an agent too, and a dead tool name in one of them is unpoliced — verified by mutation.
+    // Not widened on purpose: those files legitimately name OAuth error codes (`invalid_client`,
+    // `redirect_uri`) and settings keys, which have a tool's shape, so covering them means a
+    // growing allow-list of exemptions and a check that fails with a message about MCP tools
+    // when someone documents an error code. `.claude/rules/mcp-tools.md` carries the rule for
+    // a reader instead.
     const NOT_TOOLS = new Set(["app_is_a_pane", "deck_unlock", "github_auth_missing", "needs_access_choice", "node_modules", "web_needs_pin"]);
-    const ghosts = [PLAN, AGENTS]
+    // Anti-vacuity, the same form the citation loops use: this loop's only input is a regex over
+    // prose, so a regex that stops matching leaves `ghosts` empty and the check green while
+    // examining nothing. Verified by mutation — neutering the pattern left this file 15/15.
+    const named = [PLAN, AGENTS]
       .flatMap((doc) => [...doc.matchAll(/`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`/g)])
-      .map((m) => m[1]!)
-      .filter((name) => !registered.includes(name) && !NOT_TOOLS.has(name));
+      .map((m) => m[1]!);
+    assert.ok(
+      named.length > 30,
+      `only ${named.length} backticked snake_case names found in PLAN.md/AGENTS.md — the pattern or the docs' ` +
+        `way of naming a tool changed, and this check is scanning nothing. Fix this check.`,
+    );
+    const ghosts = named.filter((name) => !registered.includes(name) && !NOT_TOOLS.has(name));
     assert.deepEqual(
       [...new Set(ghosts)],
       [],
@@ -104,14 +248,112 @@ describe("docs describe the code that exists", () => {
     // that share the shape and are not tools. Names without an underscore (`describe`, `ui`,
     // `logs`) are ordinary English and stay out of reach; that is the honest limit of a
     // text scan.
-    const ghostsInSource = [...TOOLS.matchAll(/`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`/g)]
-      .map((m) => m[1]!)
-      .filter((name) => !registered.includes(name));
+    //
+    // The other limit is the FILE: tools.ts, not every file that produces agent-facing text.
+    // `engine/preview.ts` writes `nextStep` strings an agent reads the same way. Widening
+    // there means allow-listing the snake_case error codes the rest of server/src is full of
+    // (`unknown_app`, `needs_pin`, `bad_request`, `invalid_client`), which trades a silent gap
+    // for a check that fires on correct code — so this stays scoped, and the rule for a reader
+    // is in `.claude/rules/mcp-tools.md`.
+    // Anti-vacuity, as above and for the same reason. The floor is low because tools.ts
+    // backticks a tool name only where a description points at another tool — a handful of
+    // places — but a floor of a handful still separates "found nothing wrong" from "looked at
+    // nothing", which is the distinction the green tick cannot make on its own.
+    const namedInSource = [...TOOLS.matchAll(/`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`/g)].map((m) => m[1]!);
+    assert.ok(
+      namedInSource.length > 3,
+      `only ${namedInSource.length} backticked snake_case names found in tools.ts — the pattern, or the way ` +
+        `descriptions refer to another tool, changed. This check is scanning nothing. Fix this check.`,
+    );
+    const ghostsInSource = namedInSource.filter((name) => !registered.includes(name));
     assert.deepEqual(
       [...new Set(ghostsInSource)],
       [],
       `tools.ts mentions a tool-shaped name that is not registered — an agent reading that description will try to call it`,
     );
+  });
+
+  it("keeps dead parameter names out of agent-facing text", () => {
+    // The sibling check above catches a dead TOOL name. It cannot catch a dead PARAMETER, and
+    // that is the worse of the two: `compare` was deleted and three of its error strings kept
+    // telling the caller to `pass against: { repo, ref }`. A model reading that sends an
+    // argument the schema does not have, gets a validation rejection, and the message that was
+    // supposed to unstick it is the thing that stuck it.
+    //
+    // Two shapes, each chosen because it is a name the text is telling the model to TYPE, not
+    // a word it happens to use:
+    //
+    //  1. `pass X: {` / `use X: [` — an argument being demonstrated. The leading verb is what
+    //     keeps English out: "not at the top level: {…}" is prose, and a bare `X:\s*[[{]`
+    //     pattern reads `level` as a parameter.
+    //  2. `X.y` where `y` IS a real field — "parameter dot subfield". `against.worktree` is
+    //     caught because `worktree` is real and `against` is not. A dotted name whose
+    //     SUBFIELD is not an input field either is left alone: descriptions legitimately
+    //     name RESPONSE shapes, so a rule demanding every dotted owner be a parameter
+    //     would be false.
+    //
+    // Fields are collected at every nesting depth and across all tools, so a real name in the
+    // wrong tool still passes — the check is "this name exists", not "this name belongs here".
+    // Tightening it needs a real schema walk, not a wider regex.
+    const fields = schemaFieldNames(TOOLS);
+    assert.ok(fields.size > 20, `only ${fields.size} zod fields parsed — the schema style changed, fix this check`);
+    // The other half of the anti-vacuity floor, and the one that bites hardest: `stringLiterals`
+    // does not lex regex literals, so a regex containing a quote (`/["']/`) makes every quote
+    // after it pair one position out. This loop then reads code fragments as prose and the
+    // descriptions it exists to scan as code — and finds nothing, silently. Its docblock states
+    // that precondition; this is what fails when it breaks.
+    assert.deepEqual(
+      quotedRegexLiterals(TOOLS),
+      [],
+      `tools.ts has a regex literal containing a quote character, which desyncs stringLiterals — ` +
+        `this check would then scan code instead of descriptions and pass for the wrong reason. ` +
+        `Move the pattern out of tools.ts, or teach stringLiterals to lex regex literals.`,
+    );
+    const ghosts = new Set<string>();
+    // One floor per LOOP, never a sum. The `fields` floor above says the SCHEMA parsed and says
+    // nothing about whether any prose is left to scan: `stringLiterals` returning an empty list
+    // — a lexer change, a rewrite of the descriptions into template parts — leaves this loop
+    // iterating over nothing and `ghosts` empty for the one reason its message does not cover.
+    const literals = stringLiterals(TOOLS);
+    assert.ok(
+      literals.length > 50,
+      `only ${literals.length} string literals lexed out of tools.ts — the lexer or the file's style changed, fix this check`,
+    );
+    for (const text of literals) {
+      for (const m of text.matchAll(/\b(?:pass|use|with|set) ([a-z][A-Za-z0-9]*)\s*:\s*[[{]/g)) {
+        if (!fields.has(m[1]!)) ghosts.add(`${m[1]}: {…}`);
+      }
+      for (const m of text.matchAll(/\b([a-z][A-Za-z0-9]+)\.([a-z][A-Za-z0-9]*)\b/g)) {
+        if (fields.has(m[2]!) && !fields.has(m[1]!)) ghosts.add(`${m[1]}.${m[2]}`);
+      }
+    }
+    assert.deepEqual(
+      [...ghosts],
+      [],
+      `tools.ts tells the caller to pass an argument no tool's schema declares — the call it describes fails validation`,
+    );
+  });
+
+  it("sees a quoted regex hiding behind a division and a comment", () => {
+    // The precondition asserted above is only worth asserting if it can fail. It could not:
+    // the guard walked past a division whose span ended at a `//`, consumed that comment's
+    // first slash, read the apostrophe in `repo's` as a quote, and swallowed the real
+    // offender inside a phantom string — returning EMPTY on a file that breaks
+    // `stringLiterals`. Fixtures rather than tools.ts, because both failure directions are
+    // invisible while the only input is a file that happens to be clean.
+    const OFFENDER = `const q = /["']/;\n`;
+    // Direction 1 — the real thing still fires, on its own and behind the two shapes that
+    // used to hide it.
+    assert.deepEqual(quotedRegexLiterals(OFFENDER), [`/["']/`]);
+    assert.deepEqual(quotedRegexLiterals(`const r = (a + b) / c; // that repo's branch\n${OFFENDER}`), [`/["']/`]);
+    assert.deepEqual(quotedRegexLiterals(`const x = a / b; ${OFFENDER}`), [`/["']/`]);
+    // Direction 2 — correct code must stay silent, or the caller's assert cries wolf and gets
+    // deleted. A division, a comment holding an apostrophe, a URL in a string, and the
+    // back-to-back regexes in tools.ts's own `slug()`, which is the shape that a naive fix
+    // (re-reading a candidate's closing slash) reports as a quoted regex.
+    assert.deepEqual(quotedRegexLiterals(`const r = (a + b) / c; // that repo's branch\n`), []);
+    assert.deepEqual(quotedRegexLiterals(`const u = "https://example.com/a";\n`), []);
+    assert.deepEqual(quotedRegexLiterals(`const s = t.replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");\n`), []);
   });
 
   it("keeps the path-scoped rules pointing at checks that exist", () => {
@@ -122,51 +364,107 @@ describe("docs describe the code that exists", () => {
     // not leave it pointing at nothing. Same failure as a doc naming a file that does not
     // exist, one layer up.
     const rulesDir = join(REPO, ".claude", "rules");
-    const testNames = new Set<string>();
     // EVERY test file, not just test-support. A rule for an area cites the check that
     // enforces it, and for a security invariant that is often the area's own regression
     // test — `oauth/router.test.ts` proves a client mid-pairing survives a registration flood,
     // and no repo-wide guardrail can. Scanning only test-support made those citations
     // dangle, which pushes the next author to drop the citation rather than fix it.
-    const walk = (dir: string): void => {
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        const full = join(dir, entry.name);
-        if (entry.isDirectory()) walk(full);
-        else if (entry.name.endsWith(".test.ts")) {
-          for (const m of readFileSync(full, "utf8").matchAll(/\bit\(\s*"([^"]+)"/g)) testNames.add(m[1]!);
-        }
-      }
-    };
-    walk(SRC);
-    assert.ok(testNames.size > 5, "no guardrail test names parsed — the `it(\"...\")` pattern changed");
+    const byFile = testChecksByFile();
+    assert.ok([...byFile.values()].reduce((n, s) => n + s.size, 0) > 5, "no guardrail test names parsed — the `it(\"...\")` pattern changed");
 
     const dangling: string[] = [];
+    let files = 0;
+    let named = 0;
     for (const f of readdirSync(rulesDir)) {
-      const src = readFileSync(join(rulesDir, f), "utf8");
-      // `→ <file>.test.ts "<check name>"`, possibly abbreviated — match on the quoted name
-      // being a PREFIX of a real one, so a rule may cite a check by its first clause.
-      // The backticks are not optional decoration to skip: the first version of this regex
-      // required `\S+\.test\.ts` followed by whitespace, so it matched none of the
-      // backticked citations actually written here and the check was vacuous. It only
-      // showed up under mutation — renaming a cited check produced no failure at all.
-      // Anchoring the whole citation to the arrow verified only the FIRST check after it, and
-      // one line here cites two — so renaming the second was silent, while AGENTS.md says a
-      // check renamed out from under a citation fails this test. The arrow marks where
-      // citations START; each `<file>.test.ts "<name>"` pair after it is one, wrapped or not.
-      for (const chunk of src.split("→").slice(1)) {
-        for (const m of chunk.matchAll(/`?\S*?\.test\.ts`?\s+"([^"]+)"/g)) {
-          // Collapse the wrap. A citation may run onto the next line — one does — and comparing
-          // the raw capture then looks for a test name containing a newline and two spaces.
-          const cited = m[1]!.replace(/\s+/g, " ").trim();
-          if (![...testNames].some((n) => n.startsWith(cited))) dangling.push(`${f}: "${cited}"`);
-        }
-      }
+      const r = danglingCitations(readFileSync(join(rulesDir, f), "utf8"), byFile);
+      files += r.files;
+      named += r.named;
+      for (const d of r.dangling) dangling.push(`${f}: ${d}`);
     }
+    // Anti-vacuity. The first version of this regex matched none of the citations actually
+    // written here and the check was inert; only mutation showed it up, and nothing would have
+    // shown it up on its own. A count is the cheap standing version of that mutation.
+    //
+    // One floor per LOOP, never a sum: the file half alone used to clear the combined floor, so
+    // the named half could match nothing and this still passed — verifying that a test file
+    // exists while the message claimed a check name had been verified.
+    //
+    // No count of today's citations here. One was written down and was wrong within the week,
+    // which is this file's own subject; the failure message prints the live number, so there
+    // is nothing a reader needs a stale copy of.
+    assert.ok(files > 12, `only ${files} test-file citations parsed in .claude/rules/ — the citation form changed, fix this check`);
+    assert.ok(named > 12, `only ${named} NAMED citations parsed in .claude/rules/ — the check-name half of the citation form changed, fix this check`);
     assert.deepEqual(
       dangling,
       [],
       "a rule in .claude/rules/ cites a guardrail check that no longer exists under that name",
     );
+  });
+
+  it("keeps source-comment citations pointing at checks that exist", () => {
+    // The same citation form, in the same repo, more common — and unpoliced. The check above
+    // reads `.claude/rules/` only, while `→ preview.test.ts "…"` is written in source comments
+    // across the engine, the streaming backends, the share proxy, the MCP tools and the CLI.
+    // (No file list and no count: the list rotted the week it was written, and the failure
+    // message below names the offending file itself.)
+    //
+    // That is not a lesser case. AGENTS.md's third un-checkable rule is that a comment stating
+    // a precondition needs a test that fails when the precondition breaks, and a citation IS
+    // that pairing written down. A rename that leaves it pointing at nothing turns the one
+    // mechanism holding those comments honest into decoration, silently.
+    //
+    // Comments only, and non-test files only: a test file naming its own checks in prose is
+    // not making a claim about somewhere else.
+    const byFile = testChecksByFile();
+    const dangling: string[] = [];
+    let files = 0;
+    let named = 0;
+    const walk = (dir: string): void => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        if (e.isSymbolicLink() || e.name === "node_modules" || e.name === "dist") continue;
+        const full = join(dir, e.name);
+        if (e.isDirectory()) walk(full);
+        else if (/\.tsx?$/.test(e.name) && !/\.test\.tsx?$/.test(e.name)) {
+          const r = danglingCitations(commentsOf(readFileSync(full, "utf8")), byFile);
+          files += r.files;
+          named += r.named;
+          for (const d of r.dangling) dangling.push(`${full.slice(REPO.length + 1)}: ${d}`);
+        }
+      }
+    };
+    for (const ws of [SRC, join(REPO, "viewer", "src"), join(REPO, "landing", "src"), join(REPO, "scripts")]) if (existsSync(ws)) walk(ws);
+    // Anti-vacuity, and it is load-bearing here: this reads comments through `commentsOf`, so
+    // a change that makes that return nothing would leave a green check that examines an empty
+    // string.
+    //
+    // One floor per LOOP, never a sum. The file half alone used to clear the combined floor, so
+    // the named half could match nothing and this stayed green while `dangling` went empty —
+    // the check would then be asserting only that a test FILE exists, which is not what its
+    // failure message says.
+    assert.ok(files > 6, `only ${files} source-comment test-file citations parsed — the citation form or comment scan changed, fix this check`);
+    assert.ok(named > 8, `only ${named} NAMED source-comment citations parsed — the check-name half of the citation form or the comment scan changed, fix this check`);
+    assert.deepEqual(
+      dangling,
+      [],
+      "a source comment cites a guardrail check that no longer exists under that name — the citation is what " +
+        "makes the comment above it verifiable, so a dangling one leaves an unverifiable claim reading as a verified one",
+    );
+  });
+
+  it("reads a comment that shares its line with a URL", () => {
+    // The check above is only as honest as `commentsOf`, and its failure direction is toward
+    // PASSING — a comment it drops is a citation nobody verifies. Fixtures, because both
+    // directions are invisible while every real file happens to be arranged conveniently.
+    //
+    // Direction 1 — the catch. Bailing on the whole line at a URL's `//` hid a fabricated
+    // citation written after one: verified by mutation in engine/metro.ts, 15/15 green.
+    assert.match(commentsOf(`const u = "http://example.com"; // \`preview.test.ts\` "nope"\n`), /preview\.test\.ts/);
+    assert.match(commentsOf(`const s = "a//b"; // \`preview.test.ts\` "nope"\n`), /preview\.test\.ts/);
+    // Direction 2 — a URL is not a comment, and neither is a `//` inside a string. Reporting
+    // one is a false red on ordinary code, which is how a guardrail gets switched off wholesale.
+    assert.equal(commentsOf(`const u = "http://example.com";\n`), "");
+    assert.equal(commentsOf(`const s = "a//b";\n`), "");
+    assert.match(commentsOf(`// see http://example.com\n`), /see http:\/\/example\.com/);
   });
 
   it("only tells people to run deckhand commands that exist", () => {
@@ -189,11 +487,23 @@ describe("docs describe the code that exists", () => {
     // being onboarded at the exact moment they cannot tell a broken instruction from their own
     // mistake. Three commands this branch deleted survived in setup's closing screen, in
     // `deckhand token`, and in doctor — all of them green.
-    for (const [name, body] of [
-      ["cli.ts", cli],
-      ["cli/setup.ts", readFileSync(join(SRC, "cli", "setup.ts"), "utf8")],
-      ["cli/doctor.ts", readFileSync(join(SRC, "cli", "doctor.ts"), "utf8")],
-    ] as const) {
+    // EVERY non-test source file, not the three that printed commands when this was written.
+    // `cli/configWrite.ts` throws "no token named X — `deckhand token list` shows them", and
+    // `mcp/tools.ts` tells an AGENT to run `deckhand app add <id> --path <dir>` — the two
+    // places a dead verb costs the most, and both were outside a three-file list while this
+    // check's own comment said "the CLI's OWN output is checked too". Green repo-wide today,
+    // so the widening costs nothing and the next printed command is covered by default.
+    const sources: [string, string][] = [];
+    const walkSrc = (dir: string): void => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        if (e.isSymbolicLink()) continue;
+        const full = join(dir, e.name);
+        if (e.isDirectory()) walkSrc(full);
+        else if (e.name.endsWith(".ts") && !e.name.endsWith(".test.ts")) sources.push([full.slice(REPO.length + 1), readFileSync(full, "utf8")]);
+      }
+    };
+    walkSrc(SRC);
+    for (const [name, body] of sources) {
       // Two shapes, because the biggest piece of CLI output is not backticked at all: the
       // usage screen, which is the first thing a lost user reads. So a verb counts when it is
       // quoted as a command AND when it is laid out as one — `deckhand pair` in prose, and
@@ -212,6 +522,10 @@ describe("docs describe the code that exists", () => {
         /(?:^|\n) {2,4}deckhand ([a-z-]+)(?=\s|$)/g,
         // Unanchored, unlike the one above it: this output is written as `say("   1.  deckhand
         // …")`, so the "line" the check reads starts with the call, not with the indent.
+        // Limit of the two unbackticked shapes, stated rather than widened: the verb must be
+        // followed by whitespace or end-of-FILE, so a step whose verb is the last thing in its
+        // string literal — `say("   1.  deckhand nosuchverb")` — is not read as a command at all.
+        // Verified by mutation; no printed step is written that way today.
         /\d+\.\s{1,4}deckhand ([a-z-]+)(?=\s|$)/g,
       ];
       for (const m of shapes.flatMap((re) => [...body.matchAll(re)])) {
@@ -223,6 +537,12 @@ describe("docs describe the code that exists", () => {
       ["AGENTS.md", AGENTS],
       ["CONSTITUTION.md", readFileSync(join(REPO, "CONSTITUTION.md"), "utf8")],
       ["README.md", readFileSync(join(REPO, "README.md"), "utf8")],
+      // PLAN was the one document exempt from this check, and it is the document AGENTS.md
+      // orders read END TO END. It named `deckhand service install|status|restart` — a verb that
+      // has never existed — plus `app remove` and `env unset`, for as long as anyone can tell.
+      // The check that exists precisely because "an instruction that cannot be followed is worse
+      // than none" was not applied to the file most likely to be followed.
+      ["PLAN.md", PLAN],
     ] as const) {
       // Only where the doc is telling someone to TYPE something: inside backticks or a
       // fenced block. "deckhand can read repos" is English, not an instruction, and a check
@@ -233,13 +553,19 @@ describe("docs describe the code that exists", () => {
         // architecture diagram contains the words "deckhand server (loopback only)".
         ...[...body.matchAll(/```(?:sh|bash|console)\n([\s\S]*?)```/g)].map((m) => m[1]!),
       ].join("\n");
-      for (const m of code.matchAll(/\bdeckhand ([a-z-]+)(?: ([a-z-]+))?/g)) {
+      // The alternation is part of the capture, because docs write a command family as
+      // `deckhand app add|remove|list`. With `([a-z-]+)` alone the second word ended at the
+      // first `|`, so `add` was checked and `remove` — which does not exist — was not text the
+      // check could see at all. Every branch of the alternation is an instruction to type
+      // something, so every branch is checked.
+      for (const m of code.matchAll(/\bdeckhand ([a-z-]+)(?: ([a-z-]+(?:\|[a-z-]+)*))?/g)) {
         const verb = m[1]!;
         if (verb === "setup" || verbs.has(verb)) {
           // A second word is only a subcommand for the verbs that take one.
-          const sub = m[2];
-          if (sub && ["token", "app", "env"].includes(verb) && !subs.has(sub) && !/^</.test(sub)) {
-            missing.push(`${name}: "deckhand ${verb} ${sub}"`);
+          for (const sub of m[2]?.split("|") ?? []) {
+            if (sub && ["token", "app", "env"].includes(verb) && !subs.has(sub) && !/^</.test(sub)) {
+              missing.push(`${name}: "deckhand ${verb} ${sub}"`);
+            }
           }
           continue;
         }
@@ -260,11 +586,28 @@ describe("docs describe the code that exists", () => {
     // eight lines above its own "do not attempt those steps" — the check was scoped to one file
     // while the class belongs to every document an agent is pointed at.
     const HUMAN_ONLY = [/cloudflared tunnel login/];
-    // PLAN.md is included because AGENTS.md orders an agent to read it end to end, and the skills
-    // because a slash command runs them — "every document an agent is pointed at" has to mean all
-    // of them, or the sentence is the same kind of claim this file exists to catch.
-    const shellBlocks = ["AGENTS.md", "README.md", "CONSTITUTION.md", "PLAN.md", ".claude/skills/shipping-a-change/SKILL.md", ".claude/skills/reviewing-deckhand/SKILL.md"].flatMap((doc) =>
+    // EVERY markdown file in the repo, not the six that were listed. The list was the check's
+    // own stated principle — "every document an agent is pointed at has to mean all of them, or
+    // the sentence is the same kind of claim this file exists to catch" — written next to a
+    // literal six, and `docs/**` and the third skill were outside it. Mutation put the login
+    // command in a shell block in `docs/reference/serve-sim-notes.md` and in
+    // `waiting-for-a-preview/SKILL.md`; both passed.
+    // Every markdown file GIT knows about — see repoFiles.ts. A raw walk also read
+    // `.claude/pr-body.md`, which `review:handover` writes minutes before the PR and which
+    // routinely contains the very command being explained.
+    const mdFiles = repoFilesEndingWith(REPO, ".md");
+    assert.ok(mdFiles.length > 8, `only ${mdFiles.length} markdown files walked — the walk is wrong, fix this check`);
+    const shellBlocks = mdFiles.flatMap((doc) =>
       [...readFileSync(join(REPO, doc), "utf8").matchAll(/```(?:sh|bash|console)\n([\s\S]*?)```/g)].map((m) => `${doc}: ${m[1]!}`),
+    );
+    // One floor per LOOP, never a sum. `mdFiles.length` above says the WALK found documents;
+    // it says nothing about the fence pattern still matching any of them. Rename the fence
+    // languages, or let a formatter rewrite them, and this loop runs zero times while every
+    // assertion inside it reads as having passed.
+    assert.ok(
+      shellBlocks.length > 10,
+      `only ${shellBlocks.length} runnable shell blocks parsed out of ${mdFiles.length} markdown files — ` +
+        `the fence pattern no longer matches how this repo writes them, fix this check`,
     );
     for (const block of shellBlocks) {
       for (const banned of HUMAN_ONLY) {
@@ -300,6 +643,46 @@ describe("docs describe the code that exists", () => {
     }
   });
 
+  it("holds docs/ and .claude/ to the same claims as the root documents", () => {
+    // Every check in this file took a hardcoded list of root-level documents, and `docs/**` was
+    // on none of them. So the reference notes drifted invisibly for as long as they existed:
+    // one of them stated a REJECTED design — "Deckhand's decision (locked): WebRTC + TURN" — as
+    // the current locked decision, in a file AGENTS.md orders read before touching streaming
+    // code. A document an agent is told to read is agent-facing whatever directory it sits in.
+    //
+    // Sourced from git rather than a raw walk (see repoFiles.ts): `.claude/pr-body.md` is
+    // ignored, is generated by `review:handover` one step before the PR, and names the paths
+    // the branch touched — including, on a branch that deletes one, a path that no longer
+    // exists. That made the documented workflow fail a check on a file outside the diff.
+    const docs: [string, string][] = repoFilesEndingWith(REPO, ".md")
+      .filter((p) => p.startsWith("docs/") || p.startsWith(".claude/"))
+      .map((p) => [p, readFileSync(join(REPO, p), "utf8")]);
+    assert.ok(docs.length > 3, `only ${docs.length} docs found — the walk is wrong, fix this check`);
+
+    const cli = readFileSync(join(SRC, "cli.ts"), "utf8");
+    const verbs = new Set([...cli.matchAll(/case "([a-z-]+)":/g)].map((m) => m[1]!));
+    const subs = new Set([...cli.matchAll(/sub === "([a-z-]+)"/g)].map((m) => m[1]!));
+    const wrong: string[] = [];
+    for (const [name, body] of docs) {
+      // Same scoping as the root check: only where the doc tells someone to TYPE something.
+      const code = [
+        ...[...body.matchAll(/`([^`\n]+)`/g)].map((m) => m[1]!),
+        ...[...body.matchAll(/```(?:sh|bash|console)\n([\s\S]*?)```/g)].map((m) => m[1]!),
+      ].join("\n");
+      for (const m of code.matchAll(/\bdeckhand ([a-z-]+)(?: ([a-z-]+(?:\|[a-z-]+)*))?/g)) {
+        const verb = m[1]!;
+        if (verb !== "setup" && !verbs.has(verb)) wrong.push(`${name}: "deckhand ${verb}"`);
+        else for (const sub of m[2]?.split("|") ?? []) {
+          if (sub && ["token", "app", "env"].includes(verb) && !subs.has(sub) && !/^</.test(sub)) wrong.push(`${name}: "deckhand ${verb} ${sub}"`);
+        }
+      }
+      for (const m of body.matchAll(/`((?:server|viewer|landing|ops|patches|docs|scripts)\/[A-Za-z0-9_\-./]+\.(?:ts|tsx|md|json|sh|yml))`/g)) {
+        if (!existsSync(join(REPO, m[1]!))) wrong.push(`${name}: ${m[1]!}`);
+      }
+    }
+    assert.deepEqual([...new Set(wrong)], [], "a file under docs/ or .claude/ names a command or a source file that does not exist");
+  });
+
   it("references only skills that exist", () => {
     // AGENTS and CONSTITUTION now make `shipping-a-change` mandatory before every PR. A
     // mandatory procedure that points at a directory nobody wrote is worse than no procedure:
@@ -332,6 +715,16 @@ describe("docs describe the code that exists", () => {
         const path = m[1]!;
         if (!existsSync(join(REPO, path))) missing.push(path);
       }
+      // DIRECTORIES and globs, which the extension requirement above could never see. PLAN's
+      // repo tree named `server/test/` and `fixtures/expo-smoke/` — neither has ever existed —
+      // and pointed `mcp/` at a `tools/*.ts` that is one file. A reader goes looking for a
+      // directory exactly as readily as for a file, and `doctor --smoke` was documented in terms
+      // of the fixture directory. A glob is checked by its own directory: the claim "there are
+      // files of this shape in here" is false the moment the directory is not there.
+      for (const m of doc.matchAll(/`((?:server|viewer|landing|ops|patches|docs|scripts|fixtures)\/[A-Za-z0-9_\-./]*?)(?:\*[A-Za-z0-9_\-.*]*)?\/?`/g)) {
+        const path = m[1]!.replace(/\/$/, "");
+        if (path && !path.includes(".") && !existsSync(join(REPO, path))) missing.push(`${path}/`);
+      }
     }
     // Bare module names too — `janitor.ts` and `scrcpy.ts` sat in PLAN for months naming
     // files nobody ever wrote, and this check could not see them: it required a directory
@@ -341,7 +734,7 @@ describe("docs describe the code that exists", () => {
     const sources = new Set<string>();
     const walk = (dir: string): void => {
       for (const e of readdirSync(dir, { withFileTypes: true })) {
-        if (e.name === "node_modules" || e.name === "dist" || e.name.startsWith(".")) continue;
+        if (e.name === "node_modules" || e.name === "dist" || e.name.startsWith(".") || e.isSymbolicLink()) continue;
         if (e.isDirectory()) walk(join(dir, e.name));
         else sources.add(e.name);
       }

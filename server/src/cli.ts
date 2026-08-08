@@ -49,6 +49,7 @@ const USAGE = `deckhand — simulator previews over MCP
 New here? One command does the whole install:
 
   deckhand setup --hostname deckhand.example.com [--web-host previews.example.com]
+                 [--port 4300] [--token NAME] [--no-services]
 
   It creates the Cloudflare tunnel and DNS route, writes the config, mints your
   connector URL, installs the LaunchAgents, and runs doctor. Re-runnable:
@@ -71,6 +72,7 @@ Everything else, for when you already know what you want:
   deckhand app add <id> <repo> --type expo|react-native|nativescript [--branch main] [--bundle-id ID]
   deckhand app add <id> --path /abs/dir [--repo owner/name] [--type ...]   local dev mode (type auto-detected)
   deckhand app add <id> --path /abs/dir --type web                        local web dev server (Vite)
+      any of the above also take [--migrates-from <id>]                   the app this one is a port of
   deckhand app list
   deckhand env set <appId> KEY=VALUE`;
 

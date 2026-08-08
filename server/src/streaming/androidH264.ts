@@ -92,19 +92,34 @@ export interface AvccSubscriber {
 
 export type SpawnRecorder = (serial: string) => ChildProcessWithoutNullStreams;
 
-const defaultSpawnRecorder: SpawnRecorder = (serial) =>
-  spawn("adb", [
-    "-s",
-    serial,
-    "exec-out",
-    "screenrecord",
-    "--output-format=h264",
-    `--bit-rate=${BIT_RATE}`,
-    // 0 removes the 180 s cap (screenrecord v1.4+). Older devices reject it and
-    // exit, which the restart loop absorbs as a segment boundary.
-    "--time-limit=0",
-    "-",
-  ]);
+/**
+ * The device-side argv of our recorder. `adb exec-out <these>` runs them as a
+ * process INSIDE the emulator, so this is exactly what `ps` shows there.
+ */
+export const RECORDER_ARGV = [
+  "screenrecord",
+  "--output-format=h264",
+  `--bit-rate=${BIT_RATE}`,
+  // 0 removes the 180 s cap (screenrecord v1.4+). Older devices reject it and
+  // exit, which the restart loop absorbs as a segment boundary.
+  "--time-limit=0",
+  "-",
+] as const;
+
+/**
+ * What a device-side `pkill -f` matches to find one of OUR recorders.
+ *
+ * An `adb shell` process carries no env marker from this side — the marker
+ * mechanism the boot reaper uses for Metro and the livesync runners cannot
+ * cross adb — so this argv prefix is the only evidence of ownership available
+ * on the device. It stops at `--output-format=h264` on purpose: the bit-rate is
+ * a tunable, and an orphan left by an older build was started with whatever
+ * value that build used. → `androidH264.test.ts` "the device-side sweep hunts
+ * for the argv we actually spawn".
+ */
+export const RECORDER_PKILL_PATTERN = RECORDER_ARGV.slice(0, 2).join(" ");
+
+const defaultSpawnRecorder: SpawnRecorder = (serial) => spawn("adb", ["-s", serial, "exec-out", ...RECORDER_ARGV]);
 
 /** One screenrecord process per device, fanned out to every viewer. */
 export class AvccSource {
@@ -145,14 +160,19 @@ export class AvccSource {
    * it starts is the same one subscribers then attach to.
    *
    * A TRUE is cached forever — a device that has encoded H.264 can encode it.
-   * A FALSE is only cached when it is a real verdict about the encoder (it died
-   * before producing anything usable). Every other route to false is a
-   * circumstance, not a capability: the readiness timer firing while an emulator
-   * is still coming up, a spawn that failed because adb was momentarily
-   * unreachable, or giving up because nobody was subscribed yet. Caching those
-   * pinned a perfectly good device to the ~4 MB/s MJPEG fallback for the rest of
-   * the server's life, with no way back short of a restart — and the first probe
-   * happens exactly when the device is at its busiest.
+   * EVERY false is cached, and only for `retryAfterMs`: `settle(false)` stamps
+   * `failedAt` whatever the cause, so the next probe inside that window reuses
+   * the answer and a viewer polling in a loop cannot respawn a recorder each
+   * time. No false is a verdict about the encoder. The cause is as often a
+   * circumstance — the readiness timer firing while an emulator is still coming
+   * up, a spawn that failed because adb was momentarily unreachable, another
+   * emulator holding the host's single H.264 encoder — and this used to cache
+   * false forever, which pinned a perfectly good device to the ~4 MB/s MJPEG
+   * fallback for the rest of the server's life, with no way back short of a
+   * restart. The first probe happens exactly when the device is at its busiest.
+   * → `androidH264.test.ts` "a spawn failure does not pin the device to MJPEG
+   * for the rest of the process" and "a dead-looking encoder is backed off, not
+   * written off"
    */
   ready(): Promise<boolean> {
     if (this.readyPromise) return this.readyPromise;
@@ -161,7 +181,7 @@ export class AvccSource {
     // another device holding the encoder, and that clears on its own.
     if (this.failedAt && Date.now() - this.failedAt < this.retryAfterMs) return Promise.resolve(false);
     // Held locally as well as on the instance: `start()` can settle
-    // SYNCHRONOUSLY (a spawn that throws), and a non-sticky settle clears the
+    // SYNCHRONOUSLY (a spawn that throws), and a failed settle clears the
     // instance field — so returning the field would hand the caller `null`.
     const probe = new Promise<boolean>((resolve) => {
       this.settleReady = resolve;
@@ -240,8 +260,10 @@ export class AvccSource {
   }
 
   /**
-   * Resolve the readiness probe. `sticky` marks a verdict about the DEVICE
-   * rather than about this attempt — only such a false is remembered.
+   * Resolve the readiness probe. No verdict here is permanent: a false is a
+   * TIMED backoff (`failedAt` + `retryAfterMs`), never "this device cannot
+   * encode", because contention for the single host encoder is indistinguishable
+   * from a dead one from in here.
    */
   private settle(ok: boolean): void {
     if (this.readyTimer) clearTimeout(this.readyTimer);
@@ -311,6 +333,15 @@ export class AvccSource {
     }
     // `adb exec-out` dying does not always take the device-side recorder with
     // it; a stray screenrecord would hold the encoder against the next start.
+    // By NAME, deliberately broader than the orphan sweep's `pkill -f
+    // <RECORDER_PKILL_PATTERN>` (androidAdb.ts), which proves ownership four
+    // ways because it may be looking at a device we do not own. This is our own
+    // teardown of our own stream, and the serial can only be an emulator
+    // deckhand booted — deckhand never targets physical hardware (PLAN §2 "NO
+    // physical devices"), so
+    // there is no third party's recorder on it to catch, and the encoder is
+    // single-instance across emulators, so one we fail to kill costs every
+    // other device its H.264.
     try {
       spawn("adb", ["-s", this.serial, "shell", "pkill", "-INT", "screenrecord"], { stdio: "ignore" }).unref();
     } catch {

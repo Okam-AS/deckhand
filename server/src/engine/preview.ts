@@ -16,8 +16,7 @@ import { hashPassword, verifyPassword } from "../share/shares.ts";
 import { WorktreeManager, worktreeKey, type RefSpec, refDescription } from "./worktree.ts";
 import { pruneDerivedData } from "./derivedData.ts";
 import { Simctl, selectRuntime, selectDeviceType, deviceLabel, type SimDevice } from "../devices/ios.ts";
-import { AndroidManager, selectSystemImage, portForSerial, serialForPort } from "../devices/android.ts";
-import type { PhysicalDevices } from "../devices/physical.ts";
+import { AndroidManager, AVD_PREFIX, selectSystemImage, portForSerial, serialForPort } from "../devices/android.ts";
 import { resolveAndroidEnv } from "../devices/toolEnv.ts";
 import { Reaper, POOL_SIM_PREFIX, POOL_AVD_PREFIX } from "./reaper.ts";
 import { METRO_MARKER_ENV } from "./metro.ts";
@@ -93,16 +92,11 @@ const BUILD_VERBS =
   /^(compiling|packaging|linking|signing|executing|copying|installing|downloading|generating|bundling|building|analyzing|preparing|processing|fetching|resolving|planning|running|creating|writing|checking)\b/i;
 
 /**
- * A short "what is it doing right now" label from a build log line, or null for
- * a line that isn't progress. Feeds the viewer's build overlay: a spinner with
- * a frozen caption is indistinguishable from a hang, and the whole log is far
- * too wide for a phone-sized frame.
- *
- * Xcode/Expo lines look like `› Compiling react-native-svg Pods/RNSVG » RNSVGUse.mm`.
- * Keep the verb and the PACKAGE, not the file after `»`: a per-file caption
- * flickers many times a second and produces unbreakable 45-character tokens that
- * overflow a phone-sized frame, while the package name changes at a readable
- * pace and still proves the build is moving.
+ * Longest caption `buildStepDetail` will emit. A budget picked against a phone-sized
+ * frame, NOT a measured limit and NOT a precondition: nothing in `viewer/` reads this
+ * number or holds a width to it, so a longer caption would wrap rather than break
+ * anything, and no test can fail on the two sides disagreeing. Whether 40 is still right
+ * is a question for whoever is looking at the overlay.
  */
 const DETAIL_MAX = 40;
 
@@ -139,6 +133,18 @@ export function buildFailureCause(lines: readonly string[], max = 400): string |
 
 const clip = (s: string, max: number): string => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
 
+/**
+ * A short "what is it doing right now" label from a build log line, or null for
+ * a line that isn't progress. Feeds the viewer's build overlay: a spinner with
+ * a frozen caption is indistinguishable from a hang, and the whole log is far
+ * too wide for a phone-sized frame.
+ *
+ * Xcode/Expo lines look like `› Compiling react-native-svg Pods/RNSVG » RNSVGUse.mm`.
+ * Keep the verb and the PACKAGE, not the file after `»`: a per-file caption
+ * flickers many times a second and produces unbreakable 45-character tokens that
+ * overflow a phone-sized frame, while the package name changes at a readable
+ * pace and still proves the build is moving.
+ */
 export function buildStepDetail(line: string): string | null {
   const clean = line
     .replace(/\x1b\[[0-9;]*m/g, "") // ANSI colour
@@ -173,6 +179,14 @@ interface LivePreview {
   app: App;
   spec?: RefSpec; // git source only; kept for restart_preview re-fetches
   devices: LiveDevice[];
+  /**
+   * The index the next device id gets. Only ever goes up, so a retired id is never
+   * handed out again — `devices.length` was not that, because `removeDevices` shrinks
+   * it. In memory only: no preview survives a restart (`reapOrphans` drops every
+   * non-`stopped` one and persists), so there is nothing to carry across.
+   * → `preview.test.ts` "never re-mints a retired device id, on any platform".
+   */
+  nextDeviceIndex: number;
   prep?: Promise<string>; // memoized source dir (shared across devices)
   sourceDir?: string;
   attached: Map<string, AttachedStream>;
@@ -266,11 +280,26 @@ export interface DeviceRequest {
  * devices — the add path grew from a copy of this, and a copy is where the two quietly
  * drift into "why does the added one have no label".
  *
- * `index` is the device's position in the preview, which is what deviceId is built from.
- * It must stay unique for the life of the preview: ids are how the viewer addresses a
- * stream, so reusing one after a device is removed would point a pane at the wrong device.
+ * `index` is the preview's monotonic device counter and NOT a position — it is what
+ * deviceId is built from, and it must stay unique for the life of the preview: ids are how
+ * the viewer addresses a stream, so reusing one after a device is removed would point a
+ * pane at the wrong device.
+ * → `preview.test.ts` "never re-mints a retired device id, on any platform"
+ *
+ * `position` is 1-based and separate for exactly that reason. A counter that skips retired
+ * ids reads as nonsense in a caption — a two-device preview captioned "android device 3".
+ * It is a placeholder only: `bootIos`/`bootAndroid` overwrite the label with the real model
+ * the moment boot starts; what a user actually reads it for is a device still pending, or one
+ * whose boot failed before it was named.
+ *
+ * It is baked into the label once and never revisited, so it does NOT track a later removal:
+ * remove one of three same-platform devices and the next add is captioned with a number a
+ * survivor already carries. Two captions, never two ids — and only on devices that are both
+ * still unnamed, which is why it is left as it is rather than renumbering labels the boot
+ * path has already replaced with a real model.
+ * → `preview.test.ts` "labels a device by its place in the preview, not by the id counter"
  */
-export function newLiveDevice(dev: DeviceRequest, index: number): LiveDevice {
+export function newLiveDevice(dev: DeviceRequest, index: number, position: number): LiveDevice {
   return {
     record: {
       deviceId: `${dev.platform}-${index}`,
@@ -280,7 +309,7 @@ export function newLiveDevice(dev: DeviceRequest, index: number): LiveDevice {
           ? "Web app"
           : dev.model && dev.runtime
             ? `${dev.model} · ${dev.runtime}`
-            : `${dev.platform} device ${index}`,
+            : `${dev.platform} device ${position}`,
       runtime: dev.runtime,
       model: dev.model,
       phase: "pending",
@@ -297,7 +326,12 @@ export interface StartPreviewRequest {
   spec?: RefSpec;
   devices: DeviceRequest[];
   access: "public" | "password";
-  /** Mark this as a public compare/migration reference pane (see PersistedPreview.reference). */
+  /**
+   * Mark this as a compare/migration pane: booted under a synthetic app id that is
+   * deliberately not in apps.yaml (see `PersistedPreview.reference`). A pane is NOT
+   * public — it takes the page's access, and `isReference` records what calling it
+   * public cost.
+   */
   reference?: boolean;
 }
 
@@ -339,14 +373,6 @@ export interface PreviewEngineDeps {
   worktrees: WorktreeManager;
   simctl: Simctl;
   android?: AndroidManager;
-  /**
-   * Physical-device detection (read-only, Phase 0). Optional: absent means the
-   * enumeration answers empty lists — every existing caller and fake keeps
-   * working unchanged, which is the backward-compatibility line this feature
-   * must never cross. Structural on purpose: only `list()` is consumed, so a
-   * test fake is a plain object literal with no cast to hide behind.
-   */
-  physical?: { list(): Promise<PhysicalDevices> };
   streaming: StreamingBackend;
   metro: MetroManager;
   store: StateStore;
@@ -473,6 +499,17 @@ export class PreviewEngine {
   private readonly leased = new Set<string>();
   /** poolName → the appId that last ran there, so a reused device is only wiped when it changes hands. */
   private readonly poolTenants = new Map<string, string>();
+  /**
+   * AVDs whose emulator did not confirm it had exited (`shutdown` returned false).
+   * Nothing here may be deleted from disk: the AVD name is the only handle
+   * `pkill -f "avd <name>"` has on a live QEMU, and `avdmanager delete` takes it
+   * out of `listAvds()` for good. The lease is gone by then, so "leased" cannot
+   * carry this — a released-but-still-running AVD is exactly what `trimPool`
+   * would otherwise pick as the cheapest thing to reclaim.
+   * → `preview.test.ts` "keeps trimPool off it once the lease is released", and
+   * "declines the delete" for each of the three paths that reach a `deleteAvd`.
+   */
+  private readonly unstoppedAvds = new Set<string>();
   /** Devices whose teardown is still in flight (they hold real resources until it finishes). */
   private tearingDown = 0;
 
@@ -782,10 +819,14 @@ export class PreviewEngine {
           }
         } else if (p.app.migratesFrom) {
           const src = this.livePreviewForApp(p.app.migratesFrom);
-          // A migration pairs two REAL apps, each with its own PIN — unlike a
-          // compare session, whose reference is a synthetic always-public app.
-          // So the source pane is only mountable when this page can actually
-          // unlock it: the unlock propagates from a proven PIN on this share,
+          // A migration pairs two REGISTERED apps, each with its own PIN, set
+          // independently. An `alongside` pane cannot drift that way — it is a
+          // synthetic app whose id is keyed by the page's access class and whose
+          // PIN is written from the page's at boot (`bootReference`,
+          // mcp/tools.ts), so it is NOT public and NOT free to mint toward.
+          // A migration source is a real app, so the pane is only mountable when
+          // this page can actually unlock it: the unlock propagates from a
+          // proven PIN on this share,
           // and the pad only ever renders for the page's own shareId. Showing
           // the pane anyway (a public target beside a PIN-protected source) got
           // its socket refused once a second, forever, with nothing on screen
@@ -847,8 +888,12 @@ export class PreviewEngine {
    * refused once a second, silently). The unlock route uses this to mint each
    * partner's cookie too.
    *
-   * Symmetric on purpose: whichever pane the viewer is opened from has to
-   * unlock the others.
+   * FORWARD ONLY, and that direction is a security property rather than an
+   * omission: a page mints for the panes it renders, and a pane never mints for
+   * the page holding it. Panes are keyed by CONTENT, so two pages naming the
+   * same source share one pane — the note in the body says what the reverse
+   * direction cost. → `preview.test.ts` "mints a page's panes, and never the
+   * other way round".
    */
   pairedShareIds(shareId: string): string[] {
     const out = new Set<string>();
@@ -987,6 +1032,43 @@ export class PreviewEngine {
     }
     this.persist();
     this.d.audit.record({ actor: "engine", tool: "set_pin", args: { app: appId, protected: pin != null }, result: "ok" });
+  }
+
+  /**
+   * Every LIVE pane this page shows, and whether its access is the page's to set.
+   *
+   * `synthetic` is an `alongside` pane: it runs under a content-keyed app id that
+   * is deliberately not in apps.yaml, so no tool call names it and the page that
+   * booted it is the only thing that can change its access. A migration-source
+   * pane is the opposite — it IS a registered app's own preview, with its own
+   * link and its own operator-set PIN, which a page must not rewrite.
+   *
+   * Mirrors `shareState`'s two pairing sources exactly (compare session wins,
+   * else `migratesFrom`): a pane this omits but shareState renders is one a
+   * page's PIN silently fails to reach.
+   * → `server.test.ts` "set_pin on a public page locks the panes whose shareIds it already disclosed"
+   */
+  panesOf(previewId: string): { appId: string; shareId: string; synthetic: boolean }[] {
+    const p = this.previews.get(previewId);
+    if (!p) return [];
+    const entry = (live: LivePreview) => ({
+      appId: live.record.appId,
+      shareId: live.record.shareId,
+      synthetic: live.record.reference === true,
+    });
+    if (p.compare) {
+      const out = [];
+      for (const r of p.compare.references) {
+        const live = this.liveByShareId(r.shareId);
+        if (live) out.push(entry(live));
+      }
+      return out;
+    }
+    if (p.app.migratesFrom) {
+      const src = this.livePreviewForApp(p.app.migratesFrom);
+      if (src) return [entry(src)];
+    }
+    return [];
   }
 
   /**
@@ -1174,7 +1256,7 @@ export class PreviewEngine {
     // Web: detect the framework so orchestration/URL know whether it hosts
     // path-based (Vite) or at the root of a per-share subdomain (Nuxt/Next/…).
     const webFramework = req.app.type === "web" && req.app.path ? detectWebFrameworkFromDir(req.app.path) : null;
-    const devices: LiveDevice[] = req.devices.map((dev, i) => newLiveDevice(dev, i));
+    const devices: LiveDevice[] = req.devices.map((dev, i) => newLiveDevice(dev, i, i + 1));
 
     const record: PersistedPreview = {
       previewId,
@@ -1195,6 +1277,7 @@ export class PreviewEngine {
       app: req.app,
       spec: req.spec,
       devices,
+      nextDeviceIndex: devices.length,
       attached: new Map(),
       lastActivityAt: this.d.now!(),
       lastProgressAt: this.d.now!(),
@@ -1214,7 +1297,7 @@ export class PreviewEngine {
     // soon as git answers: "local" names the SOURCE MODE, not what is on screen,
     // and two panes both reading "local" say nothing about which branch each one
     // is. The viewer polls, so it picks this up within a poll. Read-only —
-    // deckhand never writes to a borrowed checkout (PLAN §11.4).
+    // deckhand never writes to a borrowed checkout (PLAN §11 item 4).
     if (req.source === "local" && req.app.path) {
       // Wrapped: this is a cosmetic lookup, and nothing cosmetic may be able to
       // fail start_preview. (It did — a WorktreeManager without the method threw
@@ -1239,19 +1322,6 @@ export class PreviewEngine {
     return this.resultFor(preview, false);
   }
 
-  /**
-   * Platforms the caller asked for that this live preview does not have.
-   *
-   * `findReusable` matches on app + source + ref and IGNORES the device list, which is right
-   * for the daily loop — asking again for what is already running should return it, not mint a
-   * second simulator. But it made a genuinely different request look satisfied: asking for
-   * iOS + Android while an iOS preview was live returned `alreadyRunning: true` and silently
-   * dropped Android. The caller saw success and no Android, and the only way anyone found to
-   * get it was `stop_preview` + start again — which reboots the iOS simulators that were
-   * working and pays for their build a second time.
-   *
-   * An empty result and a satisfied request must not look the same (CONSTITUTION §3).
-   */
   /**
    * Add devices to a LIVE preview, without touching the ones already running.
    *
@@ -1297,15 +1367,23 @@ export class PreviewEngine {
       );
     }
 
-    // Index off the current length, which is safe ONLY because a device is never removed
-    // from a live preview — they go away with the whole preview or not at all. If per-device
-    // removal is ever added, this silently starts reusing ids, and a device id is how a viewer
-    // pane addresses a stream: both ends would agree on the name and disagree about the
-    // device. Indexing off the highest id instead is one line, and it is deliberately NOT
-    // here, because with no removal there is no input that tells the two apart and a guard no
-    // test can fail is not a guard.
-    const added = specs.map((spec, i) => newLiveDevice(spec, p.devices.length + i));
+    // A per-preview counter, NOT `p.devices.length`: `removeDevices` (the `stop_device` tool)
+    // shrinks the list, so the length handed a retired index straight back. Called through
+    // startPreview that was merely confusing — the id carries the platform and
+    // `missingPlatforms()` filters by it, so nothing live collided — but this method is
+    // public, and a caller that does not filter gave two LIVE devices one id. A device id is
+    // how a viewer pane addresses a stream, so that is one pane showing another's video.
+    const start = p.nextDeviceIndex;
+    // The caption gets the position instead (see newLiveDevice): `p.devices` has not been
+    // pushed to yet, so its length is the count of devices already on the preview.
+    const added = specs.map((spec, i) => newLiveDevice(spec, start + i, p.devices.length + i + 1));
+    p.nextDeviceIndex = start + specs.length;
     p.devices.push(...added);
+    // `p.record.devices` is a separate array (startPreview built it with `.map()`), and it
+    // is the one that reaches state.json. Pushing to `p.devices` alone left `persist()`
+    // writing the pre-add list — invisible through `getStatus`, which reads `p.devices`,
+    // and wrong for anything reading the file. `removeDevices` re-syncs the same way.
+    p.record.devices = p.devices.map((d) => d.record);
     this.persist();
     this.markActive(p);
 
@@ -1373,6 +1451,19 @@ export class PreviewEngine {
     return doomed.map((d) => d.record.deviceId);
   }
 
+  /**
+   * Platforms the caller asked for that this live preview does not have.
+   *
+   * `findReusable` matches on app + source + ref and IGNORES the device list, which is right
+   * for the daily loop — asking again for what is already running should return it, not mint a
+   * second simulator. But it made a genuinely different request look satisfied: asking for
+   * iOS + Android while an iOS preview was live returned `alreadyRunning: true` and silently
+   * dropped Android. The caller saw success and no Android, and the only way anyone found to
+   * get it was `stop_preview` + start again — which reboots the iOS simulators that were
+   * working and pays for their build a second time.
+   *
+   * An empty result and a satisfied request must not look the same (CONSTITUTION §3).
+   */
   private missingPlatforms(p: LivePreview, req: StartPreviewRequest): Platform[] {
     const live = new Set(p.devices.map((d) => d.record.platform));
     return [...new Set(req.devices.map((d) => d.platform))].filter((pl) => !live.has(pl));
@@ -1442,6 +1533,22 @@ export class PreviewEngine {
   }
 
   /**
+   * Stop the app's Metro once nothing is using it any more.
+   *
+   * Teardown killed the dev processes but never Metro, so every finished Expo
+   * preview left one listening for the rest of the server's life and `freePort`
+   * simply moved to the next port — the 8081-8099 range emptied out over a few
+   * app switches and previews started failing with "no free Metro port".
+   * App-scoped, and no narrower: `stopApp` reaps every server this app has (one
+   * per checkout and env), and the guard above is what stops it running while
+   * another preview of the SAME app is still live.
+   */
+  private stopMetroIfUnused(appId: string): void {
+    for (const other of this.previews.values()) if (other.app.id === appId) return;
+    void this.d.metro.stopApp(appId).catch(() => {});
+  }
+
+  /**
    * Release everything a forgotten preview still holds — dev processes, devices,
    * worktree — without blocking the caller (startPreview is synchronous). The
    * device count is held in `tearingDown` for the duration so a preview starting
@@ -1451,21 +1558,6 @@ export class PreviewEngine {
    * made the immediate retry of a failed preview fail with "device capacity
    * reached", which is precisely the flow this path exists to serve.
    */
-  /**
-   * Stop the app's Metro once nothing is using it any more.
-   *
-   * Teardown killed the dev processes but never Metro, so every finished Expo
-   * preview left one listening for the rest of the server's life and `freePort`
-   * simply moved to the next port — the 8081-8099 range emptied out over a few
-   * app switches and previews started failing with "no free Metro port".
-   * App-scoped on purpose: one manager, one Metro, and another app's live
-   * preview may be the one holding it.
-   */
-  private stopMetroIfUnused(appId: string): void {
-    for (const other of this.previews.values()) if (other.app.id === appId) return;
-    void this.d.metro.stopApp(appId).catch(() => {});
-  }
-
   private releaseInBackground(p: LivePreview): () => number {
     let held = p.devices.length;
     this.tearingDown += held;
@@ -1708,7 +1800,7 @@ export class PreviewEngine {
       // correct, which is what made this easy to miss. Claimed after the boot
       // returns instead — see below.
     } else {
-      avdName = `deckhand_${p.record.previewId}_${dev.record.deviceId}`.replace(/[^A-Za-z0-9_]/g, "_");
+      avdName = `${AVD_PREFIX}${p.record.previewId}_${dev.record.deviceId}`.replace(/[^A-Za-z0-9_]/g, "_");
       dev.deviceName = avdName; // see bootIos: spare it by name while createAvd runs
       await android.createAvd(avdName, image, profile);
     }
@@ -1727,6 +1819,18 @@ export class PreviewEngine {
     });
     this.setPhase(p, dev, "booting", "booting emulator");
     let serial: string;
+    // QEMU exists from here on: `bootEmulator` spawns the emulator detached BEFORE its
+    // first await and only waits afterwards, while `record.serial` appears seconds to
+    // minutes later. In between, a stop/remove aborts this boot and tears the device
+    // down in the same call with nothing awaiting it — and teardown, finding no serial,
+    // has no shutdown to ask and so no answer to record. Say the answer now, in the only
+    // direction that is safe to be wrong in: nothing has confirmed this emulator is
+    // gone, so its AVD name — the sole handle `pkill -f "avd <name>"` and the reaper
+    // have on the process — is not deletable by teardownDevices or trimPool. This one
+    // piece of bookkeeping precedes its effect deliberately (the rest of the file
+    // records after): it is a claim that a process may exist, and the spawn is what it
+    // is guarding against. Every path below settles it — clean shutdown clears it.
+    this.noteStopped(avdName, false);
     try {
       serial = await android.bootEmulator(avdName, port, undefined, { wipeData, signal: dev.abort.signal });
       // The wipe has now actually run, so the AVD really does belong to this app.
@@ -1739,6 +1843,18 @@ export class PreviewEngine {
       // record.serial was never set, so teardown can't reach it either. Kill it
       // by the port we know before that port goes back in the pool, or the next
       // preview allocates 5554, collides, and streams the abandoned device.
+      // Whether it died is NOT settled here — the claim made before the spawn already
+      // says an emulator may exist under this name, and that claim is what stops
+      // teardown and trimPool deleting the AVD of a process we may have failed to kill.
+      //
+      // The answer is deliberately thrown away HERE, unlike everywhere else this file
+      // calls shutdown. `shutdown` returns `true` as soon as `adb get-state` fails, and
+      // a boot that threw is in that state BY CONSTRUCTION: `adb wait-for-device` is the
+      // step that would have made adb know this serial, and it is exactly the step that
+      // did not finish. So `true` here means "adb never heard of it", not "the process
+      // died" — spending it would clear the claim on evidence that does not exist, and
+      // delete the sole handle (`pkill -f "avd <name>"`) on a live QEMU. The image is
+      // reclaimed by the reaper's kill-then-delete at the next boot instead.
       await android.shutdown(serialForPort(port)).catch(() => {});
       this.androidPorts.delete(port);
       dev.androidPort = undefined;
@@ -1746,8 +1862,12 @@ export class PreviewEngine {
     }
     dev.record.serial = serial;
     await this.abandonIfAborted(dev, async () => {
-      await android.shutdown(serial).catch(() => {});
-      if (!dev.poolName) await android.deleteAvd(avdName).catch(() => {});
+      // Same rule as teardownDevices: an emulator that has not confirmed it is gone keeps
+      // its AVD. An aborted start_preview is the likeliest place to hit it — the emulator
+      // finished booting milliseconds ago and is asked to die immediately.
+      const stoppedCleanly = await android.shutdown(serial).catch(() => false);
+      this.noteStopped(avdName, stoppedCleanly);
+      if (!dev.poolName && stoppedCleanly) await android.deleteAvd(avdName).catch(() => {});
     });
     return serial;
   }
@@ -2496,9 +2616,17 @@ export class PreviewEngine {
   }
 
   /**
-   * Whether a preview is a compare/migration reference pane — deliberately
-   * public, and deliberately not backed by an app in apps.yaml. The only case
-   * where "no app found" is legitimate rather than a reason to deny.
+   * Whether a preview is a pane booted alongside a page — deliberately not backed
+   * by an app in apps.yaml, which is the only case where "no app found" is
+   * legitimate rather than a reason to deny.
+   *
+   * A pane is NOT public. It takes the page's access, and its synthetic app id is
+   * keyed by access class so a public page and a protected one never land on the
+   * same pane. This said "deliberately public" until 2026-08-08, and that sentence
+   * is what made `set_pin { previewId: <pane>, remove: true }` look harmless — it
+   * published a protected page's pane, reproduced and fixed the same day. If you
+   * are reading this to decide whether a pane needs guarding: it does.
+   * → `server.test.ts` "refuses to set or remove a PIN on a pane"
    */
   isReference(previewId: string): boolean {
     return this.previews.get(previewId)?.record.reference === true;
@@ -2558,7 +2686,7 @@ export class PreviewEngine {
   }
 
   /** The working preview whose compare session shows this pane, if any. */
-  private pageShowingPane(paneId: string): string | null {
+  pageShowingPane(paneId: string): string | null {
     for (const p of this.previews.values()) {
       if (p.record.phase === "stopped") continue;
       if (p.compare?.references.some((r) => r.previewId === paneId)) return p.record.previewId;
@@ -2576,30 +2704,17 @@ export class PreviewEngine {
   }
 
   /**
-   * Enumerate available iOS runtimes/models, Android API levels, connected
-   * PHYSICAL devices, and current capacity. `physical.targetable` is the wire's
-   * own statement of whether start_preview can build to that hardware (false in
-   * Phase 0) — the claim lives here so tool descriptions cannot go stale on it.
+   * Enumerate available iOS runtimes/models, Android API levels, and current
+   * capacity. Simulators and emulators only: deckhand does not target hardware
+   * plugged into the machine, and does not report it either (PLAN §2 "NO
+   * physical devices").
    */
   async listDevices(): Promise<{
     ios: { runtimes: { version: string; name: string }[]; models: string[] };
     android: { apiLevels: number[] };
-    physical: PhysicalDevices & { targetable: boolean };
     capacity: { inUse: number; max: number };
   }> {
-    const [runtimes, deviceTypes, physical] = await Promise.all([
-      this.d.simctl.listRuntimes(),
-      this.d.simctl.listDeviceTypes(),
-      // The physical section is additive: a broken scanner must never take down
-      // the enumeration the simulator sections answer (tested with a rejecting
-      // scanner). Absent dep = empty answer, same as every pre-feature deployment.
-      (this.d.physical?.list() ?? Promise.resolve({ ios: [], android: [] } satisfies PhysicalDevices)).catch(
-        (e): PhysicalDevices => {
-          const msg = `physical device scan failed: ${e instanceof Error ? e.message : String(e)}`;
-          return { ios: [], android: [], errors: { ios: msg, android: msg } };
-        },
-      ),
-    ]);
+    const [runtimes, deviceTypes] = await Promise.all([this.d.simctl.listRuntimes(), this.d.simctl.listDeviceTypes()]);
     let apiLevels: number[] = [];
     try {
       apiLevels = [...new Set((await this.android().listSystemImages()).map((i) => i.api))].sort((a, b) => b - a);
@@ -2613,7 +2728,6 @@ export class PreviewEngine {
         models: deviceTypes.map((d) => d.name),
       },
       android: { apiLevels },
-      physical: { ...physical, targetable: false },
       capacity: { inUse, max: this.d.config.limits.maxTotalDevices },
     };
   }
@@ -2922,9 +3036,19 @@ export class PreviewEngine {
    * Clear out whatever the previous process left behind. Deckhand's devices do
    * not survive its own exit — a crash or a plain `serve` restart orphans every
    * booted simulator, emulator and helper it owned, and nothing ever collected
-   * them. Called once, before the server starts listening.
+   * them.
+   *
+   * Called once per boot, but AFTER the HTTP port is bound (see `server.ts`) —
+   * the bind is what proves we are the only server, so a second `deckhand
+   * serve` dies on EADDRINUSE before it can delete this one's devices. Every
+   * sweep below therefore has to spare what is live RIGHT NOW: a `start_preview`
+   * can land in the seconds between the bind and here.
    */
   async reapOrphans(): Promise<{ sims: number; avds: number; previews: number }> {
+    // The only definition of "stale on boot" in the repo, and `failed` is deliberately
+    // inside it: a failed preview still holds a booted simulator and a worktree, and
+    // counting it as using zero devices was one of the two original resource leaks
+    // (PLAN, "Device lifecycle"). → `preview.test.ts` "reaps a FAILED preview at boot".
     const stale = this.d.store.load().previews.filter((p) => p.phase !== "stopped");
     // Spare whatever is already live. The map is normally empty at boot, but
     // this runs *after* the port is bound (see server.ts) — so an agent's
@@ -2940,7 +3064,11 @@ export class PreviewEngine {
         // between reading it and acting on it widens that window. (Putting the
         // Metro reap ahead of it did exactly that, and the in-flight test caught
         // it.) Metro and devices are independent, so order costs nothing here.
-        const devices = await reaper.reap(this.liveDeviceHandles());
+        // Lazily, not by value: `reap` awaits a shutdown and a delete per orphan, and the boot
+        // sweep runs AFTER the port is bound on purpose — so a `start_preview` can create a
+        // device between the read and the kill. Passing the reader lets it re-check at each
+        // destructive call instead of diffing against a set from before the awaits.
+        const devices = await reaper.reap(() => this.liveDeviceHandles());
         // Metro AND the livesync runners: both are spawned detached and tracked
         // only in memory, so both were reparented to launchd on every restart.
         // The livesync leak was the worse of the two by far — 36 orphans at 418%
@@ -2973,9 +3101,16 @@ export class PreviewEngine {
         // call, and until this line existed it had none: StreamingRouter.reapOrphans() was
         // written, tested, and never reached from boot, so the 2h48m orphan that motivated
         // it (see serveSim.ts) would have survived every restart. Spare what is live, for
-        // the same reason the device reap does.
+        // the same reason the device reap does — and by every identifier a BACKEND
+        // keys on, which is not the set the Reaper uses: serve-sim's helper map is
+        // keyed by simulator UDID, AndroidAdbBackend's by adb serial, and its
+        // recorder sweep reads the AVD name too (that is what answers for an
+        // emulator still booting, before a serial exists). `names` is the fourth
+        // thing liveDeviceHandles returns and is left out deliberately: it is the
+        // simulator/AVD *device* name, which only the Reaper matches on — no
+        // backend has ever seen it. A backend that keys on one has to be added here.
         const live = this.liveDeviceHandles();
-        await this.d.streaming.reapOrphans(new Set([...live.udids, ...live.avds])).catch(() => {});
+        await this.d.streaming.reapOrphans(new Set([...live.udids, ...live.avds, ...live.serials])).catch(() => {});
         return devices;
       } catch {
         return { sims: [], avds: [], keptPooled: [] };
@@ -3014,22 +3149,39 @@ export class PreviewEngine {
    * Every device handle a live preview holds or is about to hold. Pool leases
    * are included by name because a device between `simctl create` and the
    * engine recording its UDID has a name but no handle yet.
+   *
+   * ONE device has up to three identifiers, and each consumer of this knows
+   * only its own:
+   *   - `udids`  — simulator UDID. The Reaper matches `simctl list` on it, and
+   *                ServeSimBackend keys its helper map on it.
+   *   - `avds`   — AVD name. The Reaper matches `avdmanager list` on it, and it
+   *                is what `adb emu avd name` reports.
+   *   - `serials`— adb serial (`emulator-5554`). AndroidAdbBackend keys its
+   *                helper map on THIS and on nothing else.
+   * A backend handed only the two the Reaper needs cannot spare anything: the
+   * boot sweep passed `udids ∪ avds` to `reapOrphans`, and `keep.has(serial)`
+   * in AndroidAdbBackend was therefore false for every live Android device, so
+   * the sweep stopped the helper of a `start_preview` that landed after the
+   * port was bound. Anything that fans a keep-set across backends must carry
+   * all three.
    */
-  private liveDeviceHandles(): { udids: string[]; avds: string[]; names: string[] } {
+  private liveDeviceHandles(): { udids: string[]; avds: string[]; serials: string[]; names: string[] } {
     const udids: string[] = [];
     const avds: string[] = [];
+    const serials: string[] = [];
     // Pool leases cover the pooled config; `deviceName` covers both, including
     // the non-pooled `deckhand-<previewId>-<n>` names that no lease ever holds.
     const names = new Set<string>(this.leased);
     for (const p of this.previews.values()) {
       for (const dev of p.devices) {
         if (dev.deviceName) names.add(dev.deviceName);
+        if (dev.record.serial) serials.push(dev.record.serial);
         if (!dev.record.udid) continue;
         // record.udid holds the AVD name on Android, the simulator UDID on iOS.
         (dev.record.platform === "android" ? avds : udids).push(dev.record.udid);
       }
     }
-    return { udids, avds, names: [...names] };
+    return { udids, avds, serials, names: [...names] };
   }
 
   /** Note that someone is actually watching this preview (resets the idle clock). */
@@ -3223,13 +3375,12 @@ export class PreviewEngine {
   }
 
   /**
-   * Release every device of a preview: detach the stream, then shut down and
-   * delete the simulator/AVD deckhand created for it. Idempotent — the handles
-   * are cleared, so a second call (stop after an idle sweep) is a no-op.
-   */
-  /**
-   * Tear down SOME of a preview's devices. Defaults to all of them, which is what
-   * stopPreview wants; `removeDevices` passes a subset. Parameterised rather than
+   * Release a preview's devices: detach the stream, then shut down and delete the
+   * simulator/AVD deckhand created for it. Idempotent — the handles are cleared, so a
+   * second call (a stop after an idle sweep) is a no-op.
+   *
+   * `only` picks a subset; the default is all of them, which is what stopPreview
+   * wants, and `removeDevices` passes a subset. Parameterised rather than
    * copied — every simulator/emulator/pool release in this method is a place a second
    * version would drift, and a leaked pool lease or an un-freed adb port is invisible
    * until the machine runs out of them.
@@ -3250,14 +3401,26 @@ export class PreviewEngine {
       // fresh ~2 GB AVD image) every single time.
       const pooled = dev.poolName != null;
       if (dev.record.platform === "android") {
+        // `shutdown` answers whether the device actually went away. Deleting the AVD takes its
+        // NAME out of `listAvds()`, and that name is the only thing `pkill -f "avd <name>"` in
+        // the reaper has to go on. Delete after a failed shutdown and a live QEMU is left with
+        // no collector — the 418%-CPU class.
         if (dev.record.serial) {
-          await this.android().shutdown(dev.record.serial).catch(() => {});
+          const stoppedCleanly = await this.android().shutdown(dev.record.serial).catch(() => false);
+          if (dev.record.udid) this.noteStopped(dev.record.udid, stoppedCleanly);
           this.androidPorts.delete(portForSerial(dev.record.serial));
         }
         // Reserved before the boot, so it must be freed even when no serial ever
         // came back (boot timeout, emulator crash).
         if (dev.androidPort != null) this.androidPorts.delete(dev.androidPort);
-        if (dev.record.udid && !pooled) await this.android().deleteAvd(dev.record.udid).catch(() => {}); // udid holds the AVD name
+        // The SET decides, not the local answer: a boot that threw has no serial to shut down
+        // here, and what it knew about its half-started emulator was recorded there. Asking
+        // "did I just stop it" instead would read a device nobody could stop as stopped.
+        // Recorded before the lease is released below — from that moment this set is the only
+        // thing standing between a live QEMU and `trimPool`'s delete.
+        if (dev.record.udid && !pooled && !this.unstoppedAvds.has(dev.record.udid)) {
+          await this.android().deleteAvd(dev.record.udid).catch(() => {}); // udid holds the AVD name
+        }
       } else if (dev.record.udid) {
         await this.d.simctl.shutdown(dev.record.udid).catch(() => {});
         if (!pooled) await this.d.simctl.delete(dev.record.udid).catch(() => {});
@@ -3272,6 +3435,17 @@ export class PreviewEngine {
       onReleased?.();
     }
     await this.trimPool();
+  }
+
+  /**
+   * Record what `AndroidManager.shutdown` answered for the emulator running `avdName`.
+   * Cleared on a clean stop so a pooled AVD that later shuts down properly becomes
+   * trimmable again — a name that could never leave this set would pin an AVD image
+   * (~2 GB) on disk for the life of the process.
+   */
+  private noteStopped(avdName: string, stoppedCleanly: boolean): void {
+    if (stoppedCleanly) this.unstoppedAvds.delete(avdName);
+    else this.unstoppedAvds.add(avdName);
   }
 
   /**
@@ -3306,7 +3480,12 @@ export class PreviewEngine {
     }
     let avdsKept = 0;
     for (const avd of avds) {
-      if (this.leased.has(avd)) continue;
+      // `unstoppedAvds` is a second, weaker kind of lease: teardown released the pool
+      // lease seconds ago and its emulator never confirmed it had exited, so this is a
+      // name attached to a possibly-live QEMU. Deleting it hides that process from the
+      // only sweep that can name it. It is not counted against `keepAvds` either — this
+      // is not a spare being kept, it is a device that would not go away.
+      if (this.leased.has(avd) || this.unstoppedAvds.has(avd)) continue;
       if (avdsKept < keepAvds) {
         avdsKept++;
         continue;

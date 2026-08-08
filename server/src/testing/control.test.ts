@@ -1,5 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { SimDeckControl, SimDeckActionError, type UiAction } from "./control.ts";
 import { SimDeckDaemon, SimDeckUnavailableError } from "./simdeck.ts";
 
@@ -42,6 +44,15 @@ function fakeFetch(): { impl: typeof fetch; calls: Recorded[] } {
 
 const iosTarget = { platform: "ios" as const, udid: "UDID-1" };
 const lastAction = (calls: Recorded[]) => [...calls].reverse().find((c) => c.url.endsWith("/action"))!;
+
+/** Every request-issuing path this client has: health, both describe backends, action, pasteboard, screenshot. */
+async function exerciseEveryPath(control: SimDeckControl): Promise<void> {
+  await control.describe(iosTarget, { interactiveOnly: true });
+  await control.describe(iosTarget, { source: "react-native", maxDepth: 3 });
+  await control.action(iosTarget, { type: "tap", x: 0.1, y: 0.1 });
+  await control.action(iosTarget, { type: "type", text: "æ" });
+  await control.screenshot(iosTarget);
+}
 
 describe("SimDeckControl.describe", () => {
   it("uses the compact describe action by default, unwrapped to the endpoint's shape", async () => {
@@ -224,13 +235,27 @@ describe("SimDeckControl.action", () => {
 
   it("never touches the input WebSocket / webrtc / refresh endpoints", async () => {
     const { impl, calls } = fakeFetch();
-    const control = new SimDeckControl({ fetchImpl: impl, autostart: false });
-    await control.describe(iosTarget, { interactiveOnly: true });
-    await control.action(iosTarget, { type: "tap", x: 0.1, y: 0.1 });
-    await control.action(iosTarget, { type: "type", text: "æ" });
-    await control.screenshot(iosTarget);
+    await exerciseEveryPath(new SimDeckControl({ fetchImpl: impl, autostart: false }));
     assert.ok(calls.length > 0);
     assert.ok(calls.every((c) => !/\/(input|control|webrtc|refresh)(\b|\/)/.test(c.url)), "hit a forbidden endpoint");
+  });
+
+  it("sends no credential on any call — no Authorization, no cookie, no token", async () => {
+    // The same-origin loopback allowance is the whole auth story, so the absence of a
+    // credential is a property to keep, not an accident. `Origin` is not one: it is a
+    // statement about where the request came from, and SimDeck grants it nothing a
+    // loopback caller did not already have.
+    const { impl, calls } = fakeFetch();
+    await exerciseEveryPath(new SimDeckControl({ fetchImpl: impl, autostart: false }));
+    assert.ok(calls.length > 0);
+    for (const c of calls) {
+      assert.deepEqual(
+        Object.keys(c.headers).filter((h) => h !== "content-type" && h !== "origin"),
+        [],
+        `${c.url} sent a header beyond content-type/origin — a credential to SimDeck is a secret deckhand would then hold`,
+      );
+      assert.doesNotMatch(c.url, /token|auth|key=/i, `${c.url} carries a credential in the URL`);
+    }
   });
 
   it("surfaces a SimDeck error as SimDeckActionError", async () => {
@@ -246,6 +271,111 @@ describe("SimDeckControl.action", () => {
     );
   });
 });
+
+// Two of this seam's rules cannot be proved by the fake fetch above, and both read as
+// covered by tests that are not covering them:
+//   - a `new WebSocket(…)` never goes through `fetchImpl` at all, so the REST-only rule's
+//     headline half is invisible to every runtime assertion here;
+//   - the runtime assertions see only the methods they call, so a method added tomorrow
+//     that opens /input or attaches a token is simply not exercised, and passes.
+// So both are also asserted against the SOURCE of server/src/testing/, which nothing new
+// in this directory can be outside of. The walk is recursive so a subdirectory added later
+// is covered too — the rule file scopes itself to `server/src/testing/**`, and a scan that
+// stopped at the top level would have made that scope a claim with nothing behind it.
+// Comments are stripped first: the rules themselves are written in the file headers, and
+// quoting a prohibition used to satisfy it.
+describe("the SimDeck client's source", () => {
+  const DIR = import.meta.dirname;
+  const sources = readdirSync(DIR, { recursive: true, encoding: "utf8" })
+    .filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"))
+    .map((f) => [f, stripComments(readFileSync(join(DIR, f), "utf8"))] as const);
+
+  it("opens no WebSocket to SimDeck", () => {
+    assert.ok(sources.length >= 2, "read no sources — the scan below would be vacuous");
+    for (const [file, src] of sources) {
+      assert.doesNotMatch(
+        src,
+        /\bnew WebSocket\b|\bwss?:\/\//,
+        `${file} opens a socket to SimDeck — /input and /control start the private CoreSimulator ` +
+          `display and encoder session, which is the path PLAN §2 rejected. REST only.`,
+      );
+    }
+  });
+
+  it("names no /input, /control, /webrtc or /refresh endpoint", () => {
+    assert.ok(sources.length >= 2, "read no sources — the scan below would be vacuous");
+    for (const [file, src] of sources) {
+      assert.doesNotMatch(
+        src,
+        /(?<![.\w])\/(input|control|webrtc|refresh)\b/,
+        `${file} names a forbidden SimDeck endpoint — REST only (accessibility-tree, action, pasteboard, screenshot.png, health).`,
+      );
+    }
+  });
+
+  it("sends no credential to SimDeck", () => {
+    assert.ok(sources.length >= 2, "read no sources — the scan below would be vacuous");
+    for (const [file, src] of sources) {
+      assert.doesNotMatch(
+        src,
+        /\b(authorization|cookie|bearer|simdeck_token|x-api-key)\b/i,
+        `${file} handles a SimDeck credential. Auth here is the same-origin loopback allowance and ` +
+          `nothing else, so deckhand holds no SimDeck token — there is no secret to leak, and that is the point.`,
+      );
+    }
+  });
+});
+
+/**
+ * Drop comments so a rule quoted in a file header cannot satisfy the scan that
+ * enforces it — without also dropping code.
+ *
+ * Two ways to get this wrong, and this walk avoids both. Dropping only whole
+ * lines that START with `//` leaves a trailing `// …/input…` on a code line, and
+ * the scan then cries wolf at the author who explains why the endpoint is off
+ * limits. Cutting every line at its first `//` instead truncates a line at the
+ * `//` inside a string literal, and THAT direction is toward passing: a real
+ * offender sharing a line with a URL vanishes along with the "comment". So
+ * quoted literals are copied whole, and everything outside one is comment.
+ *
+ * Twin of the walk in `test-support/invariants.test.ts`, duplicated rather than
+ * shared: it is nine lines, and importing a scanner from another suite couples
+ * two guardrails that have to be able to fail independently.
+ * → "names no /input, /control, /webrtc or /refresh endpoint", proved both ways:
+ * a trailing comment naming an endpoint must not fire, a real `"/input"` must.
+ */
+function stripComments(src: string): string {
+  let out = "";
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i]!;
+    if (c === '"' || c === "'" || c === "`") {
+      // Copy the literal whole. An unterminated one runs to the end of the file,
+      // which is what the compiler would say about it too.
+      out += c;
+      for (i++; i < src.length; i++) {
+        out += src[i];
+        if (src[i] === "\\") {
+          out += src[++i] ?? "";
+          continue;
+        }
+        if (src[i] === c) break;
+      }
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "/") {
+      while (i < src.length && src[i] !== "\n") i++;
+      out += "\n";
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "*") {
+      const end = src.indexOf("*/", i + 2);
+      i = end === -1 ? src.length : end + 1;
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
 
 describe("SimDeckDaemon", () => {
   it("returns the loopback origin when the service is already healthy (no start)", async () => {

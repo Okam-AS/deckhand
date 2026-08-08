@@ -5,7 +5,7 @@ import { MobileChrome, type DockEntry } from "./MobileChrome.tsx";
 import { WebFrame } from "./WebFrame.tsx";
 import { PinGate } from "./PinGate.tsx";
 import { ProgressBar } from "./ProgressBar.tsx";
-import { computeStage, pollDecision, shortDeviceName, type StageGroup, stillUnlocked } from "./panes.ts";
+import { computeStage, pollDecision, shortDeviceName, stagePicker, type PickerRow, type StageGroup, stillUnlocked } from "./panes.ts";
 import { fetchShareState, shareIdFromPath, type ShareState } from "./api.ts";
 import { useIsMobile } from "./useIsMobile.ts";
 
@@ -222,6 +222,10 @@ export function App() {
 
   const { groups, panes, visible, multiSource } = stage;
   const shownCount = visible.size;
+  // Non-empty only when the stage is down to one pane — see stagePicker. On
+  // desktop that is the only way to reach the other panes, including the ones
+  // belonging to other SOURCES, which no per-column control lists.
+  const picker = stagePicker(stage);
   // With one source and one device on screen the two layout modes are identical —
   // render at the normal size, never the enlarged focus size. Grouped columns are
   // sized by the column, so the modes don't apply there at all.
@@ -246,14 +250,15 @@ export function App() {
   const focusedGroup = groups.find((g) => g.panes.some((p) => p.key === mobileFocus));
 
   // Each column chooses on its own. Making the others follow spent a click every
-  // time the guess was wrong, and which two things to compare is the user's call.
+  // time the guess was wrong, and which devices to hold up against each other is
+  // the user's call.
   const chooseInGroup = (group: StageGroup, key: string) =>
     setChoices((prev) => ({ ...prev, [group.shareId]: key }));
 
   return (
     <>
       <main
-        className={`app ${!multiSource && panes.length > 1 && !isMobile ? "has-picker" : ""} ${multiSource ? "app--grouped" : ""} ${isMobile ? "app--mobile" : ""}`}
+        className={`app ${!isMobile && picker.rows.length > 1 ? "has-picker" : ""} ${multiSource ? "app--grouped" : ""} ${isMobile ? "app--mobile" : ""}`}
       >
         <ProgressBar testRun={state.testRun} screens={state.ledger?.screens} />
         <section className={`stage stage--${effectiveMode} ${multiSource ? "stage--grouped" : ""}`} ref={stageRef}>
@@ -279,12 +284,22 @@ export function App() {
                     hidden={!visible.has(p.key)}
                     registerControls={registerControls}
                     onRotationChange={handleRotation}
-                    // With several sources each column shows one device, so the
-                    // switch belongs in that column's control row — beside
-                    // Home/Rotate rather than floating above the stage.
+                    // With several sources side by side each column shows one
+                    // device, so the switch belongs in that column's control row
+                    // — beside Home/Rotate rather than floating above the stage.
+                    //
+                    // Only while they ARE side by side: this writes `choices`,
+                    // which decides visibility only in that branch of
+                    // computeStage. Once the stage is down to one pane the
+                    // page-level picker below owns the choice, and a control
+                    // writing the other channel would appear to do nothing.
                     topbarLead={
-                      multiSource && g.panes.length > 1 ? (
-                        <GroupDevicePicker group={g} onPick={(key) => chooseInGroup(g, key)} />
+                      multiSource && g.panes.length > 1 && shownCount > 1 ? (
+                        <StageDevicePicker
+                          options={g.panes.map((p) => ({ key: p.key, label: shortDeviceName(p.device.label) }))}
+                          activeKey={g.activeKey}
+                          onPick={(key) => chooseInGroup(g, key)}
+                        />
                       ) : undefined
                     }
                   />
@@ -313,14 +328,11 @@ export function App() {
         />
       ) : (
         <>
-          {/* One source with several devices uses the SAME picker two sources use —
-              compact, single-select, next to the frame. There is no separate
-              layout mode any more: computeStage shows everything that fits and
-              one device when it does not, so there was nothing left for a
-              Side-by-side/Focus toggle to decide. */}
-          {!multiSource && panes.length > 1 && shownCount === 1 && groups[0] && (
-            <GroupDevicePicker group={groups[0]} onPick={(key) => setFocusKey(key)} />
-          )}
+          {/* The desktop's one-pane control, in the SAME compact single-select
+              picker the columns use. It lists every pane on the page, whatever
+              source it belongs to: between the mobile breakpoint and the width
+              where the sources fit, nothing else can reach another source. */}
+          <StageDevicePicker options={picker.rows} activeKey={picker.activeKey} onPick={setFocusKey} />
         </>
       )}
     </>
@@ -328,17 +340,31 @@ export function App() {
 }
 
 /**
- * Which device this column shows: DevicePicker in single-select compact mode, so
- * it's the same switch-device icon button + popover the mobile dock uses, sitting
- * in the control row beside Home/Rotate/Fullscreen.
+ * Which pane is on screen: DevicePicker in single-select compact mode, so it is
+ * the same switch-device icon button + popover the mobile dock uses, sitting in
+ * the control row beside Home/Rotate/Fullscreen.
+ *
+ * `activeKey` is the caller's, never derived here. The two call sites answer
+ * "what is showing" from different state (a column's `choices` entry; the
+ * stage's single visible pane), and a picker that guessed at one of them ticked
+ * a pane the stage was not showing — which DevicePicker then treats as an
+ * already-satisfied click and ignores.
  */
-function GroupDevicePicker({ group, onPick }: { group: StageGroup; onPick: (key: string) => void }) {
+function StageDevicePicker({
+  options,
+  activeKey,
+  onPick,
+}: {
+  options: PickerRow[];
+  activeKey: string;
+  onPick: (key: string) => void;
+}) {
   const [open, setOpen] = useState(false);
-  if (group.panes.length < 2) return null;
+  if (options.length < 2) return null;
   return (
     <DevicePicker
-      options={group.panes.map((p) => ({ key: p.key, label: shortDeviceName(p.device.label) }))}
-      visible={new Set([group.activeKey])}
+      options={options}
+      visible={new Set([activeKey])}
       shownCount={1}
       onToggle={onPick}
       open={open}

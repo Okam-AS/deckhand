@@ -20,6 +20,8 @@ partial stand-in for a fourteen-method class when a complete one is a function c
 
 Two known limits of that mechanism, so you do not over-trust it: method parameters are **bivariant**, so an override with a wrong-but-compatible signature still compiles; and optional members may be omitted entirely.
 
+The guardrail that enforces it reads both spellings of the cast — `as unknown as Deps["simctl"]` and `as unknown as Simctl` — for those six classes only. A hand-rolled partial of anything else (`PreviewEngine`, a router's deps) is still yours to judge; the check has no opinion about it.
+
 Also worth knowing here:
 
 - `npm test` runs under `tsx`, which does **not** typecheck. A test asserting that something is a compile error proves nothing unless `npm run typecheck` runs too — `npm run ci` runs both.

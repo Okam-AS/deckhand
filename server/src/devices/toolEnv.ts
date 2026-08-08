@@ -62,7 +62,7 @@ export function resolveAndroidEnv(base: NodeJS.ProcessEnv = process.env): Androi
   const androidHome = firstExisting(androidHomeCandidates(base));
   if (!androidHome) {
     throw new Error(
-      "Android SDK not found — set ANDROID_HOME or install it under ~/Library/Android/sdk (Phase 4 `deckhand init` will guide this)",
+      "Android SDK not found — set ANDROID_HOME or install it under ~/Library/Android/sdk (`brew install --cask android-commandlinetools`; `deckhand doctor` names what is still missing)",
     );
   }
   const javaHome = resolveJavaHome();

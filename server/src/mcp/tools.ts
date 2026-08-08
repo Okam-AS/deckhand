@@ -7,7 +7,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { App, AppType, Config } from "../config.ts";
 import { appSchema, ConfigError, parseRepo, publicBaseUrl } from "../config.ts";
-import { versionStatus } from "../version.ts";
+import { versionStatus, type UpdateStatus } from "../version.ts";
 import { DEV_MENU_PREFLIGHT, devMenuHint } from "../testing/devMenu.ts";
 import { selectorMissHint } from "../testing/tree.ts";
 import type { Principal } from "../auth.ts";
@@ -45,32 +45,52 @@ export interface ToolContext {
 }
 
 /**
- * Every successful tool response, and the one place the update notice can be attached
- * without anyone having to remember to.
+ * The JSON success response, and the funnel the update notice rides on.
  *
  * Attached only when there is genuinely something to say (this checkout is on main and main
  * has moved), so the normal case is byte-identical to before. Deliberately not restricted to
- * `start_preview`: whichever tool the agent reaches for next is the one that should tell it,
- * and a notice on a funnel cannot be forgotten by the next tool somebody adds.
+ * `start_preview`: whichever tool the agent reaches for next is the one that should tell it.
+ *
+ * The funnel has a hole, and it is a real one rather than a hypothesis: `screenshot` returns
+ * an image content block, which has nowhere to carry JSON, so it goes around this and carries
+ * no notice. It is the only such tool, and the guardrail below keeps it the only one — a
+ * SECOND tool building a response by hand fails `mcp/responses.test.ts`.
  */
 function ok(data: Record<string, unknown>): CallToolResult {
-  const version = versionStatus();
-  // Two different "you are behind" states, and the one that was missing is the common one:
-  // the checkout was pulled and the process still runs the old code. Comparing the CHECKOUT
-  // to origin/main reports "up to date" while the running server is hours stale.
-  const notice =
-    version?.restartNeeded || version?.updateAvailable
-      ? {
-          deckhandUpdate: {
-            running: version.current,
-            checkout: version.checkout,
-            latest: version.latest,
-            action: version.restartNeeded ? "restart" : "pull-and-restart",
-          },
-          nextStep: version.note,
-        }
-      : {};
-  return { content: [{ type: "text", text: JSON.stringify({ ok: true, ...data, ...notice }) }] };
+  return { content: [{ type: "text", text: JSON.stringify(withUpdateNotice(data, versionStatus())) }] };
+}
+
+/**
+ * The success body, with the update notice attached ALONGSIDE whatever the tool said.
+ *
+ * Split out and exported so the notice has a test at all: `ok()` reads the real git state.
+ *
+ * The notice is a nag and the tool's `nextStep` is the thing the user needs, so the tool's
+ * wins. Spreading the notice over the data instead made the nag win in the steady state —
+ * any install on main that is behind, or pulled and not restarted — and `start_preview`'s
+ * "Give the user this link NOW" came back as "restart deckhand". The note is never lost
+ * either: it rides inside `deckhandUpdate`, and only surfaces as `nextStep` when the tool
+ * had nothing of its own to say.
+ * → `mcp/responses.test.ts` "the update notice never replaces a tool's own nextStep"
+ *
+ * Two different "you are behind" states, and the one that was missing is the common one: the
+ * checkout was pulled and the process still runs the old code. Comparing the CHECKOUT to
+ * origin/main reports "up to date" while the running server is hours stale.
+ */
+export function withUpdateNotice(data: Record<string, unknown>, version: UpdateStatus | null): Record<string, unknown> {
+  const body = { ok: true, ...data };
+  if (!version?.restartNeeded && !version?.updateAvailable) return body;
+  return {
+    ...body,
+    deckhandUpdate: {
+      running: version.current,
+      checkout: version.checkout,
+      latest: version.latest,
+      action: version.restartNeeded ? "restart" : "pull-and-restart",
+      note: version.note,
+    },
+    ...("nextStep" in body || version.note === undefined ? {} : { nextStep: version.note }),
+  };
 }
 
 function fail(code: string, message: string, hint?: string): CallToolResult {
@@ -267,7 +287,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "List devices",
       description:
-        "List available iOS simulator runtimes and models, plus current capacity. Also reports PHYSICAL devices this machine can see (`physical`: paired iPhones/iPads via devicectl, adb-connected Android hardware). Read two fields there before answering about real devices: `physical.targetable` says whether start_preview can build to that hardware — while it is false, say deckhand sees the device but physical-device previews are not supported yet, and offer a matching simulator. And if `physical.errors` is present, the scan FAILED (tooling missing or hung) — say the scan failed and suggest `deckhand doctor`; never report a failed scan as 'no devices connected'.",
+        "List the iOS simulator runtimes and models and the Android emulator API levels this machine can boot, plus current capacity. Simulators and emulators are the ONLY things deckhand can preview on: it cannot build to, stream from, or see a real iPhone or Android phone plugged into the machine. Asked about one, say previewing on physical devices is not supported and offer the closest simulator or emulator from this list — do not say deckhand can see the device, and do not suggest plugging it in.",
       inputSchema: {},
     },
     () => audited("list_devices", {}, async () => ok(await engine.listDevices())),
@@ -318,11 +338,6 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       ? `Give the user this link NOW: ${url} — it's already live (it shows build progress while the sim boots) and is stable for this app across restarts; relay it before any other work, don't wait for ready. Then poll preview_status for readiness. While the preview runs, file saves livesync to the simulator automatically, so after editing code there is nothing to call — just tell the user the change is on the sim. Only call restart_preview after native-level changes (new plugins, Podfile/gradle edits) or if the app looks stuck. ${TEST_RUN_CONTRACT} ${linkFooter(url)}`
       : `Give the user this link NOW: ${url} — it's already live (it shows build progress) and is stable for this app; relay it before any other work, don't wait for ready. Then poll preview_status for readiness. After pushing new commits to ${ref ?? "the branch"}, call restart_preview to rebuild the same simulators at the new tip — the link stays the same. ${TEST_RUN_CONTRACT} ${linkFooter(url)}`;
 
-  /**
-   * UI actions that change what the user sees, as opposed to the read-only verifiers
-   * (waitFor/assert/query). A bare `assert` moves nothing on screen, so it is not the thing
-   * the user is left guessing about.
-   */
   /**
    * The actions that make a claim about the screen. A step reported `passed` right after one
    * of these FAILED is the shape of a verdict with no evidence behind it — see
@@ -516,8 +531,13 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         // ...but roll it back if the boot then throws (device caps, one-device-per-
         // platform): the share id is stable per app, so a failed call must not leave
         // an ALREADY-RUNNING share of this app newly public.
-        // Extra sources first, so their (public) panes exist before this app's
-        // share takes the chosen access — same order the old compare tool used.
+        // Extra sources first, so their panes exist before this app's share takes the
+        // chosen access. `bootReference` is handed `args.share`, so every pane on the
+        // page BOOTS with the access the caller asked for, and nothing may change it
+        // afterwards: a pane's synthetic app id is never a registered app's, so the
+        // setAppPin below cannot reach one, and set_pin refuses a pane outright.
+        // → server.test.ts "gives an extra pane the page's PIN instead of publishing it"
+        // → server.test.ts "refuses to set or remove a PIN on a pane"
         const refs: { reference: CompareReference; previewId: string; booted: boolean }[] = [];
         // Undo the panes THIS call started; a reused running pane is left alone,
         // because another page may be showing it right now.
@@ -631,7 +651,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             (refs.length
               ? ` It shows ${refs.length + 1} sources side by side under this one link. Drive a pane with describe/ui/screenshot using ITS OWN previewId from \`alongside\` — ${refs
                   .map((r) => `"${r.previewId}"`)
-                  .join(", ")} — with the same deviceIds (ios-0, android-1). A pane is NOT reachable by the source app's id: preview_status/parity_status/ui by that app id will say it isn't running, because a pane runs under a synthetic id. Never call start_preview on the source app to get a handle — that boots a second set of devices on a second link and the page keeps streaming the pane; re-read the pane ids with parity_status on THIS previewId instead. Judge each item yourself and record the verdict with parity_set (done / adjusted / regression). The checklist is local to this session — keep the project plan in your task tracker.`
+                  .join(", ")} — with the same deviceIds (ios-0, android-1). A pane is NOT reachable by the source app's id: preview_status/parity_status by that app id will say it isn't running, because a pane runs under a synthetic id (and describe/ui/screenshot take no app id at all). Never call start_preview on the source app to get a handle — that boots a second set of devices on a second link and the page keeps streaming the pane; re-read the pane ids with parity_status on THIS previewId instead. Judge each item yourself and record the verdict with parity_set (done / adjusted / regression). The checklist is local to this session — keep the project plan in your task tracker.`
               : "") +
             protectionNote,
         });
@@ -658,14 +678,14 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   // itself on a second URL to show it.
   const bootReference = (
     workingApp: App,
-    against: { app?: string; ref?: string; worktree?: string; repo?: string } | undefined,
+    alongside: { app?: string; ref?: string; worktree?: string; repo?: string } | undefined,
     devices: { platform: "ios" | "android"; runtime?: string; model?: string }[],
     share: { access: "public" | "pin"; pin?: string },
   ): { reference: CompareReference; previewId: string; booted: boolean } | CallToolResult => {
     // An entry with nothing named means "my migratesFrom" — that is the whole
     // point of declaring it, and it saves the agent repeating the source app id.
-    const named = against && (against.app || against.ref || against.worktree || against.repo);
-    const a = named ? against : workingApp.migratesFrom ? { app: workingApp.migratesFrom } : undefined;
+    const named = alongside && (alongside.app || alongside.ref || alongside.worktree || alongside.repo);
+    const a = named ? alongside : workingApp.migratesFrom ? { app: workingApp.migratesFrom } : undefined;
     if (!a) {
       return fail(
         "needs_reference",
@@ -686,7 +706,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       spec = source === "git" ? parseRefSpec({ ref: base.defaultBranch }) : undefined;
       key = `app:${resolved.id}`;
     } else if (a.worktree) {
-      if (!a.worktree.startsWith("/")) return fail("bad_request", "against.worktree must be an absolute path");
+      if (!a.worktree.startsWith("/")) return fail("bad_request", "an alongside worktree must be an absolute path");
       base = { ...workingApp, path: a.worktree, repo: undefined };
       source = "local";
       key = `worktree:${a.worktree}`;
@@ -694,8 +714,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       if (!a.ref) {
         return fail(
           "needs_ref",
-          `against.repo "${a.repo}" needs a ref — that repo's default branch is unknown`,
-          'pass against: { repo, ref } — e.g. ref: "main".',
+          `alongside repo "${a.repo}" needs a ref — that repo's default branch is unknown`,
+          'pass alongside: [{ repo, ref }] — e.g. ref: "main".',
         );
       }
       // An arbitrary repo reaches PAST the registered set and runs that repo's
@@ -716,12 +736,12 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       spec = parseRefSpec({ ref: a.ref });
       key = `repo:${a.repo}@${a.ref}`;
     } else {
-      // against.ref → the working app's build config at another git ref (needs a repo).
+      // alongside.ref → the working app's build config at another git ref (needs a repo).
       if (!workingApp.repo) {
         return fail(
           "local_only_app",
-          `app "${workingApp.id}" has no repo — an against.ref needs a git repo`,
-          "use against: { worktree: <abs path> } to compare against another local checkout instead",
+          `app "${workingApp.id}" has no repo — an alongside ref needs a git repo`,
+          "pass alongside: [{ worktree: <abs path> }] to show another local checkout instead",
         );
       }
       base = workingApp;
@@ -731,7 +751,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     }
     if (base.type === "web") return fail("web_not_supported", "extra panes are for mobile apps (iOS/Android), not web previews");
     // The reference ALWAYS boots under a synthetic, distinct app id. Sharing the
-    // working app's id (a same-app against.ref, or against.app pointing at itself)
+    // working app's id (a same-app alongside.ref, or alongside.app pointing at itself)
     // would collide on the per-app stable shareId (self-pairing) and per-app PIN,
     // and a public reference boot would wipe a registered app's persisted PIN. A
     // fresh id keyed by `key` stays stable across restarts (so compare is idempotent).
@@ -772,10 +792,10 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     return {
       reference: { shareId: result.shareId, repo: base.repo ?? refApp.id, ref },
       previewId: result.previewId,
-      // Whether THIS call booted it. The reference app id is keyed by
-      // repo+ref alone, not by the working app, so a second compare against the
-      // same reference reuses the running one — and the rollback below must not
-      // tear down a pane another compare session is using.
+      // Whether THIS call booted it. The reference app id is keyed by content and
+      // access class, not by the working app, so a second page against the same
+      // source AND the same access reuses the running one — and the rollback must
+      // not tear down a pane another page is using.
       booted: !result.alreadyRunning,
     };
   };
@@ -963,7 +983,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Describe the screen (accessibility tree)",
       description:
-        "Read the on-screen UI as a structured accessibility tree — the agent's eyes for driving the app. Use interactiveOnly for a compact, actionable list, and drive actions by #id/text/label selectors (the positional @e# refs are unstable across snapshots). Pair with `ui` to act and `screenshot` to eyeball. In a test loop, describe once to understand a new screen — then verify with `ui` waitFor/assert, not repeated full dumps. Needs the SimDeck testing backend on the deckhand machine.",
+        "Read the on-screen UI as a structured accessibility tree — the agent's eyes for driving the app. Call it with just previewId/deviceId: that snapshot is already the compact, actionable one. Drive actions by #id/text/label selectors (the positional @e# refs are unstable across snapshots). Pair with `ui` to act and `screenshot` to eyeball. In a test loop, describe once to understand a new screen — then verify with `ui` waitFor/assert, not repeated full dumps. Needs the SimDeck testing backend on the deckhand machine.",
       inputSchema: {
         previewId: z.string(),
         deviceId: z.string(),
@@ -971,7 +991,10 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           .string()
           .optional()
           .describe("auto (default), native-ax, nativescript, react-native, flutter, uikit, android-uiautomator"),
-        interactiveOnly: z.boolean().optional().describe("prune to tappable elements + ancestors (recommended in a loop)"),
+        interactiveOnly: z
+          .boolean()
+          .optional()
+          .describe("prune to tappable elements + ancestors — it applies only to the tree endpoint, which you reach by also passing source or maxDepth (or when the default snapshot comes back empty); on its own the default snapshot is already smaller and no less complete"),
         maxDepth: z.number().int().positive().optional(),
       },
     },
@@ -1087,7 +1110,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Set or remove a share PIN",
       description:
-        "Protect a running preview's share link with a numeric PIN, change it, or remove it (make the link public again) — the viewer URL stays the same. A web preview is the exception: its share is always PIN-protected, so remove:true is refused for one. Ask the user for a 4–6 digit PIN and NEVER repeat it back in chat. Pass previewId or app id. To remove protection, pass remove:true.",
+        "Protect a running preview's share link with a numeric PIN, change it, or remove it (make the link public again) — the viewer URL stays the same. Setting a PIN on a page protects every extra pane on it too, under the same PIN; removing one never publishes a pane. A web preview is the exception: its share is always PIN-protected, so remove:true is refused for one. Ask the user for a 4–6 digit PIN and NEVER repeat it back in chat. Pass previewId or app id. To remove protection, pass remove:true.",
       inputSchema: {
         previewId: z.string().optional().describe("from start_preview; or pass app instead"),
         app: z.string().optional().describe("app id — protects its running preview"),
@@ -1103,6 +1126,43 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         if (denied) return denied;
         const appId = engine.appIdFor(id);
         if (!appId) return fail("unknown_preview", `no active preview "${id}"`);
+        // A pane's access belongs to the PAGE that booted it, and is not
+        // separately settable. Its synthetic app id is what backs its share, so
+        // set_pin on a pane's previewId edited exactly the record the pane's gate
+        // reads — remove:true published half of a PIN-protected page on a URL the
+        // caller already holds, and a new PIN re-hashed the record every page
+        // sharing that content-keyed pane unlocks against.
+        // → server.test.ts "refuses to set or remove a PIN on a pane"
+        //
+        // The remedy is set_pin on the PAGE, which propagates (below) — so the hint
+        // names that page. It must never read as "a pane's access can't be changed":
+        // that sentence is what left a public page's panes unlockable after the
+        // operator reached for the padlock, and it is the direction of the fix.
+        // → server.test.ts "set_pin on a public page locks the panes whose shareIds it already disclosed"
+        if (engine.isReference(id)) {
+          const page = engine.pageShowingPane(id);
+          return fail(
+            "preview_is_a_pane",
+            `preview "${id}" is an extra pane on another page — its access follows that page's, and is not separately settable`,
+            page
+              ? `Call set_pin on the PAGE instead — previewId "${page}". Its PIN covers the page and every pane on it, this one included.`
+              : "Its page is gone, so nothing shows this pane any more — stop it with stop_preview rather than re-gating it.",
+          );
+        }
+        // A page's PIN has to reach the panes it shows. `setAppPin` only touches
+        // previews whose record.appId is the page's, and a pane runs under a
+        // synthetic, content-keyed id that no tool call names — so locking a page
+        // left every pane serving its own stream on a shareId the page had already
+        // published anonymously while it was public, under a response that said the
+        // link was now protected.
+        //
+        // SET propagates; REMOVE never does. Publishing a pane is the direction that
+        // was the hole, and a pane is keyed by CONTENT, so it may be one a SECOND
+        // page is also showing. Propagating a SET can cost that other page the pane
+        // (its access class is the same, so `partnerIsReachable` stops advertising a
+        // pane the other page cannot unlock) — a pane that disappears, never one
+        // that is exposed. Propagating a REMOVE would be the reverse trade.
+        const panes = engine.panesOf(id);
         if (args.remove) {
           engine.setAppPin(appId, null);
           return ok({ app: appId, protected: false, nextStep: "The link is now public — anyone with the URL can open it." });
@@ -1114,16 +1174,30 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             "Ask the user for a 4–6 digit code; don't repeat it in chat.",
           );
         }
+        // Panes first: a throw partway leaves them MORE protected than the page,
+        // never less. (Only the remove path of setAppPin can throw today.)
+        for (const pane of panes) if (pane.synthetic) engine.setAppPin(pane.appId, args.pin!);
         engine.setAppPin(appId, args.pin!);
+        // A migration-source pane is a registered app's own preview on its own
+        // link, so this call cannot gate it — say which one rather than let
+        // "PIN-protected" stand for a page still showing a public share.
+        const stillOpen = panes.filter((p) => !p.synthetic && !engine.pinInfoForShare(p.shareId).required).map((p) => p.appId);
         return ok({
           app: appId,
           protected: true,
-          nextStep: "The link is now PIN-protected — viewers must enter the PIN the user set. The URL is unchanged; don't repeat the PIN in chat.",
+          ...(panes.length ? { panesProtected: panes.filter((p) => p.synthetic).length } : {}),
+          nextStep:
+            (stillOpen.length
+              ? `The page's own link is now PIN-protected, but it also shows ${stillOpen.map((a) => `"${a}"`).join(", ")} — a registered app with its own PUBLIC share link, which this call cannot gate. Call set_pin { app: "${stillOpen[0]}" } with the same PIN, or that pane stays open to anyone.`
+              : panes.length
+                ? "The link is now PIN-protected — viewers must enter the PIN the user set, and it covers every extra pane on the page."
+                : "The link is now PIN-protected — viewers must enter the PIN the user set.") +
+            " The URL is unchanged; don't repeat the PIN in chat.",
         });
       }),
   );
 
-  // --- agent-driven test runs (surfaced live in the viewer, PLAN §8) ---------
+  // --- agent-driven test runs (surfaced live in the viewer, PLAN §6) ---------
 
   server.registerTool(
     "start_test_run",
@@ -1374,7 +1448,10 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           .enum(["expo", "react-native", "nativescript"])
           .optional()
           .describe("override auto-detection if it can't tell"),
-        branch: z.string().optional().describe("default branch to build (default: main)"),
+        branch: z
+          .string()
+          .optional()
+          .describe("pin the branch to build — omit it and deckhand detects the repo's own default branch (master, develop, …), falling back to main"),
         bundleId: z.string().optional().describe("iOS bundle id / Android package, if auto-detection can't find it"),
         migratesFrom: z
           .string()

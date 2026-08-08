@@ -1,15 +1,1 @@
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "G=\"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/bash-guard.ts\"; [ -f \"$G\" ] || exit 0; npx --prefix \"${CLAUDE_PROJECT_DIR:-.}\" tsx \"$G\""
-          }
-        ]
-      }
-    ]
-  }
-}
+{}
