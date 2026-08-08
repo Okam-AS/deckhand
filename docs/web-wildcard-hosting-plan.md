@@ -83,7 +83,8 @@ http://127.0.0.1:<devPort>/   (the framework's dev server, bound loopback, no --
 - **cloudflared ingress**: add a rule mapping that host → `http://127.0.0.1:4300`. The
   existing apex rule stays for MCP + path-based shares.
 - `deckhand setup --web-host <host>` does both of those. It does **not** write the config
-  key: `deckhand init` takes only hostname and port, and setup leaves an existing
+  key: `deckhand init` has no flag that writes it (`cmdInit` takes hostname, port and the
+  two GitHub App fields, and nothing else), and setup leaves an existing
   config.yaml alone — so `webHost:` goes into `~/.deckhand/config.yaml` by hand.
 
 ### 2. Host-based routing (server)
@@ -192,8 +193,8 @@ burdened with `webHost`/DNS. So web setup is strictly opt-in:
   - *Co-located agent* (shell on the machine / SSH — deckhand's intended setup model):
     find or clone the checkout, `deckhand app add <id> --path <dir> --type web`,
     `start_preview`. Tool responses already steer here (empty-state + add_app web hint).
-  - *Remote-only MCP agent* (no shell): web apps are **CLI-only to register** by design
-    (owner-scoped tokens can't touch repo-less local apps), so it relays the one
+  - *Remote-only MCP agent* (no shell): web apps are **CLI-only to register** by design —
+    `add_app` fails `web_local_only` for every caller, whoever they are — so it relays the one
     `deckhand app add … --type web` command for the user/co-located agent to run, then
     drives `start_preview`. The `start_preview` response also warns, in-band, when a
     subdomain-web app has no `webHost` yet (loopback-only until configured).

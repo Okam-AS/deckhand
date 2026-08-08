@@ -143,7 +143,10 @@ npx tsx server/src/cli.ts setup \
   `doctor` says so as a warning rather than a failure.
 
 `setup` creates the Cloudflare tunnel and DNS route, merges your cloudflared
-config (it never overwrites rules for other services), links `deckhand` onto your
+config (rules for other services are carried through the merge, and the previous
+file is copied to `config.yml.bak` before anything is written — so the one case
+the merge cannot preserve, a config.yml that will not parse and so comes back as
+nothing to merge with, is still recoverable by hand), links `deckhand` onto your
 PATH, writes deckhand's config, prints your **connector URL**, installs the
 LaunchAgents so it survives sleep and reboot, and runs `doctor`.
 
