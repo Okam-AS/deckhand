@@ -21,7 +21,16 @@ describe("streamBadge", () => {
     assert.equal(streamBadge("fallback", args), "Reduced quality");
     // The signature is the guard: there is no platform argument to special-case
     // with, so an Android device that dropped to MJPEG cannot look healthy.
-    assert.equal(streamBadge.length, 2, "a third argument would be a platform switch creeping back in");
+    // `Function.length` only sees the positional spelling — a `platform` field
+    // added to `opts` leaves it at 2 — so the likelier return of the switch is
+    // the line below, not this one.
+    assert.equal(streamBadge.length, 2, "a third POSITIONAL argument would be a platform switch creeping back in");
+    // Excess-property checking covers the other spelling. It is enforced by
+    // `npm run typecheck`, NOT by this run: tests run under tsx, which does not
+    // typecheck. Once `opts` accepts a platform, the error disappears and the
+    // unused @ts-expect-error is itself the failure.
+    // @ts-expect-error - opts takes no platform, and must not learn to
+    streamBadge("fallback", { ready: true, isThumb: false, platform: "android" });
   });
 
   it("shows the connecting pill before the first frame", () => {

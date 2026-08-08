@@ -11,9 +11,16 @@ import type { PlayerStatus } from "./player.ts";
  * so "fallback" means the same degradation everywhere: WebCodecs is gone, or the
  * helper had no H.264 to give. This used to suppress the pill for Android on the
  * grounds that MJPEG was Android's normal path; it stopped being that when the
- * Android helper started serving /stream.avcc (androidAdb.ts, which 404s it only
- * on an image whose encoder cannot run), and until this was removed a degraded
- * Android device looked identical to a healthy one.
+ * Android helper started serving /stream.avcc, and until this was removed a
+ * degraded Android device looked identical to a healthy one.
+ *
+ * That 404 is not a verdict on the device: `serveAvcc` sends it whenever
+ * `AvccSource.ready()` is false, which includes the whole backoff window after
+ * any failed probe — and the commonest cause is another emulator holding the
+ * host's single H.264 encoder, indistinguishable from a dead one from in there
+ * (see `settle` in androidH264.ts). So the pill can be right that this device is
+ * degraded now and wrong about why; it says "Reduced quality", which is true
+ * either way, and claims nothing about the hardware.
  *
  * The four causes behind "fallback" are deliberately not told apart. The player
  * collapses them into one status, so splitting the copy is not a string change —
