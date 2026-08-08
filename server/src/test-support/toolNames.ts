@@ -2,7 +2,7 @@
  * How the guardrails read the MCP tool registry out of `mcp/tools.ts`.
  *
  * Three checks are keyed on this one parse — every tool must be documented in PLAN
- * (docs.test.ts), every tool must be wrapped in `audited()` (invariants.test.ts, PLAN §11.2),
+ * (docs.test.ts), every tool must be wrapped in `audited()` (invariants.test.ts, PLAN §11 item 2),
  * and no dead name may appear in agent-facing text. A tool the parse cannot see is exempt from
  * all three, and none of them fails: the other nineteen tools keep their sentinels green, so a
  * PARTIAL miss is silent. That is why the pattern lives in one file instead of being written

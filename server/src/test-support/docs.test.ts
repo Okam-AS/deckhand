@@ -182,7 +182,7 @@ describe("docs describe the code that exists", () => {
 
   it("mentions no MCP tool that does not exist", () => {
     // PLAN documented `start_migration_preview` — a tool that never existed — for two weeks,
-    // and §11.3 gated a `compare_start` it never defined. Worse, the dead name leaked into a
+    // and §11 item 3 gated a `compare_start` it never defined. Worse, the dead name leaked into a
     // tool DESCRIPTION, i.e. into text an agent reads as instructions.
     //
     // There is no escape hatch for "recording history". There was one — any line containing
@@ -204,10 +204,18 @@ describe("docs describe the code that exists", () => {
     // when someone documents an error code. `.claude/rules/mcp-tools.md` carries the rule for
     // a reader instead.
     const NOT_TOOLS = new Set(["app_is_a_pane", "deck_unlock", "github_auth_missing", "needs_access_choice", "node_modules", "web_needs_pin"]);
-    const ghosts = [PLAN, AGENTS]
+    // Anti-vacuity, the same form the citation loops use: this loop's only input is a regex over
+    // prose, so a regex that stops matching leaves `ghosts` empty and the check green while
+    // examining nothing. Verified by mutation — neutering the pattern left this file 15/15.
+    const named = [PLAN, AGENTS]
       .flatMap((doc) => [...doc.matchAll(/`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`/g)])
-      .map((m) => m[1]!)
-      .filter((name) => !registered.includes(name) && !NOT_TOOLS.has(name));
+      .map((m) => m[1]!);
+    assert.ok(
+      named.length > 30,
+      `only ${named.length} backticked snake_case names found in PLAN.md/AGENTS.md — the pattern or the docs' ` +
+        `way of naming a tool changed, and this check is scanning nothing. Fix this check.`,
+    );
+    const ghosts = named.filter((name) => !registered.includes(name) && !NOT_TOOLS.has(name));
     assert.deepEqual(
       [...new Set(ghosts)],
       [],
@@ -237,9 +245,17 @@ describe("docs describe the code that exists", () => {
     // (`unknown_app`, `needs_pin`, `bad_request`, `invalid_client`), which trades a silent gap
     // for a check that fires on correct code — so this stays scoped, and the rule for a reader
     // is in `.claude/rules/mcp-tools.md`.
-    const ghostsInSource = [...TOOLS.matchAll(/`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`/g)]
-      .map((m) => m[1]!)
-      .filter((name) => !registered.includes(name));
+    // Anti-vacuity, as above and for the same reason. The floor is low because tools.ts
+    // backticks a tool name only where a description points at another tool — a handful of
+    // places — but a floor of a handful still separates "found nothing wrong" from "looked at
+    // nothing", which is the distinction the green tick cannot make on its own.
+    const namedInSource = [...TOOLS.matchAll(/`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`/g)].map((m) => m[1]!);
+    assert.ok(
+      namedInSource.length > 3,
+      `only ${namedInSource.length} backticked snake_case names found in tools.ts — the pattern, or the way ` +
+        `descriptions refer to another tool, changed. This check is scanning nothing. Fix this check.`,
+    );
+    const ghostsInSource = namedInSource.filter((name) => !registered.includes(name));
     assert.deepEqual(
       [...new Set(ghostsInSource)],
       [],

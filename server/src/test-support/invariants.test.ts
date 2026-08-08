@@ -11,7 +11,7 @@ import { repoFilesEndingWith } from "./repoFiles.ts";
  *
  * PLAN §2 (locked decisions) and §11 (security model) say outright that they are
  * "acceptance criteria, not suggestions" — but nothing enforced them, so they
- * were criteria only for whoever remembered to read 885 lines of prose. Every
+ * were criteria only for whoever remembered to read the whole document. Every
  * assertion below is one a reviewer would otherwise have to make by hand, and
  * several encode rules that were already broken once.
  *
@@ -201,7 +201,7 @@ describe("PLAN §2 — locked decisions", () => {
     // The pin is a security control, not hygiene: serve-sim exposes /exec and
     // /exec-ws, reachable from inside the simulator, which shares the host's
     // loopback. patch-package removes them. A caret range would silently take a
-    // version the patch does not apply to. (PLAN §11.1 caveat.)
+    // version the patch does not apply to. (PLAN §11 item 1 caveat.)
     const pkg = JSON.parse(read(join(REPO, "server", "package.json"))) as { dependencies: Record<string, string> };
     const pinned = pkg.dependencies["serve-sim"];
     assert.match(pinned ?? "", /^\d+\.\d+\.\d+$/, "serve-sim must be pinned exactly — a range can drift past the patch");
@@ -258,7 +258,7 @@ describe("PLAN §11 — security model", () => {
       "a registerTool() call uses a computed name, which opts it out of this check entirely",
     );
     for (const name of registered) {
-      assert.ok(audited.has(name), `MCP tool "${name}" is registered but never wrapped in audited() — PLAN §11.2`);
+      assert.ok(audited.has(name), `MCP tool "${name}" is registered but never wrapped in audited() — PLAN §11 item 2`);
     }
   });
 
@@ -298,7 +298,7 @@ describe("PLAN §11 — security model", () => {
         assert.match(
           m[1]!,
           /"127\.0\.0\.1"/,
-          `${rel(file)} binds .listen(${m[1]}) — PLAN §11.1 requires loopback only. If this is a probe rather ` +
+          `${rel(file)} binds .listen(${m[1]}) — PLAN §11 item 1 requires loopback only. If this is a probe rather ` +
             `than a server, add it to the exempt map with the reason.`,
         );
       }
@@ -330,14 +330,14 @@ describe("PLAN §11 — security model", () => {
           opts,
           null,
           `${rel(file)} constructs a WebSocketServer from something other than an object literal, so this ` +
-            `check cannot read its port or host. Pass the options inline — PLAN §11.1 is not opt-out-able ` +
+            `check cannot read its port or host. Pass the options inline — PLAN §11 item 1 is not opt-out-able ` +
             `by moving the object to a variable.`,
         );
         if (!/\bport\s*:/.test(opts!)) continue;
         assert.match(
           opts!,
           /\bhost\s*:\s*"127\.0\.0\.1"/,
-          `${rel(file)} constructs a WebSocketServer with its own port and no loopback host — PLAN §11.1. ` +
+          `${rel(file)} constructs a WebSocketServer with its own port and no loopback host — PLAN §11 item 1. ` +
             `Attach it to the HTTP server (\`noServer: true\`) or pass host: "127.0.0.1".`,
         );
       }
@@ -392,7 +392,7 @@ describe("PLAN §11 — security model", () => {
       assert.doesNotMatch(
         read(file),
         /(?:from|import\(?)\s*["'][^"']*secrets\.ts["']/,
-        `${rel(file)} imports secrets.ts — PLAN §11.5 keeps secrets off the MCP surface entirely`,
+        `${rel(file)} imports secrets.ts — PLAN §11 item 5 keeps secrets off the MCP surface entirely`,
       );
     }
   });
@@ -663,7 +663,11 @@ describe("the connector URL is public by construction", () => {
   });
 
   it("mounts the routers a connector needs, not merely defines them", () => {
-    const server = read(join(SRC, "server.ts"));
+    // Comments stripped, for the same reason the share gate and the hook check strip them: a
+    // commented-out `app.use("/pair", createPairRouter({…}))` is EXACTLY the "written, tested,
+    // never called" shape this check exists to catch, and reading server.ts raw made the
+    // disabling line satisfy the check that should have failed on it. Verified by mutation.
+    const server = stripComments(read(join(SRC, "server.ts")));
     for (const [what, call] of [
       ["the OAuth discovery documents", /app\.use\(createOAuthMetadataRouter\(/],
       ["/oauth", /app\.use\("\/oauth", createOAuthRouter\(/],
@@ -677,7 +681,10 @@ describe("the connector URL is public by construction", () => {
     // The public half of pairing asks for a code and proves nothing; the minting half needs
     // tokens.yaml. If `pairRouter` ever stopped authenticating, the connector URL alone would
     // approve its own request — a total bypass with nothing else failing.
-    const source = read(join(SRC, "oauth", "pairRouter.ts"));
+    // Comments stripped, like every other source-text check here: the two positive assertions
+    // would otherwise be satisfied by a comment naming the call it had just deleted, and the
+    // negative one fires on a comment explaining why an OAuth grant must not approve.
+    const source = stripComments(read(join(SRC, "oauth", "pairRouter.ts")));
     assert.match(source, /bearerToken\(/, "pairRouter must authenticate every call");
     assert.match(source, /deps\.auth\.authenticate\(/, "…against tokens.yaml, not against an OAuth grant");
     assert.doesNotMatch(source, /oauth\?\.authenticate|store\.authenticate\(/, "an OAuth grant must not be able to approve the next one");
@@ -693,7 +700,11 @@ describe("config that changes at runtime is watched", () => {
     //
     // A unit test cannot see the wiring — the same gap that left StreamingRouter.reapOrphans
     // written, tested and never called.
-    const server = read(join(SRC, "server.ts"));
+    //
+    // Comments stripped, like its sibling above: `// watchTokens(cfg)` is how a watcher gets
+    // switched off during a debugging session and left switched off, and reading server.ts raw
+    // let that line stand in for the call it disabled. Verified by mutation.
+    const server = stripComments(read(join(SRC, "server.ts")));
     for (const [what, call] of [
       ["apps.yaml", /watchApps\(/],
       ["tokens.yaml", /watchTokens\(/],
@@ -756,8 +767,13 @@ describe("one definition of the gate", () => {
     // missing `npm run build`, so a build-only failure reached CI after a push, which is the
     // one place a pre-commit gate is no use. Nothing failed, because each copy was internally
     // consistent.
-    const ci = readFileSync(join(REPO, ".github", "workflows", "ci.yml"), "utf8");
-    const hook = readFileSync(join(REPO, "ops", "hooks", "pre-commit"), "utf8");
+    // `#` comment lines dropped from both, exactly as the sibling check below does to this same
+    // hook, and for the same reason: BOTH files explain the one-definition rule in prose that
+    // contains the words `npm run ci`, so reading them raw let the explanation stand in for the
+    // step. A ci.yml whose only `npm run ci` is in the comment above the job satisfied this.
+    const decomment = (src: string): string => src.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+    const ci = decomment(readFileSync(join(REPO, ".github", "workflows", "ci.yml"), "utf8"));
+    const hook = decomment(readFileSync(join(REPO, "ops", "hooks", "pre-commit"), "utf8"));
     for (const [name, src] of [["ci.yml", ci], ["ops/hooks/pre-commit", hook]] as const) {
       assert.match(src, /npm run ci\b/, `${name} must invoke \`npm run ci\`, so there is one definition of the gate`);
       // Re-implementing the steps is the failure mode, not a style preference.
