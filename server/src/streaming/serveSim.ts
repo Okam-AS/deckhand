@@ -319,10 +319,10 @@ export class ServeSimBackend implements StreamingBackend {
    * from a set computed before the await it is used after. A helper attached DURING the sweep
    * is in neither list, so it survives the per-udid kill and the port sweep — the same guard
    * `sweepDeviceRecorders` applies on Android.
-   * → `serveSim.test.ts` "spares a helper attached DURING the sweep" (the kill loop),
-   *   "spares a helper attached DURING the port sweep",
-   *   "spares a port an in-flight attach has already claimed",
-   *   "forgets only the condemned RECORD, not whatever now sits under its udid"
+   * → `serveSim.test.ts` "spares a helper attached DURING the `serve-sim -k` kills",
+   *   `serveSim.test.ts` "spares a helper attached DURING the port sweep",
+   *   `serveSim.test.ts` "spares a port an in-flight attach has already claimed",
+   *   `serveSim.test.ts` "forgets only the condemned RECORD, not whatever now sits under its udid"
    *
    * Three things that guard does NOT close, so do not read it as more than it is:
    * - The blanket `-k` branch, taken only when we know of no helper at all (a fresh process):

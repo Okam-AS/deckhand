@@ -124,7 +124,7 @@ describe("ServeSimBackend — surviving helpers", () => {
     assert.equal(again.origin, stream.origin, "the spared helper is still remembered after the sweep");
   });
 
-  it("spares a helper attached DURING the sweep", async () => {
+  it("spares a helper attached DURING the `serve-sim -k` kills", async () => {
     // `keep` is a snapshot the engine took BEFORE this call, and the per-udid kills below it
     // are awaits — so a start_preview can attach after the snapshot and before the port
     // sweep. Its udid is in neither `keep` nor the condemned list, and both the kill loop and
