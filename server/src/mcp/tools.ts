@@ -7,7 +7,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { App, AppType, Config } from "../config.ts";
 import { appSchema, ConfigError, parseRepo, publicBaseUrl } from "../config.ts";
-import { versionStatus } from "../version.ts";
+import { versionStatus, type UpdateStatus } from "../version.ts";
 import { DEV_MENU_PREFLIGHT, devMenuHint } from "../testing/devMenu.ts";
 import { selectorMissHint } from "../testing/tree.ts";
 import type { Principal } from "../auth.ts";
@@ -54,27 +54,43 @@ export interface ToolContext {
  * The funnel has a hole, and it is a real one rather than a hypothesis: `screenshot` returns
  * an image content block, which has nowhere to carry JSON, so it goes around this and carries
  * no notice. It is the only such tool, and the guardrail below keeps it the only one — a
- * SECOND tool building a response by hand fails `mcp/responses.test.ts`. Nothing anywhere
- * exercises the notice itself; `deckhandUpdate` has no test.
+ * SECOND tool building a response by hand fails `mcp/responses.test.ts`.
  */
 function ok(data: Record<string, unknown>): CallToolResult {
-  const version = versionStatus();
-  // Two different "you are behind" states, and the one that was missing is the common one:
-  // the checkout was pulled and the process still runs the old code. Comparing the CHECKOUT
-  // to origin/main reports "up to date" while the running server is hours stale.
-  const notice =
-    version?.restartNeeded || version?.updateAvailable
-      ? {
-          deckhandUpdate: {
-            running: version.current,
-            checkout: version.checkout,
-            latest: version.latest,
-            action: version.restartNeeded ? "restart" : "pull-and-restart",
-          },
-          nextStep: version.note,
-        }
-      : {};
-  return { content: [{ type: "text", text: JSON.stringify({ ok: true, ...data, ...notice }) }] };
+  return { content: [{ type: "text", text: JSON.stringify(withUpdateNotice(data, versionStatus())) }] };
+}
+
+/**
+ * The success body, with the update notice attached ALONGSIDE whatever the tool said.
+ *
+ * Split out and exported so the notice has a test at all: `ok()` reads the real git state.
+ *
+ * The notice is a nag and the tool's `nextStep` is the thing the user needs, so the tool's
+ * wins. Spreading the notice over the data instead made the nag win in the steady state —
+ * any install on main that is behind, or pulled and not restarted — and `start_preview`'s
+ * "Give the user this link NOW" came back as "restart deckhand". The note is never lost
+ * either: it rides inside `deckhandUpdate`, and only surfaces as `nextStep` when the tool
+ * had nothing of its own to say.
+ * → `mcp/responses.test.ts` "the update notice never replaces a tool's own nextStep"
+ *
+ * Two different "you are behind" states, and the one that was missing is the common one: the
+ * checkout was pulled and the process still runs the old code. Comparing the CHECKOUT to
+ * origin/main reports "up to date" while the running server is hours stale.
+ */
+export function withUpdateNotice(data: Record<string, unknown>, version: UpdateStatus | null): Record<string, unknown> {
+  const body = { ok: true, ...data };
+  if (!version?.restartNeeded && !version?.updateAvailable) return body;
+  return {
+    ...body,
+    deckhandUpdate: {
+      running: version.current,
+      checkout: version.checkout,
+      latest: version.latest,
+      action: version.restartNeeded ? "restart" : "pull-and-restart",
+      note: version.note,
+    },
+    ...("nextStep" in body || version.note === undefined ? {} : { nextStep: version.note }),
+  };
 }
 
 function fail(code: string, message: string, hint?: string): CallToolResult {

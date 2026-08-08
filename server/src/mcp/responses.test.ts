@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { UpdateStatus } from "../version.ts";
+import { withUpdateNotice } from "./tools.ts";
 
 const TOOLS = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "tools.ts"), "utf8");
 
@@ -10,7 +12,7 @@ const TOOLS = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "tools.
  * `ok()` is where the `deckhandUpdate` notice is attached, so a tool that builds its own
  * response object silently opts out of it — which is what `screenshot` did, undetected, while
  * the comment on `ok()` claimed a funnel nobody could forget. This does not prove the notice
- * reaches an agent (nothing does; `deckhandUpdate` has no test). What it proves is narrower
+ * reaches an agent (the test below pins its SHAPE; nothing pins the delivery). What it proves is narrower
  * and is the thing that actually went wrong: exactly three places in tools.ts hand-build a
  * CallToolResult, and a fourth has to be argued for.
  *
@@ -56,4 +58,46 @@ test("only the two response helpers and screenshot's image build a result by han
       "screenshot tool's span — pick the tool that now follows it as the anchor",
   );
   assert.ok(image > screenshot && image < describe, "the image response is no longer inside the screenshot tool");
+});
+
+/**
+ * The notice is a NAG; the tool's `nextStep` is the thing the user needs. Spreading the
+ * notice over the data made the nag win, and it wins in the steady state — any install on
+ * main that is behind, or pulled and not restarted. `start_preview`'s "Give the user this
+ * link NOW" was replaced by "restart deckhand", so the agent relayed the restart and never
+ * the link.
+ */
+test("the update notice never replaces a tool's own nextStep", () => {
+  const version: UpdateStatus = {
+    current: "aaaaaaa",
+    checkout: "bbbbbbb",
+    restartNeeded: true,
+    describe: "v0.3.0-12-gbbbbbbb",
+    latest: "bbbbbbb",
+    branch: "main",
+    updateAvailable: false,
+    dirty: false,
+    note: "deckhand has been updated on disk but is still running the old code — restart it?",
+    checkedAt: new Date().toISOString(),
+  };
+
+  const own = withUpdateNotice({ url: "https://x/s/abc", nextStep: "Give the user this link NOW" }, version);
+  assert.equal(own.nextStep, "Give the user this link NOW", "the tool's own instruction was lost under the update nag");
+  assert.deepEqual(
+    own.deckhandUpdate,
+    { running: "aaaaaaa", checkout: "bbbbbbb", latest: "bbbbbbb", action: "restart", note: version.note },
+    "and the notice must still arrive — carrying its note, since it no longer owns nextStep",
+  );
+
+  // A tool with nothing of its own to say is where the note belongs at top level: that is
+  // the field an agent is told to relay.
+  const silent = withUpdateNotice({ apps: [] }, version);
+  assert.equal(silent.nextStep, version.note);
+
+  // Nothing to say: byte-identical to a response with no notice at all.
+  assert.deepEqual(withUpdateNotice({ apps: [] }, null), { ok: true, apps: [] });
+  assert.deepEqual(
+    withUpdateNotice({ apps: [] }, { ...version, restartNeeded: false, updateAvailable: false }),
+    { ok: true, apps: [] },
+  );
 });
