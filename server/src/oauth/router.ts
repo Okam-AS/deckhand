@@ -97,10 +97,17 @@ export const PAIR_FORM_SCRIPT = `
   // The code is single-use, so a second POST spends nothing and tells the visitor "invalid code"
   // about a code that just worked. Auto-submit makes that easy to hit: pasting submits, and the
   // hand already on its way to Connect clicks a form that is mid-flight.
+  // Typing or pasting a code submits without the button, so once one is away the button stops
+  // asking for a click and reports instead. It is still load-bearing where the script runs:
+  // implicit submission (Enter in a single-field form) goes through it, and it is the only way
+  // forward for a visitor whose field the browser restored — see the enable above. It is no
+  // fallback for a script that never ran: the markup ships it disabled, and only this script
+  // enables it.
   c.form.addEventListener("submit", (e) => {
     if (sent) { e.preventDefault(); return; }
     sent = true;
     b.disabled = true;
+    b.textContent = "Connecting…";
     c.readOnly = true;
   });
   // A visitor coming back to a restored page would otherwise find the lock still on, with nothing
@@ -111,6 +118,7 @@ export const PAIR_FORM_SCRIPT = `
     if (!e.persisted) return;
     sent = false;
     c.readOnly = false;
+    b.textContent = "Connect";
     b.disabled = c.value.length !== 7;
   });
   c.addEventListener("input", () => {
