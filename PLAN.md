@@ -488,9 +488,12 @@ The contract now:
   bound — the bind is what proves only one server is running, so a second `deckhand serve` dies
   on `EADDRINUSE` before it can delete the live server's sims and AVDs): deckhand binds a single
   loopback port, so exactly one server runs at a time and every `deckhand-…` device on the
-  machine at startup is by definition an orphan. Helpers are killed first (`serve-sim <udid>`;
-  emulators by their `-avd` argument, since orphans collide on console port 5554), then the
-  device is shut down. Devices the developer created themselves are never touched.
+  machine at startup is by definition an orphan. Helpers are killed first — matched on the
+  **udid**, allowing any suffix on the binary name, because the helper's real argv is
+  `node …/serve-sim/dist/serve-sim.js <udid> --port N …` and a `serve-sim <udid>` pattern
+  never matched it, so this reap silently killed nothing for as long as it existed
+  (`reaper.ts`); emulators by their `-avd` argument, since orphans collide on console port
+  5554. Then the device is shut down. Devices the developer created themselves are never touched.
 - **Pooled devices** (`limits.reuseDevices`, default on) are named by *shape*, not by preview:
   `deckhand-pool-<model>-<runtime>` / `deckhand_pool_<profile>_api<n>`. They are shut down on
   teardown and kept on disk for the next preview of that shape (concurrent previews of one shape
@@ -547,8 +550,11 @@ Essentials:
   device rather than deckhand, and embedding couples the server's stability to a native
   addon. Helpers bind loopback ports from `helperPortRange`; deckhand tracks
   pid/port per udid and reaps on detach. serve-sim also keeps a state file under
-  `$TMPDIR/serve-sim/` and supports `--list`/`--kill` — the janitor uses these to find and
-  kill **orphans** after crashes.
+  `$TMPDIR/serve-sim/`, but deckhand never reads it and never calls `--list`: **orphans**
+  left by a crash are collected by `reapOrphans` (`streaming/serveSim.ts`), which calls the
+  kill form (`-k [udid]`) and then sweeps `helperPortRange` with its own `lsof`, SIGKILLing
+  whatever still holds a port. That sweep is not the janitor's — it runs once at boot from
+  `server.ts`, and again from `deckhand doctor --device-only` in a second process.
 - Video: **`stream.avcc`** — H.264 in AVCC framing over a single long-lived **chunked HTTP
   response**, NOT a WebSocket — decoded with WebCodecs when the browser supports it
   (`codec: auto`), with automatic **MJPEG-over-HTTP fallback** (`stream.mjpeg`) — this
