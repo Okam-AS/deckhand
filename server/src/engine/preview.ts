@@ -508,6 +508,16 @@ export class PreviewEngine {
   private readonly leased = new Set<string>();
   /** poolName → the appId that last ran there, so a reused device is only wiped when it changes hands. */
   private readonly poolTenants = new Map<string, string>();
+  /**
+   * AVDs whose emulator did not confirm it had exited (`shutdown` returned false).
+   * Nothing here may be deleted from disk: the AVD name is the only handle
+   * `pkill -f "avd <name>"` has on a live QEMU, and `avdmanager delete` takes it
+   * out of `listAvds()` for good. The lease is gone by then, so "leased" cannot
+   * carry this — a released-but-still-running AVD is exactly what `trimPool`
+   * would otherwise pick as the cheapest thing to reclaim.
+   * → `preview.test.ts` "keeps an AVD whose emulator would not die" (all three paths).
+   */
+  private readonly unstoppedAvds = new Set<string>();
   /** Devices whose teardown is still in flight (they hold real resources until it finishes). */
   private tearingDown = 0;
 
@@ -1792,15 +1802,22 @@ export class PreviewEngine {
       // record.serial was never set, so teardown can't reach it either. Kill it
       // by the port we know before that port goes back in the pool, or the next
       // preview allocates 5554, collides, and streams the abandoned device.
-      await android.shutdown(serialForPort(port)).catch(() => {});
+      // And if it will not die, say so where teardown will read it: this device has no
+      // record.serial, so teardownDevices cannot re-ask and would otherwise delete the AVD
+      // of the emulator we just failed to kill.
+      this.noteStopped(avdName, await android.shutdown(serialForPort(port)).catch(() => false));
       this.androidPorts.delete(port);
       dev.androidPort = undefined;
       throw err;
     }
     dev.record.serial = serial;
     await this.abandonIfAborted(dev, async () => {
-      await android.shutdown(serial).catch(() => {});
-      if (!dev.poolName) await android.deleteAvd(avdName).catch(() => {});
+      // Same rule as teardownDevices: an emulator that has not confirmed it is gone keeps
+      // its AVD. An aborted start_preview is the likeliest place to hit it — the emulator
+      // finished booting milliseconds ago and is asked to die immediately.
+      const stoppedCleanly = await android.shutdown(serial).catch(() => false);
+      this.noteStopped(avdName, stoppedCleanly);
+      if (!dev.poolName && stoppedCleanly) await android.deleteAvd(avdName).catch(() => {});
     });
     return serial;
   }
@@ -3347,20 +3364,27 @@ export class PreviewEngine {
       // shape boots it again instead of paying for a create (and, on Android, a
       // fresh ~2 GB AVD image) every single time.
       const pooled = dev.poolName != null;
-      let stoppedCleanly = true;
       if (dev.record.platform === "android") {
-        // `shutdown` answers whether the device actually went away. It matters here and
-        // nowhere else: deleting the AVD takes its NAME out of `listAvds()`, and that name is
-        // the only thing `pkill -f "avd <name>"` in the reaper has to go on. Delete after a
-        // failed shutdown and a live QEMU is left with no collector — the 418%-CPU class.
+        // `shutdown` answers whether the device actually went away. Deleting the AVD takes its
+        // NAME out of `listAvds()`, and that name is the only thing `pkill -f "avd <name>"` in
+        // the reaper has to go on. Delete after a failed shutdown and a live QEMU is left with
+        // no collector — the 418%-CPU class.
         if (dev.record.serial) {
-          stoppedCleanly = await this.android().shutdown(dev.record.serial).catch(() => false);
+          const stoppedCleanly = await this.android().shutdown(dev.record.serial).catch(() => false);
+          if (dev.record.udid) this.noteStopped(dev.record.udid, stoppedCleanly);
           this.androidPorts.delete(portForSerial(dev.record.serial));
         }
         // Reserved before the boot, so it must be freed even when no serial ever
         // came back (boot timeout, emulator crash).
         if (dev.androidPort != null) this.androidPorts.delete(dev.androidPort);
-        if (dev.record.udid && !pooled && stoppedCleanly) await this.android().deleteAvd(dev.record.udid).catch(() => {}); // udid holds the AVD name
+        // The SET decides, not the local answer: a boot that threw has no serial to shut down
+        // here, and what it knew about its half-started emulator was recorded there. Asking
+        // "did I just stop it" instead would read a device nobody could stop as stopped.
+        // Recorded before the lease is released below — from that moment this set is the only
+        // thing standing between a live QEMU and `trimPool`'s delete.
+        if (dev.record.udid && !pooled && !this.unstoppedAvds.has(dev.record.udid)) {
+          await this.android().deleteAvd(dev.record.udid).catch(() => {}); // udid holds the AVD name
+        }
       } else if (dev.record.udid) {
         await this.d.simctl.shutdown(dev.record.udid).catch(() => {});
         if (!pooled) await this.d.simctl.delete(dev.record.udid).catch(() => {});
@@ -3375,6 +3399,17 @@ export class PreviewEngine {
       onReleased?.();
     }
     await this.trimPool();
+  }
+
+  /**
+   * Record what `AndroidManager.shutdown` answered for the emulator running `avdName`.
+   * Cleared on a clean stop so a pooled AVD that later shuts down properly becomes
+   * trimmable again — a name that could never leave this set would pin an AVD image
+   * (~2 GB) on disk for the life of the process.
+   */
+  private noteStopped(avdName: string, stoppedCleanly: boolean): void {
+    if (stoppedCleanly) this.unstoppedAvds.delete(avdName);
+    else this.unstoppedAvds.add(avdName);
   }
 
   /**
@@ -3409,7 +3444,12 @@ export class PreviewEngine {
     }
     let avdsKept = 0;
     for (const avd of avds) {
-      if (this.leased.has(avd)) continue;
+      // `unstoppedAvds` is a second, weaker kind of lease: teardown released the pool
+      // lease seconds ago and its emulator never confirmed it had exited, so this is a
+      // name attached to a possibly-live QEMU. Deleting it hides that process from the
+      // only sweep that can name it. It is not counted against `keepAvds` either — this
+      // is not a spare being kept, it is a device that would not go away.
+      if (this.leased.has(avd) || this.unstoppedAvds.has(avd)) continue;
       if (avdsKept < keepAvds) {
         avdsKept++;
         continue;

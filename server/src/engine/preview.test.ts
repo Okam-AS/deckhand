@@ -7,6 +7,7 @@ import { fakeMetro, fakeDevProcs, fakeSimctl, fakeAndroid, fakeWorktrees, fakeRe
 import { PreviewEngine, PreviewError, buildStepDetail, redactForShare, type PreviewEngineDeps, type StartPreviewRequest, type DeviceRequest } from "./preview.ts";
 import type { SimDeckControl } from "../testing/control.ts";
 import type { App, Config } from "../config.ts";
+import type { AndroidManager } from "../devices/android.ts";
 import type { RunResult } from "./procs.ts";
 import type { CommandStep } from "./recipes.ts";
 import type { DevRunSpec } from "./devProcess.ts";
@@ -80,7 +81,7 @@ interface Harness {
  * (`...androidFake(calls), attachedSerials: …`) instead of restating a whole
  * device manager to change a single answer.
  */
-function androidFake(calls: string[] = []) {
+function androidFake(calls: string[] = [], over: Partial<AndroidManager> = {}) {
   return fakeAndroid({
     // No emulator is attached in the fake world, so every console port is free.
     // Tests about port collisions override this.
@@ -104,6 +105,7 @@ function androidFake(calls: string[] = []) {
     shutdown: async () => true,
     deleteAvd: async () => {},
     describe: async () => "tree",
+    ...over,
   });
 }
 
@@ -2721,5 +2723,147 @@ describe("listDevices physical section", () => {
     assert.deepEqual(out.physical.android, []);
     assert.match(out.physical.errors!.ios!, /scanner exploded/);
     assert.match(out.physical.errors!.android!, /scanner exploded/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// An emulator that would not die keeps its AVD.
+//
+// `AndroidManager.shutdown` polls `adb get-state` to a deadline and answers
+// whether the device actually went away. Every caller that then deletes the AVD
+// regardless throws away the ONLY handle on the surviving QEMU: `pkill -f "avd
+// <name>"` in the reaper draws its names from `listAvds()`, and `avdmanager
+// delete` takes the name out of that list for good. The orphan holds the
+// machine's single H.264 encoder and drops every other emulator to MJPEG.
+//
+// Three paths reach a delete, and the guard on one of them was undone by the
+// next: teardown declined the delete, released the pool lease, and `trimPool`
+// then deleted the now-unleased AVD with no shutdown of its own.
+// ---------------------------------------------------------------------------
+
+describe("an emulator that would not die keeps its AVD", () => {
+  /** `shutdown` times out (false), and every AVD deletion is recorded. */
+  const stubborn = (calls: string[], over: Partial<AndroidManager> = {}) =>
+    androidFake(calls, {
+      shutdown: async (serial: string) => {
+        calls.push(`shutdown ${serial}`);
+        return false;
+      },
+      deleteAvd: async (name: string) => void calls.push(`deleteAvd ${name}`),
+      ...over,
+    });
+
+  const startAndroid = (h: Harness) =>
+    h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "android", runtime: "34" }],
+      access: "public",
+    });
+
+  it("declines the delete on teardown when the emulator never confirmed it was gone", async () => {
+    const calls: string[] = [];
+    const h = makeEngine({ android: stubborn(calls) });
+    startAndroid(h);
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+
+    await h.engine.stopPreview("pv1");
+
+    assert.ok(calls.some((c) => c.startsWith("shutdown ")), `teardown must try to stop it — saw ${JSON.stringify(calls)}`);
+    assert.deepEqual(
+      calls.filter((c) => c.startsWith("deleteAvd ")),
+      [],
+      "the AVD name is the reaper's only handle on the live emulator; it must survive",
+    );
+  });
+
+  it("keeps trimPool off it once the lease is released", async () => {
+    // The guard above lasts seven lines. Teardown declines the delete, releases the
+    // pool lease, and calls trimPool — which deletes pooled AVDs over budget with no
+    // shutdown and no ownership check. An AVD that has just stopped being leased is
+    // exactly what it reaches for first.
+    const calls: string[] = [];
+    const leased = "deckhand_pool_pixel_7_api34"; // the name leaseName builds for this shape
+    // Listed with the stuck AVD PAST the keep slot: `listAvds` order is avdmanager's,
+    // so the stuck one can sit anywhere, and only the position where it is over budget
+    // asks trimPool the question. First in the list, it survives by luck.
+    const kept = "deckhand_pool_spare_1"; // fills the single keep slot
+    const overBudget = "deckhand_pool_spare_2"; // and this one is what a trim is for
+    const h = makeEngine({
+      // Pooling on, and room for exactly one idle AVD.
+      config: { ...config, limits: { ...config.limits, reuseDevices: true, maxTotalDevices: 1 } },
+      android: stubborn(calls, { listAvds: async () => [kept, leased, overBudget] }),
+    });
+    startAndroid(h);
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+
+    await h.engine.stopPreview("pv1");
+
+    assert.ok(!calls.includes(`deleteAvd ${leased}`), `trimPool deleted a live emulator's AVD — saw ${JSON.stringify(calls)}`);
+    // …and the trim still happens: a guard that switched trimming off entirely would
+    // pass the line above while filling the disk with 2 GB images.
+    assert.ok(calls.includes(`deleteAvd ${overBudget}`), `an idle spare over budget must still be trimmed — saw ${JSON.stringify(calls)}`);
+  });
+
+  it("declines the delete when an aborted preview cannot stop the emulator it just booted", async () => {
+    // start_preview aborted while `bootEmulator` was in flight: the boot succeeds
+    // moments later and `abandonIfAborted` has to give the device back. Same rule —
+    // an emulator that will not die keeps its name.
+    const calls: string[] = [];
+    let releaseBoot!: () => void;
+    const booting = new Promise<void>((r) => (releaseBoot = r));
+    const h = makeEngine({
+      android: stubborn(calls, {
+        bootEmulator: async () => {
+          calls.push("emu boot");
+          await booting;
+          return "emulator-5554";
+        },
+      }),
+    });
+    startAndroid(h);
+    while (!calls.includes("emu boot")) await new Promise((r) => setTimeout(r, 5));
+
+    // Teardown runs first and cannot re-ask a device with no serial; what it does
+    // there is a separate question. This test is about what the boot path does when
+    // it comes back and finds the preview gone.
+    await h.engine.stopPreview("pv1");
+    calls.length = 0;
+    releaseBoot();
+    // The abandon path is not awaited by anything the test holds; wait for its own
+    // trace rather than for a phase, and give a delete that should not happen time
+    // to land after it.
+    for (let i = 0; i < 200 && !calls.some((c) => c.startsWith("shutdown ")); i++) await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.ok(calls.some((c) => c.startsWith("shutdown ")), `the abandoned emulator must be stopped — saw ${JSON.stringify(calls)}`);
+    assert.deepEqual(
+      calls.filter((c) => c.startsWith("deleteAvd ")),
+      [],
+      "an emulator that outlived its shutdown must keep its AVD name here too",
+    );
+  });
+
+  it("declines the delete when the emulator that outlived a boot TIMEOUT cannot be killed by port", async () => {
+    // The fourth path, and the one with no second chance: `bootEmulator` threw, so
+    // `record.serial` was never set — teardown cannot re-ask this device whether its
+    // emulator went away, and read its own silence as "nothing to keep". The kill by
+    // console port is the only place that answer exists, so it has to be recorded there.
+    const calls: string[] = [];
+    const h = makeEngine({
+      android: stubborn(calls, {
+        bootEmulator: async () => {
+          calls.push("emu boot");
+          throw new Error("did not finish booting");
+        },
+      }),
+    });
+    startAndroid(h);
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "failed");
+    await h.engine.stopPreview("pv1");
+
+    assert.ok(calls.some((c) => c.startsWith("shutdown ")), `the abandoned emulator must be killed by its port — saw ${JSON.stringify(calls)}`);
+    assert.deepEqual(calls.filter((c) => c.startsWith("deleteAvd ")), [], "a boot timeout that would not die keeps its AVD too");
   });
 });
