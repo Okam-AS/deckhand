@@ -290,8 +290,14 @@ export interface DeviceRequest {
  * `position` is 1-based and separate for exactly that reason. A counter that skips retired
  * ids reads as nonsense in a caption — a two-device preview captioned "android device 3".
  * It is a placeholder only: `bootIos`/`bootAndroid` overwrite the label with the real model
- * the moment boot starts, so it never has to track a later removal; what a user actually
- * reads it for is a device still pending, or one whose boot failed before it was named.
+ * the moment boot starts; what a user actually reads it for is a device still pending, or one
+ * whose boot failed before it was named.
+ *
+ * It is baked into the label once and never revisited, so it does NOT track a later removal:
+ * remove one of three same-platform devices and the next add is captioned with a number a
+ * survivor already carries. Two captions, never two ids — and only on devices that are both
+ * still unnamed, which is why it is left as it is rather than renumbering labels the boot
+ * path has already replaced with a real model.
  * → `preview.test.ts` "labels a device by its place in the preview, not by the id counter"
  */
 export function newLiveDevice(dev: DeviceRequest, index: number, position: number): LiveDevice {

@@ -130,6 +130,13 @@ describe("ServeSimBackend — surviving helpers", () => {
     // sweep. Its udid is in neither `keep` nor the condemned list, and both the kill loop and
     // the port sweep have to re-read `this.helpers` to see it. Getting this wrong SIGKILLs a
     // preview that just came up, on a port we then still believe is free.
+    //
+    // This case covers an attach landing in the KILL loop only — the three below cover the
+    // later windows: the port sweep's own awaits, an attach still in flight, and a re-attach
+    // of a condemned udid. This name reads as covering all four and does not; it is kept
+    // because `.claude/rules/streaming.md` cites it verbatim, and the siblings say which
+    // window each one holds. The sweep passed THIS one while still killing anything that
+    // attached a step later.
     const listening = new Map<number, number[]>();
     const killArgs: string[][] = [];
     const killedPids: number[] = [];
@@ -164,6 +171,141 @@ describe("ServeSimBackend — surviving helpers", () => {
     const again = await backend.attach({ platform: "ios", udid: "NEW" });
     assert.equal(again.origin, `http://127.0.0.1:3102`, "and it is still remembered, so the next attach does not reallocate its port");
     assert.equal(new URL(live.origin).port, "3100", "fixture sanity: the kept helper is inside the range too");
+  });
+
+  it("spares a helper attached DURING the port sweep", async () => {
+    // The port sweep awaits one `lsof` per port across the whole range, and `attach` is not
+    // serialised against it: `allocatePort` picks any port nothing holds, so an attach landing
+    // in one of those awaits takes a port that was free when the sweep started. A spared-port
+    // set computed once, before the loop, cannot contain it — and the sweep then SIGKILLs a
+    // daemon that is seconds from serving a preview, which reports `ready` with a dead stream.
+    const listening = new Map<number, number[]>();
+    const killedPids: number[] = [];
+    let fired = false;
+    let sweeping = false;
+    let attachedMidSweep: string | undefined;
+    const backend: ServeSimBackend = new ServeSimBackend({
+      portRange: [3100, 3102],
+      detachImpl: async (_bin, args) => {
+        const port = args[args.indexOf("-p") + 1]!;
+        return JSON.stringify({ port: Number(port), streamUrl: `http://127.0.0.1:${port}/helper/${args[args.length - 1]}/stream.mjpeg` });
+      },
+      killImpl: async () => {},
+      listenersImpl: async (port) => {
+        // The start_preview lands HERE: inside the sweep's own lsof await, after any set of
+        // spared ports could have been computed. `fired` keeps the attach's own port scan
+        // from re-entering this branch.
+        if (sweeping && port === 3102 && !fired) {
+          fired = true;
+          const s = await backend.attach({ platform: "ios", udid: "NEW" });
+          attachedMidSweep = new URL(s.origin).port;
+          listening.set(Number(attachedMidSweep), [9102]); // its daemon is now up and listening
+        }
+        return listening.get(port) ?? [];
+      },
+      killPidImpl: (pid) => killedPids.push(pid),
+    });
+
+    await backend.attach({ platform: "ios", udid: "LIVE" });
+    await backend.attach({ platform: "ios", udid: "DEAD" });
+    listening.set(3101, [9101]); // DEAD's daemon ignores `-k` — that is what the port sweep is for
+
+    sweeping = true; // only now may the fixture's attach fire: the window under test is the sweep's
+    await backend.reapOrphans(new Set(["LIVE"]));
+
+    assert.equal(attachedMidSweep, "3102", "fixture sanity: the mid-sweep attach took a port inside the swept range");
+    assert.deepEqual(killedPids, [9101], "only DEAD's surviving daemon is signalled — not the helper that attached mid-sweep");
+    const again = await backend.attach({ platform: "ios", udid: "NEW" });
+    assert.equal(again.origin, "http://127.0.0.1:3102", "and it is still remembered, so the next attach does not reallocate its port");
+  });
+
+  it("spares a port an in-flight attach has already claimed", async () => {
+    // An attach binds its port DURING `serve-sim --detach`, before `this.helpers` records the
+    // helper. Re-reading the map is not enough on its own for that instant: the listener is
+    // real and nothing in the map claims it. The claim is staked at allocation instead.
+    const listening = new Map<number, number[]>();
+    const killedPids: number[] = [];
+    let releaseDetach: (() => void) | undefined;
+    let fired = false;
+    let sweeping = false;
+    let inFlight: Promise<unknown> | undefined;
+    const backend: ServeSimBackend = new ServeSimBackend({
+      portRange: [3100, 3102],
+      detachImpl: async (_bin, args) => {
+        const port = Number(args[args.indexOf("-p") + 1]!);
+        const udid = args[args.length - 1]!;
+        if (udid === "NEW") {
+          // The daemon binds the port, then the CLI reports it — the window this covers.
+          listening.set(port, [9102]);
+          await new Promise<void>((r) => (releaseDetach = r));
+        }
+        return JSON.stringify({ port, streamUrl: `http://127.0.0.1:${port}/helper/${udid}/stream.mjpeg` });
+      },
+      killImpl: async () => {},
+      listenersImpl: async (port) => {
+        if (sweeping && port === 3102 && !fired) {
+          fired = true;
+          inFlight = backend.attach({ platform: "ios", udid: "NEW" });
+          // Let it run as far as its own detach await, where it holds the port and no helper
+          // record exists yet.
+          await new Promise((r) => setTimeout(r, 0));
+        }
+        return listening.get(port) ?? [];
+      },
+      killPidImpl: (pid) => killedPids.push(pid),
+    });
+
+    await backend.attach({ platform: "ios", udid: "LIVE" });
+    await backend.attach({ platform: "ios", udid: "DEAD" });
+    listening.set(3101, [9101]);
+
+    sweeping = true; // only now may the fixture's attach fire: the window under test is the sweep's
+    await backend.reapOrphans(new Set(["LIVE"]));
+    releaseDetach?.();
+    const s = (await inFlight) as { origin: string };
+
+    assert.equal(new URL(s.origin).port, "3102", "fixture sanity: the in-flight attach claimed a port inside the swept range");
+    assert.deepEqual(killedPids, [9101], "the daemon an unfinished attach had just bound must survive the sweep");
+  });
+
+  it("forgets only the condemned RECORD, not whatever now sits under its udid", async () => {
+    // The condemned list is fixed before the kills, but the deletion happens after them — and
+    // a re-attach of a condemned udid during those awaits puts a DIFFERENT record under the
+    // same key. Deleting by key alone forgot a live helper, which then had its port swept.
+    const listening = new Map<number, number[]>([[3101, [9101]]]);
+    const killedPids: number[] = [];
+    let reattached = false;
+    const backend: ServeSimBackend = new ServeSimBackend({
+      portRange: [3100, 3102],
+      detachImpl: async (_bin, args) => {
+        const port = Number(args[args.indexOf("-p") + 1]!);
+        return JSON.stringify({ port, streamUrl: `http://127.0.0.1:${port}/helper/${args[args.length - 1]}/stream.mjpeg` });
+      },
+      killImpl: async (_bin, args) => {
+        if (args[1] !== "DEAD" || reattached) return;
+        reattached = true;
+        // `-k` worked: DEAD's daemon is gone. The same udid is then re-attached mid-sweep and
+        // gets a NEW helper record — a different object under the same key, so identity is the
+        // only thing that tells it from the one the sweep condemned. (It lands back on the
+        // port `-k` just freed, and a live daemon on it is precisely what must not be killed.)
+        listening.delete(3101);
+        const s = await backend.attach({ platform: "ios", udid: "DEAD" });
+        listening.set(Number(new URL(s.origin).port), [9102]);
+      },
+      listenersImpl: async (port) => listening.get(port) ?? [],
+      killPidImpl: (pid) => killedPids.push(pid),
+    });
+
+    await backend.attach({ platform: "ios", udid: "LIVE" });
+    await backend.attach({ platform: "ios", udid: "DEAD" });
+    listening.set(3101, [9101]);
+
+    await backend.reapOrphans(new Set(["LIVE"]));
+
+    assert.ok(reattached, "fixture sanity: the re-attach ran inside the kill loop");
+    assert.deepEqual(killedPids, [], "the re-attached helper is still ours, so nothing in the range is signalled");
+    const again = await backend.attach({ platform: "ios", udid: "DEAD" });
+    assert.equal(again.origin, "http://127.0.0.1:3101", "and the record survives, so the next attach reuses it");
   });
 
   it("a pid that dies between the scan and the signal is not an error", async () => {
