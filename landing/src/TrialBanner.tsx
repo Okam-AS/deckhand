@@ -32,7 +32,7 @@ export function TrialBanner({ offer }: TrialBannerProps) {
           rel="noreferrer"
           target="_blank"
         >
-          Request a trial key
+          Request a trial
           <ArrowIcon />
         </a>
         <small>Trial access is currently provisioned directly.</small>

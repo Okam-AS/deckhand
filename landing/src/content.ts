@@ -1,5 +1,5 @@
 export interface PricingPlan {
-  name: "Solo" | "Team" | "Lifetime";
+  name: "Solo" | "Lifetime";
   amount: string;
   cadence: string;
   detail: string;
@@ -37,7 +37,8 @@ export interface RunTarget {
 export const productFacts = {
   slogan: "Your code. Always on your machine.",
   localOwnership: "Your machine · your tester · your code.",
-  cloudRole: "Validates your API key",
+  connectorRole: "Public by design",
+  pairingGate: "Pairing code",
   localRole: "Builds, boots, controls, and streams on your Mac",
   platforms: "iOS, Android, and web",
 } as const;
@@ -119,22 +120,14 @@ export const paidPricingPlans: readonly PricingPlan[] = [
     cadence: "per month",
     detail: "One developer, up to two machines.",
     features: ["Two registered machines", "Unlimited local previews", "Public or PIN-protected links"],
-    cta: "Choose Solo",
-  },
-  {
-    name: "Team",
-    amount: "NOK 275",
-    cadence: "per seat / month",
-    detail: "Minimum two seats. Support included.",
-    features: ["Everything in Solo", "Shared team workflow", "Support included"],
     featured: true,
-    cta: "Choose Team",
+    cta: "Choose Solo",
   },
   {
     name: "Lifetime",
     amount: "NOK 10,000",
     cadence: "one-time",
-    detail: "One API key, up to two machines.",
+    detail: "One purchase, up to two machines.",
     features: ["Single lifetime purchase", "Two registered machines", "All current core features"],
     cta: "Buy lifetime",
   },

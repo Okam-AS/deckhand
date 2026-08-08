@@ -84,7 +84,7 @@ function Hero() {
             rel="noreferrer"
             target="_blank"
           >
-            Request a trial key
+            Request a trial
             <ArrowIcon />
           </a>
           <a className="text-link" href="#product">
@@ -202,8 +202,9 @@ function LocalFirst() {
           </div>
           <h2>Your source stays where the work happens.</h2>
           <p>
-            The backend validates your API key; source, builds, devices, previews, and streams remain on your Mac.
-            The Deckhand MCP server runs beside your checkouts and native toolchains.
+            Your connector URL is public by design — what keeps everyone else out is a pairing code minted on
+            your Mac. A tunnel carries the request to that one machine, where source, builds, devices, previews,
+            and streams stay. The Deckhand MCP server runs beside your checkouts and native toolchains.
           </p>
           <ul className="security-list">
             <li>
@@ -227,14 +228,14 @@ function LocalFirst() {
               <CloudKeyIcon />
             </div>
             <div>
-              <span>Deckhand backend</span>
-              <strong>{productFacts.cloudRole}</strong>
+              <span>Your connector URL</span>
+              <strong>{productFacts.connectorRole}</strong>
             </div>
-            <span className="scope-chip">Narrow scope</span>
+            <span className="scope-chip">No secret</span>
           </div>
           <div className="architecture-rail" aria-hidden="true">
             <span />
-            <em>API key valid</em>
+            <em>{productFacts.pairingGate}</em>
             <span />
           </div>
           <div className="architecture-local">
@@ -337,7 +338,7 @@ function FinalCta() {
         Your local device lab is ready
       </div>
       <h2>Give your coding agent a pair of hands.</h2>
-      <p>Start with a 14-day trial. One API key, one local MCP server, every device you need.</p>
+      <p>Start with a 14-day trial. One local MCP server, one pairing code, every device you need.</p>
       <div className="hero-actions">
         <a
           className="button button-primary"
@@ -345,7 +346,7 @@ function FinalCta() {
           rel="noreferrer"
           target="_blank"
         >
-          Request a trial key
+          Request a trial
           <ArrowIcon />
         </a>
         <a className="text-link" href="#security">
