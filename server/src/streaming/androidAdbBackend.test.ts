@@ -303,4 +303,39 @@ describe("AndroidAdbBackend.reapOrphans — recorders left inside the emulator",
       await b.detach(device.serial).catch(() => {});
     }
   });
+
+  it("spares a device attached after it was already a candidate", async () => {
+    // The other half of the same window, and the one the candidate list cannot close.
+    // Ownership is decided per device as the list is built, then `hostRecorderSerials`
+    // is read and the loop awaits one 5s-timeout pkill per candidate — so an attach can
+    // land after a serial has been judged an orphan and before its kill goes out, up to
+    // N × 5s later. The `busy` snapshot is taken once and cannot see it; the helper map
+    // can, which is exactly what the method's docblock says the map is for. Re-checking
+    // it in the loop is what makes that true for a device already on the list.
+    const { adb } = fakeAdb();
+    const seen: string[] = [];
+    let attaching: Promise<unknown> | null = null;
+    const b: AndroidAdbBackend = new AndroidAdbBackend({
+      portRange: [3440, 3450],
+      adb: async (serial, args, o) => {
+        if (args[0] === "shell" && args[1] === "pkill") seen.push(serial);
+        if (args[0] === "emu") return { stdout: Buffer.from("deckhand_p1_1\nOK\n"), code: 0 };
+        return adb(serial, args, o);
+      },
+      listSerials: async () => ["emulator-5554"],
+      // Read AFTER the candidate list is built: emulator-5554 is already condemned by
+      // the time this attach lands.
+      hostRecorderSerials: async () => {
+        attaching ??= b.attach(device);
+        await attaching;
+        return new Set<string>();
+      },
+    });
+    try {
+      await b.reapOrphans();
+      assert.deepEqual(seen, [], "a candidate we started streaming is no longer an orphan");
+    } finally {
+      await b.detach(device.serial).catch(() => {});
+    }
+  });
 });

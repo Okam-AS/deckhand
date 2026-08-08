@@ -593,9 +593,12 @@ export class AndroidAdbBackend implements StreamingBackend {
    *      calling this, so every helper that survives the prune IS in `keep`.
    *      What it decides on its own is the attach that lands DURING the sweep
    *      — later than the engine's keep-set snapshot, later than the prune,
-   *      and visible here only because the map is read after an await.
+   *      and visible here only because the map is read after an await. Read
+   *      twice for that reason: once while judging a serial, and again before
+   *      its kill goes out, which can be N × 5 s later.
    *      → `androidAdbBackend.test.ts` "spares a device attached AFTER the
-   *      keep-set was taken"
+   *      keep-set was taken" and "spares a device attached after it was
+   *      already a candidate"
    *   4. no host-side `adb -s <serial> exec-out screenrecord` is alive. This is
    *      the only check that survives a process boundary, and it is what makes
    *      `deckhand doctor --device-only` — a separate process, empty helper map,
@@ -625,9 +628,10 @@ export class AndroidAdbBackend implements StreamingBackend {
       if (candidates.length === 0) return;
       // Read the owners LAST, which NARROWS the race and does not close it: the
       // loop below awaits one 5 s-timeout pkill per candidate, so by candidate N
-      // this snapshot can be N × 5 s old, and a `start_preview` that attached in
-      // the meantime has a recorder we cannot see. Reading it before the `emu avd
-      // name` probes would only have made it staler.
+      // this snapshot can be N × 5 s old. Reading it before the `emu avd name`
+      // probes would only have made it staler. What is left is a recorder started
+      // by ANOTHER process mid-sweep — an attach in this one is caught by the
+      // helper re-check in the loop, which is not a snapshot.
       //
       // Tolerable because of where the cost lands, not because the window is
       // small: the loser is one freshly started recorder, and `AvccSource` either
@@ -639,7 +643,9 @@ export class AndroidAdbBackend implements StreamingBackend {
       // passed all four ownership tests, and the pkill matches our own argv.
       const busy = await this.hostRecorderSerials();
       for (const serial of candidates) {
-        if (busy.has(serial)) continue;
+        // `busy` is that one snapshot; `this.helpers` is read fresh each time round, and
+        // it is the half of the window an attach lands in after its serial was condemned.
+        if (busy.has(serial) || this.helpers.has(serial)) continue;
         await this.adb(serial, ["shell", "pkill", "-INT", "-f", deviceShellQuote(RECORDER_PKILL_PATTERN)], {
           timeoutMs: 5_000,
         });
