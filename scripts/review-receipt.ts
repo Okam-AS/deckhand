@@ -325,8 +325,9 @@ function loadOrCreate(branch: string, dir = RECEIPT_DIR): Receipt {
 }
 
 /**
- * The gate. Pure, so the hook, the CLI and the tests share one definition of "reviewed
- * enough" — and so the thresholds are covered by tests rather than by trying it on a real PR.
+ * The gate. Pure, so the CLI (`check`, `round`, `handover`) and the tests share one definition
+ * of "reviewed enough" — and so the thresholds are covered by tests rather than by trying it
+ * on a real PR.
  */
 export function validate(receipt: Receipt | null, hash: string): Verdict {
   if (!receipt) {
@@ -336,10 +337,14 @@ export function validate(receipt: Receipt | null, hash: string): Verdict {
     };
   }
   // A receipt is a JSON file an agent can write, so it can be any shape at all. Reading a
-  // field off a malformed one used to throw, which took the PreToolUse hook down with a
-  // non-blocking error — a crash in the guard OPENS the gate it exists to close. Checking the
-  // top-level array was not enough: `rounds: [null]` and `waived: "x"` both still threw, one
-  // level in. Every field this function walks is checked before it is walked.
+  // field off a malformed one used to throw. Nothing catches that throw: `check`, `round` and
+  // `handover` all call this straight from the CLI, so it surfaces as a stack trace on a
+  // non-zero exit. That fails CLOSED — no handover is written — but it fails mute: the one
+  // thing that gets a stuck review moving ("the receipt is malformed, re-run the review") is
+  // what a verdict carries and an exception does not, and a tool that crashes reads as broken
+  // rather than as a state to fix. Checking the top-level array was not enough: `rounds:
+  // [null]` and `waived: "x"` both still threw, one level in. Every field this function walks
+  // is checked before it is walked.
   // Junk is REFUSED rather than skipped over. Filtering a null finding out and carrying on
   // would make the most permissive reading of a broken file the one the gate acts on, which is
   // the same failure in slower motion.

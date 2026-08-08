@@ -176,8 +176,8 @@ describe("the gate", () => {
     assert.match(!v.ok ? v.reason : "", /in place, not on a clean checkout/);
   });
 
-  // A crash in the guard OPENS the gate it exists to close: a PreToolUse hook that throws is
-  // reported as a non-blocking error and the command runs.
+  // `validate` is called straight from the CLI, so a throw here is a stack trace where the
+  // agent needs a reason and an instruction — refusing mute is refusing badly.
   it("returns a verdict rather than throwing on a malformed receipt", () => {
     // Every one of these reached a field read one level in and threw. The first two got past
     // the top-level `Array.isArray(rounds)` check that was supposed to cover this class — which
