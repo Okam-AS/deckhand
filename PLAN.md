@@ -425,7 +425,11 @@ It was hard-coded to 8081, and since every Metro answers `/status` the same way,
 developer's own `expo start` on 8081 passed the health check and the previewed app's native
 shell silently loaded a FOREIGN JS bundle — so deckhand picks a port nothing is listening on
 and then verifies the listener is in its own process group. One server reused across previews
-of the same app, keyed by an env-signature; restart only when env changes or health
+of the same app, keyed by app id + CHECKOUT PATH + env-signature. The checkout is in the key,
+not decoration: one app can have two live previews at different refs, and keying on app+env
+alone handed the second one the first checkout's bundle — the same foreign-bundle failure,
+with deckhand as the intruder, so no process-group check could catch it (`metro.ts`). Restart
+only when env changes or health
 (`GET /status`) fails. Env: `REACT_NATIVE_PACKAGER_HOSTNAME=127.0.0.1`. **Do not set `CI=1`
 on Metro** — verified on-device (Expo SDK 57) that CI mode puts Metro on a non-interactive
 path that never binds the dev server, so the app cannot load JS; `CI=1` belongs on the
@@ -563,8 +567,12 @@ Essentials:
   `$TMPDIR/serve-sim/`, but deckhand never reads it and never calls `--list`: **orphans**
   left by a crash are collected by `reapOrphans` (`streaming/serveSim.ts`), which calls the
   kill form (`-k [udid]`) and then sweeps `helperPortRange` with its own `lsof`, SIGKILLing
-  whatever still holds a port. That sweep is not the janitor's — it runs once at boot from
-  `server.ts`, and again from `deckhand doctor --device-only` in a second process.
+  whatever still holds a port. It runs once at boot, from `server.ts` by way of
+  `PreviewEngine.reapOrphans`, and nowhere else — the marker-based janitor cannot see a
+  serve-sim helper at all, because the helper daemonizes itself and so carries no env marker.
+  (`cli/doctor.ts` also calls `reapOrphans` in a second process, but that is the **Android**
+  backend's, in `smokeAndroid`'s teardown, and it fires on `--smoke` as much as on
+  `--device-only`. The iOS smoke path detaches its stream and deletes its simulator instead.)
 - Video: **`stream.avcc`** — H.264 in AVCC framing over a single long-lived **chunked HTTP
   response**, NOT a WebSocket — decoded with WebCodecs when the browser supports it
   (`codec: auto`), with automatic **MJPEG-over-HTTP fallback** (`stream.mjpeg`) — this
@@ -583,6 +591,11 @@ Essentials:
   the page mixes content and input dies).
 
 ### Android backend — the gate (2026-07-09) and what streams now
+
+**What streams now is H.264** (`streaming/androidH264.ts`). Everything down to "That path is no
+longer the primary one" is how it got there, and the `screencap` MJPEG backend it describes is
+today's FALLBACK — for a system image with no working AVC encoder, notably the API 29 emulator.
+Read the present tense in that list as "this is what the fallback does", not as Android's route.
 
 The gate (ws-scrcpy vs embedded scrcpy-server vs …) resolved at the time to: **ship an
 adb-based backend first, keep scrcpy H.264 as a possible upgrade behind the same seam.**
@@ -766,9 +779,12 @@ change eases in/out — nothing snaps.
   server (the watcher compares content, so rotating a value under the same name applies too).
   There are no roles: every credential is the operator's (CONSTITUTION §"Who it is for").
 - `deckhand doctor` — the verification loop, each check independently reportable:
-  toolchains present (xcodebuild, simctl, node; java, sdkmanager, adb, emulator for Android),
+  toolchains present (node, xcodebuild, simctl; adb and emulator for Android — a WARNING, not a
+  failure, because an iOS-only install is a working install),
   the vendored serve-sim present **with its exec-stripping patch still applied**, a connector
-  credential exists, GitHub App JWT mints and each installation returns a token, tunnel answers
+  credential exists, GitHub App JWT mints and lists its installations (it COUNTS them; it does
+  not mint an installation token for each — nothing here proves an individual install is usable),
+  tunnel answers
   **from the public hostname**. Exit non-zero on any failure. Plain `doctor`
   touches no device: it is the paperwork pass, and nothing in it proves video works.
   `--smoke` adds the hardware pass: it creates a simulator and an emulator and checks boot,
@@ -784,12 +800,23 @@ change eases in/out — nothing snaps.
 
 1. **Reachability**: deckhand and every streaming helper bind loopback; only cloudflared is
    exposed; TLS at Cloudflare's edge. **Amended (2026-08-07):** "no tokenless code path exists
-   at all" is no longer true, and pretending otherwise would hide where to look. Four paths are
-   unauthenticated *by construction*, because a client with no credential yet has to start
-   somewhere: the two `/.well-known/oauth-*` discovery documents (public, no secret in them),
-   `POST /oauth/register` (RFC 7591 dynamic registration — capped, since it writes to disk), and
-   `GET /oauth/authorize`, which is unauthenticated at the origin and gated by **a pairing code
-   the operator minted at the machine**. Registering or discovering buys nothing, and nothing
+   at all" is no longer true, and pretending otherwise would hide where to look. **Seven**
+   handlers take no credential *by construction*, because a client with no credential yet has to
+   start somewhere. The point of a list like this is that a reader can check it against
+   `server/src/oauth/router.ts`, so it is the whole of it, each with what actually stands in
+   front of it:
+
+   | Handler | What stands in front of it |
+   |---|---|
+   | `GET /.well-known/oauth-protected-resource` | nothing — public, no secret in it |
+   | `GET /.well-known/oauth-protected-resource/mcp` | nothing — the same document, served where a client that starts from the resource looks |
+   | `GET /.well-known/oauth-authorization-server` | nothing — public, no secret in it |
+   | `POST /oauth/register` | nothing — RFC 7591 has no credential to check, a client does not have one yet. Capped, since it writes to disk, and a client mid-pairing is never evicted |
+   | `GET /oauth/authorize` | nothing — it renders a form. It stores no request, decides nothing and mints nothing |
+   | `POST /oauth/authorize` | **the pairing code.** This is the one a stranger attacks: it SPENDS the code and is the only place an authorization code is minted. Wrong guesses lock out the SOURCE, never the code |
+   | `POST /oauth/token` | **the PKCE verifier.** The client is public — deckhand issues no client secret, so there is nothing else to present — and the authorization code is single-use, burnt even when redemption fails |
+
+   Registering or discovering buys nothing, and nothing
    incoming is stored: a grant needs a code that only `deckhand pair` produces, and wrong guesses
    lock out the SOURCE rather than burning the code (§11.6). The other direction — park the
    incoming request and let the operator approve one from a list — was tried and rejected,
@@ -832,9 +859,12 @@ change eases in/out — nothing snaps.
    only "configured: yes/no".
 6. **Shares**: 144-bit IDs, scrypt-hashed PINs, HMAC-signed unlock cookies, the
    `deck_unlock` cookie stripped before proxying so the HMAC never reaches the app,
-   shares die with their preview. The proxy exposes only video, `ax` and input for the
-   share's own devices — serve-sim's other endpoints (camera, devtools, exec) are never
-   forwarded. **Web previews (2026-07-15) are the deliberate exception:** a `web` app's
+   shares die with their preview. Of the helper, the proxy forwards only video, `ax` and input
+   for the share's own devices — serve-sim's other endpoints (camera, devtools, exec) are never
+   forwarded. It serves two routes of its own behind the same PIN gate, and they are part of the
+   surface even though neither reaches the helper: `POST …/restart`, the viewer's Rebuild button
+   for a local share (throttled), and `POST …/dev/:deviceId/clientlog`, which takes the browser's
+   own account of whether a frame ever decoded — the one thing that is invisible server-side. **Web previews (2026-07-15) are the deliberate exception:** a `web` app's
    share proxies the whole dev-server origin (a dev server serves arbitrary paths), so the
    PIN a web share always carries is the gate rather than a narrow allow-list. **The
    `shareId` is not part of that gate for every web share:** a path-hosted (Vite) share sits
@@ -876,10 +906,14 @@ operator saying so, once, per client, at the Mac**:
   code and walk to the Mac. Bounding the queue does not help — anything a stranger can create,
   a stranger can create enough of. Storing nothing incoming removes the class.
 - The two halves are protected differently, and that asymmetry IS the design. The public half
-  (`/oauth/register`, `/oauth/authorize`) proves nothing and needs nothing. The
-  deciding half (`/pair/*`) needs a `tokens.yaml` credential — obtainable only by being at the
-  machine. An OAuth grant deliberately cannot approve, or one connector could wave the next one
-  through.
+  (`/oauth/register`, `GET /oauth/authorize`, the discovery documents) proves nothing and needs
+  nothing — it registers a name and renders a form. The deciding half is `/pair/*`, which MINTS a
+  code and needs a `tokens.yaml` credential — obtainable only by being at the machine. Note where
+  that leaves `POST /oauth/authorize`: it is public like the first half and it decides like the
+  second, because SPENDING the code is exactly the moment the operator's decision takes effect.
+  It is the one endpoint a stranger can usefully attack, and the guess budget on it is what makes
+  the design hold — item 1 above lists it with the other six. An OAuth grant deliberately cannot
+  approve, or one connector could wave the next one through.
 - **Superseded (2026-08-07): Cloudflare Access and `connector.allowedEmails`.** Both are gone.
   They worked, but they made a from-scratch install stop dead on an errand deckhand could not
   perform — creating an Access application needs a Cloudflare API token with `Access: Edit`, a
