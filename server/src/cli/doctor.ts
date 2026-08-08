@@ -316,7 +316,10 @@ function checkWebHost(config: Config, apps: App[]): Check {
 async function smokeIos(config: Config): Promise<Check[]> {
   const label = (cap: string) => `smoke ios: ${cap}`;
   const simctl = new Simctl();
-  const backend = new ServeSimBackend({ portRange: config.streaming.serveSim.helperPortRange });
+  // `bin` is not optional in practice: without it the backend spawns whatever PATH calls
+  // "serve-sim", which is an unpatched build with a live /exec shell route — or nothing.
+  // → invariants.test.ts "makes every composition root name the vendored serve-sim binary"
+  const backend = new ServeSimBackend({ portRange: config.streaming.serveSim.helperPortRange, bin: vendoredServeSimBin() });
   let udid: string | undefined;
   const checks: Check[] = [];
   try {

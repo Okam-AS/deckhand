@@ -273,7 +273,7 @@ describe("AndroidAdbBackend.reapOrphans — recorders left inside the emulator",
   });
 
   it("never touches a physical device", async () => {
-    // Physical hardware is BORROWED (devices/physical.ts): deckhand does not
+    // Physical hardware is BORROWED — deckhand does not
     // stream it, so a screenrecord there is always somebody else's capture.
     const h = sweepHarness({ serials: ["R5CT30ABCDE"], avds: {} });
     await h.backend.reapOrphans();

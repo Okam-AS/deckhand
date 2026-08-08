@@ -279,6 +279,46 @@ describe("PLAN §8 — the streaming seam", () => {
       );
     }
   });
+
+  it("makes every composition root name the vendored serve-sim binary", () => {
+    // `ServeSimBackend`'s constructor falls back to `bin ?? "serve-sim"` — a bare PATH lookup,
+    // which on a machine with a global serve-sim resolves an UNPATCHED copy whose /exec route
+    // still runs host shell commands. That is precisely the channel the pin-and-patch check
+    // above exists to remove, and the pin cannot see it: it inspects node_modules, not who
+    // asks for it. doctor.ts shipped without a `bin` and spawned whatever PATH had; on a PATH
+    // with no serve-sim at all it spawned nothing, and the device gate reported ios stream and
+    // ios describe FAILED on a healthy machine. `npm run test:device` hid both, because npm
+    // prepends node_modules/.bin — the vendored copy — to PATH, so the runner resolved the
+    // right binary by accident. `deckhand doctor --device-only` does not.
+    //
+    // The assertion is `vendoredServeSimBin()`, not merely "some bin": `bin: "serve-sim"` is
+    // the bug spelled out longhand. Tests under streaming/ are exempt — they inject a
+    // detachImpl and never spawn anything.
+    const argsOf = (src: string, at: number): string => {
+      let depth = 0;
+      for (let i = at; i < src.length; i++) {
+        if (src[i] === "(") depth++;
+        else if (src[i] === ")" && --depth === 0) return src.slice(at, i + 1);
+      }
+      return src.slice(at);
+    };
+    let found = 0;
+    for (const file of [...sourceFiles(), ...testFiles()]) {
+      if (rel(file).startsWith("server/src/streaming/")) continue;
+      const src = read(file);
+      for (const m of src.matchAll(/new ServeSimBackend\s*\(/g)) {
+        found++;
+        assert.match(
+          argsOf(src, m.index + m[0].length - 1),
+          /vendoredServeSimBin\s*\(\s*\)/,
+          `${rel(file)} constructs ServeSimBackend without bin: vendoredServeSimBin(). It will spawn ` +
+            `whatever "serve-sim" PATH resolves — an unpatched build with a live /exec shell route, ` +
+            `or nothing at all. See the docblock on vendoredServeSimBin in streaming/serveSim.ts.`,
+        );
+      }
+    }
+    assert.ok(found >= 2, `only ${found} ServeSimBackend constructions found outside streaming/ — the check is wrong, fix it`);
+  });
 });
 
 describe("PLAN §11 — security model", () => {
