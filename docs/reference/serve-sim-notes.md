@@ -158,8 +158,9 @@ other previews.
 - Young project: the exact npm version is pinned in `server/package.json`, and
   `server/src/test-support/invariants.test.ts` fails the build on a range or on a patch file
   that no longer matches the pin — the pin is a security control, because `patch-package`
-  strips serve-sim's `/exec` routes. `deckhand doctor` verifies helper spawn plus a first
-  frame on that pinned copy. Apache-2.0 and small → vendor/fork is a real escape hatch.
+  strips serve-sim's `/exec` routes — which is what plain `deckhand doctor` checks about the
+  vendored copy: that it is installed and that the patch is still applied. Helper spawn plus
+  a first frame is the hardware pass, `deckhand doctor --device-only` (or `--smoke`). Apache-2.0 and small → vendor/fork is a real escape hatch.
 - Rides `simctl io` (public interface) — materially safer against new Xcode/iOS-runtime
   releases than private-framework bridges, but still verify early on beta Xcode.
 - iOS-only. Android is a separate backend behind the same `StreamingBackend` seam, and it is

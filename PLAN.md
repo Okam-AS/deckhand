@@ -44,7 +44,7 @@ implementation:
 | GitHub access | **Minimal GitHub App** — permissions `Contents: Read-only` (optionally `Pull requests: Read-only`), **no webhooks, no OAuth, no callback URLs**. One App ID + private key PEM on the mini. Each repo org installs the app and picks repos. Hourly installation tokens, injected into git via ephemeral `GIT_ASKPASS`. The set of app installations *is* the repo allowlist. **Amended (2026-07-10):** a **fine-grained PAT** (`Contents: Read-only`, selected repos) is an equally supported auth mode — same tokenResolver seam, far less setup, and the mode agent-led onboarding (§6) walks new users through. The App remains the recommended path for multi-org installs. **Amended (2026-07-15): the access ladder.** Asking a user for a PAT when the machine can already read the repo is bad onboarding, so credentials resolve in order: PAT file → GitHub App → (if `githubAmbient`, default on) the deckhand user's **gh CLI session** (`gh auth token`, in-memory, same `GIT_ASKPASS` handling) → anonymous git (public repos; gated on `allowPublicRepos`) → the one-time setup URL as **last resort**. Explicit credentials always shadow ambient ones, so an App's installation set remains the allowlist. Before any of this, onboarding steers to a **local checkout** when one exists (§6). Ambient tradeoff recorded in §11.4. |
 | Multi-org / multi-dev | **Dropped (2026-08-05.)** One install, one operator, however many repo orgs their credential reaches. A second developer runs their own deckhand; a colleague who only needs to WATCH uses the share link, which needs no token. |
 | Viewer | One page (ours — not serve-sim's preview UI), multiple devices side by side, live video + **touch control on** (not view-only), public or PIN-protected share links. |
-| Setup story | Setup on the mini will be performed **by an AI over SSH**. `AGENTS.md`/`CLAUDE.md` must be an agent runbook; `deckhand init` must be idempotent/resumable with non-interactive flags; `deckhand doctor` must prove the install works end to end. Target: only 3 human questions (GitHub App ID + PEM, tunnel hostname, the token name). |
+| Setup story | Setup on the mini will be performed **by an AI over SSH**. `AGENTS.md`/`CLAUDE.md` must be an agent runbook; the installer — `deckhand setup` (§10), not the config-writing `init` it calls — must be idempotent/resumable with non-interactive flags; `deckhand doctor --device-only` must prove the install works end to end on real hardware. The human is asked as little as the tooling cannot infer: `setup`'s preflight (`humanInput` in `cli/preflight.ts`) asks for a tunnel hostname, and optionally a second hostname for web previews. Credentials are not among them — the GitHub ladder (above) reaches an ambient `gh` session before it asks for anything. |
 | State | No database. `config.yaml`, `apps.yaml`, `tokens.yaml` + a small `state.json` (atomic writes) for restart recovery. Previews are ephemeral. |
 | Host | Apple Silicon Mac mini (serve-sim's helper binary is arm64-only). |
 
@@ -686,8 +686,9 @@ change eases in/out — nothing snaps.
 
 - `deckhand setup` — **the only command a new install needs.** Run with no arguments it is a
   PREFLIGHT: it reports every prerequisite (Node, Xcode, cloudflared, Android SDK) with *who
-  can fix it* — `fix:` for what a non-interactive process can do, `you:` and a **NEEDS YOU**
-  block for what needs a browser and someone's Cloudflare account. That classification
+  can fix it* — `fix:` for what a non-interactive process can do, `you:` for a fix only a
+  person at the machine can perform (an App Store Xcode, the machine's default Node), and a
+  **BLOCKED** block for what needs a browser and someone's Cloudflare account. That classification
   (`cli/preflight.ts`) exists because an agent handed only a repo URL will otherwise run
   `cloudflared tunnel login` and block on a prompt nobody sees.
   Run with `--hostname` it does the rest: adopt-or-create the named tunnel, DNS route,
@@ -712,11 +713,12 @@ change eases in/out — nothing snaps.
   There are no roles: every credential is the operator's (CONSTITUTION §"Who it is for").
 - `deckhand doctor` — the verification loop, each check independently reportable:
   toolchains present (xcodebuild, simctl, node; java, sdkmanager, adb, emulator for Android),
-  serve-sim helper spawns for a booted sim + **a first frame decodes** (the real "will video
-  work" check), GitHub App JWT mints and each installation returns a token, tunnel answers
-  **from the public hostname**, and disk tier. Exit non-zero on any failure.
+  the vendored serve-sim present **with its exec-stripping patch still applied**, a connector
+  credential exists, GitHub App JWT mints and each installation returns a token, tunnel answers
+  **from the public hostname**, and disk tier. Exit non-zero on any failure. Plain `doctor`
+  touches no device: it is the paperwork pass, and nothing in it proves video works.
   `--smoke` adds the hardware pass: it creates a simulator and an emulator and checks boot,
-  first frame and describe on each — six independent checks, no fixture app and no build.
+  **first frame** and describe on each — six independent checks, no fixture app and no build.
   `--device-only` runs that pass alone, and its exit code covers only the device checks.
 - `deckhand serve` — run the server (what launchd invokes).
 - `deckhand token add|rm|list|url`, `deckhand app add|list`,
