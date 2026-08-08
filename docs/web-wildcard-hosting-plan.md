@@ -1,9 +1,10 @@
 # Hosting non-Vite web frameworks at the root of their own host
 
-**Shipped.** deckhand detects the web framework and hosts Nuxt/Next/static at the ROOT of a
+**Shipped.** deckhand detects the web framework and hosts Nuxt/Next at the ROOT of a
 host of its own, via a host-based reverse proxy plus the framework's HMR websocket, with
 **zero checkout edits**. The public side is `webHost` in config (`server/src/config.ts`),
-set by `deckhand setup --web-host <host>`: one host that the installer controls and whose
+with `deckhand setup --web-host <host>` routing that host through the tunnel: one host that
+the installer controls and whose
 TLS cert already covers it, serving **the single active subdomain-web preview** at a time
 (`resolveWebHost` in `server/src/engine/preview.ts`, the middleware and HMR upgrade in
 `server/src/share/proxy.ts`). A `<hostId>.<hostname>` label is still matched, but only for
@@ -39,7 +40,7 @@ Frameworks that can't set their base path at runtime break this model:
 - **CRA** hardcodes `/` unless `homepage`/`PUBLIC_URL` is set at build time.
 
 Making these work path-based would require **editing tracked config files in the user's
-checkout** — which deckhand must never do (borrow-never-own; see AGENTS.md). This plan
+checkout** — which deckhand must never do (borrow-never-own; see AGENTS.md). Root hosting
 removes that requirement entirely.
 
 ## Core idea
@@ -81,38 +82,52 @@ http://127.0.0.1:<devPort>/   (the framework's dev server, bound loopback, no --
   host under your zone is covered by Cloudflare's free Universal SSL.
 - **cloudflared ingress**: add a rule mapping that host → `http://127.0.0.1:4300`. The
   existing apex rule stays for MCP + path-based shares.
-- `deckhand setup --web-host <host>` does both.
+- `deckhand setup --web-host <host>` does both of those. It does **not** write the config
+  key: `deckhand init` takes only hostname and port, and setup leaves an existing
+  config.yaml alone — so `webHost:` goes into `~/.deckhand/config.yaml` by hand.
 
 ### 2. Host-based routing (server)
-- Middleware keyed on the **Host header**: if it matches the configured `webHost`,
-  reverse-proxy `/*` to the active web preview's dev-server origin (loopback). A
-  `<hostId>.<hostname>` label resolves the same way for loopback testing. Otherwise 404.
-- Parallel to — not a replacement for — the existing path router (`/s/:shareId/...`), which
-  still serves MCP, the viewer, and device/Vite-path previews.
+- `createHostWebProxyMiddleware` (`server/src/share/proxy.ts`) keys on the **Host header**
+  and asks `engine.resolveWebHost`. A Host equal to the configured `webHost` resolves to
+  the single active (newest, non-terminal) subdomain-web preview; a `<hostId>.<...>` label
+  resolves to the preview whose shareId hashes to that label (loopback and tests). No match
+  → `next()`, so ordinary apex routing (MCP, viewer, path shares) proceeds — it is parallel
+  to the path router (`/s/:shareId/...`), not a replacement for it.
+- Resolving a Host also marks the preview active: a subdomain-hosted app has no `/s/<id>`
+  viewer polling behind it, so this is the only signal the idle sweep gets.
+- While the dev server is still starting, the middleware answers 503 with an
+  auto-refreshing "starting…" page instead of proxying.
 
 ### 3. Dev-server launch (engine + recipes)
-- Add a per-framework "root dev run" alongside `webDevRun` — **no `--base`**, framework's
-  own host/port flags:
-  - Vite: `vite --host 127.0.0.1 --port <p>` (base defaults to `/`).
-  - Nuxt 2: `nuxt-ts --hostname 127.0.0.1 --port <p>` (or `HOST`/`PORT` env).
-  - Next: `next dev -H 127.0.0.1 -p <p>`.
-  - Static: `vite preview` / a tiny static file server over `dist/`.
-- Detection (`detect.ts`) grows to classify the framework (already returns `web` for Vite;
-  add `nuxt`/`next` sub-classification, or a `webFramework` field on the app).
-- Readiness: same HTTP-200 probe (`WebBackend`), now against `http://127.0.0.1:<p>/`.
+- `webRootDevRun` (`server/src/engine/recipes.ts`) starts the dev server with **no
+  `--base`** and loopback host/port only: `--host 127.0.0.1 --port <p> --strictPort` for
+  Vite, `-H 127.0.0.1 -p <p>` for the rest. `startWebDevProcess` in `preview.ts` picks it
+  over `webDevRun` for subdomain-hosted apps.
+- `detect.ts` classifies the framework from the checkout's package.json deps and exports
+  `WebFramework` (`vite | nuxt | next | static`); `webHostingMode` maps it to `path` (Vite,
+  or an undetected `web` app) or `subdomain` (Nuxt/Next). The result is recorded on the
+  preview record as `webFramework`. `static` is declared but unreachable — no detector
+  returns it and nothing serves a built `dist/`.
+- Readiness: the same HTTP-200 probe (`WebBackend`), against `http://127.0.0.1:<p>/` with
+  an empty base path.
 
 ### 4. Reverse proxy (share/proxy.ts)
-- A **host-scoped** variant of the web proxy: forward the whole request (`req.originalUrl`,
-  any method later) to `${origin}${req.originalUrl}`; forward the framework's HMR websocket
-  wherever it lives (root for Vite, `/_nuxt/` for Nuxt webpack HMR — proxied because we
-  forward everything under the host). Keep `X-Forwarded-Proto: https`, `X-Forwarded-Host`,
-  safe close-code mapping, loopback-only upstream.
+- The host-scoped proxy forwards the whole request (`req.originalUrl`, any method, body
+  streamed) to `${origin}${req.originalUrl}`, sets `X-Forwarded-Proto: https` and
+  `X-Forwarded-Host`, drops any inbound `x-forwarded-*`, and re-streams the response.
+- `handleHostWebUpgrade` bridges the WebSocket upgrade at whatever path the framework's HMR
+  lives (root for Vite, `/_nuxt/` for Nuxt webpack HMR) to the same loopback origin, and
+  destroys the socket unless the share is unlocked and ready. Upstreams are loopback-only.
 
 ### 5. Share auth on the web host
-- The PIN gate runs on the web host before anything is proxied, and the unlock cookie it
-  sets is signed **per shareId** — a cookie minted for one share does not validate for
-  another. Never widen that cookie to a wildcard domain.
-- The 144-bit `shareId` stays as unguessable as it is in the path form.
+- **A web preview cannot start without a PIN** — enforced in `preview.ts` where the
+  preview is created, not only in the MCP tool, because on the configured `webHost` there
+  is no shareId in the URL to keep anything secret. The PIN is the whole gate there.
+- There is no React viewer on the web host, so the gate serves a standalone numeric pad.
+  The `deck_unlock` cookie it sets is HMAC-signed **per shareId** and bound to the PIN in
+  force, so a cookie minted for one share does not validate for another and a PIN change
+  invalidates it immediately. It is stripped from every request before proxying, so it
+  never reaches the app. Never widen that cookie to a wildcard domain.
 
 ### 6. Viewer
 - The host serves the app **directly** — no deckhand chrome, no iframe, and no React viewer
@@ -123,10 +138,11 @@ http://127.0.0.1:<devPort>/   (the framework's dev server, bound loopback, no --
   `X-Frame-Options: DENY` would break.
 
 ## Coexistence
-- Keep path-based Vite hosting as the default for Vite (no infra needed, works today).
-- Use subdomain hosting for non-Vite frameworks, or make it the default for all `web` apps
-  once the DNS/tunnel is in place. A per-app `hosting: path | subdomain` (auto-selected by
-  framework) keeps both live during migration.
+Both models are live, and the choice is **automatic, from the detected framework**
+(`webHostingMode` in `server/src/engine/detect.ts`): Vite — and any `web` app whose
+framework is not detected — hosts path-based under `/s/<shareId>/web/` with `--base`, and
+Nuxt/Next host at the root of the web host. There is no per-app hosting field and no
+override: nothing in config.yaml or apps.yaml selects the mode.
 
 ## Security (maps to PLAN §11)
 - **§11 item 1, loopback-only**: dev servers still bind `127.0.0.1`; the subdomain resolves to
@@ -147,7 +163,10 @@ http://127.0.0.1:<devPort>/   (the framework's dev server, bound loopback, no --
 | Vite | ✅ | ✅ | none |
 | Nuxt 2 | ❌ (needs `router.base`) | ✅ (`-H/-p`) | none |
 | Next.js | ❌ (needs `basePath`) | ✅ (`next dev -H -p`) | none |
-| CRA / static | ❌ | ✅ (serve `dist/` at root) | none |
+
+CRA and plain static builds are not in that table because they are not detected as `web`
+apps at all — `detectAppType` needs `nuxt`, `next` or `vite` in the dependencies, and
+nothing serves a built `dist/` at root.
 
 ## Verification
 - `deckhand app add <id> --path <abs-path-to-checkout> --type web` → `start_preview` →
@@ -163,12 +182,12 @@ Not every deckhand install hosts web apps — a mobile-only install must never b
 burdened with `webHost`/DNS. So web setup is strictly opt-in:
 
 - **`deckhand setup --web-host <host>`** (shipped) takes a first-level host under a domain
-  the user controls, e.g. `web.<their-domain>`, and wires it: the tunnel DNS route, the
-  ingress rule, and `webHost:` in config.yaml. Omit the flag and nothing about web appears —
-  a mobile-only install is never asked.
+  the user controls, e.g. `web.<their-domain>`, and wires the tunnel DNS route and the
+  ingress rule for it; `webHost:` itself is added to config.yaml by hand. Omit the flag and
+  nothing about web appears — a mobile-only install is never asked.
 - **`deckhand doctor`** (shipped) only surfaces web at all when web apps are registered:
   it's `skipped` with no web apps, a plain ✓ for Vite-only, and a non-failing ⚠ when a
-  Nuxt/Next/static app exists but `webHost` is unset. Doctor never fails on this.
+  Nuxt/Next app exists but `webHost` is unset. Doctor never fails on this.
 - **Per app** — "run up xxx webapp in deckhand":
   - *Co-located agent* (shell on the machine / SSH — deckhand's intended setup model):
     find or clone the checkout, `deckhand app add <id> --path <dir> --type web`,
@@ -183,8 +202,8 @@ Net: Vite works out of the box with zero web setup; Nuxt/Next need the one-time 
 `webHost` step; nothing is imposed on installs that don't host web.
 
 ## Open questions / risks
-- **cloudflared wildcard ingress** exact syntax, if the wildcard upgrade is ever taken —
+- **cloudflared wildcard ingress** exact syntax, if the per-share wildcard is ever taken —
   a wildcard hostname may need its own DNS route add.
-- **Nuxt 2 webpack HMR** (sockjs/websocket at `/_nuxt/`) through the proxy — needs a real
-  end-to-end check like the Vite `vite-hmr` one already done.
-- Per-framework dev-run flags and detection surface (a small `webFramework` enum).
+- **Nuxt 2 webpack HMR** (sockjs/websocket at `/_nuxt/`) through the proxy is **not
+  verified end to end.** The upgrade path is wired (`handleHostWebUpgrade`) and Vite's
+  `vite-hmr` socket is proxied, but nobody has watched a Nuxt edit hot-reload through it.
