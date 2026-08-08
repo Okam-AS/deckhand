@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import type { Simctl, SimDevice } from "../devices/ios.ts";
-import type { AndroidManager } from "../devices/android.ts";
+import { AVD_PREFIX, type AndroidManager } from "../devices/android.ts";
 
 // ---------------------------------------------------------------------------
 // Orphan reaper. A deckhand process owns every simulator/AVD it names
@@ -21,8 +21,6 @@ import type { AndroidManager } from "../devices/android.ts";
 
 /** Simulator names deckhand creates: `deckhand-<previewId>-<deviceId>`. */
 export const SIM_PREFIX = "deckhand-";
-/** AVD names deckhand creates: `deckhand_<previewId>_<deviceId>` (avdmanager forbids "-"). */
-export const AVD_PREFIX = "deckhand_";
 /** Pooled devices are named by shape, not by preview — they outlive a preview on purpose. */
 export const POOL_SIM_PREFIX = "deckhand-pool-";
 export const POOL_AVD_PREFIX = "deckhand_pool_";

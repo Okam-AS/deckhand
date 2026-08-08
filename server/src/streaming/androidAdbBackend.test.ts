@@ -279,15 +279,4 @@ describe("AndroidAdbBackend.reapOrphans — recorders left inside the emulator",
       assert.deepEqual(seen, [], "the helper we hold is live work, not an orphan");
     });
   });
-
-  it("owns the same AVD prefix the reaper does", async () => {
-    // The prefix is duplicated rather than imported, to keep the streaming seam
-    // free of an engine dependency. Nothing else would notice them drifting:
-    // the sweep would simply stop recognising deckhand's own emulators and go
-    // quietly back to sweeping nothing.
-    const { AVD_PREFIX } = await import("../engine/reaper.ts");
-    const h = sweepHarness({ serials: ["emulator-5554"], avds: { "emulator-5554": `${AVD_PREFIX}p1_1` } });
-    await h.backend.reapOrphans();
-    assert.deepEqual(h.killed(), ["emulator-5554"], "reaper's AVD prefix is the one this sweep recognises");
-  });
 });

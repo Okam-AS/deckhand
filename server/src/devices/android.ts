@@ -15,6 +15,17 @@ import { androidProcessEnv } from "./toolEnv.ts";
 // GitHub runners cannot boot an emulator; both are run by hand.
 // ---------------------------------------------------------------------------
 
+/**
+ * AVD names deckhand creates: `deckhand_<previewId>_<deviceId>` (avdmanager
+ * forbids "-"), and `deckhand_pool_…`, which shares the prefix.
+ *
+ * It lives here, in the shared low-level device layer, because both the engine
+ * (`engine/reaper.ts`) and the streaming seam (`streaming/androidAdb.ts`) have
+ * to recognise deckhand's own emulators, and the seam takes no dependency on
+ * the engine. Two copies of the string could drift with nothing to notice.
+ */
+export const AVD_PREFIX = "deckhand_";
+
 export interface ExecResult {
   stdout: Buffer;
   stderr: string;

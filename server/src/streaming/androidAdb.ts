@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { WebSocketServer, type WebSocket } from "ws";
 import { allocatePort, helperBasePath, type AttachedStream, type StreamDeviceRef, type StreamingBackend } from "./backend.ts";
 import { AvccSource, RECORDER_PKILL_PATTERN } from "./androidH264.ts";
-import { parseAdbDevices } from "../devices/android.ts";
+import { AVD_PREFIX, parseAdbDevices } from "../devices/android.ts";
 
 /**
  * How long to keep asking a freshly booted emulator for a frame. Matches the
@@ -56,22 +56,6 @@ export interface AndroidAdbOptions {
    */
   hostRecorderSerials?: () => Promise<Set<string>>;
 }
-
-/**
- * AVD names deckhand creates (`deckhand_<previewId>_<deviceId>`, and
- * `deckhand_pool_…`, which shares the prefix). Duplicated from
- * `engine/reaper.ts` rather than imported because the seam takes no dependency
- * on the ENGINE — the orchestration layer that owns previews, worktrees and
- * spawns, and that imports this backend's world rather than the reverse.
- *
- * `devices/` is NOT that layer, which is why `parseAdbDevices` above is a plain
- * import and this is not: it is the shared low-level device layer, imported by
- * `server.ts`, `cli/doctor.ts` and the engine alike and importing none of them.
- * A constant naming AVDs would sit there quite happily; it lives in the reaper
- * today, so this copy is the price, and a drift is compile-time invisible.
- * → `androidAdbBackend.test.ts` "owns the same AVD prefix the reaper does"
- */
-const DECKHAND_AVD_PREFIX = "deckhand_";
 
 /** Parse `adb shell wm size` → device pixel dimensions. */
 export function parseWmSize(output: string): { w: number; h: number } | null {
@@ -623,7 +607,7 @@ export class AndroidAdbBackend implements StreamingBackend {
         const res = await this.adb(serial, ["emu", "avd", "name"], { timeoutMs: 5_000 });
         if (res.code !== 0) continue;
         const avd = parseEmuAvdName(res.stdout.toString());
-        if (!avd || !avd.startsWith(DECKHAND_AVD_PREFIX) || keep.has(avd)) continue;
+        if (!avd || !avd.startsWith(AVD_PREFIX) || keep.has(avd)) continue;
         candidates.push(serial);
       }
       if (candidates.length === 0) return;
