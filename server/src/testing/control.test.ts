@@ -279,11 +279,14 @@ describe("SimDeckControl.action", () => {
 //   - the runtime assertions see only the methods they call, so a method added tomorrow
 //     that opens /input or attaches a token is simply not exercised, and passes.
 // So both are also asserted against the SOURCE of server/src/testing/, which nothing new
-// in this directory can be outside of. Comments are stripped first: the rules themselves
-// are written in the file headers, and quoting a prohibition used to satisfy it.
+// in this directory can be outside of. The walk is recursive so a subdirectory added later
+// is covered too — the rule file scopes itself to `server/src/testing/**`, and a scan that
+// stopped at the top level would have made that scope a claim with nothing behind it.
+// Comments are stripped first: the rules themselves are written in the file headers, and
+// quoting a prohibition used to satisfy it.
 describe("the SimDeck client's source", () => {
   const DIR = import.meta.dirname;
-  const sources = readdirSync(DIR)
+  const sources = readdirSync(DIR, { recursive: true, encoding: "utf8" })
     .filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"))
     .map((f) => [f, stripComments(readFileSync(join(DIR, f), "utf8"))] as const);
 
@@ -300,6 +303,7 @@ describe("the SimDeck client's source", () => {
   });
 
   it("names no /input, /control, /webrtc or /refresh endpoint", () => {
+    assert.ok(sources.length >= 2, "read no sources — the scan below would be vacuous");
     for (const [file, src] of sources) {
       assert.doesNotMatch(
         src,
@@ -310,6 +314,7 @@ describe("the SimDeck client's source", () => {
   });
 
   it("sends no credential to SimDeck", () => {
+    assert.ok(sources.length >= 2, "read no sources — the scan below would be vacuous");
     for (const [file, src] of sources) {
       assert.doesNotMatch(
         src,
