@@ -77,6 +77,36 @@ button[disabled]{opacity:.45;cursor:default;transform:none}
 }
 
 /**
+ * The pairing form's behaviour, as source rather than inline in the page, so a test can run it
+ * against stub elements. It is browser code: no imports, no TypeScript.
+ */
+export const PAIR_FORM_SCRIPT = `
+  const c = document.getElementById("c"), b = document.getElementById("b");
+  const format = (v) => {
+    const raw = v.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
+    return raw.length > 3 ? raw.slice(0, 3) + "-" + raw.slice(3) : raw;
+  };
+  let sent = false;
+  // The code is single-use, so a second POST spends nothing and tells the visitor "invalid code"
+  // about a code that just worked. Auto-submit makes that easy to hit: pasting submits, and the
+  // hand already on its way to Connect clicks a form that is mid-flight.
+  c.form.addEventListener("submit", (e) => {
+    if (sent) { e.preventDefault(); return; }
+    sent = true;
+    b.disabled = true;
+    c.readOnly = true;
+  });
+  c.addEventListener("input", () => {
+    if (sent) return;
+    c.value = format(c.value);
+    b.disabled = c.value.length !== 7;
+    // Submitting on completion, because the last thing between two screens should not be
+    // hunting for a button.
+    if (!b.disabled) c.form.requestSubmit();
+  });
+`;
+
+/**
  * The page that asks for the code.
  *
  * No status, no polling, no waiting: the browser holds everything needed to finish, and the
@@ -110,20 +140,7 @@ function codeForm(
           their own trusted hostname and collect the grant. -->
      <p class="who">Connecting <strong>${esc(req.clientName)}</strong><br><span>${esc(new URL(req.redirectUri).host)}</span></p>
      <p class="hint">Run <code>deckhand pair</code> on the Mac to get a code.</p>
-     <script>
-       const c = document.getElementById("c"), b = document.getElementById("b");
-       const format = (v) => {
-         const raw = v.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
-         return raw.length > 3 ? raw.slice(0, 3) + "-" + raw.slice(3) : raw;
-       };
-       c.addEventListener("input", () => {
-         c.value = format(c.value);
-         b.disabled = c.value.length !== 7;
-         // Submitting on completion, because the last thing between two screens should not be
-         // hunting for a button.
-         if (!b.disabled) c.form.requestSubmit();
-       });
-     </script>`,
+     <script>${PAIR_FORM_SCRIPT}</script>`,
     "Ask whoever runs this deckhand for the code.",
   );
 }
