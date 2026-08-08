@@ -146,13 +146,16 @@ surfaces **no blocking finding an earlier round hadn't already reported**.
    `should`, so the lazy path is the safe one, and a nit a later round raises to `should`
    **does** count as new — filing something small to defuse it doesn't work.
 3. **Fix a blocking finding, then SAY SO in the next round.** Put its fingerprint (from
-   `review:show`) in that round's `"resolved": [...]`. That round has to sit at a different
-   diff than the one that raised it — a fix moves the code, so if the hash has not moved you
-   have not fixed anything. Record it once and it carries forward; re-report it and it
-   reopens. Until you record it the finding is open however many rounds pass without
-   mentioning it, and the handover will say so. Not bookkeeping for its own sake: `validate`
-   used to clear a finding the moment ANY edit moved the hash, so fixing one finding
-   silently cleared every other one raised beside it.
+   `review:show`) in that round's `"resolved": [...]`. The TRACKED code has to have moved on
+   from what the finding was raised against, and must not have gone back to it — a fix moves
+   the code, so if it has not moved you have not fixed anything, and if it moved back you have
+   unfixed it. Record it once and it carries forward; re-report it and it reopens. Until you
+   record it the finding is open however many rounds pass without mentioning it.
+   Not bookkeeping for its own sake, and the wording is exact for a reason. `validate` first
+   cleared a finding the moment ANY edit moved the hash, so fixing one finding silently
+   cleared every other one raised beside it. The repair — "a later round at a DIFFERENT diff"
+   — was then bypassed with `touch scratch.tmp` … `resolved` … `rm scratch.tmp`, because
+   `diffHash` folds in untracked files. Hence "tracked", and hence the revert clause.
 4. **Don't count "new" yourself.** `review:round` deduplicates against every earlier round,
    including rounds recorded in sessions you never saw. That is the number the gate rests
    on, so it is computed, not asserted.

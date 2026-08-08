@@ -271,11 +271,14 @@ Two things it enforces that cost a round if you learn them late:
   `waived` takes the fingerprint from `review:show` and a sentence saying why it
   cannot be mechanised or why it is acceptable — at least 20 characters, because
   waiving used to cost nothing while reporting demanded evidence, which made
-  dismissing a bug cheaper than raising one. **"Fixed" means a LATER round, at a
-  different diff, lists the fingerprint in `resolved`** — the diff has to have moved,
-  because a fix moves the code and re-reading it does not, so a round cannot clear
-  what it is itself looking at. Record it once and it carries forward; re-report it
-  and it reopens.
+  dismissing a bug cheaper than raising one. **"Fixed" means a LATER round lists the
+  fingerprint in `resolved`, and the TRACKED CODE has moved on from what the finding
+  was raised against — and has not since gone back to it.** Both halves matter. "A
+  different diff" was the first attempt and it was not enough: `diffHash` folds in
+  untracked files, so `touch scratch.tmp` moved it, and `rm` moved it back — three
+  rounds later the gate opened with the reported code byte-identical. The second half
+  is what makes a resolution **expire on a revert** rather than being a one-way
+  ratchet. Record it once and it carries forward; re-report it and it reopens.
 
   A finding nobody mentions again stays open: silence is not a resolution. That
   sentence was prose until 2026-08-08 — `validate` skipped every round whose diff
