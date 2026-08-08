@@ -456,7 +456,7 @@ Two holes followed, and both were observed on the dev Mac (4 booted simulators, 
 
 1. **Nothing survives a restart, and nothing collected the leftovers.** A crash or a plain
    `deckhand serve` restart orphaned every booted simulator, emulator and serve-sim helper.
-   `staleOnBoot()` was written for this and never called.
+   A boot-time reap was written for this and never called.
 2. **Nothing ever expired.** A preview nobody watched, or one that failed to build, held its
    devices forever — and failed previews were counted as using *zero* devices, so capacity
    never pushed back.
