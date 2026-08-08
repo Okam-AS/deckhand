@@ -150,6 +150,48 @@ export function computeStage(sharePanes: SharePane[], opts: StageOptions): Stage
   return { groups, panes: all, visible: new Set(all.map((p) => p.key)), multiSource };
 }
 
+/** One row of the stage-level picker. Same shape as DevicePicker's option. */
+export interface PickerRow {
+  key: string;
+  label: string;
+}
+
+export interface StagePickerModel {
+  /** Empty means there is nothing to choose — render no picker. */
+  rows: PickerRow[];
+  /** The row that is ticked: the pane actually on screen, whatever chose it. */
+  activeKey: string;
+}
+
+/**
+ * The page-level picker, for the width where the stage is down to ONE pane.
+ *
+ * Two channels decide what is on screen, and which one is authoritative depends
+ * only on how many panes fit (see computeStage): with several visible, each
+ * group's `choices` entry picks its own device; with one visible, `focusKey`
+ * picks it and `choices` is only a fallback. This picker belongs to the second
+ * case, so it is keyed off `visible` — the answer — rather than off either
+ * channel. Writing one channel and reading the other is exactly the bug this
+ * replaced: the picker set `focusKey` and ticked `activeKey`, so it ticked a
+ * pane that was not on screen, and DevicePicker's "clicking the ticked row is a
+ * no-op" made the real one unreachable without a reload.
+ *
+ * Rows span EVERY source, not one group. Between 701px (above the mobile dock)
+ * and the fitting width this is the only source switcher a desktop has, and a
+ * group-scoped one left the other sources mounted and unreachable — on the page
+ * whose whole purpose is holding sources against each other.
+ */
+export function stagePicker(stage: Stage): StagePickerModel {
+  const activeKey = stage.visible.size === 1 ? ([...stage.visible][0] ?? "") : "";
+  if (!activeKey || stage.panes.length < 2) return { rows: [], activeKey: "" };
+  const rows = stage.panes.map((p) => {
+    const device = shortDeviceName(p.device.label);
+    const group = stage.groups.find((g) => g.shareId === p.shareId);
+    return { key: p.key, label: stage.multiSource && group ? `${group.label} · ${device}` : device };
+  });
+  return { rows, activeKey };
+}
+
 /**
  * Which device a group shows: the explicit pick, else a healthy one, else the
  * first.
