@@ -2853,11 +2853,16 @@ describe("an emulator that would not die keeps its AVD", () => {
     );
   });
 
-  it("reclaims the AVD image when an aborted boot's emulator really did die", async () => {
-    // The other side of the guard above, and the reason it is not simply "never delete
-    // while booting": teardown has already declined this AVD, so if the kill-by-port
-    // DID confirm the emulator gone, the boot path is the last thing that can reclaim
-    // a ~2 GB image nobody owns any more. Only a confirmed death may delete.
+  it("keeps the AVD when an aborted boot's kill-by-port answers `true`", async () => {
+    // `true` from THIS shutdown is not a death. `shutdown` returns as soon as `adb
+    // get-state` fails, and an aborted boot never got past `adb wait-for-device` — the
+    // one step that would have made adb know the serial — so `true` here says only "adb
+    // never heard of it". Deleting the AVD on that takes the name out of `listAvds()`,
+    // and `pkill -f "avd <name>"` is the only thing that can ever name the QEMU this
+    // boot spawned detached: the uncollectable-orphan class.
+    //
+    // The image is not leaked, only left for the reaper, which kills by name and deletes
+    // at the next boot — by which time the process has usually gone.
     const calls: string[] = [];
     let failBoot!: () => void;
     const booting = new Promise<void>((_ok, fail) => (failBoot = () => fail(new Error("boot aborted"))));
@@ -2865,7 +2870,7 @@ describe("an emulator that would not die keeps its AVD", () => {
       android: androidFake(calls, {
         shutdown: async (serial: string) => {
           calls.push(`shutdown ${serial}`);
-          return true; // this one really did exit
+          return true; // what real adb answers for a serial it was never told about
         },
         deleteAvd: async (name: string) => void calls.push(`deleteAvd ${name}`),
         bootEmulator: async () => {
@@ -2885,10 +2890,55 @@ describe("an emulator that would not die keeps its AVD", () => {
     for (let i = 0; i < 200 && !calls.some((c) => c.startsWith("shutdown ")); i++) await new Promise((r) => setTimeout(r, 5));
     await new Promise((r) => setTimeout(r, 20));
 
+    // The kill by port still has to happen: the port goes straight back in the pool, and
+    // a survivor on a reused port is streamed to the next preview.
+    assert.ok(
+      calls.includes("shutdown emulator-5554"),
+      `the abandoned emulator must still be killed by its port — saw ${JSON.stringify(calls)}`,
+    );
     assert.deepEqual(
       calls.filter((c) => c.startsWith("deleteAvd ")),
-      ["deleteAvd deckhand_pv1_android_0"],
-      `an emulator confirmed gone leaves no image behind — saw ${JSON.stringify(calls)}`,
+      [],
+      `nothing here witnessed a death, so the AVD name must survive — saw ${JSON.stringify(calls)}`,
+    );
+  });
+
+  it("keeps a pooled AVD when an aborted boot is killed by a port adb never knew", async () => {
+    // The same false confirmation, and the case where it is a regression: `stopPreview`
+    // aborts, `teardownDevices` runs to completion for a device with no serial — clearing
+    // `dev.poolName` — and only THEN does the boot's rejection land, so a `!dev.poolName`
+    // read in the catch sees "not pooled" for a device that was pooled, and destroys the
+    // ~2 GB image the pool exists to avoid re-paying for.
+    const calls: string[] = [];
+    let failBoot!: () => void;
+    const booting = new Promise<void>((_ok, fail) => (failBoot = () => fail(new Error("boot aborted"))));
+    const h = makeEngine({
+      config: { ...config, limits: { ...config.limits, reuseDevices: true } },
+      android: androidFake(calls, {
+        shutdown: async (serial: string) => {
+          calls.push(`shutdown ${serial}`);
+          return true; // adb was never told about this serial; it fails get-state at once
+        },
+        deleteAvd: async (name: string) => void calls.push(`deleteAvd ${name}`),
+        bootEmulator: async () => {
+          calls.push("emu boot");
+          await booting;
+          return "emulator-5554";
+        },
+      }),
+    });
+    startAndroid(h);
+    while (!calls.includes("emu boot")) await new Promise((r) => setTimeout(r, 5));
+
+    await h.engine.stopPreview("pv1");
+    failBoot();
+    for (let i = 0; i < 200 && !calls.some((c) => c.startsWith("shutdown ")); i++) await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.deepEqual(
+      calls.filter((c) => c.startsWith("deleteAvd ")),
+      [],
+      `a pooled AVD must survive an aborted boot — saw ${JSON.stringify(calls)}`,
     );
   });
 

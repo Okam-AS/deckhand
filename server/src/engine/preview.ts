@@ -1815,17 +1815,19 @@ export class PreviewEngine {
       // record.serial was never set, so teardown can't reach it either. Kill it
       // by the port we know before that port goes back in the pool, or the next
       // preview allocates 5554, collides, and streams the abandoned device.
-      // And if it will not die, say so where teardown will read it: this device has no
-      // record.serial, so teardownDevices cannot re-ask and would otherwise delete the AVD
-      // of the emulator we just failed to kill.
-      const stoppedCleanly = await android.shutdown(serialForPort(port)).catch(() => false);
-      this.noteStopped(avdName, stoppedCleanly);
-      // An aborted boot has already been past teardownDevices, which declined this AVD
-      // because nothing had confirmed the emulator gone. The kill above is that
-      // confirmation and nothing runs after it, so this is the last owner of a ~2 GB
-      // image. A boot that merely TIMED OUT is not aborted: its device keeps its record
-      // and teardown deletes the AVD later, having re-read the same answer.
-      if (dev.abort.signal.aborted && !dev.poolName && stoppedCleanly) await android.deleteAvd(avdName).catch(() => {});
+      // Whether it died is NOT settled here — the claim made before the spawn already
+      // says an emulator may exist under this name, and that claim is what stops
+      // teardown and trimPool deleting the AVD of a process we may have failed to kill.
+      //
+      // The answer is deliberately thrown away HERE, unlike everywhere else this file
+      // calls shutdown. `shutdown` returns `true` as soon as `adb get-state` fails, and
+      // a boot that threw is in that state BY CONSTRUCTION: `adb wait-for-device` is the
+      // step that would have made adb know this serial, and it is exactly the step that
+      // did not finish. So `true` here means "adb never heard of it", not "the process
+      // died" — spending it would clear the claim on evidence that does not exist, and
+      // delete the sole handle (`pkill -f "avd <name>"`) on a live QEMU. The image is
+      // reclaimed by the reaper's kill-then-delete at the next boot instead.
+      await android.shutdown(serialForPort(port)).catch(() => {});
       this.androidPorts.delete(port);
       dev.androidPort = undefined;
       throw err;
