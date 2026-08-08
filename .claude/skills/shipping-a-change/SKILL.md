@@ -145,13 +145,21 @@ surfaces **no blocking finding an earlier round hadn't already reported**.
    `review:show`, so a round that is mostly quibbles reads as one. Severity defaults to
    `should`, so the lazy path is the safe one, and a nit a later round raises to `should`
    **does** count as new — filing something small to defuse it doesn't work.
-3. **Don't count "new" yourself.** `review:round` deduplicates against every earlier round,
+3. **Fix a blocking finding, then SAY SO in the next round.** Put its fingerprint (from
+   `review:show`) in that round's `"resolved": [...]`. That round has to sit at a different
+   diff than the one that raised it — a fix moves the code, so if the hash has not moved you
+   have not fixed anything. Record it once and it carries forward; re-report it and it
+   reopens. Until you record it the finding is open however many rounds pass without
+   mentioning it, and the handover will say so. Not bookkeeping for its own sake: `validate`
+   used to clear a finding the moment ANY edit moved the hash, so fixing one finding
+   silently cleared every other one raised beside it.
+4. **Don't count "new" yourself.** `review:round` deduplicates against every earlier round,
    including rounds recorded in sessions you never saw. That is the number the gate rests
    on, so it is computed, not asserted.
-4. If the round found something new, **change the lens** and go again: a different pass
+5. If the round found something new, **change the lens** and go again: a different pass
    emphasis, a fresh subagent with no session context, a different model. Repeating one
    lens re-finds one lens's bugs.
-5. **At least one round must be cold, and it must have read the code as it SHIPS** — a
+6. **At least one round must be cold, and it must have read the code as it SHIPS** — a
    reviewer starting from the diff alone, carrying none of the context this code was written
    in. A cold round against an older diff does not count, because fixing something moves the
    hash: `cold → fix → inline` is refused, and the shape that passes is `cold → fix → cold`. Your own session has the blind spot built
@@ -160,7 +168,7 @@ surfaces **no blocking finding an earlier round hadn't already reported**.
    When you spawn one, give it the diff and **nothing else** — no summary of your reasoning,
    or you have handed it your blind spot along with the code. Never mark your own re-read as
    cold.
-6. The curve accumulates on disk, so a later session extends it rather than starting over.
+7. The curve accumulates on disk, so a later session extends it rather than starting over.
 
 ## 7. The gates, last
 

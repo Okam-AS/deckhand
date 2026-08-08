@@ -130,10 +130,12 @@ npx tsx server/src/cli.ts setup \
   - **BLOCKED** — also relay-and-stop, but an errand off this machine: a browser
     and their Cloudflare account. Never attempt it — `cloudflared tunnel login`
     opens a browser and will hang you forever.
-  - **ASK THE USER** — one question to ask in the words given, not a report to
-    paste at them.
+  - **ASK THE USER** — questions to ask in the words given, not a report to
+    paste at them. There is more than one: a fresh install asks for the hostname
+    and, marked `(optional)`, a second hostname for web previews.
 - Install what it says you can install. Then ask the user for a hostname on a
-  domain they have on Cloudflare, and run `setup --hostname <that>`.
+  domain they have on Cloudflare, and run `setup --hostname <that>` — adding
+  `--web-host <the second>` if they wanted web previews.
 - At the end, run `deckhand pair` yourself and give the user the code it prints;
   they type it into the page Claude opens. Typing the command is yours, typing the
   code into their own browser is theirs.

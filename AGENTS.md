@@ -268,8 +268,16 @@ Two things it enforces that cost a round if you learn them late:
   `waived` takes the fingerprint from `review:show` and a sentence saying why it
   cannot be mechanised or why it is acceptable — at least 20 characters, because
   waiving used to cost nothing while reporting demanded evidence, which made
-  dismissing a bug cheaper than raising one. A finding nobody mentions again stays
-  open: silence is not a resolution.
+  dismissing a bug cheaper than raising one. **"Fixed" means a LATER round, at a
+  different diff, lists the fingerprint in `resolved`** — the diff has to have moved,
+  because a fix moves the code and re-reading it does not, so a round cannot clear
+  what it is itself looking at. Record it once and it carries forward; re-report it
+  and it reopens.
+
+  A finding nobody mentions again stays open: silence is not a resolution. That
+  sentence was prose until 2026-08-08 — `validate` skipped every round whose diff
+  was not the current one, so fixing ANY finding moved the hash and cleared the
+  others by silence. It is enforced now, which is why `resolved` exists.
 
 Merging is still yours once the PR exists:
 
