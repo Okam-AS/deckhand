@@ -520,9 +520,11 @@ Full API notes in `docs/reference/serve-sim-notes.md` — read them before imple
 Essentials:
 
 - Deckhand installs the **pinned** npm package and spawns **one helper per device**
-  (`serve-sim --no-preview -q -p <port> <device>` or via its documented middleware/embedding
-  API — implementer's choice; prefer whichever makes deckhand own the child process
-  lifecycle directly). Helpers bind loopback ports from `helperPortRange`; deckhand tracks
+  (`serve-sim --detach -p <port> <udid>`). Embedding serve-sim's `simMiddleware` in
+  deckhand's own Express server was considered and NOT taken, and it is not an
+  implementer's choice: a helper in its own process means a crashed capture kills one
+  device rather than deckhand, and embedding couples the server's stability to a native
+  addon. Helpers bind loopback ports from `helperPortRange`; deckhand tracks
   pid/port per udid and reaps on detach. serve-sim also keeps a state file under
   `$TMPDIR/serve-sim/` and supports `--list`/`--kill` — the janitor uses these to find and
   kill **orphans** after crashes.
@@ -533,7 +535,7 @@ Essentials:
   `gesture`/`button`/`type`/`rotate` used by the `ui` MCP tool).
 - `describe`: serve-sim's accessibility endpoints (`ax`); `logs`: its forwarded simulator
   log/event stream.
-- When embedding/proxying: wire WS `upgrade` handling and forward `X-Forwarded-Proto` so
+- When proxying: wire WS `upgrade` handling and forward `X-Forwarded-Proto` so
   helper URLs come out `https`/`wss` behind the tunnel (documented requirement; without it
   the page mixes content and input dies).
 
