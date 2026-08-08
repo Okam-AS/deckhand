@@ -101,7 +101,7 @@ function androidFake(calls: string[] = []) {
     launch: async () => {},
     screenshotPng: async () => Buffer.from([0x89, 0x50]),
     findApk: async () => "/wt/app-debug.apk",
-    shutdown: async () => {},
+    shutdown: async () => true,
     deleteAvd: async () => {},
     describe: async () => "tree",
   });
@@ -2134,7 +2134,10 @@ describe("PreviewEngine idle sweep", () => {
           androidCalls.push("bootEmulator");
           throw new Error("did not finish booting");
         },
-        shutdown: async (serial: string) => void androidCalls.push(`shutdown ${serial}`),
+        shutdown: async (serial: string) => {
+          androidCalls.push(`shutdown ${serial}`);
+          return true;
+        },
         deleteAvd: async (n: string) => void androidCalls.push(`deleteAvd ${n}`),
         packagePath: async () => "/data/app/base.apk",
         installApk: async () => {},
@@ -2310,7 +2313,10 @@ describe("device pool", () => {
       installApk: async () => {},
       launch: async () => {},
       findApk: async () => "/wt/app-debug.apk",
-      shutdown: async () => void calls.push("avd shutdown"),
+      shutdown: async () => {
+        calls.push("avd shutdown");
+        return true;
+      },
       deleteAvd: async (n: string) => {
         calls.push(`avd delete ${n}`);
         const i = avds.indexOf(n);

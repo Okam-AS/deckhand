@@ -434,15 +434,22 @@ export class AndroidManager {
    * immediately while QEMU takes seconds to exit, still holding its console port
    * and the AVD's lock file — reusing either before then fails the next boot
    * ("AVD is already running") or lands two emulators on one serial.
+   *
+   * Returns whether it actually went away. A caller that deletes the AVD after a
+   * false takes the emulator's NAME out of `listAvds()`, and `pkill -f "avd
+   * <name>"` over those names is the only thing that kills an emulator process —
+   * so a timeout that reads as success leaves a QEMU orphan no sweep can name.
+   * "Still running" and "gone" must not be the same value.
    */
-  async shutdown(serial: string, timeoutMs = 20_000): Promise<void> {
+  async shutdown(serial: string, timeoutMs = 20_000): Promise<boolean> {
     await this.adb(serial, ["emu", "kill"]).catch(() => {});
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const res = await this.adb(serial, ["get-state"]).catch(() => ({ code: 1 }) as ExecResult);
-      if (res.code !== 0) return; // adb no longer knows the serial: the emulator is gone
+      if (res.code !== 0) return true; // adb no longer knows the serial: the emulator is gone
       await new Promise((r) => setTimeout(r, 500));
     }
+    return false;
   }
 
   async deleteAvd(name: string): Promise<void> {
