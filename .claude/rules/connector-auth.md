@@ -19,9 +19,11 @@ Hardest rules:
 - **The credential is a header, never a path segment or a query parameter.** URLs get pasted
   into shared connector settings, screenshots and logs; `Authorization` does not. → `invariants.test.ts` "puts no credential in an MCP route path", and `mcp/server.test.ts` "refuses the legacy /mcp/<token> URL even when the token is valid"
 - **The public half of pairing proves nothing; the deciding half needs `tokens.yaml`.** Both are
-  reachable through the tunnel, so being loopback protects neither. If the approve endpoint ever
-  stopped authenticating, the URL would approve its own request. An OAuth grant deliberately
-  cannot approve either — one connector waving the next one through turns a single approval into
+  reachable through the tunnel, so being loopback protects neither. There is no approve endpoint
+  to guard — `/oauth/authorize` only checks a code, and the deciding half is `POST /pair/code`
+  (`pairRouter`), which MINTS one. If that route ever stopped authenticating, the connector URL
+  alone would mint the code it is being asked for and pair itself. An OAuth grant deliberately
+  cannot mint either — one connector waving the next one through turns a single approval into
   a standing one. → `invariants.test.ts` "puts no approval path outside the credential the machine holds"
 - **The operator MINTS; the browser types.** The other direction — park the request, let the
   operator approve it from a list — reads friendlier and collapses under load: parking is

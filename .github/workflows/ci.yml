@@ -12,7 +12,8 @@ concurrency:
 jobs:
   check:
     # macOS because the real product is mac-only (Xcode/simctl, Android SDK).
-    # Phase 0 only runs typecheck + unit tests, which are platform-independent.
+    # What runs here is `npm run ci` (typecheck + unit tests + build) — all of it
+    # platform-independent, and none of it touches a device. See the note below.
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
