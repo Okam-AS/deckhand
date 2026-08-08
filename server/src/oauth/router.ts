@@ -77,15 +77,61 @@ button[disabled]{opacity:.45;cursor:default;transform:none}
 }
 
 /**
+ * The pairing form's behaviour, as source rather than inline in the page, so a test can run it
+ * against stub elements. It is browser code: no imports, no TypeScript.
+ *
+ * It goes into the page unescaped, and `esc()` would be the wrong tool inside a script body
+ * anyway — so nothing derived from the request may ever be interpolated here.
+ */
+export const PAIR_FORM_SCRIPT = `
+  const c = document.getElementById("c"), b = document.getElementById("b");
+  const format = (v) => {
+    const raw = v.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
+    return raw.length > 3 ? raw.slice(0, 3) + "-" + raw.slice(3) : raw;
+  };
+  let sent = false;
+  // A back-navigation restores the field's value whether or not the page comes from the bfcache,
+  // and the markup's disabled attribute is only right for an empty field. Without this the visitor
+  // is looking at their whole code above a dead button.
+  b.disabled = c.value.length !== 7;
+  // The code is single-use, so a second POST spends nothing and tells the visitor "invalid code"
+  // about a code that just worked. Auto-submit makes that easy to hit: pasting submits, and the
+  // hand already on its way to Connect clicks a form that is mid-flight.
+  c.form.addEventListener("submit", (e) => {
+    if (sent) { e.preventDefault(); return; }
+    sent = true;
+    b.disabled = true;
+    c.readOnly = true;
+  });
+  // A visitor coming back to a restored page would otherwise find the lock still on, with nothing
+  // but a reload to save them. The lock is for the click that races the submit, not for the page.
+  // It covers the back-navigation only: an aborted navigation fires no pageshow, so a visitor who
+  // hits Stop still has to reload.
+  window.addEventListener("pageshow", (e) => {
+    if (!e.persisted) return;
+    sent = false;
+    c.readOnly = false;
+    b.disabled = c.value.length !== 7;
+  });
+  c.addEventListener("input", () => {
+    if (sent) return;
+    c.value = format(c.value);
+    b.disabled = c.value.length !== 7;
+    // Submitting on completion, because the last thing between two screens should not be
+    // hunting for a button.
+    if (!b.disabled) c.form.requestSubmit();
+  });
+`;
+
+/**
  * The page that asks for the code.
  *
  * No status, no polling, no waiting: the browser holds everything needed to finish, and the
  * only missing piece is a string that exists on the operator's machine. The form carries the
  * request's own parameters so the POST can re-validate them rather than trust a session.
  *
- * The input does the tidying a person should not have to: upper-cases, inserts the hyphen, and
- * submits itself the moment six characters are in. Somebody is reading this off another screen
- * — every keystroke of ceremony is a chance to mistype the one string that matters.
+ * Somebody is reading the code off another screen, so the field spares them every keystroke of
+ * ceremony it can; PAIR_FORM_SCRIPT is where that behaviour lives.
  */
 function codeForm(
   res: express.Response,
@@ -110,20 +156,7 @@ function codeForm(
           their own trusted hostname and collect the grant. -->
      <p class="who">Connecting <strong>${esc(req.clientName)}</strong><br><span>${esc(new URL(req.redirectUri).host)}</span></p>
      <p class="hint">Run <code>deckhand pair</code> on the Mac to get a code.</p>
-     <script>
-       const c = document.getElementById("c"), b = document.getElementById("b");
-       const format = (v) => {
-         const raw = v.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
-         return raw.length > 3 ? raw.slice(0, 3) + "-" + raw.slice(3) : raw;
-       };
-       c.addEventListener("input", () => {
-         c.value = format(c.value);
-         b.disabled = c.value.length !== 7;
-         // Submitting on completion, because the last thing between two screens should not be
-         // hunting for a button.
-         if (!b.disabled) c.form.requestSubmit();
-       });
-     </script>`,
+     <script>${PAIR_FORM_SCRIPT}</script>`,
     "Ask whoever runs this deckhand for the code.",
   );
 }

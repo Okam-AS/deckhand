@@ -121,6 +121,40 @@ the area, so the next reader is told what the next test cannot be.
 A single pass reports what the first lens happened to catch. Run rounds until one
 surfaces **no blocking finding an earlier round hadn't already reported**.
 
+**Round count scales with the change, not with the ceremony.** A round exists to catch a
+defect; a round that reports what the last brief asked for is the process reviewing
+itself. These rules keep the curve attached to the code:
+
+- **Freeze the diff before the first cold round.** The gate wants a cold round that read
+  the code AS IT SHIPS, so *every* later edit voids it — a comment, a doc, a rule file, a
+  typo. Finish all of it, then review. And if the edit is not part of the change (a skill,
+  a rule, a note to the next agent), it belongs in its own PR: bolting it on here costs a
+  full round per edit and buys the reviewer nothing.
+
+- **Mutation-test before the first cold round, not after it.** Delete each line your new
+  tests guard, watch a test fail, put it back (step 4). A round spent telling you a test
+  asserts nothing is a round you could have had for free.
+- **Brief the reviewer with a bar, never with a list of angles.** A reviewer handed
+  candidate angles returns a finding per angle, at any diff size. Give it the diff, and
+  this:
+
+  > Report a finding ONLY if you would refuse to merge this as it stands. Do not report
+  > style, naming, wording, hypotheticals you cannot reproduce, or pre-existing behaviour
+  > this diff did not introduce. An empty array is the expected answer if the change is
+  > mergeable — returning `[]` is a successful review. Do not go looking for a new angle
+  > in order to have something to return.
+
+  Then say what would justify one: the change is wrong, a test passes for the wrong reason
+  (mutate the line and check), a comment states something false beside the code, a rule in
+  `.claude/rules/` is weakened.
+- **Check `git branch --show-current` before you record the round.** A reviewer that checked
+  out the diff may leave the tree somewhere else, and the receipt is written for whatever
+  branch you are standing on — a round recorded from `main` lands in `main`'s receipt, where
+  it counts for nothing and has to be deleted by hand.
+
+  A two-file pairing fix cost four cold rounds this way on 2026-08-08 — one for untested
+  tests, three for angles the briefs supplied.
+
 1. Run steps 3–5, then record the round — **every** finding, with its severity. The test
    for severity is: *would I merge this as it stands?* If yes it's a `nit`.
 
@@ -145,7 +179,11 @@ surfaces **no blocking finding an earlier round hadn't already reported**.
    `review:show`, so a round that is mostly quibbles reads as one. Severity defaults to
    `should`, so the lazy path is the safe one, and a nit a later round raises to `should`
    **does** count as new — filing something small to defuse it doesn't work.
-3. **Fix a blocking finding, then SAY SO in the next round.** Put its fingerprint (from
+3. **Record the round before you fix anything in it.** `resolved` asks the named file to
+   hold different bytes than *when the finding was raised*, so a finding recorded after
+   its own fix can never be answered — only waived, which costs a further cold round. The
+   order is: review, record, fix, record the fix.
+4. **Fix a blocking finding, then SAY SO in the next round.** Put its fingerprint (from
    `review:show`) in that round's `"resolved": [...]`. **The FILE the finding names has to hold
    different bytes than when it was raised** — at that round and still now — so a mode bit, a
    blank line elsewhere, or a rename does not count. Fixed it somewhere else? Say where:
@@ -159,13 +197,15 @@ surfaces **no blocking finding an earlier round hadn't already reported**.
    cleared every other one raised beside it. The repair — "a later round at a DIFFERENT diff"
    — was then bypassed with `touch scratch.tmp` … `resolved` … `rm scratch.tmp`, because
    `diffHash` folds in untracked files. Hence "tracked", and hence the revert clause.
-4. **Don't count "new" yourself.** `review:round` deduplicates against every earlier round,
+5. **Don't count "new" yourself.** `review:round` deduplicates against every earlier round,
    including rounds recorded in sessions you never saw. That is the number the gate rests
    on, so it is computed, not asserted.
-5. If the round found something new, **change the lens** and go again: a different pass
-   emphasis, a fresh subagent with no session context, a different model. Repeating one
-   lens re-finds one lens's bugs.
-6. **At least one round must be cold, and it must have read the code as it SHIPS** — a
+6. If the round found something **blocking**, change the lens and go again: a different
+   pass emphasis, a fresh subagent with no session context, a different model. Repeating
+   one lens re-finds one lens's bugs. A round that found only nits does not earn a new
+   lens — it earns the same bar again, and the honest next answer to it is `[]`. Rotating
+   the lens after a nit is how a two-file diff buys four rounds.
+7. **At least one round must be cold, and it must have read the code as it SHIPS** — a
    reviewer starting from the diff alone, carrying none of the context this code was written
    in. A cold round against an older diff does not count, because fixing something moves the
    hash: `cold → fix → inline` is refused, and the shape that passes is `cold → fix → cold`. Your own session has the blind spot built
@@ -174,7 +214,7 @@ surfaces **no blocking finding an earlier round hadn't already reported**.
    When you spawn one, give it the diff and **nothing else** — no summary of your reasoning,
    or you have handed it your blind spot along with the code. Never mark your own re-read as
    cold.
-7. The curve accumulates on disk, so a later session extends it rather than starting over.
+8. The curve accumulates on disk, so a later session extends it rather than starting over.
 
 ## 7. The gates, last
 

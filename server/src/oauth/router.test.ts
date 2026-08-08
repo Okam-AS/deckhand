@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import express from "express";
-import { createOAuthRouter, createOAuthMetadataRouter } from "./router.ts";
+import { createOAuthRouter, createOAuthMetadataRouter, PAIR_FORM_SCRIPT } from "./router.ts";
 import { OAuthStore } from "./store.ts";
 import { PairingStore } from "./pairing.ts";
 
@@ -140,6 +140,19 @@ describe("OAuth authorization server", () => {
     const res = await authorize(authorizeUrl(clientId, challenge, { redirect_uri: "https://attacker.example/catch" }));
     assert.equal(res.status, 400);
     assert.equal(res.headers.get("location"), null, "redirecting here would make authorize an open redirector");
+  });
+
+  // The form's behaviour lives in a constant and its markup in the template, so the ids that tie
+  // them together are now in two places. A drift is silent everywhere else: the elements come back
+  // null, the first keystroke throws, and the page renders perfectly while pairing is impossible.
+  it("serves the pairing script against ids the page actually has", async () => {
+    const clientId = await register();
+    const { challenge } = pkce();
+    const html = await (await authorize(authorizeUrl(clientId, challenge))).text();
+    assert.ok(html.includes(`<script>${PAIR_FORM_SCRIPT}</script>`), "the page must carry the script verbatim");
+    const asked = [...PAIR_FORM_SCRIPT.matchAll(/getElementById\("([^"]+)"\)/g)].map((m) => m[1]);
+    assert.ok(asked.length > 0, "if the script stops looking elements up, this check has stopped checking");
+    for (const id of asked) assert.match(html, new RegExp(`id="${id}"`), `the script looks up #${id}`);
   });
 
   it("requires PKCE S256", async () => {
