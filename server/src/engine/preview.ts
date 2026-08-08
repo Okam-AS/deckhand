@@ -2491,6 +2491,8 @@ export class PreviewEngine {
         "wait for the current build to finish (poll preview_status), then restart",
       );
     }
+    // A verdict is a claim about a build, and this replaces the build.
+    this.clearTestRun(previewId);
     p.record.phase = "running";
     p.record.updatedAt = this.iso();
     this.persist();
@@ -2870,8 +2872,8 @@ export class PreviewEngine {
   /**
    * Drop the current run so the viewer goes back to showing no run at all.
    *
-   * A finished run otherwise lingers for the life of the preview — which is right while it is
-   * the record of what just happened, and wrong once it is stale or was recorded badly. There
+   * A finished run otherwise lingers until the next run or a rebuild — which is right while it
+   * is the record of what just happened, and wrong once it is stale or was recorded badly. There
    * was no way to take it back: `startTestRun` only replaces one run with another, so the only
    * escape was to leave a misleading verdict on screen.
    */

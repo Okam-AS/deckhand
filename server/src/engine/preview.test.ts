@@ -597,6 +597,20 @@ describe("local (dev-mode) previews", () => {
     assert.equal(h.simctlCalls.filter((c) => c.startsWith("create ")).length, 1, "restart must not boot new sims");
   });
 
+  it("restart drops the verdict, because it is a claim about the build being replaced", async () => {
+    const h = makeEngine();
+    const first = startLocal(h);
+    await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
+    h.engine.startTestRun("pv1", "Smoke", ["A"]);
+    h.engine.finishTestRun("pv1", "passed", "ok");
+    assert.ok(h.engine.shareState(first.shareId)!.testRun, "the run is on the page before the rebuild");
+
+    h.engine.restartPreview("pv1");
+    assert.equal(h.engine.shareState(first.shareId)!.testRun, undefined, "a passed run over rebuilt code reads as a claim about what is on screen now");
+    await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
+    assert.equal(h.engine.shareState(first.shareId)!.testRun, undefined, "and it must not come back when the rebuild lands");
+  });
+
   it("restart re-attaches when the kept helper no longer answers", async () => {
     const h = makeEngine();
     startLocal(h);

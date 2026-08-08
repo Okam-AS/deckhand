@@ -853,7 +853,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Restart a preview",
       description:
-        "Rebuild a running preview in place: same simulators, same viewer URL. Local (dev-mode) previews re-run the build against the current files — needed after native-level changes (new plugins, Podfile/gradle edits) or when the app is stuck; ordinary code edits livesync automatically and do NOT need this. Git previews fetch the ref's latest commit and rebuild — call it after pushing. Pass previewId, or just the app id.",
+        "Rebuild a running preview in place: same simulators, same viewer URL. Local (dev-mode) previews re-run the build against the current files — needed after native-level changes (new plugins, Podfile/gradle edits) or when the app is stuck; ordinary code edits livesync automatically and do NOT need this. Git previews fetch the ref's latest commit and rebuild — call it after pushing. Any test run on the preview is dropped: its verdict was about the build being replaced. Pass previewId, or just the app id.",
       inputSchema: {
         previewId: z.string().optional().describe("from start_preview; or pass app instead"),
         app: z.string().optional().describe("app id — restarts its running preview"),
@@ -1341,7 +1341,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Clear the test run",
       description:
-        "Remove the preview's test run so the viewer shows none at all — the dock's run button disappears. Use it when a finished run is stale (the user has moved on) or was recorded wrongly and you are about to redo it; a finished run otherwise stays on screen for the life of the preview. This is not how you end a run: finish_test_run records the verdict, and clearing instead of finishing throws away what you just proved. Pass previewId or app id.",
+        "Remove the preview's test run so the viewer shows none at all — the dock's run button disappears. Use it when a finished run is stale (the user has moved on) or was recorded wrongly and you are about to redo it; a finished run otherwise stays on screen until the next run, or until a rebuild (restart_preview) drops it. This is not how you end a run: finish_test_run records the verdict, and clearing instead of finishing throws away what you just proved. Pass previewId or app id.",
       inputSchema: {
         previewId: z.string().optional().describe("from start_preview; or pass app instead"),
         app: z.string().optional().describe("app id — targets its running preview"),
