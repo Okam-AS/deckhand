@@ -386,8 +386,12 @@ dev overlay and reported a working app as having "critical UI bugs".
 
 ### Nothing is "tested" until this is green
 
-`npm run test:device` is the only check that touches hardware. It verifies three
-capabilities on **both** platforms, as six independent checks:
+`npm run test:device` is the hardware pass. It is one spelling of one run:
+`deckhand doctor --device-only`, and `deckhand doctor --smoke` runs the same
+device checks — the difference is the exit code, not the work (`cli.ts`, and
+PLAN §10 says which is for what). Nothing else in the repo touches a device;
+plain `doctor` and `npm run ci` are paperwork. It verifies three capabilities on
+**both** platforms, as six independent checks:
 
 |  | boot | stream | describe |
 |---|---|---|---|
@@ -541,8 +545,9 @@ Local is the default when they are working in a project. See the `nextStep` that
 
 **When something is wrong:** `deckhand doctor` first, always. It names the missing
 piece and the command that fixes it. `deckhand doctor --device-only` boots a real
-simulator and emulator; it takes minutes and is the only check that touches
-hardware. Restarting the server to unstick one is subject to the same rule as
+simulator and emulator; it takes minutes, and it is the same run as `npm run
+test:device` (see "Nothing is 'tested' until this is green"), so do not treat
+running one as a reason to skip the other. Restarting the server to unstick one is subject to the same rule as
 deploying — say so first (see "Deploy after merging, not before").
 
 ## Before you change an area, read its rule
