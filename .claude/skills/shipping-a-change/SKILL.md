@@ -121,16 +121,16 @@ the area, so the next reader is told what the next test cannot be.
 A single pass reports what the first lens happened to catch. Run rounds until one
 surfaces **no blocking finding an earlier round hadn't already reported**.
 
-**Spend the rounds on the code, not on the review.** A two-file fix took four cold
-rounds on 2026-08-08, and three of them were the process eating itself: round 1 met code
-whose new tests had never been mutation-tested, and rounds 2–4 came from briefs that told
-a fresh reviewer to find a NEW LENS and listed candidate angles to try. A reviewer told to
-find a new angle finds one. Two things keep the curve honest:
+**Round count scales with the change, not with the ceremony.** A round exists to catch a
+defect; a round that reports what the last brief asked for is the process reviewing
+itself. Two rules keep the curve attached to the code:
 
 - **Mutation-test before the first cold round, not after it.** Delete each line your new
   tests guard, watch a test fail, put it back (step 4). A round spent telling you a test
   asserts nothing is a round you could have had for free.
-- **Brief the reviewer with a bar, never with a list of angles.** The brief that works:
+- **Brief the reviewer with a bar, never with a list of angles.** A reviewer handed
+  candidate angles returns a finding per angle, at any diff size. Give it the diff, and
+  this:
 
   > Report a finding ONLY if you would refuse to merge this as it stands. Do not report
   > style, naming, wording, hypotheticals you cannot reproduce, or pre-existing behaviour
@@ -140,7 +140,10 @@ find a new angle finds one. Two things keep the curve honest:
 
   Then say what would justify one: the change is wrong, a test passes for the wrong reason
   (mutate the line and check), a comment states something false beside the code, a rule in
-  `.claude/rules/` is weakened. Give it the diff and nothing else.
+  `.claude/rules/` is weakened.
+
+  A two-file pairing fix cost four cold rounds this way on 2026-08-08 — one for untested
+  tests, three for angles the briefs supplied.
 
 1. Run steps 3–5, then record the round — **every** finding, with its severity. The test
    for severity is: *would I merge this as it stands?* If yes it's a `nit`.
