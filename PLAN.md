@@ -329,8 +329,10 @@ a page simply was. Generalised:
    and owner-scope gates went with team support (§11 item 3).
 
 **Accepted risk — reach across owner boundaries (2026-07-31).** A page may now show panes
-from more than two registered apps, and whoever holds the link plus any one pane's PIN
-reaches all of them. This is a difference of degree, not of kind: the two-app case was
+from more than two registered apps, and whoever holds the page's link plus the PAGE's own
+PIN reaches all of them — the unlock mints for every pane the page renders. That is the only
+direction: a pane's PIN reaches nothing (item 2 above), and the reverse mint is a bug, not a
+symmetry this note accepts. This is a difference of degree, not of kind: the two-app case was
 already accepted above and in `partnerIsReachable`, whose rule is preserved unchanged — a
 protected pane joins only when the page itself is protected, so access is never granted
 from nothing. The panes are chosen by an operator holding a valid token, which since
