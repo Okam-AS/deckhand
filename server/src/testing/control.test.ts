@@ -326,15 +326,55 @@ describe("the SimDeck client's source", () => {
   });
 });
 
-/** Drop comment lines so a rule quoted in a file header cannot satisfy the scan that enforces it. */
+/**
+ * Drop comments so a rule quoted in a file header cannot satisfy the scan that
+ * enforces it — without also dropping code.
+ *
+ * Two ways to get this wrong, and this walk avoids both. Dropping only whole
+ * lines that START with `//` leaves a trailing `// …/input…` on a code line, and
+ * the scan then cries wolf at the author who explains why the endpoint is off
+ * limits. Cutting every line at its first `//` instead truncates a line at the
+ * `//` inside a string literal, and THAT direction is toward passing: a real
+ * offender sharing a line with a URL vanishes along with the "comment". So
+ * quoted literals are copied whole, and everything outside one is comment.
+ *
+ * Twin of the walk in `test-support/invariants.test.ts`, duplicated rather than
+ * shared: it is nine lines, and importing a scanner from another suite couples
+ * two guardrails that have to be able to fail independently.
+ * → "names no /input, /control, /webrtc or /refresh endpoint", proved both ways:
+ * a trailing comment naming an endpoint must not fire, a real `"/input"` must.
+ */
 function stripComments(src: string): string {
-  return src
-    .split("\n")
-    .filter((l) => {
-      const t = l.trim();
-      return !t.startsWith("//") && !t.startsWith("*") && !t.startsWith("/*");
-    })
-    .join("\n");
+  let out = "";
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i]!;
+    if (c === '"' || c === "'" || c === "`") {
+      // Copy the literal whole. An unterminated one runs to the end of the file,
+      // which is what the compiler would say about it too.
+      out += c;
+      for (i++; i < src.length; i++) {
+        out += src[i];
+        if (src[i] === "\\") {
+          out += src[++i] ?? "";
+          continue;
+        }
+        if (src[i] === c) break;
+      }
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "/") {
+      while (i < src.length && src[i] !== "\n") i++;
+      out += "\n";
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "*") {
+      const end = src.indexOf("*/", i + 2);
+      i = end === -1 ? src.length : end + 1;
+      continue;
+    }
+    out += c;
+  }
+  return out;
 }
 
 describe("SimDeckDaemon", () => {
