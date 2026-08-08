@@ -61,7 +61,10 @@ export interface AppDeps {
   persistApps?: (apps: App[]) => void;
   /** Credential onboarding: shared nonce store + PAT destination path. */
   setup?: { store: SetupStore; patPath: string };
-  /** Connector grants, and the requests waiting for the operator to approve them. */
+  /**
+   * Connector grants, and the pairing code the operator minted. No incoming request is ever
+   * stored or queued for approval — see `oauth/pairing.ts`.
+   */
   connector?: { store: OAuthStore; pairing: PairingStore; baseUrl: string };
 }
 
@@ -242,9 +245,6 @@ export function createServer(): DeckhandServer {
       // sweeping idle previews for as long as we run.
       await engine.reapOrphans().catch(() => {});
       engine.startJanitor();
-      // Log the running commit, and start the first update check. Not awaited: `ls-remote`
-      // is a network call and nothing about serving depends on the answer. It exists so the
-      // first tool response after a boot already has something to say.
       // Loud, and next to the listen line, because a server that came up with NO apps looks
       // healthy from the outside and its first `list_apps` looks like a fresh install.
       if (appsError) {
@@ -252,13 +252,14 @@ export function createServer(): DeckhandServer {
         console.error(`  ${appsError}`);
         console.error(`  The file is untouched. Fix that entry and deckhand picks it up without a restart.`);
       }
+      // Log the running commit, and start the first update check. Not awaited: `ls-remote`
+      // is a network call and nothing about serving depends on the answer. It exists so the
+      // first tool response after a boot already has something to say.
       void refreshVersion().then((v) => {
         if (!v) return;
         console.log(`deckhand ${v.describe}${v.dirty ? " (uncommitted changes)" : ""} on ${v.branch ?? "a detached HEAD"}`);
         if (v.note) console.log(`  ${v.note}`);
       });
-      // Registering an app must not cost a restart — a restart tears down every
-      // booted simulator on the machine.
       // A token minted while the server runs must work immediately. It did not: setup starts
       // the LaunchAgent and then mints the token, so a brand-new install's only token
       // was invisible until a restart — the connector 404'd and claude.ai reported an OAuth
@@ -267,6 +268,8 @@ export function createServer(): DeckhandServer {
         onReload: (names) => console.log(`tokens.yaml: reloaded (${names.length}: ${names.join(", ")})`),
         onError: (err) => console.error(`tokens.yaml: keeping the previous list — ${(err as Error).message}`),
       });
+      // Registering an app must not cost a restart — a restart tears down every
+      // booted simulator on the machine.
       watchApps(apps, {
         onReload: (_apps, { added, removed }) => {
           for (const id of added) console.log(`apps.yaml: registered "${id}"`);
