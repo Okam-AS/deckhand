@@ -9,7 +9,8 @@ import { ghCliToken } from "../github/credentials.ts";
 import { Simctl, selectRuntime, selectDeviceType } from "../devices/ios.ts";
 import { ServeSimBackend, vendoredServeSimBin } from "../streaming/serveSim.ts";
 import { AndroidAdbBackend } from "../streaming/androidAdb.ts";
-import { AndroidManager, selectSystemImage, serialForPort } from "../devices/android.ts";
+import { AndroidManager, AVD_PREFIX, selectSystemImage, serialForPort } from "../devices/android.ts";
+import { SIM_PREFIX } from "../engine/reaper.ts";
 import { detectWebFrameworkFromDir, webHostingMode } from "../engine/detect.ts";
 import { repoRoot } from "../version.ts";
 
@@ -17,6 +18,25 @@ import { repoRoot } from "../version.ts";
 const ANDROID_SMOKE_PORTS: [number, number] = [3290, 3299];
 /** Console port for the gate's emulator, clear of the 5554-5584 band a developer's own AVD lands in. */
 const ANDROID_SMOKE_CONSOLE_PORT = 5680;
+
+/**
+ * The gate's own two devices, DERIVED from the prefixes every sweep selects on —
+ * never spelled out, which is the whole point.
+ *
+ * Both were hand-written as the same literal `"deckhand-doctor"`, and that put the
+ * AVD outside `AVD_PREFIX` ("deckhand_"): `orphanAvds` never reaped it and
+ * `sweepDeviceRecorders`' second ownership gate never matched it, so an interrupted
+ * `--device-only` run left an emulator holding the machine's single H.264 encoder and
+ * every other emulator silently dropped to MJPEG. The simulator's literal happened to
+ * match `SIM_PREFIX`, so the two platforms reaped differently for no reason anyone chose.
+ *
+ * The separator differs per platform on purpose: each sweep selects by ITS OWN prefix,
+ * so the rule is "prefix + role", not "the same string on both".
+ * → `doctor.test.ts` "names them inside the prefixes both sweeps select on", and
+ * "spells no device name by hand anywhere in doctor.ts" for the next one.
+ */
+export const DOCTOR_SIM_NAME = `${SIM_PREFIX}doctor`;
+export const DOCTOR_AVD_NAME = `${AVD_PREFIX}doctor`;
 
 // ---------------------------------------------------------------------------
 // `deckhand doctor` — independently-reportable checks. Default runs the fast
@@ -286,7 +306,7 @@ async function smokeIos(config: Config): Promise<Check[]> {
   try {
     const runtime = selectRuntime(await simctl.listRuntimes());
     const deviceType = selectDeviceType(await simctl.listDeviceTypes());
-    udid = await simctl.create("deckhand-doctor", deviceType.identifier, runtime.identifier);
+    udid = await simctl.create(DOCTOR_SIM_NAME, deviceType.identifier, runtime.identifier);
     await simctl.bootAndWait(udid);
     checks.push({ name: label("boot"), ok: true, gate: true, smoke: "ios", detail: `${deviceType.name}, ${runtime.name}` });
 
@@ -344,7 +364,7 @@ async function smokeAndroid(): Promise<Check[]> {
   const label = (cap: string) => `smoke android: ${cap}`;
   const android = new AndroidManager();
   const backend = new AndroidAdbBackend({ portRange: ANDROID_SMOKE_PORTS });
-  const avd = "deckhand-doctor";
+  const avd = DOCTOR_AVD_NAME;
   let serial: string | undefined;
   const checks: Check[] = [];
   try {

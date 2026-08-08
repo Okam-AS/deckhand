@@ -3,7 +3,17 @@ import { readFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkConnectorAuth, checkPublicUrl, deviceGateExit, freshnessVerdict, readTokens, type Check } from "./doctor.ts";
+import {
+  DOCTOR_AVD_NAME,
+  DOCTOR_SIM_NAME,
+  checkConnectorAuth,
+  checkPublicUrl,
+  deviceGateExit,
+  freshnessVerdict,
+  readTokens,
+  type Check,
+} from "./doctor.ts";
+import { orphanAvds, orphanSims } from "../engine/reaper.ts";
 import type { Config } from "../config.ts";
 
 /**
@@ -257,3 +267,85 @@ describe("the tunnel agent forces http2", () => {
     assert.ok(args.indexOf("--protocol") < args.indexOf("run"), "--protocol must precede `run` or cloudflared rejects it");
   });
 });
+
+/**
+ * The gate creates two devices of its own, and an interrupted run (Ctrl-C, a throw past the
+ * `finally`, a laptop lid) leaves them behind. Whether anything ever collects them is decided
+ * entirely by whether their names fall inside the prefixes the sweeps select on.
+ *
+ * They did not. Both were hand-written `"deckhand-doctor"`, so the AVD sat outside
+ * `AVD_PREFIX` ("deckhand_") and was invisible to `orphanAvds` AND to `sweepDeviceRecorders`'
+ * second ownership gate — leaving an orphaned `screenrecord` holding the machine's single
+ * H.264 encoder, which drops every other emulator to MJPEG with nothing in any log to say so.
+ */
+describe("the device gate's own devices are reapable", () => {
+  it("names them inside the prefixes both sweeps select on", () => {
+    // Asserted through the selectors rather than with `startsWith`, so this fails for the
+    // reason that matters — the reaper cannot see them — and keeps failing if the selectors
+    // themselves change shape.
+    assert.deepEqual(
+      orphanSims([{ udid: "DOCTOR", name: DOCTOR_SIM_NAME, state: "Booted" }]).map((s) => s.name),
+      [DOCTOR_SIM_NAME],
+      `${DOCTOR_SIM_NAME} is not reaped as an orphan simulator`,
+    );
+    assert.deepEqual(orphanAvds([DOCTOR_AVD_NAME]), [DOCTOR_AVD_NAME], `${DOCTOR_AVD_NAME} is not reaped as an orphan AVD`);
+  });
+
+  it("spells no device name by hand anywhere in doctor.ts", () => {
+    // The selector test above can only judge the names doctor EXPORTS. A future author adding
+    // a third device — the way the second one was added — writes a fresh literal at its call
+    // site, and nothing above would notice. So: no string literal in this file may begin with
+    // `deckhand-`/`deckhand_` at all. Derive it from `SIM_PREFIX`/`AVD_PREFIX` instead.
+    const src = stripComments(readFileSync(new URL("./doctor.ts", import.meta.url), "utf8"));
+    const literals = [...src.matchAll(/["'`]deckhand[-_][^"'`]*/g)].map((m) => m[0].slice(1));
+    assert.deepEqual(literals, [], "derive device names from SIM_PREFIX / AVD_PREFIX, do not spell them out");
+  });
+
+  it("reads the scan's comment stripper both ways", () => {
+    // A guardrail that fires on prose gets deleted rather than obeyed, and one that reads a
+    // comment as code would let a real literal hide behind a `//`. Both directions, or neither
+    // half of the scan above is trustworthy.
+    const scan = (s: string) => [...stripComments(s).matchAll(/["'`]deckhand[-_][^"'`]*/g)].map((m) => m[0].slice(1));
+    assert.deepEqual(scan('// it used to be called "deckhand-doctor"\nconst x = 1;\n'), [], "a name quoted in prose is not a device name");
+    assert.deepEqual(scan('/* was "deckhand-doctor" */\nconst avd = "deckhand_doctor";\n'), ["deckhand_doctor"], "and a real literal still fires");
+  });
+});
+
+/**
+ * Comments are not code, and a name quoted in prose must not fire the scan above. Twin of the
+ * walks in `test-support/invariants.test.ts` and `testing/control.test.ts`, duplicated rather
+ * than shared for the same reason they are: it is a dozen lines, and importing a scanner
+ * couples guardrails that have to be able to fail independently.
+ */
+function stripComments(src: string): string {
+  let out = "";
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i]!;
+    if (c === '"' || c === "'" || c === "`") {
+      // Copy the literal whole — that is the part the scan is looking at.
+      out += c;
+      for (i++; i < src.length; i++) {
+        out += src[i];
+        if (src[i] === "\\") {
+          out += src[++i] ?? "";
+          continue;
+        }
+        if (src[i] === c) break;
+      }
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "/") {
+      while (i < src.length && src[i] !== "\n") i++;
+      out += "\n";
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "*") {
+      i += 2;
+      while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) i++;
+      i++;
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}

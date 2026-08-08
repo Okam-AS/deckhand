@@ -16,8 +16,17 @@ import { androidProcessEnv } from "./toolEnv.ts";
 // ---------------------------------------------------------------------------
 
 /**
- * AVD names deckhand creates: `deckhand_<previewId>_<deviceId>` (avdmanager
- * forbids "-"), and `deckhand_pool_…`, which shares the prefix.
+ * AVD names deckhand creates: `deckhand_<previewId>_<deviceId>`, and
+ * `deckhand_pool_…`, which shares the prefix.
+ *
+ * The underscore is a CONVENTION, not a constraint. This said "avdmanager forbids
+ * `-`" and that is false — it answers an invalid name with "Allowed characters are:
+ * a-z A-Z 0-9 . _ -", and creating `deckhand-hyphen-probe` succeeds. Believing the
+ * false version is what let `cli/doctor.ts` name the gate's AVD `deckhand-doctor`,
+ * outside this prefix and therefore outside every sweep. Nothing in CI can pin the
+ * real rule (no emulator on a GitHub runner), so treat this paragraph as the record
+ * of one hand-run probe rather than as a checked fact — but do not restore the claim
+ * that a hyphen is rejected.
  *
  * It lives here, in the shared low-level device layer, because both the engine
  * (`engine/reaper.ts`) and the streaming seam (`streaming/androidAdb.ts`) have
