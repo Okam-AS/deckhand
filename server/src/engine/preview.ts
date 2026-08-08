@@ -2999,9 +2999,12 @@ export class PreviewEngine {
         // call, and until this line existed it had none: StreamingRouter.reapOrphans() was
         // written, tested, and never reached from boot, so the 2h48m orphan that motivated
         // it (see serveSim.ts) would have survived every restart. Spare what is live, for
-        // the same reason the device reap does.
+        // the same reason the device reap does — and by EVERY identifier a
+        // backend might key on, not just the two the Reaper uses: serve-sim's
+        // helper map is keyed by simulator UDID, AndroidAdbBackend's by adb
+        // serial. See liveDeviceHandles.
         const live = this.liveDeviceHandles();
-        await this.d.streaming.reapOrphans(new Set([...live.udids, ...live.avds])).catch(() => {});
+        await this.d.streaming.reapOrphans(new Set([...live.udids, ...live.avds, ...live.serials])).catch(() => {});
         return devices;
       } catch {
         return { sims: [], avds: [], keptPooled: [] };
@@ -3040,22 +3043,39 @@ export class PreviewEngine {
    * Every device handle a live preview holds or is about to hold. Pool leases
    * are included by name because a device between `simctl create` and the
    * engine recording its UDID has a name but no handle yet.
+   *
+   * ONE device has up to three identifiers, and each consumer of this knows
+   * only its own:
+   *   - `udids`  — simulator UDID. The Reaper matches `simctl list` on it, and
+   *                ServeSimBackend keys its helper map on it.
+   *   - `avds`   — AVD name. The Reaper matches `avdmanager list` on it, and it
+   *                is what `adb emu avd name` reports.
+   *   - `serials`— adb serial (`emulator-5554`). AndroidAdbBackend keys its
+   *                helper map on THIS and on nothing else.
+   * A backend handed only the two the Reaper needs cannot spare anything: the
+   * boot sweep passed `udids ∪ avds` to `reapOrphans`, and `keep.has(serial)`
+   * in AndroidAdbBackend was therefore false for every live Android device, so
+   * the sweep stopped the helper of a `start_preview` that landed after the
+   * port was bound. Anything that fans a keep-set across backends must carry
+   * all three.
    */
-  private liveDeviceHandles(): { udids: string[]; avds: string[]; names: string[] } {
+  private liveDeviceHandles(): { udids: string[]; avds: string[]; serials: string[]; names: string[] } {
     const udids: string[] = [];
     const avds: string[] = [];
+    const serials: string[] = [];
     // Pool leases cover the pooled config; `deviceName` covers both, including
     // the non-pooled `deckhand-<previewId>-<n>` names that no lease ever holds.
     const names = new Set<string>(this.leased);
     for (const p of this.previews.values()) {
       for (const dev of p.devices) {
         if (dev.deviceName) names.add(dev.deviceName);
+        if (dev.record.serial) serials.push(dev.record.serial);
         if (!dev.record.udid) continue;
         // record.udid holds the AVD name on Android, the simulator UDID on iOS.
         (dev.record.platform === "android" ? avds : udids).push(dev.record.udid);
       }
     }
-    return { udids, avds, names: [...names] };
+    return { udids, avds, serials, names: [...names] };
   }
 
   /** Note that someone is actually watching this preview (resets the idle clock). */

@@ -1840,9 +1840,10 @@ describe("PreviewEngine idle sweep", () => {
     // so the orphan that motivated it (a helper 2h48m old serving a dead simulator's last
     // frame forever) survived every restart. Nothing failed, because nothing asked.
     const reapKeep: (readonly string[])[] = [];
+    const attached: string[] = [];
     const h = makeEngine({
       streaming: {
-        attach: async () => ({
+        attach: async (d: StreamDeviceRef) => (attached.push(d.udid), {
           origin: "http://127.0.0.1:3100",
           helperBasePath: "/helper/x",
           waitForFirstFrame: async () => true,
@@ -1863,6 +1864,46 @@ describe("PreviewEngine idle sweep", () => {
     assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
     await h.engine.reapOrphans();
     assert.ok(reapKeep[1]!.length > 0, "a live preview's device must be named, or the sweep kills its own helper");
+    // By the identifier the backend actually keys its helper map on — which is the one it
+    // was handed on attach. A keep-set that names the device some OTHER way spares nothing.
+    assert.equal(attached.length, 1, "the fixture has to reach a real attach, or this asserts nothing");
+    assert.ok(reapKeep[1]!.includes(attached[0]!), `spared by the udid serve-sim keys on (${attached[0]})`);
+  });
+
+  it("spares a live ANDROID helper at boot — the keep-set carries adb serials, not just AVD names", async () => {
+    // AndroidAdbBackend keys `this.helpers` by adb SERIAL (`emulator-5554`) and its sweep
+    // asks `keep.has(serial)`. The engine used to fill the keep-set from `record.udid`,
+    // which holds the AVD NAME on Android — so that test was false for every live device
+    // and the boot sweep stopped the helper of a start_preview that landed after the port
+    // was bound (the sweep runs after the bind on purpose; see reapOrphans). Nothing
+    // failed loudly: the preview stayed `ready` with a dead stream.
+    const reapKeep: (readonly string[])[] = [];
+    const attached: string[] = [];
+    const h = makeEngine({
+      streaming: {
+        attach: async (d: StreamDeviceRef) => {
+          attached.push(d.serial ?? d.udid);
+          return {
+            origin: "http://127.0.0.1:3100",
+            helperBasePath: "/helper/x",
+            waitForFirstFrame: async () => true,
+            describe: async () => "tree",
+            detach: async () => {},
+          };
+        },
+        reapOrphans: async (keep?: ReadonlySet<string>) => void reapKeep.push([...(keep ?? [])]),
+      },
+    });
+
+    h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "android" }], access: "public" });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+    await h.engine.reapOrphans();
+
+    assert.equal(attached.length, 1, "the fixture has to reach a real attach, or this asserts nothing");
+    assert.ok(
+      reapKeep[0]!.includes(attached[0]!),
+      `the serial the helper is keyed by (${attached[0]}) must be in the keep-set, got ${JSON.stringify(reapKeep[0])}`,
+    );
   });
 
   it("reaps a FAILED preview at boot, not just a running one", async () => {
