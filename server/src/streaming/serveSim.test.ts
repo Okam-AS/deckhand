@@ -268,6 +268,48 @@ describe("ServeSimBackend — surviving helpers", () => {
     assert.deepEqual(killedPids, [9101], "the daemon an unfinished attach had just bound must survive the sweep");
   });
 
+  it("never blanket-kills while an attach already holds a port", async () => {
+    // The blanket `serve-sim -k` kills every helper on the machine, so it is taken only when
+    // we know of no helper at all. `this.helpers` is not the whole of what we know: an attach
+    // inside `serve-sim --detach` has claimed its port and has no record yet, and the boot
+    // sweep runs after the port is bound, so that is exactly the state a start_preview racing
+    // the sweep is in. `pendingPorts` is a READ of a helper we know about, not a prediction
+    // about one — the blanket kill has to consult it too.
+    const killArgs: string[][] = [];
+    let releaseDetach: (() => void) | undefined;
+    const backend = new ServeSimBackend({
+      portRange: [3100, 3102],
+      detachImpl: async (_bin, args) => {
+        const port = Number(args[args.indexOf("-p") + 1]!);
+        const udid = args[args.length - 1]!;
+        // The daemon binds the port here; the CLI has not reported it yet.
+        await new Promise<void>((r) => (releaseDetach = r));
+        return JSON.stringify({ port, streamUrl: `http://127.0.0.1:${port}/helper/${udid}/stream.mjpeg` });
+      },
+      killImpl: async (_bin, args) => {
+        killArgs.push(args);
+      },
+      listenersImpl: async () => [],
+      killPidImpl: () => {},
+    });
+
+    const inFlight = backend.attach({ platform: "ios", udid: "NEW" });
+    // One macrotask drains every microtask before it, so the attach is parked inside
+    // detachImpl: port claimed, `this.helpers` still empty.
+    await new Promise((r) => setTimeout(r, 0));
+    assert.ok(releaseDetach, "fixture sanity: the attach is parked inside `serve-sim --detach`");
+
+    await backend.reapOrphans();
+
+    assert.deepEqual(
+      killArgs.filter((a) => a.length === 1 && a[0] === "-k"),
+      [],
+      "the blanket `-k` killed the daemon an unfinished attach had just spawned",
+    );
+    releaseDetach!();
+    await inFlight;
+  });
+
   it("forgets only the condemned RECORD, not whatever now sits under its udid", async () => {
     // The condemned list is fixed before the kills, but the deletion happens after them — and
     // a re-attach of a condemned udid during those awaits puts a DIFFERENT record under the

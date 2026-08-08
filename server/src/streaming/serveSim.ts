@@ -322,12 +322,15 @@ export class ServeSimBackend implements StreamingBackend {
    * → `serveSim.test.ts` "spares a helper attached DURING the `serve-sim -k` kills",
    *   `serveSim.test.ts` "spares a helper attached DURING the port sweep",
    *   `serveSim.test.ts` "spares a port an in-flight attach has already claimed",
-   *   `serveSim.test.ts` "forgets only the condemned RECORD, not whatever now sits under its udid"
+   *   `serveSim.test.ts` "forgets only the condemned RECORD, not whatever now sits under its udid",
+   *   `serveSim.test.ts` "never blanket-kills while an attach already holds a port"
    *
-   * Three things that guard does NOT close, so do not read it as more than it is:
-   * - The blanket `-k` branch, taken only when we know of no helper at all (a fresh process):
-   *   an attach landing inside that one await is killed by a `-k` already in flight, and no
-   *   re-read can see the future. It stays narrowed to the boot case for exactly that reason.
+   * The blanket `-k` takes every helper on the machine, so it is taken only when we know of no
+   * helper at all — and `this.helpers` is not the whole of what we know. An attach still inside
+   * `serve-sim --detach` has claimed a port and recorded nothing, which is a helper we know
+   * about, so `pendingPorts` gates that branch too. With an attach in flight the branch is
+   * simply skipped: the port sweep below is the stronger lever anyway, and it spares the same
+   * set. What is left open is the instant AFTER the re-read, which no read can close:
    * - The instant between the last re-read and `killPidImpl`. Nothing closes that — the only
    *   real fix is that an attach one instant later than a signal loses a helper, not a port:
    *   `attach` verifies a remembered helper is still listening and respawns if it is not.
@@ -339,7 +342,7 @@ export class ServeSimBackend implements StreamingBackend {
   async reapOrphans(keep: ReadonlySet<string> = new Set()): Promise<void> {
     const known = new Map(this.helpers);
     const doomed = [...known.keys()].filter((udid) => !keep.has(udid));
-    if (known.size === 0) {
+    if (known.size === 0 && this.pendingPorts.size === 0) {
       await this.killImpl(this.bin, ["-k"]);
     } else {
       // Per-udid, because the blanket `-k` would take the live ones with it. Helpers left
