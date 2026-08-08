@@ -110,16 +110,50 @@ export function stringLiterals(src: string): string[] {
  * Every `/…/` in `src` that contains a quote character — i.e. every regex literal that would
  * desync `stringLiterals`. Empty is the precondition holding.
  *
- * Why this is sound despite sharing the lexer's blind spot: the walk is CORRECT up to the
- * first offending regex, because the only thing that desyncs it is an offending regex. So the
- * first one is always seen, which is the one that has to be reported.
+ * A candidate is `/` to the next unescaped `/` on the SAME line, non-empty — so a character
+ * class containing `/` closes early rather than swallowing the rest of the line.
  *
- * Deliberately conservative about what counts as a candidate — `/` to the next unescaped `/`
- * on the SAME line, non-empty — so a division (`(a + b) / c`) has no closer and is not a
- * candidate at all, and a character class containing `/` closes early rather than swallowing
- * the rest of the line. Both directions err toward "not a regex", which is right: the caller
- * uses this to reject, and a guardrail that fires on correct code gets switched off.
+ * Two things this has to get right, and it used to get neither:
+ *
+ *  1. That closer must not be a COMMENT OPENING. `(a + b) / c; // that repo's default branch`
+ *     used to consume through the first `/` of the `//`, so the comment was never recognised,
+ *     the apostrophe opened a phantom string, and the offending regex on the NEXT line was
+ *     swallowed by it — the guard returned empty while the caller silently scanned code as
+ *     prose. So a `//` or `/*` at the closer position abandons the candidate and hands the
+ *     position to the comment branch instead.
+ *  2. Telling a regex from a division needs the PREVIOUS significant token, and skipping that
+ *     is not conservative in the direction it looks: `const x = a / b; const y = /["']/;`
+ *     consumed the division's span up to the real regex's opening `/`, landed inside it, and
+ *     read `"` as a string. `canStartRegex` reads that token. It is division only after an
+ *     identifier that is not a keyword regexes may follow; `)`, `]` and `}` are genuinely
+ *     ambiguous (`if (x) /re/` versus `(a + b) / c`) and are read as REGEX, because the caller
+ *     uses this to REJECT and a false red here is loud while a miss is silent.
+ *
+ * So the precondition it enforces holds in the direction that matters: no `/…/` containing a
+ * quote reaches the caller unreported. What it may still do is report a division as a regex —
+ * `(a + b) / c + "x" / d`, ambiguous opener and a quote in the span. Nothing in `mcp/tools.ts`
+ * is written that way; if that day comes, the fix is to move the expression, not to widen this.
+ *
+ * A regex inside a template's `${…}` is skipped, and safely: `stringLiterals` blanks those
+ * spans with the identical brace walk, so it cannot desync on what it never reads.
+ * → docs.test.ts "sees a quoted regex hiding behind a division and a comment"
  */
+const REGEX_PRECEDING_KEYWORDS = new Set([
+  "return", "typeof", "case", "in", "of", "do", "else", "yield", "await", "new", "delete", "void", "instanceof", "throw",
+]);
+
+/** Whether the `/` at `at` can open a regex literal, read from the previous significant token. */
+function canStartRegex(src: string, at: number): boolean {
+  let k = at - 1;
+  while (k >= 0 && /\s/.test(src[k]!)) k--;
+  if (k < 0) return true;
+  // Anything that is not a word character — including `)`, `]` and `}` — is read as "regex".
+  if (!/[A-Za-z0-9_$]/.test(src[k]!)) return true;
+  let s = k;
+  while (s >= 0 && /[A-Za-z0-9_$]/.test(src[s]!)) s--;
+  return REGEX_PRECEDING_KEYWORDS.has(src.slice(s + 1, k + 1));
+}
+
 export function quotedRegexLiterals(src: string): string[] {
   const out: string[] = [];
   let i = 0;
@@ -154,6 +188,10 @@ export function quotedRegexLiterals(src: string): string[] {
         if (d === c) break;
       }
     } else if (c === "/") {
+      if (!canStartRegex(src, i)) {
+        i++;
+        continue;
+      }
       let j = i + 1;
       let body = "";
       while (j < src.length && src[j] !== "\n" && src[j] !== "/") {
@@ -165,9 +203,12 @@ export function quotedRegexLiterals(src: string): string[] {
         body += src[j]!;
         j++;
       }
-      if (src[j] === "/" && body.length > 0) {
+      if (src[j] !== "/") i++;
+      // The "closer" is a comment opening, not a closer. Hand it to the comment branch rather
+      // than consuming it — swallowing the first `/` of a `//` is what hid the next regex.
+      else if (src[j + 1] === "/" || src[j + 1] === "*") i = j;
+      else if (body.length > 0) {
         if (/["'`]/.test(body)) out.push(`/${body}/`);
-        // Consumed either way: a candidate's own slashes must not be re-read as a comment.
         i = j + 1;
       } else i++;
     } else i++;

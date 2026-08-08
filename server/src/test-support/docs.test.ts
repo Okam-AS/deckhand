@@ -284,7 +284,16 @@ describe("docs describe the code that exists", () => {
         `Move the pattern out of tools.ts, or teach stringLiterals to lex regex literals.`,
     );
     const ghosts = new Set<string>();
-    for (const text of stringLiterals(TOOLS)) {
+    // One floor per LOOP, never a sum. The `fields` floor above says the SCHEMA parsed and says
+    // nothing about whether any prose is left to scan: `stringLiterals` returning an empty list
+    // — a lexer change, a rewrite of the descriptions into template parts — leaves this loop
+    // iterating over nothing and `ghosts` empty for the one reason its message does not cover.
+    const literals = stringLiterals(TOOLS);
+    assert.ok(
+      literals.length > 50,
+      `only ${literals.length} string literals lexed out of tools.ts — the lexer or the file's style changed, fix this check`,
+    );
+    for (const text of literals) {
       for (const m of text.matchAll(/\b(?:pass|use|with|set) ([a-z][A-Za-z0-9]*)\s*:\s*[[{]/g)) {
         if (!fields.has(m[1]!)) ghosts.add(`${m[1]}: {…}`);
       }
@@ -297,6 +306,28 @@ describe("docs describe the code that exists", () => {
       [],
       `tools.ts tells the caller to pass an argument no tool's schema declares — the call it describes fails validation`,
     );
+  });
+
+  it("sees a quoted regex hiding behind a division and a comment", () => {
+    // The precondition asserted above is only worth asserting if it can fail. It could not:
+    // the guard walked past a division whose span ended at a `//`, consumed that comment's
+    // first slash, read the apostrophe in `repo's` as a quote, and swallowed the real
+    // offender inside a phantom string — returning EMPTY on a file that breaks
+    // `stringLiterals`. Fixtures rather than tools.ts, because both failure directions are
+    // invisible while the only input is a file that happens to be clean.
+    const OFFENDER = `const q = /["']/;\n`;
+    // Direction 1 — the real thing still fires, on its own and behind the two shapes that
+    // used to hide it.
+    assert.deepEqual(quotedRegexLiterals(OFFENDER), [`/["']/`]);
+    assert.deepEqual(quotedRegexLiterals(`const r = (a + b) / c; // that repo's branch\n${OFFENDER}`), [`/["']/`]);
+    assert.deepEqual(quotedRegexLiterals(`const x = a / b; ${OFFENDER}`), [`/["']/`]);
+    // Direction 2 — correct code must stay silent, or the caller's assert cries wolf and gets
+    // deleted. A division, a comment holding an apostrophe, a URL in a string, and the
+    // back-to-back regexes in tools.ts's own `slug()`, which is the shape that a naive fix
+    // (re-reading a candidate's closing slash) reports as a quoted regex.
+    assert.deepEqual(quotedRegexLiterals(`const r = (a + b) / c; // that repo's branch\n`), []);
+    assert.deepEqual(quotedRegexLiterals(`const u = "https://example.com/a";\n`), []);
+    assert.deepEqual(quotedRegexLiterals(`const s = t.replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");\n`), []);
   });
 
   it("keeps the path-scoped rules pointing at checks that exist", () => {
@@ -330,8 +361,11 @@ describe("docs describe the code that exists", () => {
     //
     // One floor per LOOP, never a sum: the file half alone used to clear the combined floor, so
     // the named half could match nothing and this still passed — verifying that a test file
-    // exists while the message claimed a check name had been verified. Today: 27 file citations,
-    // 26 named.
+    // exists while the message claimed a check name had been verified.
+    //
+    // No count of today's citations here. One was written down and was wrong within the week,
+    // which is this file's own subject; the failure message prints the live number, so there
+    // is nothing a reader needs a stale copy of.
     assert.ok(files > 12, `only ${files} test-file citations parsed in .claude/rules/ — the citation form changed, fix this check`);
     assert.ok(named > 12, `only ${named} NAMED citations parsed in .claude/rules/ — the check-name half of the citation form changed, fix this check`);
     assert.deepEqual(
@@ -342,10 +376,11 @@ describe("docs describe the code that exists", () => {
   });
 
   it("keeps source-comment citations pointing at checks that exist", () => {
-    // The same citation form, in the same repo, three times as common — and unpoliced. The
-    // check above reads `.claude/rules/` only, while `→ preview.test.ts "…"` is written in
-    // source comments eighteen times, in preview.ts, proxy.ts, androidAdb.ts, androidH264.ts,
-    // reaper.ts, metro.ts, control.ts, tools.ts, configWrite.ts, setup.ts and devices/android.ts.
+    // The same citation form, in the same repo, more common — and unpoliced. The check above
+    // reads `.claude/rules/` only, while `→ preview.test.ts "…"` is written in source comments
+    // across the engine, the streaming backends, the share proxy, the MCP tools and the CLI.
+    // (No file list and no count: the list rotted the week it was written, and the failure
+    // message below names the offending file itself.)
     //
     // That is not a lesser case. AGENTS.md's third un-checkable rule is that a comment stating
     // a precondition needs a test that fails when the precondition breaks, and a citation IS
@@ -376,10 +411,10 @@ describe("docs describe the code that exists", () => {
     // a change that makes that return nothing would leave a green check that examines an empty
     // string.
     //
-    // One floor per LOOP, never a sum. The file half alone (14) used to clear the combined floor
-    // of 12, so the named half could match nothing and this stayed green while `dangling` went
-    // empty — the check would then be asserting only that a test FILE exists, which is not what
-    // its failure message says. Today: 14 file citations, 18 named, across eleven files.
+    // One floor per LOOP, never a sum. The file half alone used to clear the combined floor, so
+    // the named half could match nothing and this stayed green while `dangling` went empty —
+    // the check would then be asserting only that a test FILE exists, which is not what its
+    // failure message says.
     assert.ok(files > 6, `only ${files} source-comment test-file citations parsed — the citation form or comment scan changed, fix this check`);
     assert.ok(named > 8, `only ${named} NAMED source-comment citations parsed — the check-name half of the citation form or the comment scan changed, fix this check`);
     assert.deepEqual(
@@ -518,6 +553,15 @@ describe("docs describe the code that exists", () => {
     assert.ok(mdFiles.length > 8, `only ${mdFiles.length} markdown files walked — the walk is wrong, fix this check`);
     const shellBlocks = mdFiles.flatMap((doc) =>
       [...readFileSync(join(REPO, doc), "utf8").matchAll(/```(?:sh|bash|console)\n([\s\S]*?)```/g)].map((m) => `${doc}: ${m[1]!}`),
+    );
+    // One floor per LOOP, never a sum. `mdFiles.length` above says the WALK found documents;
+    // it says nothing about the fence pattern still matching any of them. Rename the fence
+    // languages, or let a formatter rewrite them, and this loop runs zero times while every
+    // assertion inside it reads as having passed.
+    assert.ok(
+      shellBlocks.length > 10,
+      `only ${shellBlocks.length} runnable shell blocks parsed out of ${mdFiles.length} markdown files — ` +
+        `the fence pattern no longer matches how this repo writes them, fix this check`,
     );
     for (const block of shellBlocks) {
       for (const banned of HUMAN_ONLY) {
