@@ -975,7 +975,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         interactiveOnly: z
           .boolean()
           .optional()
-          .describe("prune to tappable elements + ancestors — only has an effect alongside source or maxDepth; on its own the default snapshot is already smaller"),
+          .describe("prune to tappable elements + ancestors — it applies only to the tree endpoint, which you reach by also passing source or maxDepth (or when the default snapshot comes back empty); on its own the default snapshot is already smaller and no less complete"),
         maxDepth: z.number().int().positive().optional(),
       },
     },
