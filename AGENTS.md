@@ -86,15 +86,15 @@ construction reference pane is gone. Panes still stream from their **own** share
 streaming seam is untouched and no new route is forwarded — the one proxy change is the
 unlock minting fanning out from a single partner to the set. The viewer has ONE stage:
 `computeStage` in `viewer/src/panes.ts` decides grouping and visibility as a pure function
-(one source → all its devices; several → one each; mobile → one), and it is the only
-tested code in `viewer/` — keep new layout rules there, not in `App.tsx`.
+(one source → all its devices; several → one each; mobile → one) — keep new layout
+rules there, not in `App.tsx`, which has no tests of its own.
 See PLAN §6 "One page, several sources" and the accepted-risk note beside it.
 
 What remains to build is PLAN's, not this file's, to enumerate. The agent-led onboarding
 contract in PLAN §6 is built; what §6 still names as unbuilt, it names in place — building
 to physical hardware (`list_devices` reports `physical` but `targetable` is always false)
 and the `metro`/`app` `logs` sources, which are accepted and capture nothing. Outside §6,
-PLAN §11.7's host hygiene (dedicated macOS user, no personal credentials, FileVault) is
+PLAN §11 item 7's host hygiene (dedicated macOS user, no personal credentials, FileVault) is
 documented nowhere: `ops/README.md` covers the LaunchAgents and not that.
 
 If you are here to **implement further**, your instructions are:
@@ -166,8 +166,10 @@ therefore does NOT do the work itself:
 5. **Commit per landed slice**, not per batch — a long uncommitted run is how work gets lost.
    **Never `git add -A` / `git add .`** — with several agents in one tree that sweeps another
    agent's half-finished file into your commit. Stage the exact paths you changed, always. This
-   happened twice on 2026-08-07 (`955998e`, `b23a251` each swallowed another agent's in-flight
-   file); nothing was lost, but the authorship and the revert boundary were.
+   happened twice on 2026-08-07 — two commits each swallowed another agent's in-flight file;
+   nothing was lost, but the authorship and the revert boundary were. (No hashes cited here on
+   purpose: this repo squash-merges, so a feature-branch hash stops resolving the moment its PR
+   lands, and the citation then reads as a typo rather than as evidence.)
    **`git commit -a`, and a pre-populated index, are the same hazard by another route.** Another
    agent may have already run `git add` on its own files before you commit, so `git commit -m`
    with no paths ships them too — that happened again on 2026-08-08 and had to be unpicked with
@@ -431,9 +433,15 @@ preview you cannot see. Offer it in one sentence, at the top of your reply — n
 buried under a status list.
 
 The version is the commit (`version.ts`) — nothing to bump, so nothing to forget.
-It only speaks when the checkout is a clean `main`; a feature branch or a dirty
-tree gets a factual note instead of a nag, because a notice that fires when it
-should not is one nobody reads when it should.
+The two actions are gated differently, and only one of them is quiet off `main`:
+`pull-and-restart` compares against `origin/main` and speaks **only** on a clean
+`main` checkout, because a feature branch is not "out of date" and a nag that
+fires when it should not is one nobody reads when it should. `restart` compares
+the sha this process booted on against the sha on disk, so it fires on any branch
+and on a dirty tree — the running code being stale is true regardless. When neither
+holds, nothing is attached: `version.ts` still composes a factual note for a dirty
+or off-`main` checkout, but `ok()` in `mcp/tools.ts` only ships one alongside a
+`deckhandUpdate`, so no tool response ever carries it.
 
 ## Setting a user up, or unsticking one
 
