@@ -495,6 +495,47 @@ describe("deckhand ships nothing about one particular install", () => {
   });
 });
 
+/**
+ * Strip comments without also eating code. The obvious `/\/\/.*$/gm` truncates a
+ * line at the `//` inside a string literal — a URL is enough — and the failure
+ * direction is toward PASSING: an offender sharing a line with a URL disappears
+ * along with the "comment". So this walks the source instead, and a `//` or a
+ * block opener inside a quoted string is left alone.
+ * → "puts no credential in an MCP route path", which plants exactly that.
+ */
+function stripComments(src: string): string {
+  let out = "";
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i]!;
+    if (c === '"' || c === "'" || c === "`") {
+      // Copy the literal whole. An unterminated one runs to the end of the file,
+      // which is what the compiler would say about it too.
+      out += c;
+      for (i++; i < src.length; i++) {
+        out += src[i];
+        if (src[i] === "\\") {
+          out += src[++i] ?? "";
+          continue;
+        }
+        if (src[i] === c) break;
+      }
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "/") {
+      while (i < src.length && src[i] !== "\n") i++;
+      out += "\n";
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "*") {
+      const end = src.indexOf("*/", i + 2);
+      i = end === -1 ? src.length : end + 1;
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
 describe("the connector URL is public by construction", () => {
   // The premise: a connector added in a Claude team or Enterprise organisation is visible to
   // everyone in it. The credential used to be a path segment in that URL — `/mcp/<token>` —
@@ -507,9 +548,9 @@ describe("the connector URL is public by construction", () => {
     // Comments stripped, like the share gate below: this file explains the rejected design at
     // length, and a check that reads the explanation as the code cries wolf at the author who
     // documents it. (Mutation: a comment reading `router.get("/:tok", …)` failed this test.)
-    const router = read(join(SRC, "mcp", "index.ts"))
-      .replace(/\/\*[\s\S]*?\*\//g, "")
-      .replace(/\/\/.*$/gm, "");
+    // Stripped string-aware, because the naive line-comment regex cuts at the `//` in a URL
+    // and would take a real offender sharing that line with it.
+    const router = stripComments(read(join(SRC, "mcp", "index.ts")));
     const offenders: string[] = [];
     for (const m of router.matchAll(/router\.(get|post|delete|put|all)\(\s*"([^"]*)"/g)) {
       const path = m[2]!;
