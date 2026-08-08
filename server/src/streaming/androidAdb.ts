@@ -584,6 +584,14 @@ export class AndroidAdbBackend implements StreamingBackend {
    *      checked because it covers a window the serial cannot: between
    *      `record.udid = <avd name>` and `record.serial = <serial>` an emulator
    *      is still booting and is in `keep` by name only.
+   *      The helper map is not a second reading of `keep`, though it looks
+   *      like one: `reapOrphans` prunes `this.helpers` down to `keep` before
+   *      calling this, so every helper that survives the prune IS in `keep`.
+   *      What it decides on its own is the attach that lands DURING the sweep
+   *      — later than the engine's keep-set snapshot, later than the prune,
+   *      and visible here only because the map is read after an await.
+   *      → `androidAdbBackend.test.ts` "spares a device attached AFTER the
+   *      keep-set was taken"
    *   4. no host-side `adb -s <serial> exec-out screenrecord` is alive. This is
    *      the only check that survives a process boundary, and it is what makes
    *      `deckhand doctor --device-only` — a separate process, empty helper map,

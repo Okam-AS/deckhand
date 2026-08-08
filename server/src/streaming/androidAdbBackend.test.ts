@@ -261,22 +261,46 @@ describe("AndroidAdbBackend.reapOrphans — recorders left inside the emulator",
     assert.deepEqual(h.killed(), [], "an unreadable owner list means unknown, not unowned");
   });
 
-  it("spares a recorder this process is streaming right now", async () => {
+  it("spares a device attached AFTER the keep-set was taken", async () => {
+    // What `sweepDeviceRecorders`'s helper-map check is for, and the only
+    // situation in which it decides anything.
+    //
+    // `keep` is a snapshot the engine takes before it calls (preview.ts
+    // `liveDeviceHandles`), and `reapOrphans` prunes `this.helpers` down to
+    // that snapshot before the sweep runs — so for every serial the prune
+    // leaves behind, `keep.has(serial)` on the next line is already true. A
+    // `start_preview` that attaches DURING the sweep is in neither: not in the
+    // snapshot, not in the pruned map. The helper map is read after an await,
+    // which is what lets it see that attach at all.
+    //
+    // This is why the earlier version of this test proved nothing: it attached
+    // a helper AND passed `keep = {deckhand_p1_1}` while the fake console
+    // answered with that same AVD name, so the sweep spared the device on the
+    // `keep.has(avd)` branch and the helper check was never reached.
     const { adb } = fakeAdb();
     const seen: string[] = [];
-    const b = new AndroidAdbBackend({
+    let attaching: Promise<unknown> | null = null;
+    const b: AndroidAdbBackend = new AndroidAdbBackend({
       portRange: [3420, 3430],
       adb: async (serial, args, o) => {
         if (args[0] === "shell" && args[1] === "pkill") seen.push(serial);
         if (args[0] === "emu") return { stdout: Buffer.from("deckhand_p1_1\nOK\n"), code: 0 };
         return adb(serial, args, o);
       },
-      listSerials: async () => ["emulator-5554"],
+      // The attach lands mid-sweep: after reapOrphans has pruned the helper
+      // map, before sweepDeviceRecorders reads it.
+      listSerials: async () => {
+        attaching ??= b.attach(device);
+        await attaching;
+        return ["emulator-5554"];
+      },
       hostRecorderSerials: async () => new Set<string>(),
     });
-    await withStream(b, async () => {
-      await b.reapOrphans(new Set(["deckhand_p1_1"]));
-      assert.deepEqual(seen, [], "the helper we hold is live work, not an orphan");
-    });
+    try {
+      await b.reapOrphans();
+      assert.deepEqual(seen, [], "a helper we hold is live work, not an orphan");
+    } finally {
+      await b.detach(device.serial).catch(() => {});
+    }
   });
 });
