@@ -12,10 +12,13 @@ checkout is gone.
 
 - Auto-mate started the daemon with a long option string. Deckhand does not: it runs
   `simdeck -p <port>` (default 4310), which starts-or-reuses the local service and returns —
-  see `server/src/testing/simdeck.ts`. On `EADDRINUSE`: `lsof -tiTCP:4310 -sTCP:LISTEN`, kill
-  **only** PIDs whose command matches `simdeck`/`SimDeck` (SIGTERM→SIGKILL), clean both 4310
-  and 4311, retry once.
-- Readiness: poll `GET /api/health` every 250 ms, ≤15 s.
+  see `server/src/testing/simdeck.ts`. It does not await that command — depending on the
+  installed CLI it detaches or blocks — and gates readiness on `GET /api/health` answering,
+  polled until `START_TIMEOUT_MS`.
+- **Auto-mate's port-contention ladder was NOT ported**, and nothing replaced it: there is no
+  `EADDRINUSE` handling, no `lsof`, no kill and no retry. A daemon already on the port that
+  answers `/api/health` *is* the reuse path; one that does not answer times out and `describe`
+  reports the daemon unavailable. Rebuild the ladder only if that verdict starts being wrong.
 - Auto-mate streamed VIDEO through SimDeck and hard-required its **software (x264)
   encoder**: the hardware one stalled once several previews streamed at once. Deckhand does
   not stream through SimDeck — serve-sim for iOS, adb for Android (PLAN §2/§8), and SimDeck's

@@ -1,9 +1,9 @@
 # serve-sim notes (iOS streaming backend)
 
 serve-sim — https://github.com/EvanBacon/serve-sim (Apache-2.0, npm `serve-sim`, by Evan
-Bacon / Expo) — is Deckhand's iOS streaming backend. These notes were verified against the
-repo source on 2026-07-09. Where a detail matters for implementation, **read the source**
-(paths given) rather than trusting this summary; the project is young and moves.
+Bacon / Expo) — is Deckhand's iOS streaming backend. Where a detail matters for
+implementation, **read the source** in `node_modules/serve-sim` rather than trusting this
+summary: the project moves, and the pin in `server/package.json` moves with it.
 
 ## What it is
 
@@ -21,7 +21,8 @@ repo source on 2026-07-09. Where a detail matters for implementation, **read the
 - Input: touch/gestures/keyboard forwarded over a WS control channel; swipe-home, pinch
   (option key), CMD+SHIFT+H, etc.
 - **Accessibility tree** (`src/ax.ts`, `src/ax-shared.ts`) — feeds Deckhand's `describe`.
-- Simulator logs forwarded to the browser; `serve-sim event-log` CLI — feeds `logs`.
+- Simulator logs forwarded to the browser; `serve-sim event-log` CLI. Deckhand does not use
+  either — the `logs` tool serves deckhand's OWN captured streams, never serve-sim's.
 - Extras we may use later: camera injection (file/webcam/placeholder), drag-drop media,
   rotate, ca-debug flags, memory-warning, DevTools proxying.
 - Apple Watch, iPad, iOS supported.
@@ -34,10 +35,14 @@ repo source on 2026-07-09. Where a detail matters for implementation, **read the
 - The Swift helper is a standalone binary embedded in the npm package — no Xcode dependency
   at runtime beyond simctl.
 - Helper state lives in `$TMPDIR/serve-sim/` (pid/port registry). `serve-sim --list` and
-  `serve-sim --kill [device]` manage running streams — Deckhand's janitor uses these plus
-  its own pid tracking to guarantee zero orphans.
+  `serve-sim --kill [device]` manage running streams. Deckhand's janitor uses the kill form
+  and its own `lsof` on the port; it never reads `--list`, because that registry is the
+  daemon's bookkeeping and not an owner deckhand can trust.
 
-## CLI surface (the parts Deckhand uses)
+## CLI surface — serve-sim's own, NOT what Deckhand calls
+
+Deckhand invokes exactly two forms: `--detach -p <port> <udid>` and `-k [udid]`
+(`server/src/streaming/serveSim.ts`). Nothing else below is called from this repo.
 
 ```
 serve-sim [device...]                 Start preview server (default: localhost:3200)
@@ -56,10 +61,15 @@ serve-sim event-log [-d udid]         Recent simulator events
 
 Devices are addressed by name or UDID; Deckhand always uses the UDID of the sim it created.
 
-## Endpoints & wire protocol (VERIFIED against source 2026-07-09, v0.1.34)
+## Endpoints & wire protocol
+
+Verified against the pinned serve-sim source in `node_modules` — `server/package.json` holds
+the exact version, and it has moved since these notes were first written, so read the source
+before trusting a detail. Symbols are named rather than line-numbered: the line numbers here
+were wrong within two minor versions.
 
 Per-device helper routes are served under `{base}/helper/<udid>/` (in-process from a native
-`DeviceSession`; `middleware.ts:696-816`). The ones Deckhand uses:
+`DeviceSession`, dispatched in `middleware.ts`). The ones Deckhand uses:
 
 | Path | Transport | Purpose |
 |---|---|---|
@@ -69,7 +79,7 @@ Per-device helper routes are served under `{base}/helper/<udid>/` (in-process fr
 | `/helper/<udid>/ax` | SSE | accessibility tree → `describe` |
 
 The H.264 path is **`stream.avcc` over a long-lived chunked HTTP response**, not a
-WebSocket — the only WebSocket here is `/ws`, and it carries input. The pinned 0.1.44 does
+WebSocket — the only WebSocket here is `/ws`, and it carries input. The pinned serve-sim does
 route `/stream.avcc`; whether it encodes on a given machine is a runtime answer, so the
 viewer probes avcc and falls back to MJPEG on a 404 rather than deciding in advance.
 Framing (`client/avcc-codec.ts`): repeating
@@ -86,13 +96,13 @@ endpoint / opaque cross-origin 404), or the decoder errors fatally mid-stream, f
 MJPEG for the session. A healthy helper paints its JPEG seed sub-second.
 
 State shape (`state.ts`): `streamUrl = …/helper/<udid>/stream.mjpeg`,
-`wsUrl = …/helper/<udid>/ws`. `rewriteStateForRequestHost` (`middleware.ts:426`) re-anchors
+`wsUrl = …/helper/<udid>/ws`. `rewriteStateForRequestHost` (`middleware.ts`) re-anchors
 these to the request host and honors `x-forwarded-proto` → this is why the proxy MUST
 forward `X-Forwarded-Proto: https` (Cloudflare terminates TLS) or the browser builds `ws://`
 URLs and mixed-content-blocks them.
 
-The HID `/ws` carries binary WebSocket frames straight to the native session
-(`middleware.ts:804-816`); Deckhand's proxy passes them through opaquely (it need not decode
+The HID `/ws` carries binary WebSocket frames straight to the native session (the upgrade
+handler in `middleware.ts`); Deckhand's proxy passes them through opaquely (it need not decode
 them). The exact touch/gesture payload encoding lives in the native addon + client — vendor
 serve-sim's client input code rather than re-deriving it. `exec-ws.ts` is a **separate**
 `/exec-ws` channel (shell exec + settings + SSE mux, token-gated) that Deckhand must **never**
@@ -108,8 +118,10 @@ taken: its device stream is lazy and browser-driven, so it never attaches to a h
 trap that `-p` is a request rather than an instruction is recorded once, in
 `.claude/rules/streaming.md`, and is not repeated here.
 
-**Only** the video + input endpoints are exposed through the share proxy — never the preview
-UI, camera, exec, or DevTools routes.
+**Only four subpaths** are exposed through the share proxy — `stream.avcc`, `stream.mjpeg`,
+`ws` and `ax` (`PROXY_ALLOWED_SUBPATHS` in `server/src/streaming/backend.ts`). `ax` is the
+accessibility SSE stream, so this is video, input AND inspection; what is never forwarded is
+the preview UI, camera, exec and DevTools routes.
 
 - **TLS/proxy note (critical for the tunnel)**: "When terminating TLS at a reverse proxy,
   forward `X-Forwarded-Proto` so the helper URLs use `https`/`wss` and avoid mixed-content
