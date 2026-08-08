@@ -33,7 +33,7 @@ implementation:
 
 | Area | Decision |
 |---|---|
-| Streaming (iOS) | **[serve-sim](https://github.com/EvanBacon/serve-sim)** (Apache-2.0, npm) — H.264 served as `stream.avcc`, AVCC-framed over a long-lived **chunked HTTP response** (not a WebSocket), decoded with WebCodecs; automatic MJPEG-over-HTTP fallback; input over the helper's WebSocket, plus accessibility tree + logs on the same helper. Free, no relay infrastructure, rides the tunnel as plain HTTPS/WSS. Captures via `simctl io` (a public Apple interface — survives new iOS runtimes as long as simctl does). Pin the npm version. |
+| Streaming (iOS) | **[serve-sim](https://github.com/EvanBacon/serve-sim)** (Apache-2.0, npm) — H.264 served as `stream.avcc`, AVCC-framed over a long-lived **chunked HTTP response** (not a WebSocket), decoded with WebCodecs; automatic MJPEG-over-HTTP fallback; input over the helper's WebSocket, plus the accessibility tree on the same helper. Free, no relay infrastructure, rides the tunnel as plain HTTPS/WSS. Captures via `simctl io` (a public Apple interface — survives new iOS runtimes as long as simctl does). Pin the npm version. |
 | Streaming (Android) | **adb-based**, not scrcpy. The decision gate (ws-scrcpy vs embedded scrcpy-server) resolved against both: scrcpy's raw H.264 wire protocol is version-specific and needs extensive on-device iteration, which cannot be validated without a live emulator. Shipped: `screencap` MJPEG plus on-device `screenrecord` H.264, behind the same `StreamingBackend` seam — see §8 for the full outcome. A scrcpy upgrade remains possible behind that seam; it is not planned. |
 | NOT WebRTC/TURN; SimDeck for CONTROL only | An earlier revision of this plan used SimDeck + WebRTC relayed through Cloudflare TURN. **Rejected (2026-07-09):** TURN costs $0.05/GB and adds a credential/relay subsystem; SimDeck removed its WS transport (v0.1.31) and its display bridge rides private CoreSimulator APIs (unhedgeable risk against future Xcode); most of the predecessor project's operational scar tissue (display-heal ladder, daemon port cleanup, token discovery) was SimDeck-specific pathology. Serving H.264 over the ordinary HTTP tunnel has none of these problems: free, no relay to run or pay for, and exactly as firewall-proof as claude.ai itself — video and input ride the same HTTPS/WSS a browser already reaches claude.ai with. What SimDeck IS used for, since 2026-07-17, is its control/inspection REST surface behind `describe` and `ui` — see `.claude/rules/testing-control.md`. |
 | App types (day one) | React Native (Expo **and** bare) + NativeScript. Flutter / plain-Xcode later. **Amended (2026-07-15): `web`.** A fourth app type hosts a **frontend web project** (a Vite dev server). It is unlike the mobile types: no device/simulator, **local-`path` only** (registered on the machine via `deckhand app add <id> --path <dir> --type web`, never over MCP), and the "preview" IS the running dev server — `start_preview` starts `npm run dev` as a long-lived process (reusing `DevProcessManager`, like NativeScript livesync) on a loopback port and reverse-proxies it through the share URL. Ready = the dev server answers HTTP 200 (no first-frame/screenshot; `screenshot` returns a clear error for web). The dev server is started with Vite's `--base=/s/<shareId>/web/ --host 127.0.0.1 --port <p>` so every asset URL (and HMR) sits under the share path. Vite-first; Next.js/others and git-based web previews are follow-ups. |
@@ -324,21 +324,25 @@ a page simply was. Generalised:
    stable per app: the page lives at the primary app's existing URL, and extra panes are
    additive content on it. A bookmarked link does not rot.
 4. **`start_preview` covers this via `alongside`** (see the tool table), so there is one
-   way to start something. Both capability gates live on it (§11.3).
+   way to start something. What bounds it is the host allow-list in `parseRepo`, re-checked in
+   the `alongside` branch before any credential is resolved — and nothing else, since the role
+   and owner-scope gates went with team support (§11 item 3).
 
 **Accepted risk — reach across owner boundaries (2026-07-31).** A page may now show panes
 from more than two registered apps, and whoever holds the link plus any one pane's PIN
 reaches all of them. This is a difference of degree, not of kind: the two-app case was
 already accepted above and in `partnerIsReachable`, whose rule is preserved unchanged — a
 protected pane joins only when the page itself is protected, so access is never granted
-from nothing. The panes are chosen by an operator whose token already passed
-`canAccessApp` for each one. Revisit if deckhand ever serves mutually-untrusted parties on
+from nothing. The panes are chosen by an operator holding a valid token, which since
+2026-08-05 is the whole of the check (§11 item 3). Revisit if deckhand ever serves mutually-untrusted parties on
 one hostname; the fix then is a per-page principal, not a narrower pane list. Note this
 compounds the cookie-jar risk in §11 item 6 for `web` panes specifically — "per share" stops
 being a sufficient scope unit when one page spans several apps.
 
 Validation rules enforced server-side (never trust the model): app must exist; ref/PR must
-resolve in that app's repo; device count within limits; token owner-scope honored.
+resolve in that app's repo; device count within limits. Not owner-scope — `role` and `owners`
+are stripped from a token as legacy keys before it is parsed (`config.ts`), and §11 item 3
+says why.
 
 > **Fork PRs (audit 2026-07-27):** `allowForkPRs` was **removed**. It was parsed into the
 > app schema and never read anywhere, while this document claimed "fork PRs rejected unless
@@ -417,7 +421,9 @@ env-signature; restart only when env changes or health (`GET /status`) fails. En
   follow the pooling rules below (a per-preview `deckhand-<previewId>-<n>` device, deleted on
   teardown, only when `limits.reuseDevices` is off).
 - **Android**: enumerate installed system images (`sdkmanager --list_installed`); create
-  AVD via `avdmanager create avd --force --name Deckhand_<...> --package <sysimg>`; **deckhand
+  AVD via `avdmanager create avd --force --name deckhand_<...> --package <sysimg>` (the
+  lowercase `deckhand_` prefix is `AVD_PREFIX`, and the orphan sweep selects on it — an AVD
+  named anything else is never reaped); **deckhand
   boots the emulator itself**: `emulator -avd <name> -no-audio -no-boot-anim` (headless flags
   per the P2 evaluation; keep GPU on for rendering), wait for `adb wait-for-device` +
   `sys.boot_completed=1`. The serial is deterministic from the console port deckhand assigns
@@ -538,8 +544,10 @@ Essentials:
 - Input: pointer/keyboard over the helper's `ws` channel — the only WebSocket it serves,
   and it carries no video (plus CLI commands
   `gesture`/`button`/`type`/`rotate` used by the `ui` MCP tool).
-- `describe`: serve-sim's accessibility endpoints (`ax`); `logs`: its forwarded simulator
-  log/event stream.
+- `describe`: serve-sim's accessibility endpoints (`ax`) — the only non-video helper route
+  the share proxy forwards. `logs` does NOT come from the helper: it returns the per-device
+  lines deckhand captured itself (see the tool table), and there is no log route in the
+  proxy's allow-list.
 - When proxying: wire WS `upgrade` handling and forward `X-Forwarded-Proto` so
   helper URLs come out `https`/`wss` behind the tunnel (documented requirement; without it
   the page mixes content and input dies).
@@ -625,7 +633,7 @@ dir is never touched).
   React viewer.
   **Amended (audit 2026-07-27): a web share is ALWAYS PIN-protected.** `start_preview` on a
   `web` app rejects `access: "public"` (`web_needs_pin`), the engine refuses to boot a web
-  device with no PIN record in force, and `set_pin --remove` fails while a web preview is
+  device with no PIN record in force, and `set_pin` with `remove: true` fails while a web preview is
   live — three layers, so no caller can route around it. Why web and not mobile: a mobile
   share exposes four allow-listed helper subpaths, while a web share exposes the dev
   server's whole route surface (including `@fs` if the previewed repo relaxed Vite's
@@ -858,9 +866,11 @@ private repo, and touches nothing on disk. Deckhand must never fetch into its
 own checkout behind the operator's back.
 
 The answer is cached for 30 minutes and refreshed in the background, so no tool
-response ever waits on the network. It is attached to every successful MCP
-response through the shared `ok()` funnel — and only when there is something to
-say, so the normal case is unchanged and a tool added later cannot forget it.
+response ever waits on the network. It is attached through the shared `ok()`
+funnel — and only when there is something to say, so the normal case is unchanged
+and a tool added later cannot forget it. One tool goes around the funnel:
+`screenshot` returns an image content block with nowhere to put JSON, so it
+carries no notice, and `mcp/responses.test.ts` keeps it the only one.
 
 It speaks only for a clean checkout on `main`. A feature branch or a dirty tree
 gets a factual note, never an update prompt.
