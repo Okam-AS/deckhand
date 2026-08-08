@@ -62,7 +62,7 @@ claude.ai / Claude Code / Routines / any MCP client        share-link viewers (a
 │  /mcp                      MCP Streamable HTTP (stateless), bearer-gated tools            │
 │  /s/<shareId>              viewer page (our built static assets + preview metadata)       │
 │  /s/<shareId>/dev/<id>/*   scoped proxy → that device's streaming helper                  │
-│                            (video avcc/MJPEG over HTTP, input WS — nothing else)          │
+│                            (video avcc/MJPEG over HTTP, ax, input WS — nothing else)      │
 │                                                                                           │
 │  auth ── mcp tools ── previewEngine ── deviceManager ── streaming backends                │
 │              │              │                │                  │                         │
@@ -120,11 +120,12 @@ allowPublicRepos: false           # public repos from owners without an app inst
 limits:
   maxDevicesPerPreview: 4
   maxTotalDevices: 6
-  idleMinutes: 45                 # auto-stop a ready preview after this long with no viewer traffic (0 = never)
+  idleMinutes: 60                 # auto-stop a ready preview after this long with no viewer traffic (0 = never)
   failedGraceMinutes: 15          # a failed preview keeps its devices this long, so Rebuild still works (0 = never)
   stuckMinutes: 90                # give up on a preview that has made no progress at all for this long (0 = never)
   reuseDevices: true              # pool simulators/AVDs by device shape instead of one throwaway per preview
-  disk:                           # free-space tiers (GiB); at critical, refuse new previews
+  disk:                           # free-space tiers (GiB); PARSED AND READ BY NOTHING — no code
+                                  # measures free space, so these three numbers change no behaviour
     watch: 50
     pressure: 35
     critical: 20
@@ -337,8 +338,7 @@ compounds the cookie-jar risk in §11.6 for `web` panes specifically — "per sh
 being a sufficient scope unit when one page spans several apps.
 
 Validation rules enforced server-side (never trust the model): app must exist; ref/PR must
-resolve in that app's repo; device count within limits; disk tier not critical; token
-owner-scope honored.
+resolve in that app's repo; device count within limits; token owner-scope honored.
 
 > **Fork PRs (audit 2026-07-27):** `allowForkPRs` was **removed**. It was parsed into the
 > app schema and never read anywhere, while this document claimed "fork PRs rejected unless
@@ -715,11 +715,13 @@ change eases in/out — nothing snaps.
   toolchains present (xcodebuild, simctl, node; java, sdkmanager, adb, emulator for Android),
   the vendored serve-sim present **with its exec-stripping patch still applied**, a connector
   credential exists, GitHub App JWT mints and each installation returns a token, tunnel answers
-  **from the public hostname**, and disk tier. Exit non-zero on any failure. Plain `doctor`
+  **from the public hostname**. Exit non-zero on any failure. Plain `doctor`
   touches no device: it is the paperwork pass, and nothing in it proves video works.
   `--smoke` adds the hardware pass: it creates a simulator and an emulator and checks boot,
   **first frame** and describe on each — six independent checks, no fixture app and no build.
-  `--device-only` runs that pass alone, and its exit code covers only the device checks.
+  `--device-only` runs the same set as `--smoke` — every paperwork check still runs and is
+  still printed — but its exit code covers only the device checks, so a code gate cannot go
+  red on an install problem its author cannot fix.
 - `deckhand serve` — run the server (what launchd invokes).
 - `deckhand token add|rm|list|url`, `deckhand app add|list`,
   `deckhand env set <appId> KEY=VALUE`.
@@ -753,7 +755,7 @@ change eases in/out — nothing snaps.
    credential is the operator and there is nobody to grant less to. Who may *obtain* one is
    §11.6.
 3. **Capability bounding**: no arbitrary shell tool; only registered apps; only refs in
-   those repos; device-count + disk-tier limits. (`start_preview`'s `alongside[].worktree` /
+   those repos; device-count limits. (`start_preview`'s `alongside[].worktree` /
    `alongside[].repo` reach past "registered apps" by design, and since 2026-08-05 nothing
    gates them but the token — the role and owner-scope gates went with team support. What
    still bounds `repo` is the HOST in the repo string, which decides who receives deckhand's
@@ -773,7 +775,7 @@ change eases in/out — nothing snaps.
    only "configured: yes/no".
 6. **Shares**: 144-bit IDs, scrypt-hashed PINs, HMAC-signed unlock cookies, the
    `deck_unlock` cookie stripped before proxying so the HMAC never reaches the app,
-   shares die with their preview. The proxy exposes only video+input for the
+   shares die with their preview. The proxy exposes only video, `ax` and input for the
    share's own devices — serve-sim's other endpoints (camera, devtools, exec) are never
    forwarded. **Web previews (2026-07-15) are the deliberate exception:** a `web` app's
    share proxies the whole dev-server origin (a dev server serves arbitrary paths), so the

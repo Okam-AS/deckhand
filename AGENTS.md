@@ -90,9 +90,12 @@ unlock minting fanning out from a single partner to the set. The viewer has ONE 
 tested code in `viewer/` — keep new layout rules there, not in `App.tsx`.
 See PLAN §6 "One page, several sources" and the accepted-risk note beside it.
 
-What remains to build is PLAN's, not this file's, to enumerate — see PLAN §6 (of the
-agent-led onboarding contract, password shares are the piece still outstanding; shares
-today are PIN-gated) and the ops runbook work that follows it.
+What remains to build is PLAN's, not this file's, to enumerate. The agent-led onboarding
+contract in PLAN §6 is built; what §6 still names as unbuilt, it names in place — building
+to physical hardware (`list_devices` reports `physical` but `targetable` is always false)
+and the `metro`/`app` `logs` sources, which are accepted and capture nothing. Outside §6,
+PLAN §11.7's host hygiene (dedicated macOS user, no personal credentials, FileVault) is
+documented nowhere: `ops/README.md` covers the LaunchAgents and not that.
 
 If you are here to **implement further**, your instructions are:
 
