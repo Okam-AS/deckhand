@@ -208,8 +208,8 @@ export class ServeSimBackend implements StreamingBackend {
 
   private async probeFirstFrame(origin: string, base: string, timeoutMs = FIRST_FRAME_TIMEOUT_MS): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
-    // Try H.264 first (future versions), then MJPEG (current). Retry until a
-    // frame lands or the window closes — the daemon needs a moment to attach.
+    // Try H.264 first, then MJPEG — this machine answers which one it is. Retry until a
+    // frame lands or the window closes; the daemon needs a moment to attach.
     while (Date.now() < deadline) {
       if (await this.probeStream(`${origin}${base}/stream.avcc`, 1500)) return true;
       if (await this.probeStream(`${origin}${base}/stream.mjpeg`, 2000)) return true;
