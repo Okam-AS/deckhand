@@ -410,6 +410,46 @@ describe("MCP server (end-to-end over HTTP)", () => {
     await admin.close();
   });
 
+  it("set_pin on a page does not reach its panes, and the pane refusal says so", async () => {
+    // A pane's access is decided by the start_preview that booted it, and by
+    // nothing afterwards: set_pin resolves the PAGE's app id, and setAppPin only
+    // touches previews whose record.appId matches it — a pane's synthetic,
+    // content-keyed id never can. So locking a public page leaves its panes
+    // public on shareIds start_preview already handed out.
+    //
+    // The refusal for a pane used to end "…every pane on it follows", which is
+    // the opposite of what happens, in the one message a model reads at the
+    // moment it has been told no. Both halves are asserted here: the behaviour,
+    // and the hint not claiming the reverse of it.
+    const admin = await client(ADMIN);
+    const page = parse(
+      await admin.callTool({
+        name: "start_preview",
+        arguments: { app: "app-a", alongside: [{ app: "app-a" }], share: { access: "public" } },
+      }),
+    );
+    assert.equal(page.ok, true);
+    const pane = (page.alongside as { shareId: string; previewId?: string }[])[0]!;
+
+    const locked = parse(await admin.callTool({ name: "set_pin", arguments: { previewId: page.previewId as string, pin: "1234" } }));
+    assert.equal(locked.ok, true);
+    assert.equal(engine.pinInfoForShare(page.shareId as string).required, true, "the page's own link is now gated");
+    assert.equal(engine.pinInfoForShare(pane.shareId).required, false, "…and the pane is NOT — this is what the hint must not deny");
+    // Worse than merely unchanged: the padlocked page still advertises the pane,
+    // whose own gate serves it to anyone holding the shareId start_preview returned.
+    assert.deepEqual(engine.pairedShareIds(page.shareId as string), [pane.shareId]);
+
+    const refused = parse(await admin.callTool({ name: "set_pin", arguments: { previewId: pane.previewId!, pin: "9999" } }));
+    assert.equal(refused.ok, false);
+    assert.equal((refused.error as { code: string }).code, "preview_is_a_pane");
+    const hint = String((refused.error as { hint?: string }).hint ?? "");
+    assert.doesNotMatch(hint, /pane[s]? .*follow/i, `the hint promises panes follow the page, and they do not: ${hint}`);
+    assert.match(hint, /start_preview/, "the hint must name the only thing that does set a pane's access");
+
+    await admin.callTool({ name: "stop_preview", arguments: { previewId: page.previewId as string } });
+    await admin.close();
+  });
+
   it("never lets a public page reuse (and strip) a protected page's pane", async () => {
     // A pane's synthetic app id comes from its CONTENT, so two pages comparing
     // against the same source used to share one pane and one PIN. A public page

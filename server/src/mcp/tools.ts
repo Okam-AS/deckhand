@@ -1133,11 +1133,18 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         // caller already holds, and a new PIN re-hashed the record every page
         // sharing that content-keyed pane unlocks against.
         // → server.test.ts "refuses to set or remove a PIN on a pane"
+        //
+        // The hint may not offer set_pin on the page as a way to reach this pane:
+        // setAppPin only touches previews whose record.appId is the page's, so a
+        // pane's access is fixed by the start_preview that booted it and by nothing
+        // after. A model told "lock the page and the panes follow" reports a padlock
+        // over a pane still streaming on a shareId start_preview already returned.
+        // → server.test.ts "set_pin on a page does not reach its panes, and the pane refusal says so"
         if (engine.isReference(id)) {
           return fail(
             "preview_is_a_pane",
-            `preview "${id}" is an extra pane on another page — its share access comes from that page`,
-            "call set_pin with the PAGE's previewId (or its app id) instead; every pane on it follows.",
+            `preview "${id}" is an extra pane on another page — its share access was fixed when that page booted it`,
+            "set_pin on the PAGE changes the page's own link only; a pane's access can't be changed while it runs. To change it, stop the page and call start_preview again with the access you want in share — every pane it boots takes that access.",
           );
         }
         if (args.remove) {
