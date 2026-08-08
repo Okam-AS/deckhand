@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { AnnexBToAvcc, buildAvcC, frameChunk, toAvccAccessUnit } from "./h264.ts";
 
 const SC4 = Buffer.from([0, 0, 0, 1]);
@@ -158,4 +161,26 @@ test("non-VCL NALs ride along in the access unit, AUD is dropped", () => {
   const events = [...p.push(annexb(SPS, PPS, AUD, SEI, IDR)), ...p.flush()];
   const key = events.find((e) => e.type === "keyframe")!;
   assert.deepEqual(key.payload, toAvccAccessUnit([SEI, IDR]));
+});
+
+/**
+ * The wire tags are declared TWICE — here and in the viewer's decoder — with nothing but
+ * this test tying them together. Renumbering one side type-checks, passes both suites, and
+ * breaks only on a real device: the viewer reads a delta as a description and falls back to
+ * MJPEG with no error anyone sees. Reading the other file's source is the only check
+ * available, since the viewer is a separate build the server cannot import.
+ */
+test("the AVCC wire tags match the viewer's decoder exactly", () => {
+  const TAG_RE = /export const (AVCC_TAG_[A-Z]+)\s*=\s*(0x[0-9a-fA-F]+)/g;
+  const tagsIn = (src: string): Record<string, string> =>
+    Object.fromEntries([...src.matchAll(TAG_RE)].map((m) => [m[1]!, String(Number(m[2]!))]));
+
+  const here = join(dirname(fileURLToPath(import.meta.url)), "h264.ts");
+  const viewer = join(dirname(fileURLToPath(import.meta.url)), "../../../viewer/src/stream/avcc.ts");
+  const ours = tagsIn(readFileSync(here, "utf8"));
+  const theirs = tagsIn(readFileSync(viewer, "utf8"));
+
+  // A parse that finds nothing would make the comparison vacuously true.
+  assert.ok(Object.keys(ours).length >= 4, `parsed no tags from h264.ts: ${JSON.stringify(ours)}`);
+  assert.deepEqual(ours, theirs, "server and viewer disagree about the AVCC wire tags");
 });

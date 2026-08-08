@@ -19,7 +19,11 @@ const NAL_SPS = 7;
 const NAL_PPS = 8;
 const NAL_AUD = 9;
 
-/** Wire tags — must match viewer/src/stream/avcc.ts. */
+/**
+ * Wire tags. Declared again in `viewer/src/stream/avcc.ts` — a separate build the server
+ * cannot import — so the two are held together only by h264.test.ts "the AVCC wire tags
+ * match the viewer's decoder exactly", which reads both files as source.
+ */
 export const AVCC_TAG_DESCRIPTION = 0x01;
 export const AVCC_TAG_KEYFRAME = 0x02;
 export const AVCC_TAG_DELTA = 0x03;

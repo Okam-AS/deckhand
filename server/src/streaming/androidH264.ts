@@ -161,7 +161,7 @@ export class AvccSource {
     // another device holding the encoder, and that clears on its own.
     if (this.failedAt && Date.now() - this.failedAt < this.retryAfterMs) return Promise.resolve(false);
     // Held locally as well as on the instance: `start()` can settle
-    // SYNCHRONOUSLY (a spawn that throws), and a non-sticky settle clears the
+    // SYNCHRONOUSLY (a spawn that throws), and a failed settle clears the
     // instance field — so returning the field would hand the caller `null`.
     const probe = new Promise<boolean>((resolve) => {
       this.settleReady = resolve;
@@ -240,8 +240,10 @@ export class AvccSource {
   }
 
   /**
-   * Resolve the readiness probe. `sticky` marks a verdict about the DEVICE
-   * rather than about this attempt — only such a false is remembered.
+   * Resolve the readiness probe. No verdict here is permanent: a false is a
+   * TIMED backoff (`failedAt` + `retryAfterMs`), never "this device cannot
+   * encode", because contention for the single host encoder is indistinguishable
+   * from a dead one from in here.
    */
   private settle(ok: boolean): void {
     if (this.readyTimer) clearTimeout(this.readyTimer);
