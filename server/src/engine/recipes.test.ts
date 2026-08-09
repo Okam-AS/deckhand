@@ -65,15 +65,15 @@ describe("install-deps — package manager dispatch", () => {
     // A project's own lockfile drives the install instead of everything being
     // forced through npm, which chokes on peer-dep shapes bun tolerates.
     for (const script of [git, local]) {
-      assert.match(script, /if \[ -f bun\.lock \] \|\| \[ -f bun\.lockb \]; then/);
-      assert.match(script, /elif \[ -f yarn\.lock \]; then/);
-      assert.match(script, /elif \[ -f pnpm-lock\.yaml \]; then/);
-      assert.match(script, /elif \[ -f package-lock\.json \]; then/);
+      assert.match(script, /if \[ -f "\$PM_ROOT\/bun\.lock" \] \|\| \[ -f "\$PM_ROOT\/bun\.lockb" \]; then/);
+      assert.match(script, /elif \[ -f "\$PM_ROOT\/yarn\.lock" \]; then/);
+      assert.match(script, /elif \[ -f "\$PM_ROOT\/pnpm-lock\.yaml" \]; then/);
+      assert.match(script, /elif \[ -f "\$PM_ROOT\/package-lock\.json" \]; then/);
       // npm is the fallback, so it must be tested last of the four.
       // Measured from the dispatch chain only: local mode prefixes a staleness guard that
       // names every lockfile (in mtime order, not detection order), so indexOf over the whole
       // script compares positions in the guard rather than in the install.
-      const chain = script.slice(script.indexOf("if [ -f bun.lock ]"));
+      const chain = script.slice(script.indexOf('if [ -f "$PM_ROOT/bun.lock" ]'));
       const order = ["bun.lock", "yarn.lock", "pnpm-lock.yaml", "package-lock.json"].map((f) => chain.indexOf(f));
       assert.deepEqual(order, [...order].sort((a, b) => a - b), "detection order must be bun, yarn, pnpm, npm");
     }
@@ -106,6 +106,40 @@ describe("install-deps — package manager dispatch", () => {
     assert.match(executed, /bun install --frozen-lockfile \|\| \{ echo .*; bun install; \}/);
     assert.match(executed, /npm ci \|\| \{ echo .*; npm install; \}/);
     assert.match(git, /retrying with an updating install/);
+  });
+
+  it("finds the lockfile up the tree, because a workspace member does not hold one", () => {
+    // THE BUG THIS EXISTS FOR (2026-08-09): every test was `-f <lockfile>` in the app's own
+    // directory. A pnpm/yarn/bun workspace keeps its lockfile at the repo root, so a monorepo app
+    // matched nothing and fell through to the no-lockfile default — `npm install`, which cannot
+    // resolve `workspace:*`. Previewing such an app died as EUNSUPPORTEDPROTOCOL, or silently
+    // installed a second copy of react and crashed inside a hook with a message naming nothing.
+    for (const script of [git, local]) {
+      assert.match(script, /pm_root\(\) \{/, "the walk must exist");
+      assert.match(script, /d=\$\(dirname "\$d"\)/, "and it must actually ascend");
+      assert.match(script, /PM_ROOT=\$\(pm_root\)/, "resolved once, so dispatch and install agree");
+    }
+  });
+
+  it("bounds the walk by the app's own git repository", () => {
+    // Unbounded, a checkout sitting inside an unrelated project would install from a stranger's
+    // lockfile — worse than the bug above. Outside a git repo the bound is the app directory,
+    // i.e. exactly the behaviour that shipped before the walk existed.
+    for (const script of [git, local]) {
+      assert.match(script, /rev-parse --show-toplevel/, "the bound is the git root");
+      assert.match(script, /\[ "\$d" = "\$stop" \] && return 0/, "and the walk stops there");
+      assert.match(script, /printf %s "\$PWD"/, "with the app dir as the fallback bound");
+    }
+  });
+
+  it("installs from the directory that owns the lockfile, not from the app dir", () => {
+    // pnpm run from a member directory installs that member; the workspace has to be installed
+    // from its root, which is also where the lockfile it was told to freeze against lives.
+    for (const script of [git, local]) {
+      for (const pm of ["bun", "yarn", "pnpm", "npm"]) {
+        assert.match(script, new RegExp(`then pm_need ${pm}; cd "\\$PM_ROOT" \\|\\| exit 1;`));
+      }
+    }
   });
 
   it("no lockfile at all: plain npm install in git mode, --no-package-lock locally", () => {
@@ -227,9 +261,9 @@ describe("buildPlan — local dev mode", () => {
     // downstream as a Metro "Unable to resolve module", which reads as the app's
     // bug rather than a checkout that never got the new dependency.
     assert.match(script, /! \[ package\.json -nt node_modules \]/, "a manifest newer than node_modules must install");
-    assert.match(script, /! \[ bun\.lock -nt node_modules \]/, "a lockfile newer than node_modules must install");
-    assert.match(script, /! \[ yarn\.lock -nt node_modules \]/, "the staleness check covers every manager's lockfile");
-    assert.match(script, /! \[ pnpm-lock\.yaml -nt node_modules \]/, "the staleness check covers every manager's lockfile");
+    assert.match(script, /! \[ "\$PM_ROOT\/bun\.lock" -nt node_modules \]/, "a lockfile newer than node_modules must install");
+    assert.match(script, /! \[ "\$PM_ROOT\/yarn\.lock" -nt node_modules \]/, "the staleness check covers every manager's lockfile");
+    assert.match(script, /! \[ "\$PM_ROOT\/pnpm-lock\.yaml" -nt node_modules \]/, "the staleness check covers every manager's lockfile");
   });
 
   it("leaves the borrowed checkout's tracked git state clean (frozen installs, or --no-package-lock)", () => {
@@ -305,7 +339,7 @@ describe("buildPlan — local dev mode", () => {
       // Only the install clause decides the package manager; local mode prefixes
       // a staleness guard that names every lockfile, so match on the whole
       // script would compare positions in the guard, not in the install.
-      const script = full.slice(full.indexOf("if [ -f bun.lock ]"));
+      const script = full.slice(full.indexOf('if [ -f "$PM_ROOT/bun.lock" ]'));
       // bun is tested BEFORE npm: a bun project keeps its private-registry
       // scopes in bunfig.toml, which npm can't read — npm resolves them against
       // the public registry and 404s.

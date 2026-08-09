@@ -69,7 +69,7 @@ export interface BuildPlanInput {
  * in the step's own cwd at run time.
  */
 const PACKAGE_MANAGERS = [
-  { name: "bun", test: "[ -f bun.lock ] || [ -f bun.lockb ]", frozen: "bun install --frozen-lockfile", loose: "bun install" },
+  { name: "bun", test: '[ -f "$PM_ROOT/bun.lock" ] || [ -f "$PM_ROOT/bun.lockb" ]', frozen: "bun install --frozen-lockfile", loose: "bun install" },
   // yarn: `--frozen-lockfile`, NOT `--immutable`, and this is the one entry worth not
   // "modernising". Measured against yarn 1.22.22 and yarn 4.18.0 with a lockfile
   // deliberately out of sync (2026-08-01):
@@ -82,9 +82,9 @@ const PACKAGE_MANAGERS = [
   // stricter spelling — it is no flag at all, and the lockfile in a BORROWED checkout gets
   // rewritten. `--frozen-lockfile` is deprecated on berry, not removed, and still enforces.
   // One spelling is correct on both; the modern-looking one is correct on one.
-  { name: "yarn", test: "[ -f yarn.lock ]", frozen: "yarn install --frozen-lockfile", loose: "yarn install" },
-  { name: "pnpm", test: "[ -f pnpm-lock.yaml ]", frozen: "pnpm install --frozen-lockfile", loose: "pnpm install" },
-  { name: "npm", test: "[ -f package-lock.json ]", frozen: "npm ci", loose: "npm install" },
+  { name: "yarn", test: '[ -f "$PM_ROOT/yarn.lock" ]', frozen: "yarn install --frozen-lockfile", loose: "yarn install" },
+  { name: "pnpm", test: '[ -f "$PM_ROOT/pnpm-lock.yaml" ]', frozen: "pnpm install --frozen-lockfile", loose: "pnpm install" },
+  { name: "npm", test: '[ -f "$PM_ROOT/package-lock.json" ]', frozen: "npm ci", loose: "npm install" },
 ] as const;
 
 /**
@@ -95,6 +95,27 @@ const PACKAGE_MANAGERS = [
  */
 const PM_HELPERS = [
   'pm_need() { command -v "$1" >/dev/null 2>&1 || { echo "deckhand: this project ships a $1 lockfile, but $1 is not installed on this host — install it (e.g. brew install $1), or enable corepack" >&2; exit 127; }; }',
+  // THE LOCKFILE MAY NOT BE IN THE APP'S OWN DIRECTORY. In a pnpm/yarn/bun workspace it lives at
+  // the repo root and the app is a member; testing `-f` in the cwd finds nothing and the chain
+  // falls through to its no-lockfile default. That default is `npm install`, and npm cannot resolve
+  // `workspace:*` — so previewing any monorepo app died as EUNSUPPORTEDPROTOCOL, or (when the app
+  // had no workspace protocol to choke on) quietly installed a SECOND copy of react beside the
+  // workspace's, which surfaces as `Cannot read property 'useSyncExternalStore' of null` and names
+  // nothing about duplication. Both were seen on 2026-08-09.
+  //
+  // So walk up, exactly as every one of these managers does when it resolves a workspace, and let
+  // the install run from the root it finds. `pm_root` is resolved ONCE into $PM_ROOT so the
+  // dispatch and the install cannot disagree about which lockfile they mean.
+  // The walk is BOUNDED by the app's own git repository. Without that bound a checkout sitting
+  // inside an unrelated project would install from a stranger's lockfile — worse than the bug it
+  // fixes. Outside a git repo the bound is the app directory itself, i.e. today's behaviour.
+  //
+  // An app whose own directory holds a lockfile stops on the first iteration, so a single-repo app
+  // resolves exactly as it did before this helper existed. Only the case that previously found
+  // NOTHING can now find something.
+  'pm_stop() { git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || printf %s "$PWD"; }',
+  'pm_root() { stop=$(pm_stop); d=$PWD; while :; do for f in bun.lock bun.lockb yarn.lock pnpm-lock.yaml package-lock.json; do [ -f "$d/$f" ] && { printf %s "$d"; return 0; }; done; [ "$d" = "$stop" ] && return 0; [ "$d" = "/" ] && return 0; d=$(dirname "$d"); done; }',
+  'PM_ROOT=$(pm_root); [ -n "$PM_ROOT" ] || PM_ROOT=$PWD',
 ];
 
 /**
@@ -104,9 +125,9 @@ const PM_HELPERS = [
  */
 function installChain(policy: (pm: (typeof PACKAGE_MANAGERS)[number]) => string, noLockfile: string): string {
   const branches = PACKAGE_MANAGERS.map(
-    (pm, i) => `${i === 0 ? "if" : "elif"} ${pm.test}; then pm_need ${pm.name}; ${policy(pm)}`,
+    (pm, i) => `${i === 0 ? "if" : "elif"} ${pm.test}; then pm_need ${pm.name}; cd "$PM_ROOT" || exit 1; ${policy(pm)}`,
   );
-  return [...PM_HELPERS, ...branches, `else ${noLockfile}; fi`].join("\n");
+  return [...branches, `else ${noLockfile}; fi`].join("\n");
 }
 
 /**
@@ -125,7 +146,7 @@ export function installDepsStep(worktreePath: string, env: Record<string, string
   );
   return {
     name: "install-deps",
-    run: { kind: "shell", script },
+    run: { kind: "shell", script: [...PM_HELPERS, script].join("\n") },
     cwd: worktreePath,
     env,
     idleTimeoutMs: GENERAL_IDLE_MS,
@@ -148,7 +169,14 @@ export function installDepsStep(worktreePath: string, env: Record<string, string
  * not a stale checkout. So install when node_modules is missing OR older than
  * the manifest/lockfile. Still read-only, still the dev's directory.
  */
-const STALE_DEPS = "[ -d node_modules ]" + ["package.json", "package-lock.json", "bun.lock", "bun.lockb", "yarn.lock", "pnpm-lock.yaml"].map((f) => ` && ! [ ${f} -nt node_modules ]`).join("");
+const STALE_DEPS =
+  '[ -d node_modules ]' +
+  " && ! [ package.json -nt node_modules ]" +
+  // The lockfiles are read at $PM_ROOT, not in the cwd: in a workspace they are not here, so the
+  // cwd spelling made these four tests vacuous and the guard rested on package.json alone.
+  ["package-lock.json", "bun.lock", "bun.lockb", "yarn.lock", "pnpm-lock.yaml"]
+    .map((f) => ` && ! [ "$PM_ROOT/${f}" -nt node_modules ]`)
+    .join("");
 
 export function installDepsIfMissingStep(worktreePath: string, env: Record<string, string>): CommandStep {
   const chain = installChain(
@@ -161,7 +189,7 @@ export function installDepsIfMissingStep(worktreePath: string, env: Record<strin
     // The staleness guard is main's; the chain inside it is this branch's. Both are needed:
     // a fresh-enough node_modules must be left alone, and when it is NOT fresh the install
     // has to use the project's own package manager.
-    run: { kind: "shell", script: `${STALE_DEPS} || {\n${chain}\n}` },
+    run: { kind: "shell", script: [...PM_HELPERS, `${STALE_DEPS} || {\n${chain}\n}`].join("\n") },
     cwd: worktreePath,
     env,
     idleTimeoutMs: GENERAL_IDLE_MS,
