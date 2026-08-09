@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { AppType } from "../config.ts";
 
 // ---------------------------------------------------------------------------
@@ -160,6 +160,43 @@ export function expoSlug(config: ExpoConfig | null): string | null {
   return config?.expo?.slug ?? config?.slug ?? null;
 }
 
+/** The directory holding this one's `.git` (dir or worktree pointer file), or null outside a repo. */
+function repoRootOf(dir: string): string | null {
+  for (let d = dir; ; ) {
+    if (existsSync(join(d, ".git"))) return d;
+    const up = dirname(d);
+    if (up === d) return null;
+    d = up;
+  }
+}
+
+/**
+ * A project's own `node_modules/.bin/<bin>`, searched from the app directory UP to the
+ * repository root.
+ *
+ * npm and yarn workspaces hoist: a member directory holds no node_modules at all, so an
+ * `existsSync` in the app dir found nothing and reported "install dependencies first" at a
+ * project whose dependencies were installed — after which the caller silently fell back to
+ * static app.json, i.e. previewed a slug/bundle id that app.config.* had overridden.
+ * `npx` (which every build step and Metro go through) already searches the same way, so this
+ * only makes the config evaluator agree with the commands deckhand runs beside it.
+ *
+ * The walk is BOUNDED by the app's own repository, and OUTSIDE a repo it does not ascend at
+ * all — matching `pm_root` in recipes.ts. Unbounded, a checkout sitting inside an unrelated
+ * project would evaluate its config with a stranger's CLI. An app whose own directory holds
+ * the bin stops on the first iteration, so a single-repo app resolves exactly as before.
+ */
+function projectBin(dir: string, bin: string): string | null {
+  const stop = repoRootOf(dir) ?? dir;
+  for (let d = dir; ; ) {
+    const candidate = join(d, "node_modules", ".bin", bin);
+    if (existsSync(candidate)) return candidate;
+    const up = dirname(d);
+    if (d === stop || up === d) return null;
+    d = up;
+  }
+}
+
 /** Dynamic Expo config filenames — evaluated by the Expo CLI, not statically readable. */
 const EXPO_DYNAMIC_CONFIG_FILES = ["app.config.ts", "app.config.js", "app.config.cjs", "app.config.mjs"];
 
@@ -204,11 +241,11 @@ export function evaluateExpoConfig(dir: string, env: Record<string, string> = {}
   // project has none, and that answers with "legacy expo-cli does not support Node
   // +17" instead of the real config error — a misleading diagnostic is worse than a
   // clear absence. Modern Expo is always a project dependency.
-  const localBin = join(dir, "node_modules", ".bin", "expo");
-  if (!existsSync(localBin)) {
+  const localBin = projectBin(dir, "expo");
+  if (!localBin) {
     return Promise.resolve({
       config: null,
-      error: "no expo CLI in this project (node_modules/.bin/expo is missing — install dependencies first)",
+      error: `no expo CLI in this project (no node_modules/.bin/expo in ${dir} or up to its repo root — install dependencies first)`,
     });
   }
   return new Promise((resolve) => {

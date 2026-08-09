@@ -1,10 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   detectAppType,
+  evaluateExpoConfig,
   detectFromRepo,
   detectWebFramework,
   webHostingMode,
@@ -154,6 +155,66 @@ describe("expoDevClientUrl", () => {
     const parsed = new URL(url);
     assert.equal(parsed.searchParams.get("url"), "http://127.0.0.1:8081");
     assert.equal(parsed.searchParams.get("disableOnboarding"), "1");
+  });
+});
+
+describe("evaluateExpoConfig — finding the project's expo CLI", () => {
+  /** A stub `expo` that answers `config --json` with a slug naming where it was installed. */
+  const installExpo = (nodeModulesOwner: string, slug: string) => {
+    const bin = join(nodeModulesOwner, "node_modules", ".bin");
+    mkdirSync(bin, { recursive: true });
+    const file = join(bin, "expo");
+    writeFileSync(file, `#!/bin/sh\nprintf '%s' '{"slug":"${slug}"}'\n`, { mode: 0o755 });
+  };
+
+  /** A repo root with an app at apps/foo, and no node_modules anywhere yet. */
+  const mkRepo = () => {
+    const root = mkdtempSync(join(tmpdir(), "deckhand-bin-"));
+    mkdirSync(join(root, ".git"));
+    const app = join(root, "apps", "foo");
+    mkdirSync(app, { recursive: true });
+    return { root, app };
+  };
+
+  it("uses the workspace root's CLI when the member directory has no node_modules", async () => {
+    // npm and yarn workspaces hoist — apps/foo holds a package.json and nothing else. Looking
+    // only in the app dir reported "install dependencies first" at a project whose dependencies
+    // WERE installed, and the caller then previewed the static app.json instead of the
+    // app.config.* the build actually uses.
+    const { root, app } = mkRepo();
+    installExpo(root, "from-root");
+    assert.deepEqual(await evaluateExpoConfig(app), { config: { slug: "from-root", ios: undefined, android: undefined } });
+  });
+
+  it("prefers the app's own CLI over the root's", async () => {
+    const { root, app } = mkRepo();
+    installExpo(root, "from-root");
+    installExpo(app, "from-app");
+    const { config } = await evaluateExpoConfig(app);
+    assert.equal(config?.slug, "from-app", "a single-repo app must still resolve on the first iteration");
+  });
+
+  it("does not ascend past the app's own repository", async () => {
+    // The bound is the difference between a fix and a worse bug: a checkout sitting inside an
+    // unrelated project must never be evaluated with that project's CLI.
+    const outer = mkdtempSync(join(tmpdir(), "deckhand-outer-"));
+    installExpo(outer, "stranger");
+    const root = join(outer, "checkout");
+    const app = join(root, "apps", "foo");
+    mkdirSync(app, { recursive: true });
+    mkdirSync(join(root, ".git"));
+    const { config, error } = await evaluateExpoConfig(app);
+    assert.equal(config, null);
+    assert.match(String(error), /no expo CLI in this project/);
+  });
+
+  it("does not ascend at all outside a git repository", async () => {
+    const outer = mkdtempSync(join(tmpdir(), "deckhand-nogit-"));
+    installExpo(outer, "stranger");
+    const app = join(outer, "app");
+    mkdirSync(app);
+    const { config } = await evaluateExpoConfig(app);
+    assert.equal(config, null);
   });
 });
 
