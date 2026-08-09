@@ -1,5 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, realpathSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { buildPlan, usesMetroDeepLink, nativescriptDevRun, webDevRun, webRootDevRun, GENERAL_IDLE_MS, SPM_IDLE_MS, type BuildPlanInput } from "./recipes.ts";
 
 const baseInput: Omit<BuildPlanInput, "type"> = {
@@ -260,10 +264,10 @@ describe("buildPlan — local dev mode", () => {
     // ...unless the manifest moved under it: present-but-incomplete surfaces far
     // downstream as a Metro "Unable to resolve module", which reads as the app's
     // bug rather than a checkout that never got the new dependency.
-    assert.match(script, /! \[ package\.json -nt node_modules \]/, "a manifest newer than node_modules must install");
-    assert.match(script, /! \[ "\$PM_ROOT\/bun\.lock" -nt node_modules \]/, "a lockfile newer than node_modules must install");
-    assert.match(script, /! \[ "\$PM_ROOT\/yarn\.lock" -nt node_modules \]/, "the staleness check covers every manager's lockfile");
-    assert.match(script, /! \[ "\$PM_ROOT\/pnpm-lock\.yaml" -nt node_modules \]/, "the staleness check covers every manager's lockfile");
+    assert.match(script, /! \[ package\.json -nt "\$PM_NM" \]/, "a manifest newer than node_modules must install");
+    assert.match(script, /! \[ "\$PM_ROOT\/bun\.lock" -nt "\$PM_NM" \]/, "a lockfile newer than node_modules must install");
+    assert.match(script, /! \[ "\$PM_ROOT\/yarn\.lock" -nt "\$PM_NM" \]/, "the staleness check covers every manager's lockfile");
+    assert.match(script, /! \[ "\$PM_ROOT\/pnpm-lock\.yaml" -nt "\$PM_NM" \]/, "the staleness check covers every manager's lockfile");
   });
 
   it("leaves the borrowed checkout's tracked git state clean (frozen installs, or --no-package-lock)", () => {
@@ -353,6 +357,80 @@ describe("buildPlan — local dev mode", () => {
       // Also on the full script: `exit 127` lives inside the pm_need definition.
       assert.match(full, /exit 127/, "a missing manager is a command-not-found condition");
     }
+  });
+});
+
+describe("install-deps — the emitted script, run for real", () => {
+  /**
+   * Run a plan's install-deps script in `cwd` with every package manager stubbed, and return
+   * what it did. The text assertions above cannot see this: the staleness guard and the
+   * dispatch chain only disagree once a real directory layout is under them.
+   */
+  function runInstallDeps(cwd: string, local = true): string {
+    const stubs = mkdtempSync(join(tmpdir(), "deckhand-pm-bin-"));
+    for (const pm of ["bun", "yarn", "pnpm", "npm"]) {
+      writeFileSync(join(stubs, pm), `#!/bin/sh\necho "RAN ${pm} $* in $(pwd -P)"\n`, { mode: 0o755 });
+    }
+    const script = installScript({ ...baseInput, type: "expo", local, worktreePath: cwd });
+    const r = spawnSync("/bin/sh", ["-c", script], {
+      cwd,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${stubs}:${process.env.PATH ?? ""}` },
+    });
+    return (r.stdout ?? "") + (r.stderr ?? "");
+  }
+
+  /** Touch `paths` in order, each a second apart, so `-nt` comparisons are unambiguous. */
+  function age(root: string, paths: string[]): void {
+    paths.forEach((p, i) => {
+      const t = new Date(Date.now() - (paths.length - i) * 60_000);
+      utimesSync(join(root, p), t, t);
+    });
+  }
+
+  /** A git repo with a pnpm workspace: lockfile at the root, the app a member of it. */
+  function mkWorkspace(): { root: string; app: string } {
+    const root = mkdtempSync(join(tmpdir(), "deckhand-ws-"));
+    spawnSync("git", ["init", "-q", root]);
+    writeFileSync(join(root, "pnpm-lock.yaml"), "lockfileVersion: 9\n");
+    writeFileSync(join(root, "package.json"), '{"name":"root","private":true}');
+    const app = join(root, "apps", "foo");
+    mkdirSync(app, { recursive: true });
+    writeFileSync(join(app, "package.json"), '{"name":"foo"}');
+    return { root, app };
+  }
+
+  it("leaves a hoisted workspace alone when the root's node_modules is fresh", () => {
+    // npm and yarn workspaces hoist: apps/foo has NO node_modules, so `[ -d node_modules ]`
+    // was false forever and every preview reinstalled the whole workspace — under an npm
+    // lockfile that is `npm ci` at the root, which deletes the developer's node_modules
+    // first. Local mode exists to never do that.
+    const { root, app } = mkWorkspace();
+    mkdirSync(join(root, "node_modules"));
+    age(root, ["pnpm-lock.yaml", "apps/foo/package.json", "node_modules"]);
+    assert.doesNotMatch(runInstallDeps(app), /RAN/, "nothing should be installed");
+  });
+
+  it("still installs — from the root, with the root's manager — when the member's manifest is newer", () => {
+    const { root, app } = mkWorkspace();
+    mkdirSync(join(root, "node_modules"));
+    age(root, ["pnpm-lock.yaml", "node_modules", "apps/foo/package.json"]);
+    const out = runInstallDeps(app);
+    assert.match(out, /RAN pnpm install --frozen-lockfile in /);
+    assert.ok(out.includes(`in ${realpathSync(root)}`), "the workspace installs from its root");
+  });
+
+  it("single repo: unchanged — its own node_modules is what the guard reads", () => {
+    const dir = mkdtempSync(join(tmpdir(), "deckhand-single-"));
+    spawnSync("git", ["init", "-q", dir]);
+    writeFileSync(join(dir, "package.json"), '{"name":"solo"}');
+    writeFileSync(join(dir, "pnpm-lock.yaml"), "lockfileVersion: 9\n");
+    mkdirSync(join(dir, "node_modules"));
+    age(dir, ["package.json", "pnpm-lock.yaml", "node_modules"]);
+    assert.doesNotMatch(runInstallDeps(dir), /RAN/, "a fresh node_modules must be left alone");
+
+    age(dir, ["node_modules", "package.json"]);
+    assert.match(runInstallDeps(dir), /RAN pnpm install --frozen-lockfile/, "a newer manifest must install");
   });
 });
 

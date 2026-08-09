@@ -170,13 +170,32 @@ export function installDepsStep(worktreePath: string, env: Record<string, string
  * the manifest/lockfile. Still read-only, still the dev's directory.
  */
 const STALE_DEPS =
-  '[ -d node_modules ]' +
-  " && ! [ package.json -nt node_modules ]" +
+  '[ -d "$PM_NM" ]' +
+  ' && ! [ package.json -nt "$PM_NM" ]' +
   // The lockfiles are read at $PM_ROOT, not in the cwd: in a workspace they are not here, so the
   // cwd spelling made these four tests vacuous and the guard rested on package.json alone.
   ["package-lock.json", "bun.lock", "bun.lockb", "yarn.lock", "pnpm-lock.yaml"]
-    .map((f) => ` && ! [ "$PM_ROOT/${f}" -nt node_modules ]`)
+    .map((f) => ` && ! [ "$PM_ROOT/${f}" -nt "$PM_NM" ]`)
     .join("");
+
+/**
+ * The node_modules the install actually populates: the app's own when it has one, else the
+ * one at the root that owns the lockfile.
+ *
+ * npm and yarn workspaces HOIST — a member directory holds a package.json and nothing else —
+ * so `[ -d node_modules ]` in the app dir was permanently false there and the guard above
+ * reported "stale" on every single preview. Under an npm lockfile that means `npm ci` at the
+ * workspace root, which DELETES the developer's node_modules before reinstalling it: the one
+ * thing local mode exists to never do, on every preview. Where the member has its own tree
+ * (pnpm's default layout, and every single-repo app) this resolves to the same directory the
+ * old spelling tested, so nothing about those changes.
+ *
+ * The honest limit: an mtime on a shared root tree answers "has anything been installed since
+ * this app's manifest changed", not "is THIS member complete". A sibling's install refreshes
+ * it too. It is the same approximation as in a single repo, one directory further up — there
+ * is no cheap exact answer, and the expensive one (asking the manager) is the install itself.
+ */
+const PM_NODE_MODULES = 'if [ -d node_modules ]; then PM_NM=$PWD/node_modules; else PM_NM=$PM_ROOT/node_modules; fi';
 
 export function installDepsIfMissingStep(worktreePath: string, env: Record<string, string>): CommandStep {
   const chain = installChain(
@@ -189,7 +208,7 @@ export function installDepsIfMissingStep(worktreePath: string, env: Record<strin
     // The staleness guard is main's; the chain inside it is this branch's. Both are needed:
     // a fresh-enough node_modules must be left alone, and when it is NOT fresh the install
     // has to use the project's own package manager.
-    run: { kind: "shell", script: [...PM_HELPERS, `${STALE_DEPS} || {\n${chain}\n}`].join("\n") },
+    run: { kind: "shell", script: [...PM_HELPERS, PM_NODE_MODULES, `${STALE_DEPS} || {\n${chain}\n}`].join("\n") },
     cwd: worktreePath,
     env,
     idleTimeoutMs: GENERAL_IDLE_MS,
