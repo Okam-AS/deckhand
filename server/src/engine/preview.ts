@@ -2466,9 +2466,27 @@ export class PreviewEngine {
       return;
     }
     if (usesMetroDeepLink(p.app.type)) {
-      if (!slug) throw new PreviewError("could not resolve the Expo slug from app.json or app.config.*");
       const metro = await this.d.metro.ensure(p.app.id, worktreePath, appEnv);
-      await this.d.simctl.openUrl(handle, expoDevClientUrl(slug, metro.manifestUrl));
+      // The deep link is the ONLY way a dev client hears which port Metro is on, and an app
+      // built without expo-dev-client cannot hear it at all: it resolves its bundle URL
+      // through RCTBundleURLProvider, whose default is the machine-global 8081. That is one
+      // port and deckhand allocates one Metro PER APP, so a second Expo preview took the
+      // first one's bundle — the backoffice ran the register's JS under its own icon, on its
+      // own simulator, with every id and path in deckhand correct. Android never had it:
+      // `adb reverse` above rewrites 8081 on the device. This is that rewrite for iOS, and
+      // it stands under the dev client too, so a deep link that does not land falls back to
+      // this app's own Metro instead of a neighbour's.
+      await this.d.simctl.setPackagerLocation(handle, bundleId, `127.0.0.1:${metro.port}`);
+      // Cold start, for the same two reasons the Android branch gives: `expo run:ios`
+      // already launched the app against whatever answered before, and the preference above
+      // is read at startup.
+      await this.d.simctl.terminate(handle, bundleId);
+      if (await this.d.simctl.hasDevLauncher(handle, bundleId)) {
+        if (!slug) throw new PreviewError("could not resolve the Expo slug from app.json or app.config.*");
+        await this.d.simctl.openUrl(handle, expoDevClientUrl(slug, metro.manifestUrl));
+      } else {
+        await this.d.simctl.launch(handle, bundleId);
+      }
     } else {
       await this.d.simctl.launch(handle, bundleId);
     }

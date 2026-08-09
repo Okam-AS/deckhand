@@ -8,6 +8,7 @@ import { PreviewEngine, PreviewError, buildStepDetail, redactForShare, type Prev
 import type { SimDeckControl } from "../testing/control.ts";
 import type { App, Config } from "../config.ts";
 import type { AndroidManager } from "../devices/android.ts";
+import type { Simctl } from "../devices/ios.ts";
 import type { RunResult } from "./procs.ts";
 import type { CommandStep } from "./recipes.ts";
 import type { DevRunSpec } from "./devProcess.ts";
@@ -109,6 +110,49 @@ function androidFake(calls: string[] = [], over: Partial<AndroidManager> = {}) {
   });
 }
 
+/**
+ * The default fake Simctl, extracted for the same reason `androidFake` is: a test that
+ * needs ONE different answer (an app installed without the Expo dev launcher) can pass
+ * its own call log and override that method, instead of restating a device manager.
+ */
+function simctlFake(calls: string[] = [], over: Partial<Simctl> = {}) {
+  return fakeSimctl({
+    listRuntimes: async () => [{ identifier: "rt.26", name: "iOS 26.0", version: "26.0", isAvailable: true }],
+    listDeviceTypes: async () => [{ identifier: "dt.16pro", name: "iPhone 16 Pro" }],
+    create: async (name: string) => {
+      calls.push(`create ${name}`);
+      const n = calls.filter((c) => c.startsWith("create ")).length;
+      return `1111111${n}-1111-1111-1111-111111111111`;
+    },
+    bootAndWait: async (udid: string) => {
+      calls.push(`boot ${udid}`);
+    },
+    appContainer: async () => "/path/to/App.app",
+    install: async (udid: string, p: string) => {
+      calls.push(`install ${udid} ${p}`);
+    },
+    launch: async (_udid: string, b: string) => {
+      calls.push(`launch ${b}`);
+    },
+    setPackagerLocation: async (_udid: string, b: string, hostPort: string) => {
+      calls.push(`packager ${b} ${hostPort}`);
+    },
+    terminate: async (_udid: string, b: string) => {
+      calls.push(`terminate ${b}`);
+    },
+    openUrl: async (_udid: string, url: string) => {
+      calls.push(`openurl ${url}`);
+    },
+    shutdown: async (u: string) => {
+      calls.push(`shutdown ${u}`);
+    },
+    delete: async (u: string) => {
+      calls.push(`delete ${u}`);
+    },
+    ...over,
+  });
+}
+
 function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (step: CommandStep) => RunResult = () => ({ code: 0, timedOut: false, aborted: false })): Harness {
   const simctlCalls: string[] = [];
   const buildEnvSeen: (Record<string, string> | undefined)[] = [];
@@ -141,32 +185,7 @@ function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (
   // compile error here rather than a silently swallowed throw at runtime.
   const devProcsComplete = fakeDevProcs(devProcs as Partial<PreviewEngineDeps["devProcs"]>);
 
-  const simctl = fakeSimctl({
-    listRuntimes: async () => [{ identifier: "rt.26", name: "iOS 26.0", version: "26.0", isAvailable: true }],
-    listDeviceTypes: async () => [{ identifier: "dt.16pro", name: "iPhone 16 Pro" }],
-    create: async (name: string) => {
-      simctlCalls.push(`create ${name}`);
-      const n = simctlCalls.filter((c) => c.startsWith("create ")).length;
-      return `1111111${n}-1111-1111-1111-111111111111`;
-    },
-    bootAndWait: async (udid: string) => {
-      simctlCalls.push(`boot ${udid}`);
-    },
-    appContainer: async () => "/path/to/App.app",
-    install: async (udid: string, p: string) => {
-      simctlCalls.push(`install ${udid} ${p}`);
-    },
-    launch: async (_udid: string, b: string) => {
-      simctlCalls.push(`launch ${b}`);
-    },
-    openUrl: async () => {},
-    shutdown: async (u: string) => {
-      simctlCalls.push(`shutdown ${u}`);
-    },
-    delete: async (u: string) => {
-      simctlCalls.push(`delete ${u}`);
-    },
-  });
+  const simctl = overrides.simctl ?? simctlFake(simctlCalls);
 
   // Queue of probe outcomes; empty = healthy. Lets a test declare "the kept
   // helper is dead" for exactly one probe (attachAndReady's liveness check).
@@ -513,6 +532,78 @@ describe("PreviewEngine.stopPreview", () => {
 // touches the source dir. The daily-loop contract: idempotent start, stable
 // share ids, restart-in-place.
 // ---------------------------------------------------------------------------
+
+describe("an Expo preview loads ITS dev server, not whatever holds 8081", () => {
+  // Two apps in one workspace, previewed at once: deckhand runs a Metro per app on its own
+  // allocated port, but the port only ever reached the app through the dev-client deep link.
+  // An app built without expo-dev-client cannot receive that link and asks 8081 — so the
+  // backoffice ran the register's JS, on its own simulator, under its own icon.
+  let appDir: string;
+  before(() => {
+    appDir = mkdtempSync(join(tmpdir(), "deckhand-expo-"));
+    writeFileSync(
+      join(appDir, "app.json"),
+      JSON.stringify({ expo: { slug: "office-app", ios: { bundleIdentifier: "no.example.office" } } }),
+    );
+  });
+  after(() => rmSync(appDir, { recursive: true, force: true }));
+
+  const expoApp = (): App => ({
+    id: "office",
+    path: appDir,
+    type: "expo",
+    defaultBranch: "main",
+    bundleId: "no.example.office",
+    env: {},
+  });
+  /** A Metro on a port that is NOT the machine default — i.e. the second Expo preview. */
+  const metroOn = (port: number) =>
+    fakeMetro({ ensure: async () => ({ port, manifestUrl: `http://127.0.0.1:${port}` }) });
+
+  const run = async (calls: string[], over: Partial<Simctl> = {}, port = 8099) => {
+    const h = makeEngine({ simctl: simctlFake(calls, over), metro: metroOn(port) });
+    h.engine.startPreview({ app: expoApp(), source: "local", devices: [{ platform: "ios" }], access: "public" });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+    return h;
+  };
+
+  it("writes the app's own Metro port as its packager location, before the cold start that reads it", async () => {
+    const calls: string[] = [];
+    await run(calls);
+    const packager = calls.indexOf("packager no.example.office 127.0.0.1:8099");
+    assert.ok(packager >= 0, `no packager location written: ${calls.join(" | ")}`);
+    const terminate = calls.indexOf("terminate no.example.office");
+    assert.ok(terminate > packager, "the preference is read at startup, so it must precede the terminate");
+    const started = calls.findIndex((c) => c.startsWith("openurl ") || c.startsWith("launch "));
+    assert.ok(started > terminate, "`expo run:ios` already launched the app; it has to be restarted");
+  });
+
+  it("launches an app with no dev launcher directly — the deep link it cannot hear is not the only channel", async () => {
+    const calls: string[] = [];
+    await run(calls, { hasDevLauncher: async () => false });
+    assert.ok(calls.includes("packager no.example.office 127.0.0.1:8099"));
+    assert.ok(calls.includes("launch no.example.office"), `never launched: ${calls.join(" | ")}`);
+    assert.equal(
+      calls.filter((c) => c.startsWith("openurl ")).length,
+      0,
+      "a plain RN binary routes the deep link as an app URL; it must not be sent one",
+    );
+  });
+
+  it("still deep-links a dev client, and on the lone-app port that is the RN default anyway", async () => {
+    const calls: string[] = [];
+    await run(calls, {}, 8081);
+    // One Expo app on the machine: Metro is on 8081, so the location written IS
+    // RCTBundleURLProvider's own default and the bundle URL is byte-for-byte what it was
+    // before this fix. The dev client is still driven by the deep link.
+    assert.ok(calls.includes("packager no.example.office 127.0.0.1:8081"));
+    const link = calls.find((c) => c.startsWith("openurl "));
+    assert.ok(link, `dev client must still be deep-linked: ${calls.join(" | ")}`);
+    assert.match(link!, /^openurl exp\+office-app:\/\/expo-development-client\//);
+    assert.match(link!, /url=http%3A%2F%2F127\.0\.0\.1%3A8081/);
+    assert.equal(calls.filter((c) => c.startsWith("launch ")).length, 0);
+  });
+});
 
 describe("local (dev-mode) previews", () => {
   let localDir: string;

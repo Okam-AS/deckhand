@@ -1,5 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   parseRuntimes,
   parseDeviceTypes,
@@ -116,6 +119,63 @@ describe("Simctl.delete", () => {
 
   it("resolves when simctl succeeds", async () => {
     await simctlExiting(0).delete("UDID-1");
+  });
+});
+
+describe("pointing an app at a specific dev server", () => {
+  it("writes RCT_jsLocation, the preference RN's own Configure Bundler writes", async () => {
+    const calls: string[][] = [];
+    const simctl = new Simctl(async (_cmd: string, args: string[]) => {
+      calls.push(args);
+      return { code: 0, stdout: Buffer.from(""), stderr: "" };
+    });
+    await simctl.setPackagerLocation("UDID-1", "com.acme.app", "127.0.0.1:8099");
+    assert.deepEqual(calls[0], [
+      "simctl", "spawn", "UDID-1", "defaults", "write", "com.acme.app", "RCT_jsLocation", "-string", "127.0.0.1:8099",
+    ]);
+  });
+
+  it("throws when the write fails, rather than launching against an unknown packager", async () => {
+    // Swallowed, this is silent: the app comes up on 8081 — another preview's Metro —
+    // looking entirely healthy, which is the failure this method exists to end.
+    const simctl = new Simctl(async () => ({ stdout: Buffer.alloc(0), stderr: "no such device", code: 1 }));
+    await assert.rejects(
+      () => simctl.setPackagerLocation("UDID-1", "com.acme.app", "127.0.0.1:8099"),
+      (e) => e instanceof SimctlError,
+    );
+  });
+});
+
+describe("recognising an installed Expo dev client", () => {
+  const app = (withLauncher: boolean): string => {
+    const dir = mkdtempSync(join(tmpdir(), "deckhand-appbundle-"));
+    const bundle = join(dir, "Acme.app");
+    mkdirSync(bundle);
+    if (withLauncher) mkdirSync(join(bundle, "EXDevLauncher.bundle"));
+    return bundle;
+  };
+  /** A simctl whose get_app_container answers with a real directory on disk. */
+  const at = (container: string) =>
+    new Simctl(async () => ({ stdout: Buffer.from(container + "\n"), stderr: "", code: 0 }));
+
+  it("reads the installed .app, not the source that claims to have built it", async () => {
+    // An app's package.json can declare expo-dev-client while a stale node_modules
+    // autolinked a binary without it — that build is what ignored its deep link and
+    // loaded a neighbouring preview's bundle, and its package.json said dev client.
+    const withIt = app(true);
+    const without = app(false);
+    try {
+      assert.equal(await at(withIt).hasDevLauncher("UDID-1", "com.acme.app"), true);
+      assert.equal(await at(without).hasDevLauncher("UDID-1", "com.acme.app"), false);
+    } finally {
+      rmSync(withIt, { recursive: true, force: true });
+      rmSync(without, { recursive: true, force: true });
+    }
+  });
+
+  it("is false when the app is not installed at all", async () => {
+    const simctl = new Simctl(async () => ({ stdout: Buffer.alloc(0), stderr: "not installed", code: 1 }));
+    assert.equal(await simctl.hasDevLauncher("UDID-1", "com.acme.app"), false);
   });
 });
 

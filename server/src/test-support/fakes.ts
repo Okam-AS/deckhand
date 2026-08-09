@@ -113,6 +113,12 @@ export function fakeSimctl(over: Partial<Simctl> = {}, log: string[] = []): Simc
     isBooted: async () => true,
     install: async (udid: string) => void log.push(`simctl install ${udid}`),
     silenceDevOverlays: async () => {},
+    setPackagerLocation: async (udid: string, bundleId: string, hostPort: string) =>
+      void log.push(`simctl packager ${udid} ${bundleId} ${hostPort}`),
+    terminate: async (udid: string, bundleId: string) => void log.push(`simctl terminate ${udid} ${bundleId}`),
+    // A dev client by default: that is what every Expo preview here is meant to be, so a
+    // test exercising the app WITHOUT one has to say so and cannot get it by omission.
+    hasDevLauncher: async () => true,
     launch: async (udid: string, bundleId: string) => void log.push(`simctl launch ${udid} ${bundleId}`),
     openUrl: async (udid: string, url: string) => void log.push(`simctl openUrl ${udid} ${url}`),
     appContainer: async () => "/tmp/container",

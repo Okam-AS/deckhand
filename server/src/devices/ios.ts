@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -252,6 +252,45 @@ export class Simctl {
     for (const [key, value] of prefs) {
       await this.run(["spawn", udid, "defaults", "write", bundleId, key, "-bool", value]).catch(() => undefined);
     }
+  }
+
+  /**
+   * Point the app's `RCTBundleURLProvider` at a specific dev server.
+   *
+   * Android gets this for free: `adb reverse 8081 -> <port>` rewrites the device's idea of
+   * the packager. A simulator shares the host's loopback, so there is no forwarding layer —
+   * an app that resolves its bundle URL the standard React Native way asks port 8081, and
+   * with a second Expo preview running that is ANOTHER app's Metro. `RCT_jsLocation` is the
+   * same preference React Native's own "Configure Bundler" dev-menu entry writes.
+   *
+   * Read on the next cold start only, so callers terminate before launching.
+   */
+  async setPackagerLocation(udid: string, bundleId: string, hostPort: string): Promise<void> {
+    const res = await this.run(["spawn", udid, "defaults", "write", bundleId, "RCT_jsLocation", "-string", hostPort]);
+    if (res.code !== 0) {
+      throw new SimctlError(
+        `could not point ${bundleId} at the dev server on ${hostPort}: ${res.stderr.trim().slice(0, 200)}`,
+      );
+    }
+  }
+
+  /** Stop the app if it is running. Not running is not a failure. */
+  async terminate(udid: string, bundleId: string): Promise<void> {
+    await this.run(["terminate", udid, bundleId]);
+  }
+
+  /**
+   * Whether the INSTALLED app is an Expo dev client.
+   *
+   * `EXDevLauncher.bundle` is a resource directory the expo-dev-client pod copies into the
+   * .app; a build whose autolinking never saw the package has none. The artifact is the only
+   * truthful source here — an app's package.json can declare expo-dev-client while a stale
+   * node_modules produced a binary without it, which is exactly the build that came up
+   * ignoring its deep link and loading a neighbouring preview's bundle.
+   */
+  async hasDevLauncher(udid: string, bundleId: string): Promise<boolean> {
+    const container = await this.appContainer(udid, bundleId);
+    return container != null && existsSync(join(container, "EXDevLauncher.bundle"));
   }
 
   async launch(udid: string, bundleId: string): Promise<void> {
