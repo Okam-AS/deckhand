@@ -1005,6 +1005,35 @@ describe("daily-loop contract (local previews, stable URLs)", () => {
     await admin.close();
   });
 
+  it("logs reach a preview that is OVER — the failure is exactly when they are wanted", async () => {
+    // `logs` used to go through the same live-preview gate as everything else, so an app
+    // that failed to build answered `no_preview` for the build log being asked about. The
+    // diagnosis was reachable only while the thing being diagnosed was still alive.
+    const admin = await client(ADMIN);
+    const started = parse(
+      await admin.callTool({ name: "start_preview", arguments: { app: "app-a", share: { access: "public" } } }),
+    ) as { ok: boolean; previewId: string };
+    assert.equal(started.ok, true);
+    for (let i = 0; i < 200 && engine.getStatus(started.previewId)?.phase !== "ready"; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    await engine.stopPreview(started.previewId);
+    assert.equal(engine.previewIdForApp("app-a"), null, "precondition: nothing is running");
+
+    for (const args of [{ previewId: started.previewId }, { app: "app-a" }]) {
+      const res = parse(await admin.callTool({ name: "logs", arguments: args })) as {
+        ok: boolean;
+        previewPhase?: string;
+        note?: string;
+        log?: string;
+      };
+      assert.equal(res.ok, true, `logs by ${Object.keys(args)[0]} must still answer: ${JSON.stringify(res)}`);
+      assert.equal(res.previewPhase, "stopped");
+      assert.match(String(res.note), /over/);
+    }
+    await admin.close();
+  });
+
   it("status/restart for an app with no running preview return an actionable no_preview", async () => {
     const admin = await client(ADMIN);
     const res = parse(await admin.callTool({ name: "preview_status", arguments: { app: "app-b" } }));

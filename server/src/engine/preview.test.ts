@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fakeMetro, fakeDevProcs, fakeSimctl, fakeAndroid, fakeWorktrees, fakeReaper } from "../test-support/fakes.ts";
-import { PreviewEngine, PreviewError, buildStepDetail, redactForShare, type PreviewEngineDeps, type StartPreviewRequest, type DeviceRequest } from "./preview.ts";
+import { PreviewEngine, PreviewError, buildStepDetail, buildFailureSummary, redactForShare, type PreviewEngineDeps, type StartPreviewRequest, type DeviceRequest } from "./preview.ts";
 import type { SimDeckControl } from "../testing/control.ts";
 import type { App, Config } from "../config.ts";
 import type { AndroidManager } from "../devices/android.ts";
@@ -532,6 +532,124 @@ describe("PreviewEngine.stopPreview", () => {
 // touches the source dir. The daily-loop contract: idempotent start, stable
 // share ids, restart-in-place.
 // ---------------------------------------------------------------------------
+
+describe("buildFailureSummary", () => {
+  it("prefers the CAUSE over the line the build merely ended on", () => {
+    const summary = buildFailureSummary([
+      "[install-deps] added 109 packages",
+      "[build] Planning build",
+      '[build] error: Signing for "OkamKitchen" requires a development team',
+      "[build] ** BUILD FAILED **",
+    ]);
+    assert.match(summary, /last step "build"/);
+    assert.match(summary, /requires a development team/);
+    assert.doesNotMatch(summary, /BUILD FAILED/, '"** BUILD FAILED **" says nothing the phase does not');
+  });
+
+  it("falls back to trouble, then to the last line, so it is never empty", () => {
+    assert.match(buildFailureSummary(["[build] step 1", "[build] ** BUILD FAILED **"]), /BUILD FAILED/);
+    assert.match(buildFailureSummary(["[build] a", "[build] b"]), /said: \[build\] b/);
+  });
+
+  it("fits the 160 characters a viewer shows, however long the line was", () => {
+    const summary = buildFailureSummary(["[build] error: " + "x".repeat(500)]);
+    assert.ok(summary.length < 140, `too long for the device frame: ${summary.length}`);
+    assert.match(summary, /…$/);
+  });
+
+  it("says so when the build captured nothing at all", () => {
+    assert.match(buildFailureSummary([]), /captured no output/);
+  });
+});
+
+describe("a build log outlives the build", () => {
+  // The one moment a build log matters is the moment the build failed — and that was the
+  // one moment deckhand threw it away: the record left `previews` on teardown and `logs`
+  // answered no_preview for the very preview being diagnosed.
+  it("keeps a stopped preview's build log, and finds it by app id", async () => {
+    const h = makeEngine();
+    h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "ios" }],
+      access: "public",
+    });
+    await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
+    const live = h.engine.logs("pv1", undefined, "build", 200);
+    assert.ok(live && live.length > 0, "precondition: the build logged something");
+
+    await h.engine.stopPreview("pv1");
+    assert.equal(h.engine.previewIdForApp("my-app"), null, "precondition: the preview is gone");
+    assert.equal(h.engine.logs("pv1", undefined, "build", 200), live, "the log must survive its preview");
+    assert.equal(h.engine.lastPreviewIdForApp("my-app"), "pv1");
+    assert.equal(h.engine.finished("pv1")?.phase, "stopped");
+  });
+
+  it("keeps a FAILED preview's log and the error each device died of", async () => {
+    const h = makeEngine({}, (step) => ({ code: step.name === "build" ? 1 : 0, timedOut: false, aborted: false }));
+    h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "ios" }],
+      access: "public",
+    });
+    await waitForPhase(h.engine, "pv1", ["failed"]);
+    await h.engine.stopPreview("pv1");
+    const over = h.engine.finished("pv1");
+    assert.ok(over, "a failed preview must leave its logs behind");
+    assert.match(over!.devices[0]!.error ?? "", /build step "build" failed/);
+    assert.match(h.engine.logs("pv1", undefined, "build", 200) ?? "", /running build/);
+  });
+
+  it("is a bounded ring, not a history", async () => {
+    const ids = { n: 0 };
+    const h = makeEngine({ genPreviewId: () => `pv${++ids.n}`, genShareId: () => `share-${ids.n}` });
+    for (let i = 0; i < 10; i++) {
+      h.engine.startPreview({
+        app: rnApp,
+        source: "git",
+        spec: { kind: "branch", branch: "main" },
+        devices: [{ platform: "ios" }],
+        access: "public",
+      });
+      await waitForPhase(h.engine, `pv${ids.n}`, ["ready", "failed"]);
+      await h.engine.stopPreview(`pv${ids.n}`);
+    }
+    assert.equal(h.engine.finished("pv10")?.phase, "stopped", "the newest is kept");
+    assert.equal(h.engine.finished("pv1"), null, "the oldest is dropped");
+    assert.equal(h.engine.lastPreviewIdForApp("my-app"), "pv10", "newest first");
+  });
+});
+
+describe("an app that never installs says what the build said", () => {
+  it("names the device and quotes the build, instead of reporting the symptom alone", async () => {
+    // Every build step exited 0 and the app is still not there — the case that reached a
+    // viewer as four words: "did not appear installed".
+    let t = 0;
+    const h = makeEngine({
+      now: () => (t += 60_000),
+      simctl: simctlFake([], { appContainer: async () => null }),
+    });
+    h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "ios", runtime: "26", model: "iPhone 16 Pro" }],
+      access: "public",
+    });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "failed");
+    const err = h.engine.getStatus("pv1")!.devices[0]!.error ?? "";
+    assert.match(err, /com\.example\.myapp is not installed on iPhone 16 Pro/);
+    assert.match(err, /every build step exited 0/);
+    assert.match(err, /last step "build" said: \[build\] running build/, "the message must carry the cause, not just the symptom");
+    // The viewer only ever sees `detail`, capped at 160 chars — so the cause has to fit there.
+    const detail = h.engine.getStatus("pv1")!.devices[0]!.detail ?? "";
+    assert.match(detail, /is not installed on iPhone 16 Pro/);
+    assert.match(detail, /last step "build"/, "the cause must survive the 160-character cap the viewer shows");
+  });
+});
 
 describe("an Expo preview loads ITS dev server, not whatever holds 8081", () => {
   // Two apps in one workspace, previewed at once: deckhand runs a Metro per app on its own

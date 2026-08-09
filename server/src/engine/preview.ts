@@ -53,6 +53,52 @@ import { SimDeckControl, type SimDeckTarget, type DescribeOptions, type UiAction
 // ---------------------------------------------------------------------------
 
 const LOG_CAP = 500;
+/** How many finished previews keep their logs. See `PreviewEngine.finished`. */
+const RETAINED_PREVIEWS = 8;
+
+/**
+ * A cause, and the weaker "something went wrong" that is only worth quoting when there is
+ * no cause. `** BUILD FAILED **` sits in the second set on purpose: it is the line an Xcode
+ * build ends on and it says nothing the phase does not.
+ */
+const BUILD_CAUSE_LINE = /\b(error|fatal|cannot|unable|no such|denied|not found|requires)/i;
+const BUILD_TROUBLE_LINE = /\b(failed|failure|\*\* BUILD)/i;
+
+/**
+ * The one line of a build log worth putting in a failure MESSAGE.
+ *
+ * It has to BE the message, not a hint beside it: `PreviewError.hint` never reaches the
+ * viewer, and `failureDetail` takes the first line of the message and caps it at 160
+ * characters to produce the entire text a viewer shows for a device that did not start.
+ */
+export function buildFailureSummary(build: string[]): string {
+  const step = [...build].reverse().find((l) => /^\[[^\]]+\]/.test(l));
+  const ran = step ? `last step "${/^\[([^\]]+)\]/.exec(step)![1]}"` : "the build";
+  const reversed = [...build].reverse();
+  const pick =
+    reversed.find((l) => BUILD_CAUSE_LINE.test(l)) ??
+    reversed.find((l) => BUILD_TROUBLE_LINE.test(l)) ??
+    reversed.find((l) => l.trim().length);
+  if (!pick) return `${ran} captured no output`;
+  const quoted = pick.trim();
+  return `${ran} said: ${quoted.length > 100 ? `${quoted.slice(0, 99)}…` : quoted}`;
+}
+
+/** A preview that is over, kept only so its build log can still be read. */
+export interface RetainedPreview {
+  previewId: string;
+  appId: string;
+  phase: string;
+  endedAt: string;
+  devices: {
+    deviceId: string;
+    label: string;
+    phase: string;
+    error?: string;
+    step?: string;
+    logs: Record<LogSource, string[]>;
+  }[];
+}
 // "stream" is the diagnostic trace for the path between the browser and the
 // device: helper attach, first-frame probes, every proxied request and its
 // upstream result, WebSocket upgrades, and what the viewer's player reports back.
@@ -1525,6 +1571,7 @@ export class PreviewEngine {
     const held: (() => number)[] = [];
     for (const [id, p] of this.previews) {
       if (p.record.appId === appId && (p.record.phase === "failed" || p.record.phase === "stopped")) {
+        this.retain(p);
         this.previews.delete(id);
         if (p.record.phase === "failed") held.push(this.releaseInBackground(p));
       }
@@ -2085,13 +2132,13 @@ export class PreviewEngine {
         this.setPhase(p, builder, "building", "first livesync build");
         this.startDevProcess(p, builder, platform, builderHandle, sourceDir, appEnv);
         this.setPhase(p, builder, "installing-app", "waiting for the app to install");
-        await this.verifyInstalled(platform, builderHandle, bundleId, DEV_INSTALL_TIMEOUT_MS, () =>
+        await this.verifyInstalled(platform, builderHandle, bundleId, builder, DEV_INSTALL_TIMEOUT_MS, () =>
           this.devProcessDead(p.app.id, platform),
         );
         await this.silenceDevOverlays(platform, builderHandle, bundleId);
       } else {
         this.setPhase(p, builder, "installing-app", "verifying install");
-        await this.verifyInstalled(platform, builderHandle, bundleId);
+        await this.verifyInstalled(platform, builderHandle, bundleId, builder);
         await this.silenceDevOverlays(platform, builderHandle, bundleId);
         this.setPhase(p, builder, "launching", "launching app");
         await this.launch(p, builder, builderHandle, bundleId, sourceDir, appEnv, slug);
@@ -2124,7 +2171,7 @@ export class PreviewEngine {
           const handle = await handleOf(i + 1);
           this.setPhase(p, dev, "installing-app", "installing");
           await this.installProduct(platform, handle, appPath);
-          await this.verifyInstalled(platform, handle, bundleId);
+          await this.verifyInstalled(platform, handle, bundleId, dev);
           await this.silenceDevOverlays(platform, handle, bundleId);
           this.setPhase(p, dev, "launching", "launching app");
           await this.launch(p, dev, handle, bundleId, sourceDir, appEnv, slug);
@@ -2397,6 +2444,7 @@ export class PreviewEngine {
     platform: Platform,
     handle: string,
     bundleId: string,
+    dev: LiveDevice,
     timeoutMs = 30_000,
     deadProbe?: () => string | null,
   ): Promise<void> {
@@ -2411,9 +2459,13 @@ export class PreviewEngine {
       if (installed) return;
       await new Promise((r) => setTimeout(r, 2000));
     }
+    // "did not appear installed" is a SYMPTOM, and on its own it is the whole message a
+    // viewer shows — an app that failed to build twice said nothing about either failure.
+    // Reaching here means every build step exited 0, so name that, name the device the app
+    // is missing from, and quote what the build actually said last.
     throw new PreviewError(
-      `app ${bundleId} did not appear installed on the device`,
-      "the build may have failed to install; check the build logTail",
+      `${bundleId} is not installed on ${dev.record.label}; every build step exited 0 and ${buildFailureSummary(dev.logs.build)}`,
+      'Read the whole build log with `logs` (source "build") — it is kept after the preview ends.',
     );
   }
 
@@ -2608,11 +2660,53 @@ export class PreviewEngine {
 
   logs(previewId: string, deviceId: string | undefined, source: LogSource, tailLines = 200): string | null {
     const p = this.active(previewId);
-    if (!p) return null;
-    const dev = deviceId ? p.devices.find((d) => d.record.deviceId === deviceId) : p.devices[0];
+    const devices = p ? p.devices.map((d) => ({ deviceId: d.record.deviceId, logs: d.logs })) : this.finished(previewId)?.devices;
+    if (!devices) return null;
+    const dev = deviceId ? devices.find((d) => d.deviceId === deviceId) : devices[0];
     if (!dev) return null;
     return dev.logs[source].slice(-tailLines).join("\n");
   }
+
+  /**
+   * The logs of a preview that is over.
+   *
+   * A build log matters most at the moment the build fails, and that was the one moment
+   * deckhand threw it away: the record left `this.previews` on teardown, so `logs` answered
+   * `no_preview` for the preview whose failure was being diagnosed. An app that failed twice
+   * in a row could only be read by catching it mid-flight.
+   *
+   * In memory and bounded, not on disk: a server restart tears down every simulator anyway,
+   * so a diagnosis that outlives the process has nothing left to act on, and PLAN §2's "no
+   * database" makes a file the wrong size of answer. RETAINED_PREVIEWS is a small ring —
+   * enough to cover retrying an app a few times, not a history.
+   */
+  finished(previewId: string): RetainedPreview | null {
+    return this.retained.find((r) => r.previewId === previewId) ?? null;
+  }
+
+  /** The most recent finished preview of an app, for `logs` called after the fact. */
+  lastPreviewIdForApp(appId: string): string | null {
+    return this.retained.find((r) => r.appId === appId)?.previewId ?? null;
+  }
+
+  private retain(p: LivePreview): void {
+    this.retained.unshift({
+      previewId: p.record.previewId,
+      appId: p.record.appId,
+      phase: p.record.phase,
+      endedAt: this.iso(),
+      devices: p.devices.map((d) => ({
+        deviceId: d.record.deviceId,
+        label: d.record.label,
+        phase: d.record.phase,
+        error: d.record.error,
+        step: d.record.step,
+        logs: d.logs,
+      })),
+    });
+    this.retained.splice(RETAINED_PREVIEWS);
+  }
+  private readonly retained: RetainedPreview[] = [];
 
   /** The simulator UDID for a device (for the screenshot/ui tools). */
   udidFor(previewId: string, deviceId: string): string | null {
@@ -3541,6 +3635,7 @@ export class PreviewEngine {
     p.record.phase = "stopped";
     p.record.updatedAt = this.iso();
     this.persist();
+    this.retain(p);
     this.previews.delete(previewId);
     this.stopMetroIfUnused(p.app.id);
     this.d.audit.record({ actor: "engine", tool: "stop_preview", args: { preview: previewId }, result: "ok" });

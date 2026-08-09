@@ -245,6 +245,14 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   const requireLivePreview = (previewId: string): CallToolResult | null =>
     engine.appIdFor(previewId) ? null : fail("unknown_preview", `no active preview "${previewId}"`);
 
+  /** The app's most recent finished preview, when it has no live one. Only `logs` uses it. */
+  const lastFinishedForApp = (app?: string): string | undefined => {
+    if (!app) return undefined;
+    const resolved = resolveApp(app);
+    if (isResult(resolved) || engine.previewIdForApp(resolved.id)) return undefined;
+    return engine.lastPreviewIdForApp(resolved.id) ?? undefined;
+  };
+
   server.registerTool(
     "list_apps",
     {
@@ -1065,7 +1073,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Read a device's logs",
       description:
-        "Read deckhand's captured logs for a device in a preview — the fastest way to find out WHY a build failed, why a screen came up wrong, or why the viewer will not show a picture. `build` (default) carries the build/install step output plus the NativeScript livesync and web dev-server streams: compile errors, install failures, and dev-server crashes surface here. **`stream` is the one to read when the viewer is stuck on \"Connecting…\" or shows a black screen while the device says ready** — it traces the whole browser→helper path: helper attach + first-frame probes, every proxied stream request with its upstream status and byte count, WebSocket upgrade accepts/refusals with the exact reason, and what the viewer's own player reports (fallback to MJPEG, decode failure, giving up). Pair with `describe`/`screenshot` when the app is up but misbehaving. Pass previewId or app id; deviceId defaults to the first/only device. Returns the last `tailLines` lines (500 are retained per source).",
+        "Read deckhand's captured logs for a device in a preview — the fastest way to find out WHY a build failed, why a screen came up wrong, or why the viewer will not show a picture. `build` (default) carries the build/install step output plus the NativeScript livesync and web dev-server streams: compile errors, install failures, and dev-server crashes surface here. **`stream` is the one to read when the viewer is stuck on \"Connecting…\" or shows a black screen while the device says ready** — it traces the whole browser→helper path: helper attach + first-frame probes, every proxied stream request with its upstream status and byte count, WebSocket upgrade accepts/refusals with the exact reason, and what the viewer's own player reports (fallback to MJPEG, decode failure, giving up). Pair with `describe`/`screenshot` when the app is up but misbehaving. Pass previewId or app id; deviceId defaults to the first/only device. Returns the last `tailLines` lines (500 are retained per source). **A preview that has failed or been stopped can still be read** — the last few finished previews keep their logs, so a build that died is diagnosable after the fact; the response then carries `previewPhase` and `deviceErrors`.",
       inputSchema: {
         previewId: z.string().optional().describe("from start_preview; or pass app instead"),
         app: z.string().optional().describe("app id — reads its running preview"),
@@ -1081,10 +1089,21 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     },
     (args) =>
       audited("logs", args, () => {
-        const id = resolvePreviewId(args);
+        // A finished preview is a legitimate target HERE and nowhere else: the build log is
+        // wanted precisely when the build failed and the preview is gone, and refusing that
+        // as "no running preview" made every failure undiagnosable after the fact.
+        const finishedId = args.previewId
+          ? engine.appIdFor(args.previewId)
+            ? undefined // a live preview of that id wins; retained is the fallback, never the answer
+            : engine.finished(args.previewId)?.previewId
+          : lastFinishedForApp(args.app);
+        const id = finishedId ?? resolvePreviewId(args);
         if (typeof id !== "string") return id;
-        const denied = requireLivePreview(id);
-        if (denied) return denied;
+        if (!finishedId) {
+          const denied = requireLivePreview(id);
+          if (denied) return denied;
+        }
+        const over = engine.finished(id);
         const source = args.source ?? "build";
         const log = engine.logs(id, args.deviceId, source, args.tailLines ?? 200);
         if (log === null) {
@@ -1094,13 +1113,26 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             "call preview_status to list the device ids",
           );
         }
+        const notes = [
+          over ? `This preview is over (${over.phase} at ${over.endedAt}); these are the logs it left behind.` : null,
+          log === "" ? `No ${source} log captured for this device.` : null,
+        ].filter(Boolean);
         return ok({
           previewId: id,
           deviceId: args.deviceId ?? null,
           source,
           lines: log ? log.split("\n").length : 0,
           log,
-          ...(log === "" ? { note: `No ${source} log captured yet for this device.` } : {}),
+          ...(over
+            ? {
+                previewPhase: over.phase,
+                previewEnded: over.endedAt,
+                deviceErrors: over.devices
+                  .filter((d) => d.error)
+                  .map((d) => `${d.deviceId}${d.step ? ` (step ${d.step})` : ""}: ${d.error}`),
+              }
+            : {}),
+          ...(notes.length ? { note: notes.join(" ") } : {}),
         });
       }),
   );
