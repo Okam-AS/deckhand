@@ -1516,6 +1516,55 @@ describe("agent-driven testing tools (describe/ui + test runs)", () => {
     await admin.close();
   });
 
+  it("will not let a run be passed while a parity item is still pending or doing", async () => {
+    // The checklist is the other half of what the page shows, and it does not settle itself: a
+    // four-item list was seeded, every judgement went into the test run instead, and the run
+    // finished green beside `Checklist 0/4` — the user had to ask whether it had been tested.
+    const admin = await client(ADMIN);
+    const started = parse(
+      await admin.callTool({
+        name: "start_preview",
+        arguments: { app: "app-mig", items: ["Login", "Profile", "Wash"], share: { access: "public" } },
+      }),
+    );
+    const previewId = started.previewId as string;
+    await admin.callTool({ name: "start_test_run", arguments: { previewId, title: "Parity pass", steps: ["One"] } });
+    await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 1, status: "passed" } } });
+    await admin.callTool({ name: "parity_set", arguments: { previewId, item: "Login", verdict: "done" } });
+    await admin.callTool({ name: "parity_set", arguments: { previewId, item: "Profile", verdict: "doing" } });
+
+    const bogus = parse(await admin.callTool({ name: "finish_test_run", arguments: { previewId, status: "passed" } }));
+    assert.equal(bogus.ok, false, "a checklist nobody closed cannot add up to a pass");
+    assert.equal((bogus.error as { code: string }).code, "parity_items_unjudged");
+    // Naming them is the point: the agent must be able to act without another round trip.
+    const message = String((bogus.error as { message: string }).message);
+    assert.match(message, /Profile/);
+    assert.match(message, /Wash/);
+    assert.doesNotMatch(message, /Login/, "an item already judged is not outstanding");
+    assert.match(String((bogus.error as { hint: string }).hint), /parity_set/);
+
+    // Refusing leaves the run open, so the agent can put it right and finish.
+    await admin.callTool({ name: "parity_set", arguments: { previewId, item: "Profile", verdict: "regression" } });
+    await admin.callTool({ name: "parity_set", arguments: { previewId, item: "Wash", verdict: "adjusted" } });
+    const clean = parse(await admin.callTool({ name: "finish_test_run", arguments: { previewId, status: "passed" } }));
+    assert.equal(clean.ok, true, "the run must still be open after the refusal");
+    assert.equal(clean.status, "passed");
+    assert.doesNotMatch(String(clean.nextStep), /unjudged/);
+
+    // A failed verdict is honest information, so it is recorded — with the open items named.
+    await admin.callTool({ name: "start_test_run", arguments: { previewId, title: "Blocked", steps: ["One"] } });
+    await admin.callTool({ name: "parity_set", arguments: { previewId, item: "Stations", verdict: "pending" } });
+    const failed = parse(
+      await admin.callTool({ name: "finish_test_run", arguments: { previewId, status: "failed", summary: "app would not boot" } }),
+    );
+    assert.equal(failed.ok, true);
+    assert.equal(failed.status, "failed");
+    assert.match(String(failed.nextStep), /Stations/, "the open item must reach the agent's report");
+
+    await admin.callTool({ name: "stop_preview", arguments: { previewId } });
+    await admin.close();
+  });
+
   it("clears a run so a stale or wrongly-recorded verdict can be taken off screen", async () => {
     const admin = await client(ADMIN);
     const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));

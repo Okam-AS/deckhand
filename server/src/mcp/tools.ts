@@ -325,6 +325,16 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     "ALWAYS open a run before you drive the app — not just for tests: start_test_run with a title saying what you are about to do (\"Verify the new tab bar\", \"Reproduce the crash\", \"Look at the wash flow\") and the steps you plan, mark each one running→passed/failed with update_test_run as you go, and close it with finish_test_run. That is what puts a live spinner and step list in the viewer; without it the user sees a cursor moving over a silent app and cannot tell what you are doing.";
 
   /**
+   * The checklist half of the same contract, and the half that gets dropped: four items seeded
+   * at start_preview, every judgement reported into the test run instead, and the run finished
+   * green beside a viewer reading "Checklist 0/4" — the user had to ask whether anything had
+   * been tested. One string, so the obligation is legible at all three points it can be
+   * abandoned: where the list is seeded, where a verdict is recorded, and where the run closes.
+   */
+  const PARITY_CONTRACT =
+    "Seeding a checklist commits you to closing it: record each item with parity_set the moment you have judged it (done / adjusted / regression), never in a batch at the end, and keep its note true to what you last saw — a stale note is trusted where a missing one is not. finish_test_run will not record a \"passed\" verdict while any item is still pending or doing.";
+
+  /**
    * Keep the link within reach. Relaying it once, at the top of a long session, means the user
    * scrolls back through everything the agent has written since to find the sim again — so the
    * contract is not "relay it early" but "never let it leave the bottom of the conversation".
@@ -434,7 +444,10 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           .describe(
             "extra sources to show on the same page, in old → new order. An empty object {} means this app's registered migratesFrom. Each gets the same `devices`.",
           ),
-        items: z.array(z.string()).optional().describe("parity checklist items to seed (flows/screens); update with parity_set"),
+        items: z
+          .array(z.string())
+          .optional()
+          .describe(`parity checklist items to seed (flows/screens). ${PARITY_CONTRACT}`),
         share: z
           .object({
             access: z.enum(["public", "pin"]).describe("REQUIRED — ask the user first: protect with a PIN, or public?"),
@@ -805,7 +818,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Record a checklist verdict",
       description:
-        "Record your verdict on one checklist item after you've judged it in the viewer. YOU maintain this list — it is what the person watching reads to see how far along you are, so keep it current as you go rather than in a batch at the end. verdict: done (verified fine — use this when there is nothing to compare against, and when the port matches the reference) · adjusted (deliberately different from the reference and fine — a redesign, not a bug) · regression (unwanted divergence, still to fix) · doing (in progress) · pending (not looked at). An unknown item name is appended. Returns the updated counts. Pass previewId or the app id.",
+        `Record your verdict on one checklist item after you've judged it in the viewer. YOU maintain this list — it is what the person watching reads to see how far along you are. ${PARITY_CONTRACT} verdict: done` +
+        " (verified fine — use this when there is nothing to compare against, and when the port matches the reference) · adjusted (deliberately different from the reference and fine — a redesign, not a bug) · regression (unwanted divergence, still to fix) · doing (in progress) · pending (not looked at). An unknown item name is appended. Returns the updated counts. Pass previewId or the app id.",
       inputSchema: {
         previewId: z.string().optional().describe("from start_preview; or pass app instead"),
         app: z.string().optional().describe("the app id — targets its running preview"),
@@ -1368,7 +1382,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Finish the test run",
       description:
-        "Conclude the current run with a verdict (passed/failed) and a one-line summary — the viewer button settles to ✓/✗. Then write the full human-readable report in chat yourself (what you tested, what passed/failed, and any bug you found). Pass previewId or app id.",
+        `Conclude the current run with a verdict (passed/failed) and a one-line summary — the viewer button settles to ✓/✗. ${PARITY_CONTRACT} Then write the full human-readable report in chat yourself (what you tested, what passed/failed, and any bug you found). Pass previewId or app id.`,
       inputSchema: {
         previewId: z.string().optional(),
         app: z.string().optional(),
@@ -1402,6 +1416,23 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             "The run is still open. Mark what you actually checked with update_test_run (passed or failed, one call per step), then finish. If you did not check them, finish as \"failed\" or clear_test_run — do not record a verdict the steps do not support.",
           );
         }
+        // The same split on the page's OTHER progress surface: an agent seeded four items,
+        // reported everything into the test run instead, and finished green while the viewer read
+        // `Checklist 0/4` — the user could only ask whether it had been tested at all. An item
+        // never judged has no honest verdict to settle to, so a pass refuses like the case above;
+        // a failed verdict is information, so it records and names what is still open.
+        const unjudged = (engine.compareStatus(id)?.items ?? []).filter(
+          (i) => i.verdict === "pending" || i.verdict === "doing",
+        );
+        if (args.status === "passed" && unjudged.length > 0) {
+          return fail(
+            "parity_items_unjudged",
+            `cannot pass a run while ${unjudged.length} checklist item(s) are unjudged: ${unjudged
+              .map((i) => `"${i.name}" (${i.verdict})`)
+              .join(", ")}`,
+            "The run is still open. Record each one with parity_set (done / adjusted / regression), then finish. If you did not look at one, tell the user which and finish as \"failed\" — do not leave an item pending under a green run.",
+          );
+        }
         const contradicted = args.status === "passed" && !!counts && counts.failed > 0;
         const effective = contradicted ? "failed" : args.status;
         engine.finishTestRun(id, effective, args.summary);
@@ -1415,6 +1446,13 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         if (counts && counts.pending > 0) {
           notes.push(
             `${counts.pending} step(s) were never marked and now render as never-run. Tell the user plainly which checks you did not perform — an unmarked step is not a passed one.`,
+          );
+        }
+        if (unjudged.length > 0) {
+          notes.push(
+            `${unjudged.length} checklist item(s) are still unjudged (${unjudged
+              .map((i) => i.name)
+              .join(", ")}) and render as never-looked-at. Record what you did learn about them with parity_set, and name the rest to the user.`,
           );
         }
         // The one moment the agent is certain to be writing a long message — so the single most
