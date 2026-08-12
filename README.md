@@ -11,6 +11,12 @@ You get back one calm page showing every device live, with full touch control â€
 shareable publicly or behind a PIN. Claude can also see and drive the devices itself
 (screenshot, accessibility tree, tap/type) before it hands you the link.
 
+## For humans: set up Deckhand with an agent
+
+Tell your coding agent:
+
+> Set up Deckhand on this Mac from https://github.com/Okam-AS/deckhand. Guide me step by step through the Cloudflare tunnel setup. When it is ready, give me the MCP connector URL and a pairing code so I can connect my agent.
+
 ## How it works
 
 1. **You ask** â€” Claude calls `start_preview` with an app id, a ref/PR, and devices.
