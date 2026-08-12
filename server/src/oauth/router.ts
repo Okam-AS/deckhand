@@ -176,6 +176,17 @@ function oauthError(res: express.Response, status: number, error: string, descri
 
 const singleString = (v: unknown): string | null => (typeof v === "string" && v !== "" ? v : null);
 
+function isAcceptedRedirectUri(uri: string): boolean {
+  try {
+    const url = new URL(uri);
+    if (url.protocol === "https:") return true;
+    const loopback = /^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\]):([1-9]\d{0,4})(?:[/?#]|$)/i.exec(uri);
+    return url.protocol === "http:" && loopback !== null && Number(loopback[1]) <= 65_535;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The `/oauth` router: dynamic client registration, the authorize page, and the
  * token endpoint. Mount at `/oauth`.
@@ -211,13 +222,11 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
     const body = (req.body ?? {}) as { redirect_uris?: unknown; client_name?: unknown };
     const uris = Array.isArray(body.redirect_uris) ? body.redirect_uris.filter((u): u is string => typeof u === "string") : [];
     if (uris.length === 0) {
-      oauthError(res, 400, "invalid_redirect_uri", "redirect_uris is required and must list at least one https URI");
+      oauthError(res, 400, "invalid_redirect_uri", "redirect_uris is required and must list at least one accepted URI");
       return;
     }
-    // http is refused outright: an authorization code lands in this URI, and the
-    // only reason to accept a cleartext one is a client we are not serving.
-    if (uris.some((u) => !/^https:\/\//i.test(u))) {
-      oauthError(res, 400, "invalid_redirect_uri", "redirect_uris must be https");
+    if (uris.some((u) => !isAcceptedRedirectUri(u))) {
+      oauthError(res, 400, "invalid_redirect_uri", "redirect_uris must be https or an http loopback callback with an explicit port");
       return;
     }
     let client: OAuthClient;
