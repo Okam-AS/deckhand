@@ -11,6 +11,7 @@ import { OAuthStore } from "./store.ts";
 import { PairingStore } from "./pairing.ts";
 
 const REDIRECT = "https://claude.ai/api/mcp/auth_callback";
+const CODEX_REDIRECT = "http://127.0.0.1:49321/callback";
 const BASE_URL = "https://deckhand.example.com";
 
 let base: string;
@@ -253,8 +254,30 @@ describe("OAuth authorization server", () => {
     assert.equal(replay.status, 400);
   });
 
-  it("refuses registration without an https redirect uri", async () => {
-    for (const body of [{}, { redirect_uris: [] }, { redirect_uris: ["http://localhost/cb"] }]) {
+  it("accepts HTTP loopback callbacks with an explicit port", async () => {
+    for (const redirect of [CODEX_REDIRECT, "http://localhost:49321/callback", "http://[::1]:49321/callback"]) {
+      const res = await fetch(`${base}/oauth/register`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ redirect_uris: [redirect], client_name: "Codex" }),
+      });
+      assert.equal(res.status, 201);
+      assert.deepEqual((await res.json() as { redirect_uris: string[] }).redirect_uris, [redirect]);
+    }
+  });
+
+  it("refuses HTTP redirects outside the exact loopback callback forms", async () => {
+    for (const body of [
+      {},
+      { redirect_uris: [] },
+      { redirect_uris: ["http://localhost/callback"] },
+      { redirect_uris: ["http://localhost:0/callback"] },
+      { redirect_uris: ["http://127.1:49321/callback"] },
+      { redirect_uris: ["http://127.0.0.1.evil.example:49321/callback"] },
+      { redirect_uris: ["http://[::1]/callback"] },
+      { redirect_uris: ["http://user@127.0.0.1:49321/callback"] },
+      { redirect_uris: ["http://192.168.1.10:49321/callback"] },
+    ]) {
       const res = await fetch(`${base}/oauth/register`, {
         method: "POST",
         headers: { "content-type": "application/json" },

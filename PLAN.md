@@ -930,7 +930,8 @@ operator saying so, once, per client, at the Mac**:
 - The OAuth server itself: authorization-code + PKCE **S256 only** (`plain` puts the verifier
   in the same redirect as the code), single-use codes burned even on a failed redemption,
   rotating refresh tokens, public clients via RFC 7591
-  dynamic registration, https redirect URIs only, and errors RENDERED rather than redirected —
+  dynamic registration, HTTPS redirect URIs plus HTTP callbacks only on `localhost`,
+  `127.0.0.1`, or `[::1]` with an explicit port, and errors RENDERED rather than redirected —
   registration is unauthenticated, so "a registered redirect_uri" is any URI a stranger asked
   for, and bouncing a browser there is an open redirector however well the match is done.
 
