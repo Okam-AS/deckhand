@@ -94,7 +94,7 @@ const PACKAGE_MANAGERS = [
  * found" in the middle of a build log.
  */
 const PM_HELPERS = [
-  'pm_need() { command -v "$1" >/dev/null 2>&1 || { echo "deckhand: this project ships a $1 lockfile, but $1 is not installed on this host — install it (e.g. brew install $1), or enable corepack" >&2; exit 127; }; }',
+  'pm_need() { command -v "$1" >/dev/null 2>&1 || { echo "deckhand: this project ships a $1 lockfile, but $1 is not on this build\'s PATH — if it is installed for you, re-run deckhand\'s ops/install-services.sh; otherwise install it (e.g. brew install $1), or enable corepack" >&2; exit 127; }; }',
 ];
 
 /**

@@ -1,6 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { readFileSync, readdirSync, mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { auditedTools, registeredTools, registerToolCallCount } from "./toolNames.ts";
@@ -1139,5 +1141,74 @@ describe("setup decides on state, not on its own prose", () => {
         "been broken that way. Read the state instead (tokens.yaml/config.yaml via their loaders), " +
         "or check the exit code. Printing it, or quoting it in a SetupError, is fine.",
     );
+  });
+});
+
+/**
+ * A LaunchAgent inherits nothing from the user's shell, so a build tool is reachable from
+ * the daemon only if `ops/install-services.sh` names it. bun's own installer puts it in
+ * `~/.bun/bin` and pnpm's in `~/Library/pnpm` — outside every standard prefix — so a repo
+ * shipping either lockfile failed `install-deps` with "not on this build's PATH" on a
+ * machine where the same build ran fine in a terminal.
+ */
+describe("the agent PATH reaches the tools a build runs", () => {
+  const INSTALL_SERVICES = join(REPO, "ops", "install-services.sh");
+  const decomment = (src: string): string => src.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+
+  it("resolves every package manager install-deps can dispatch to", () => {
+    // Read from recipes.ts rather than listed here: the rule is "whatever the build can run",
+    // so a fifth manager added there fails this until the agent can find it too.
+    const recipes = read(join(SRC, "engine", "recipes.ts"));
+    const start = recipes.indexOf("const PACKAGE_MANAGERS = [");
+    assert.ok(start >= 0, "PACKAGE_MANAGERS is gone from recipes.ts — this check has lost its subject");
+    const managers = [...recipes.slice(start, recipes.indexOf("] as const;", start)).matchAll(/\{\s*name:\s*"([a-z]+)"/g)].map((m) => m[1]!);
+    assert.ok(managers.length >= 4, `read only ${managers.length} package managers from recipes.ts`);
+    // Comments stripped: the script explains this rule in prose that names the tools, and an
+    // explanation standing in for the code is how three checks here passed for the wrong reason.
+    const script = decomment(readFileSync(INSTALL_SERVICES, "utf8"));
+    for (const pm of managers)
+      assert.match(
+        script,
+        new RegExp(`tool_dir ${pm}\\b`),
+        `ops/install-services.sh never resolves \`${pm}\`, so a repo with a ${pm} lockfile fails install-deps under the agent while the same build works in a terminal`,
+      );
+  });
+
+  it("adds a tool's own dir, and contributes nothing for one that is absent", () => {
+    // The script's own comment records the other half: `dirname` of a tool that is not there
+    // yields a component that IS a directory ("/", "."), which then shadows nothing but is
+    // searched on every exec.
+    const src = readFileSync(INSTALL_SERVICES, "utf8");
+    const from = src.indexOf('AGENT_PATH="$NODE_DIR"');
+    const to = src.indexOf("\ndone\n", from);
+    assert.ok(from >= 0 && to > from, "the AGENT_PATH loop is not where this check reads it from");
+    const block = src.slice(from, to + "\ndone\n".length);
+
+    const tmp = mkdtempSync(join(tmpdir(), "deckhand-agent-path-"));
+    try {
+      const toolbin = join(tmp, "toolbin");
+      const nodeDir = join(tmp, "node");
+      mkdirSync(toolbin);
+      mkdirSync(nodeDir);
+      writeFileSync(join(toolbin, "bun"), "#!/bin/sh\n", { mode: 0o755 });
+      const run = (path: string): string[] =>
+        execFileSync("bash", ["-c", `set -euo pipefail\nNODE_DIR=${nodeDir}\n${block}\nprintf '%s' "$AGENT_PATH"`], {
+          encoding: "utf8",
+          env: { PATH: path, HOME: tmp },
+        }).split(":");
+
+      const found = run(`${toolbin}:/usr/bin:/bin`);
+      assert.ok(found.includes(toolbin), `bun is in ${toolbin} and the agent PATH did not get it: ${found.join(":")}`);
+      const absent = run("/usr/bin:/bin");
+      assert.ok(!absent.includes(toolbin), `${toolbin} is not on the installer's PATH and must not be searched: ${absent.join(":")}`);
+      for (const components of [found, absent])
+        for (const d of components)
+          assert.ok(
+            d.length > 0 && d.startsWith("/") && d !== "/" && d !== ".",
+            `"${d}" is not a tool directory — an unresolved tool must add nothing: ${components.join(":")}`,
+          );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });

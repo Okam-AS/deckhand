@@ -88,13 +88,16 @@ describe("install-deps — package manager dispatch", () => {
     }
   });
 
-  it("fails with a named fix when the lockfile's manager is not installed on the host", () => {
+  it("fails with a named fix when the lockfile's manager is not on the build's PATH", () => {
     // Otherwise a yarn-lockfile repo on a Mac without yarn dies as a bare
     // exit-127 "command not found" in the middle of a build log.
     for (const script of [git, local]) {
       assert.match(script, /pm_need\(\) \{ command -v "\$1" >\/dev\/null 2>&1 \|\|/);
       for (const pm of ["bun", "yarn", "pnpm", "npm"]) assert.match(script, new RegExp(`then pm_need ${pm};`));
-      assert.match(script, /is not installed on this host/);
+      assert.match(script, /is not on this build's PATH/);
+      // The daemon's PATH is built by ops/install-services.sh and is not the shell's, so
+      // "install it" alone sent an operator looking for a bun that was already installed.
+      assert.match(script, /ops\/install-services\.sh/);
     }
   });
 
