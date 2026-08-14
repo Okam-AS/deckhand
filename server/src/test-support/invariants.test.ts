@@ -1172,6 +1172,11 @@ describe("the agent PATH reaches the tools a build runs", () => {
         new RegExp(`tool_dir ${pm}\\b`),
         `ops/install-services.sh never resolves \`${pm}\`, so a repo with a ${pm} lockfile fails install-deps under the agent while the same build works in a terminal`,
       );
+    // The script says this in a comment, which is one alphabetised list away from being false.
+    assert.ok(
+      script.indexOf("platform-tools") < Math.min(...managers.map((pm) => script.indexOf(`tool_dir ${pm}`))),
+      "the Android SDK dirs must come before the package managers: one of those usually resolves to /opt/homebrew/bin, and hoisting that prefix lets a brewed adb outrank the SDK's",
+    );
   });
 
   it("adds a tool's own dir, and contributes nothing for one that is absent", () => {

@@ -21,24 +21,27 @@ NODE_DIR="$(dirname "$NODE")"
 # The agent's PATH: a LaunchAgent inherits nothing from the user's shell, so
 # every build tool has to be named. Resolve the ones that live outside the
 # standard prefixes on this machine — CocoaPods (a Ruby gem bin dir; without it
-# `ns run ios` exits 127 at "Installing pods..."), every package manager
-# install-deps dispatches to (bun's own installer uses ~/.bun/bin and pnpm's
-# ~/Library/pnpm, so a lockfile for either exits 127 under the agent while the
-# same build works in a terminal), and the Android SDK tools.
+# `ns run ios` exits 127 at "Installing pods..."), the Android SDK tools, and
+# every package manager install-deps dispatches to (bun's own installer uses
+# ~/.bun/bin and pnpm's ~/Library/pnpm, so a lockfile for either exits 127 under
+# the agent while the same build works in a terminal).
 AGENT_PATH="$NODE_DIR"
 # `dirname` of a missing tool used to yield "/", which is a directory — so a Mac
 # without CocoaPods got a bare "/" component in the agent's PATH.
 tool_dir() { p="$(command -v "$1" 2>/dev/null)" && dirname "$p" || echo ""; }
+# The package managers come after the SDK dirs: one of them usually resolves to
+# /opt/homebrew/bin, and hoisting that prefix would let a brewed adb outrank the
+# SDK's.
 for d in \
   "$(tool_dir pod)" \
   "$(tool_dir ruby)" \
+  "${ANDROID_HOME:-$HOME/Library/Android/sdk}/platform-tools" \
+  "${ANDROID_HOME:-$HOME/Library/Android/sdk}/emulator" \
+  "${ANDROID_HOME:-$HOME/Library/Android/sdk}/cmdline-tools/latest/bin" \
   "$(tool_dir bun)" \
   "$(tool_dir yarn)" \
   "$(tool_dir pnpm)" \
   "$(tool_dir npm)" \
-  "${ANDROID_HOME:-$HOME/Library/Android/sdk}/platform-tools" \
-  "${ANDROID_HOME:-$HOME/Library/Android/sdk}/emulator" \
-  "${ANDROID_HOME:-$HOME/Library/Android/sdk}/cmdline-tools/latest/bin" \
   /opt/homebrew/bin /usr/local/bin /usr/bin /bin /usr/sbin /sbin
 do
   [ -n "$d" ] || continue
