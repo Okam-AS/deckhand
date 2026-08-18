@@ -89,12 +89,12 @@ const PACKAGE_MANAGERS = [
 
 /**
  * Deckhand does not install package managers. A lockfile whose manager is not on
- * PATH exits 127 saying exactly that, rather than silently falling through to npm
- * and failing later with an unrelated error — or dying as a bare "command not
- * found" in the middle of a build log.
+ * build's PATH exits 127 saying exactly that, rather than silently falling through
+ * to npm and failing later with an unrelated error — or dying as a bare "command
+ * not found" in the middle of a build log.
  */
 const PM_HELPERS = [
-  'pm_need() { command -v "$1" >/dev/null 2>&1 || { echo "deckhand: this project ships a $1 lockfile, but $1 is not installed on this host — install it (e.g. brew install $1), or enable corepack" >&2; exit 127; }; }',
+  'pm_need() { command -v "$1" >/dev/null 2>&1 || { echo "deckhand: this project ships a $1 lockfile, but $1 is not on this build\'s PATH — if it is installed for you, re-run ./ops/install-services.sh from the deckhand checkout; otherwise install it (e.g. brew install $1), or enable corepack" >&2; exit 127; }; }',
 ];
 
 /**
