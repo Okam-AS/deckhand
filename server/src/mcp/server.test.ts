@@ -251,6 +251,20 @@ describe("MCP server (end-to-end over HTTP)", () => {
     }
   });
 
+  it("get_guide gives agents the safe Deckhand workflow", async () => {
+    const admin = await client(ADMIN);
+    const res = parse(await admin.callTool({ name: "get_guide", arguments: {} })) as { guide?: string[] };
+    assert.deepEqual(res.guide, [
+      "Start with `list_apps`. When you can run commands on the deckhand host, prefer its existing checkout: register it with `deckhand app add <id> --path <dir>`; otherwise use `add_app` for a GitHub source. Never ask for or relay a credential or app secret in chat; relay the one-time setup link if `add_app` returns one.",
+      "Before `start_preview`, ask the user to choose public access or a PIN. A public link is open to anyone with its URL; web previews require a PIN. Pass a user-chosen 4–6 digit PIN without repeating it in chat.",
+      "Give the `start_preview` URL to the user immediately, then poll `preview_status` until the target is ready before driving it. Reuse an equivalent live preview; use `restart_preview` for a local native/dependency change or after pushing new git commits, not for ordinary hot reloads.",
+      "For visible, end-to-end work, start a test run, then use `describe` to orient, `ui` to act, and `describe` or `screenshot` to verify. Update each test step as it runs and finish the run with an evidence-based verdict.",
+      "When build or launch fails, read `logs` with its default build source. When a ready viewer has no video, read `logs` with source `stream`. Stop previews you no longer need with `stop_preview`.",
+      "If any JSON tool response includes `deckhandUpdate`, ask the operator before pulling or restarting. Never update or restart automatically: a restart tears down booted simulators and emulators.",
+    ]);
+    await admin.close();
+  });
+
   it("an extra pane with nothing named and no migratesFrom asks for a source (no devices booted)", async () => {
     const admin = await client(ADMIN);
     const res = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-a", alongside: [{}], share: { access: "public" } } }));

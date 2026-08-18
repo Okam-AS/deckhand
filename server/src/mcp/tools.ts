@@ -246,6 +246,28 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     engine.appIdFor(previewId) ? null : fail("unknown_preview", `no active preview "${previewId}"`);
 
   server.registerTool(
+    "get_guide",
+    {
+      title: "Get Deckhand guide",
+      description: "Return the concise safe workflow for using this Deckhand MCP. Call this at the start of an unfamiliar Deckhand task, then follow the guide alongside each tool's own nextStep.",
+      inputSchema: {},
+    },
+    () =>
+      audited("get_guide", {}, () =>
+        ok({
+          guide: [
+            "Start with `list_apps`. When you can run commands on the deckhand host, prefer its existing checkout: register it with `deckhand app add <id> --path <dir>`; otherwise use `add_app` for a GitHub source. Never ask for or relay a credential or app secret in chat; relay the one-time setup link if `add_app` returns one.",
+            "Before `start_preview`, ask the user to choose public access or a PIN. A public link is open to anyone with its URL; web previews require a PIN. Pass a user-chosen 4–6 digit PIN without repeating it in chat.",
+            "Give the `start_preview` URL to the user immediately, then poll `preview_status` until the target is ready before driving it. Reuse an equivalent live preview; use `restart_preview` for a local native/dependency change or after pushing new git commits, not for ordinary hot reloads.",
+            "For visible, end-to-end work, start a test run, then use `describe` to orient, `ui` to act, and `describe` or `screenshot` to verify. Update each test step as it runs and finish the run with an evidence-based verdict.",
+            "When build or launch fails, read `logs` with its default build source. When a ready viewer has no video, read `logs` with source `stream`. Stop previews you no longer need with `stop_preview`.",
+            "If any JSON tool response includes `deckhandUpdate`, ask the operator before pulling or restarting. Never update or restart automatically: a restart tears down booted simulators and emulators.",
+          ],
+        }),
+      ),
+  );
+
+  server.registerTool(
     "list_apps",
     {
       title: "List apps",
