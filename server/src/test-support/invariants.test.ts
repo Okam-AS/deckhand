@@ -1,8 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { readFileSync, readdirSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
 import { auditedTools, registeredTools, registerToolCallCount } from "./toolNames.ts";
 import { repoFilesEndingWith } from "./repoFiles.ts";
 
@@ -1139,5 +1141,74 @@ describe("setup decides on state, not on its own prose", () => {
         "been broken that way. Read the state instead (tokens.yaml/config.yaml via their loaders), " +
         "or check the exit code. Printing it, or quoting it in a SetupError, is fine.",
     );
+  });
+});
+
+describe("the LaunchAgent PATH reaches every package manager a build can dispatch to", () => {
+  const INSTALL_SERVICES = join(REPO, "ops", "install-services.sh");
+
+  const packageManagers = (): string[] => {
+    const recipes = read(join(SRC, "engine", "recipes.ts"));
+    const start = recipes.indexOf("const PACKAGE_MANAGERS = [");
+    assert.ok(start >= 0, "PACKAGE_MANAGERS is gone from recipes.ts — this check has lost its source of truth");
+    const end = recipes.indexOf("] as const;", start);
+    assert.ok(end > start, "PACKAGE_MANAGERS no longer has a readable end — update the installer and this check together");
+    const names = [...recipes.slice(start, end).matchAll(/\{\s*name:\s*"([a-z]+)"/g)].map((m) => m[1]!);
+    assert.ok(names.length > 0, "no package managers found in recipes.ts");
+    return names;
+  };
+
+  it("adds absolute package-manager dirs after the Android SDK, and ignores a relative command lookup", () => {
+    const source = read(INSTALL_SERVICES);
+    const from = source.indexOf("tool_dir() {");
+    const pathStart = source.indexOf('AGENT_PATH="$NODE_DIR"');
+    const toolsEnd = source.indexOf("\nfor d in \\", from);
+    const to = source.indexOf("\nCLOUDFLARED=", from);
+    assert.ok(from >= 0 && pathStart >= 0 && toolsEnd > from && to > toolsEnd, "the LaunchAgent PATH setup must include tool_dir and end before tunnel setup");
+    const pathSetup = source.slice(from, toolsEnd) + source.slice(pathStart, to);
+    const managers = packageManagers();
+    const tmp = mkdtempSync(join(tmpdir(), "deckhand-agent-path-"));
+    const node = process.execPath;
+    const nodeDir = join(tmp, "node");
+    const android = join(tmp, "Library", "Android", "sdk");
+    const sdkDirs = [join(android, "platform-tools"), join(android, "emulator"), join(android, "cmdline-tools", "latest", "bin")];
+
+    const run = (path: string, cwd = tmp): string[] =>
+      execFileSync(
+        "/bin/bash",
+        [
+          "-c",
+          `set -euo pipefail\nREPO=${JSON.stringify(REPO)}\nNODE=${JSON.stringify(node)}\nNODE_DIR=${JSON.stringify(nodeDir)}\n${pathSetup}\nprintf '%s' "$AGENT_PATH"`,
+        ],
+        { cwd, encoding: "utf8", env: { HOME: tmp, PATH: path } },
+      ).split(":");
+
+    try {
+      mkdirSync(nodeDir);
+      for (const dir of sdkDirs) mkdirSync(dir, { recursive: true });
+      const managerDirs = managers.map((manager) => join(tmp, manager));
+      for (const [i, dir] of managerDirs.entries()) {
+        mkdirSync(dir);
+        writeFileSync(join(dir, managers[i]!), "#!/bin/sh\n", { mode: 0o755 });
+      }
+      const found = run([...managerDirs, "/usr/bin", "/bin"].join(":"));
+      for (const dir of managerDirs) assert.ok(found.includes(dir), `manager at ${dir} was not added to the LaunchAgent PATH: ${found.join(":")}`);
+      assert.ok(
+        Math.max(...sdkDirs.map((dir) => found.indexOf(dir))) < Math.min(...managerDirs.map((dir) => found.indexOf(dir))),
+        `Android SDK dirs must precede package-manager dirs: ${found.join(":")}`,
+      );
+
+      const relativeDir = join(tmp, "relative-tools");
+      mkdirSync(relativeDir);
+      writeFileSync(join(relativeDir, "bun"), "#!/bin/sh\n", { mode: 0o755 });
+      const relativePath = "relative-tools:/usr/bin:/bin";
+      const lookup = execFileSync("/bin/bash", ["-c", "command -v bun"], { cwd: tmp, encoding: "utf8", env: { PATH: relativePath } }).trim();
+      assert.ok(lookup.length > 0 && !lookup.startsWith("/"), `fixture must make command -v bun relative, got ${lookup}`);
+      const ambiguous = run(relativePath);
+      for (const component of ambiguous)
+        assert.ok(component.startsWith("/") && component !== "/", `relative command lookup must not add ${JSON.stringify(component)} to PATH: ${ambiguous.join(":")}`);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });
