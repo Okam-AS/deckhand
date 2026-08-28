@@ -423,6 +423,15 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             .join(", ")}. Do NOT call start_preview for "${args.app}" to get a handle: that boots a SECOND set of devices on a second link, and the page keeps streaming the pane.`,
         );
       }
+      // A preview that FAILED is still here, still holding the build log that says
+      // why, and still rebuildable — for `limits.failedGraceMinutes`. Reporting it as
+      // "no running preview … call start_preview" hides the one thing the caller
+      // needs and recommends the one move that destroys it: five kitchen previews
+      // failed in `install-deps` on 2026-08-28 and every `logs` call was refused this
+      // way, so the cause (npm run against a pnpm workspace) stayed invisible for
+      // half an hour while the viewer displayed it in full.
+      const failed = engine.failedPreviewIdForApp(resolved.id);
+      if (failed) return failed;
       return fail(
         "no_preview",
         `no running preview for app "${args.app}"`,

@@ -97,6 +97,43 @@ const PM_HELPERS = [
   'pm_need() { command -v "$1" >/dev/null 2>&1 || { echo "deckhand: this project ships a $1 lockfile, but $1 is not on this build\'s PATH — if it is installed for you, re-run ./ops/install-services.sh from the deckhand checkout; otherwise install it (e.g. brew install $1), or enable corepack" >&2; exit 127; }; }',
 ];
 
+/** Every lockfile name the dispatch above knows, in the same precedence order. */
+const LOCKFILES = PACKAGE_MANAGERS.flatMap((pm) => [...pm.test.matchAll(/-f ([^\s\]]+)/g)].map((m) => m[1]!));
+
+/**
+ * A MONOREPO PACKAGE DOES NOT HOLD ITS OWN LOCKFILE, AND THE DISPATCH READ ONLY ITS
+ * OWN DIRECTORY.
+ *
+ * The dispatch tests `[ -f pnpm-lock.yaml ]` in the step's cwd, which for a registered
+ * app is the app directory — `<repo>/apps/kitchen`. In a pnpm/yarn/npm workspace the
+ * lockfile lives at the REPO ROOT, so every test missed, the chain fell through to its
+ * `else` branch, and a pnpm workspace was installed with npm. npm cannot read the
+ * `workspace:` protocol those manifests use and dies with `EUNSUPPORTEDPROTOCOL
+ * Unsupported URL Type "workspace:"` — a build that fails in seconds, naming npm, on a
+ * project that never asked for npm. Measured 2026-08-28 on `apps/kitchen` of a pnpm
+ * workspace: five consecutive previews, same error, install skipped for weeks before
+ * that only because the staleness guard below happened to hold.
+ *
+ * So find the nearest ancestor that DOES hold a lockfile and install from there. Two
+ * bounds keep the walk honest:
+ *
+ * - it stops at the first directory holding `.git` (a file in a git worktree, a
+ *   directory in a clone), so a disposable worktree can never reach a lockfile in
+ *   whatever directory deckhand happens to keep its worktrees under;
+ * - it answers nothing when no ancestor has one, which leaves the `else` branch
+ *   exactly as it was for a genuinely lockfile-less project.
+ *
+ * The workspace root is also the only place a workspace install CAN run: `pnpm install`
+ * inside one package of a workspace is not a smaller install, it is the wrong one.
+ */
+const WS_ROOT_HELPER =
+  `dh_ws_root() { d=$PWD; while :; do for f in ${LOCKFILES.join(" ")}; do ` +
+  `if [ -f "$d/$f" ]; then printf '%s\\n' "$d"; return 0; fi; done; ` +
+  `if [ -e "$d/.git" ] || [ "$d" = / ] || [ -z "$d" ]; then return 0; fi; d=$(dirname "$d"); done; }`;
+
+/** Shell that puts the install in the workspace root, or leaves it in cwd when there is none. */
+const WS_ROOT_CD = 'dh_root=$(dh_ws_root); if [ -n "$dh_root" ]; then cd "$dh_root" || exit 1; fi';
+
 /**
  * Build the lockfile-dispatch chain. `policy` renders the install for one
  * manager, so the disposable-worktree and borrowed-checkout rules stay separate
@@ -106,7 +143,9 @@ function installChain(policy: (pm: (typeof PACKAGE_MANAGERS)[number]) => string,
   const branches = PACKAGE_MANAGERS.map(
     (pm, i) => `${i === 0 ? "if" : "elif"} ${pm.test}; then pm_need ${pm.name}; ${policy(pm)}`,
   );
-  return [...PM_HELPERS, ...branches, `else ${noLockfile}; fi`].join("\n");
+  // The `cd` runs before the tests, so each `[ -f <lockfile> ]` below is asked in the
+  // directory that owns the install rather than in the package that merely wants one.
+  return [...PM_HELPERS, WS_ROOT_HELPER, WS_ROOT_CD, ...branches, `else ${noLockfile}; fi`].join("\n");
 }
 
 /**
@@ -148,7 +187,16 @@ export function installDepsStep(worktreePath: string, env: Record<string, string
  * not a stale checkout. So install when node_modules is missing OR older than
  * the manifest/lockfile. Still read-only, still the dev's directory.
  */
-const STALE_DEPS = "[ -d node_modules ]" + ["package.json", "package-lock.json", "bun.lock", "bun.lockb", "yarn.lock", "pnpm-lock.yaml"].map((f) => ` && ! [ ${f} -nt node_modules ]`).join("");
+const STALE_DEPS =
+  "[ -d node_modules ]" +
+  ["package.json", "package-lock.json", "bun.lock", "bun.lockb", "yarn.lock", "pnpm-lock.yaml"].map((f) => ` && ! [ ${f} -nt node_modules ]`).join("") +
+  // …and the WORKSPACE root's lockfile, which is the one a monorepo package actually
+  // installs from. Without this a `pnpm install` at the root leaves this package's
+  // node_modules older than the lockfile that produced it and nothing notices, which
+  // is the same blindness as the dispatch above wearing the staleness guard's clothes.
+  // `${dh_root:-.}` collapses to the current directory when there is no workspace root,
+  // so a single-package checkout tests exactly the files it tested before.
+  LOCKFILES.map((f) => ' && ! [ "${dh_root:-.}/' + f + '" -nt node_modules ]').join("");
 
 export function installDepsIfMissingStep(worktreePath: string, env: Record<string, string>): CommandStep {
   const chain = installChain(
@@ -161,7 +209,9 @@ export function installDepsIfMissingStep(worktreePath: string, env: Record<strin
     // The staleness guard is main's; the chain inside it is this branch's. Both are needed:
     // a fresh-enough node_modules must be left alone, and when it is NOT fresh the install
     // has to use the project's own package manager.
-    run: { kind: "shell", script: `${STALE_DEPS} || {\n${chain}\n}` },
+    // `dh_root` is resolved once, up here, because the STALE guard needs it too — and the
+    // guard runs whether or not the chain inside the braces is ever reached.
+    run: { kind: "shell", script: `${WS_ROOT_HELPER}\ndh_root=$(dh_ws_root)\n${STALE_DEPS} || {\n${chain}\n}` },
     cwd: worktreePath,
     env,
     idleTimeoutMs: GENERAL_IDLE_MS,

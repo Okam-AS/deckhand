@@ -2654,6 +2654,37 @@ export class PreviewEngine {
   }
 
   /**
+   * The most recent FAILED preview of an app, while it is still in memory.
+   *
+   * A build that fails is kept for `limits.failedGraceMinutes` precisely so it can be
+   * read and rebuilt — its phase, its device error and its build log are all still
+   * there, and the viewer shows them. But every tool that addresses a preview by APP
+   * id goes through `livePreviewForApp`, which skips `failed`, so the MCP surface
+   * answered `no_preview` — "no running preview … call start_preview to boot one" —
+   * about a preview that had just failed and was holding the reason why.
+   *
+   * The cost, measured 2026-08-28: five previews of one app failed in `install-deps`,
+   * and the `logs` call that would have named the cause was REFUSED as `no_preview`
+   * each time, while the viewer displayed the npm error plainly. The agent read the
+   * refusal as "it never started", started another, and the cycle repeated for half
+   * an hour. A preview that DIED and one that was never started are not the same
+   * fact and must not share an answer.
+   *
+   * Deliberately NOT folded into `livePreviewForApp`: that one decides whether an app
+   * is live for pane REUSE (`hasLivePreviewForApp`) and whether a checkout may be
+   * deleted (`remove_app`), and a failed preview is correctly "not live" for both.
+   * This is a lookup for READING and REBUILDING, and only `resolvePreviewId` uses it.
+   */
+  failedPreviewIdForApp(appId: string): string | null {
+    let best: LivePreview | null = null;
+    for (const p of this.previews.values()) {
+      if (p.record.appId !== appId || p.record.phase !== "failed") continue;
+      if (!best || p.record.createdAt > best.record.createdAt) best = p;
+    }
+    return best?.record.previewId ?? null;
+  }
+
+  /**
    * Live reference panes built from the same source as `app`, and the page each
    * one is shown on.
    *

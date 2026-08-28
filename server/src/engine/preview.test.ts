@@ -351,6 +351,35 @@ describe("PreviewEngine.startPreview", () => {
     assert.ok((st.devices[0]!.logTail ?? "").length > 0);
   });
 
+  // A failed preview is kept for `failedGraceMinutes` so it can be read and rebuilt,
+  // and the viewer shows its error. But every MCP tool that addresses a preview by APP
+  // id resolved through `previewIdForApp`, which skips `failed` — so `logs` answered
+  // "no running preview … call start_preview", the one move that throws the log away.
+  // Five kitchen previews failed in install-deps on 2026-08-28 and the cause was
+  // invisible to the agent for half an hour while the viewer displayed it in full.
+  it("a preview that FAILED is still findable by app id, and is not confused with one that never started", async () => {
+    const h = makeEngine({}, (step) => ({ code: step.name === "build" ? 1 : 0, timedOut: false, aborted: false }));
+    h.engine.startPreview({
+      app: rnApp,
+      source: "git",
+      spec: { kind: "branch", branch: "main" },
+      devices: [{ platform: "ios" }],
+      access: "public",
+    });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["failed"]), "failed");
+
+    // "Live" still means live: a failed preview must not be reused as a pane, and its
+    // checkout must stay deletable. Both read `previewIdForApp`, which is unchanged.
+    assert.equal(h.engine.previewIdForApp(rnApp.id), null, "a failed preview is not LIVE");
+    // …but it is still THERE, and the log that says why is reachable.
+    assert.equal(h.engine.failedPreviewIdForApp(rnApp.id), "pv1");
+    assert.match(h.engine.logs("pv1", undefined, "build", 200) ?? "", /\S/, "its build log must be readable");
+
+    // The discriminating half: an app with no preview at all still answers nothing,
+    // or the fix would turn every "never started" into a phantom handle.
+    assert.equal(h.engine.failedPreviewIdForApp("no-such-app"), null);
+  });
+
   it("fails the boot when the bundle id isn't a valid bundle id", async () => {
     // bundleId comes from the previewed repo's own config and reaches multi-arg
     // `adb shell` calls as an unquoted token adb joins into a shell command line.
