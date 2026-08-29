@@ -1,5 +1,9 @@
-import { describe, it } from "node:test";
+import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { buildPlan, usesMetroDeepLink, nativescriptDevRun, webDevRun, webRootDevRun, GENERAL_IDLE_MS, SPM_IDLE_MS, type BuildPlanInput } from "./recipes.ts";
 
 const baseInput: Omit<BuildPlanInput, "type"> = {
@@ -399,5 +403,116 @@ describe("pods never rewrite a borrowed checkout", () => {
     for (const local of [true, false]) {
       assert.match(podsScriptFor(local), /cmp -s ios\/Podfile\.lock ios\/Pods\/Manifest\.lock/);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A monorepo package holds no lockfile of its own. The dispatch used to test for
+// one in the step's cwd only, so `<repo>/apps/kitchen` matched nothing and fell
+// through to npm — which cannot read the `workspace:` protocol those manifests
+// use and dies with EUNSUPPORTEDPROTOCOL. These run the emitted shell for real
+// against planted trees, with the four managers shimmed, because the defect was
+// never in the string: it was in which directory the string asked its question.
+// ---------------------------------------------------------------------------
+describe("install-deps — the workspace root, not the package directory", () => {
+  const localBase = { platform: "ios" as const, udid: "UDID", appEnv: {}, local: true, type: "expo" as const };
+
+  /** A PATH whose bun/yarn/pnpm/npm print "<name> @ <cwd>" and succeed. */
+  function shimBin(dir: string): string {
+    const bin = path.join(dir, "bin");
+    fs.mkdirSync(bin, { recursive: true });
+    for (const pm of ["bun", "yarn", "pnpm", "npm"]) {
+      fs.writeFileSync(path.join(bin, pm), `#!/bin/sh\necho "${pm} @ $PWD"\n`, { mode: 0o755 });
+    }
+    return bin;
+  }
+
+  /** Run a plan's install-deps step in `cwd` and return what the shimmed manager reported. */
+  function runInstall(cwd: string, bin: string, local: boolean): string {
+    const step = buildPlan({ ...localBase, local, worktreePath: cwd })[0]!;
+    const script = step.run.kind === "shell" ? step.run.script : "";
+    const r = spawnSync("/bin/sh", ["-c", script], {
+      cwd,
+      encoding: "utf8",
+      env: { PATH: `${bin}:/usr/bin:/bin`, HOME: cwd },
+    });
+    return `${r.stdout}${r.stderr}`.trim();
+  }
+
+  let tmp: string;
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), "dh-ws-"));
+  });
+  afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
+
+  it("installs a workspace package with the ROOT's manager, from the ROOT", () => {
+    const root = path.join(tmp, "repo");
+    const pkg = path.join(root, "apps", "kitchen");
+    fs.mkdirSync(pkg, { recursive: true });
+    fs.mkdirSync(path.join(root, ".git"));
+    fs.writeFileSync(path.join(root, "pnpm-lock.yaml"), "");
+    // The package's own manifest declares a workspace dependency — the manifest npm
+    // cannot read, and the reason picking the wrong manager is a failure and not a
+    // slower success.
+    fs.writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ dependencies: { "@x/y": "workspace:*" } }));
+
+    assert.equal(runInstall(pkg, shimBin(tmp), true), `pnpm @ ${fs.realpathSync(root)}`);
+  });
+
+  it("does not reach past the checkout it was given — a lockfile above `.git` is another project's", () => {
+    const outer = path.join(tmp, "outer");
+    const wt = path.join(outer, "wt");
+    const pkg = path.join(wt, "pkg");
+    fs.mkdirSync(pkg, { recursive: true });
+    fs.writeFileSync(path.join(outer, "pnpm-lock.yaml"), ""); // deckhand's own worktrees dir, say
+    fs.writeFileSync(path.join(wt, ".git"), "gitdir: /elsewhere"); // a worktree's .git is a FILE
+    fs.writeFileSync(path.join(pkg, "package.json"), "{}");
+
+    // Falls back exactly as before: npm, in the package, with no lockfile written.
+    assert.equal(runInstall(pkg, shimBin(tmp), true), `npm @ ${fs.realpathSync(pkg)}`);
+  });
+
+  it("leaves a single-package checkout answering in its own directory", () => {
+    const app = path.join(tmp, "app");
+    fs.mkdirSync(app, { recursive: true });
+    fs.mkdirSync(path.join(app, ".git"));
+    fs.writeFileSync(path.join(app, "yarn.lock"), "");
+    fs.writeFileSync(path.join(app, "package.json"), "{}");
+
+    assert.equal(runInstall(app, shimBin(tmp), true), `yarn @ ${fs.realpathSync(app)}`);
+  });
+
+  it("a root lockfile newer than the package's node_modules is stale — the guard reads the root too", () => {
+    const root = path.join(tmp, "repo");
+    const pkg = path.join(root, "apps", "kitchen");
+    fs.mkdirSync(path.join(pkg, "node_modules"), { recursive: true });
+    fs.mkdirSync(path.join(root, ".git"));
+    fs.writeFileSync(path.join(pkg, "package.json"), "{}");
+    const lock = path.join(root, "pnpm-lock.yaml");
+    fs.writeFileSync(lock, "");
+
+    // node_modules older than the root lockfile: a `pnpm install` at the root happened
+    // after this package was last populated, so it must install.
+    const old = new Date(Date.now() - 60_000);
+    fs.utimesSync(path.join(pkg, "node_modules"), old, old);
+    fs.utimesSync(path.join(pkg, "package.json"), old, old);
+    assert.equal(runInstall(pkg, shimBin(tmp), true), `pnpm @ ${fs.realpathSync(root)}`);
+
+    // …and the discriminating half: node_modules newer than everything installs nothing.
+    const now = new Date();
+    fs.utimesSync(path.join(pkg, "node_modules"), now, now);
+    fs.utimesSync(lock, old, old);
+    assert.equal(runInstall(pkg, shimBin(tmp), true), "", "a fresh node_modules must be left alone");
+  });
+
+  it("applies to a disposable worktree too, where the fallback may rewrite a lockfile", () => {
+    const root = path.join(tmp, "wt");
+    const pkg = path.join(root, "packages", "app");
+    fs.mkdirSync(pkg, { recursive: true });
+    fs.writeFileSync(path.join(root, ".git"), "gitdir: /elsewhere");
+    fs.writeFileSync(path.join(root, "pnpm-lock.yaml"), "");
+    fs.writeFileSync(path.join(pkg, "package.json"), "{}");
+
+    assert.equal(runInstall(pkg, shimBin(tmp), false), `pnpm @ ${fs.realpathSync(root)}`);
   });
 });
