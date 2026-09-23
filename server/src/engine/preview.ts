@@ -2859,6 +2859,18 @@ export class PreviewEngine {
     return { platform: "ios", udid: dev.record.udid };
   }
 
+  /** The device's UI language, or null when it cannot be read — a hint, never a reason to fail. */
+  async uiLanguage(previewId: string, deviceId: string): Promise<string | null> {
+    const dev = this.active(previewId)?.devices.find((d) => d.record.deviceId === deviceId);
+    try {
+      if (dev?.record.platform === "android" && dev.record.serial) return await this.android().uiLanguage(dev.record.serial);
+      if (dev?.record.platform === "ios" && dev.record.udid) return await this.d.simctl.uiLanguage(dev.record.udid);
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
   /** Accessibility tree for a device (SimDeck describe) — the agent's "eyes". */
   describe(previewId: string, deviceId: string, opts: DescribeOptions = {}): Promise<unknown> {
     return this.simdeckControl().describe(this.simdeckTarget(previewId, deviceId), opts);

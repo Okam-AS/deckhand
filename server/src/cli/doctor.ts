@@ -13,6 +13,8 @@ import { AndroidManager, AVD_PREFIX, selectSystemImage, serialForPort } from "..
 import { SIM_PREFIX } from "../engine/reaper.ts";
 import { detectWebFrameworkFromDir, webHostingMode } from "../engine/detect.ts";
 import { repoRoot } from "../version.ts";
+import { lookupTypesafeKey, type KeyLookup } from "../navigate/secrets.ts";
+import { EGRESS_HOST } from "../navigate/egress.ts";
 
 /** Helper ports for the Android smoke leg — outside the configured preview range, so a gate run cannot evict a live preview's helper. */
 const ANDROID_SMOKE_PORTS: [number, number] = [3290, 3299];
@@ -321,6 +323,16 @@ function checkWebHost(config: Config, apps: App[]): Check {
     warn: true,
     detail: `${subdomain.length} web app(s) (Nuxt/Next/static) need subdomain hosting but no webHost is set — previews work on loopback only. Set webHost (+ a DNS route/ingress) to share them publicly.`,
   };
+}
+
+/**
+ * A warning while app content can leave this machine through `navigate`.
+ * No line at all without a key file: an install that never set one is exactly what it was before navigate.
+ */
+export function checkNavigateEgress(key: KeyLookup): Check | null {
+  if (key.state === "missing") return null;
+  if (key.state === "error") return { name: "navigate egress", ok: true, warn: true, detail: `navigate is off: ${key.message}` };
+  return { name: "navigate egress", ok: true, warn: true, detail: `navigate sends screen labels from every app it drives to ${EGRESS_HOST} (a third party) — test data and test accounts only. Off: \`deckhand secret rm typesafe\`` };
 }
 
 /**
@@ -646,6 +658,8 @@ export async function runDoctor(opts: { smoke?: boolean } = {}): Promise<{ check
     checks.push(await checkServices());
     checks.push(await checkGitHub(config));
     checks.push(checkWebHost(config, apps));
+    const egress = checkNavigateEgress(lookupTypesafeKey());
+    if (egress) checks.push(egress);
     checks.push(await checkServerFreshness(config));
     checks.push(await checkPublicUrl(config));
     if (opts.smoke) {

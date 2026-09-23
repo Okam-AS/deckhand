@@ -61,11 +61,21 @@ describe("SimDeckControl.describe", () => {
     // saving is encoding, not content — so this is the default and nothing is lost.
     const { impl, calls } = fakeFetch();
     const control = new SimDeckControl({ fetchImpl: impl, autostart: false });
-    const tree = await control.describe(iosTarget, { interactiveOnly: true });
+    const tree = await control.describe(iosTarget, {});
     // Unwrapped: callers must not have to know which backend answered.
     assert.deepEqual(tree, { roots: [{ id: "compact-root" }] });
     assert.deepEqual(lastAction(calls).body, { action: "describe" });
-    assert.ok(!calls.some((c) => c.url.includes("/accessibility-tree")), "the expensive endpoint must not be touched");
+    assert.ok(!calls.some((c) => c.url.includes("/accessibility-tree")), "the endpoint must not be touched");
+  });
+
+  it("takes interactiveOnly to the endpoint, where it is the fast capture", async () => {
+    // Measured on iOS 26.5 Settings: the compact action and the full tree both take ~1.2s, the
+    // interactive capture ~0.2s. The action ignores the option, so honouring it means the endpoint.
+    const { impl, calls } = fakeFetch();
+    const control = new SimDeckControl({ fetchImpl: impl, autostart: false });
+    await control.describe(iosTarget, { interactiveOnly: true });
+    assert.ok(calls.some((c) => c.url.includes("/accessibility-tree") && c.url.includes("interactiveOnly=true")));
+    assert.ok(!calls.some((c) => c.url.endsWith("/action")), "the slow compact action must not be used");
   });
 
   it("still uses the endpoint when the caller asks for a source or a depth", async () => {

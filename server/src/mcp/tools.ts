@@ -23,6 +23,9 @@ import type { AuditLog } from "../audit.ts";
 import { summarizeArgs } from "../audit.ts";
 import { SimDeckUnavailableError } from "../testing/simdeck.ts";
 import { SimDeckActionError, type UiAction } from "../testing/control.ts";
+import type { JevProvider } from "../navigate/jev.ts";
+import { navigate } from "../navigate/loop.ts";
+import { EGRESS_HOST } from "../navigate/egress.ts";
 
 // ---------------------------------------------------------------------------
 // MCP tool registrations (PLAN §6). Bound per request to the authenticated
@@ -42,6 +45,8 @@ export interface ToolContext {
   persistApps?: (apps: App[]) => void;
   /** Mints one-time setup URLs for credential onboarding. */
   setup?: SetupStore;
+  /** The `navigate` decider; holds the TypeSafe key so this layer never does. */
+  jev?: JevProvider;
 }
 
 /**
@@ -341,7 +346,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
    * (the dev-menu overlay was eating the tap). Both were nearly reported to the user as
    * app bugs. Steering toward a cheaper model bought slower runs and false findings.
    *
-   * So: no model advice at all. The agent that called the tool does the work.
+   * So: no model advice to the caller. `navigate` runs deckhand's own decider server-side,
+   * which adds no round trip and cannot author a finding — PLAN §6 says why that differs.
    */
   const TEST_RUN_CONTRACT =
     "ALWAYS open a run before you drive the app — not just for tests: start_test_run with a title saying what you are about to do (\"Verify the new tab bar\", \"Reproduce the crash\", \"Look at the wash flow\") and the steps you plan, mark each one running→passed/failed with update_test_run as you go, and close it with finish_test_run. That is what puts a live spinner and step list in the viewer; without it the user sees a cursor moving over a silent app and cannot tell what you are doing.";
@@ -1039,7 +1045,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         interactiveOnly: z
           .boolean()
           .optional()
-          .describe("prune to tappable elements + ancestors — it applies only to the tree endpoint, which you reach by also passing source or maxDepth (or when the default snapshot comes back empty); on its own the default snapshot is already smaller and no less complete"),
+          .describe("prune to tappable elements + ancestors: on iOS several times faster than the default snapshot, but without headings or static text — use it to find something to tap, not to read what a screen says. On Android it is no faster (every capture is a uiautomator dump) and drops the text labelling list rows, so leave it off there"),
         maxDepth: z.number().int().positive().optional(),
       },
     },
@@ -1102,6 +1108,65 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           const msg = e instanceof Error ? e.message : String(e);
           return failWith("ui_error", msg, hint ? { screen: hint } : {});
         }
+      }),
+  );
+
+  // Registered only while a TypeSafe key is readable, read per MCP request (a fresh server each time): with no key, deckhand is what it was without navigate.
+  const access = ctx.jev?.();
+  const decider = access?.ok ? access.client : null;
+  if (decider) server.registerTool(
+    "navigate",
+    {
+      title: "Navigate toward a goal (server-side loop)",
+      description:
+        "Reach a screen or state in ONE call instead of one describe→ui round trip per step: deckhand reads the accessibility tree, a fast decision model (TypeSafe Jev, text-only) picks the next action from a closed list (tap an element on screen, back, scroll, type a value YOU supplied, done, stuck), deckhand performs it once the screen has stopped moving, and repeats — all on the deckhand machine. " +
+        "Use it for plain navigation (\"open Settings → About\", \"get to the checkout screen\"), not for judging whether the app is right: it never writes text of its own, it cannot see pixels, and it stops and hands back on low confidence, a repeated move, a failed action or maxSteps. " +
+        "`text` maps a name to a value to type (e.g. {\"email\": \"a@b.no\"}); only the NAMES reach the decision model. Element roles and masked labels leave the machine for TypeSafe's API. " +
+        "Always read `outcome`: `done` is the model's judgement, so confirm it with one `ui` assert/waitFor before you report it; `escalated`/`limit` means continue yourself from `finalScreen` with describe + ui.",
+      inputSchema: {
+        previewId: z.string(),
+        deviceId: z.string(),
+        goal: z.string().min(1).describe("what the screen should show when navigation is finished, stated literally; name screens as the app labels them when you know the labels"),
+        maxSteps: z.number().int().min(1).max(30).optional().describe("actions before it hands back (default 10)"),
+        minConfidence: z
+          .number()
+          .min(0)
+          .max(1)
+          .optional()
+          .describe("one confidence floor for every action; by default each kind has its own, a tap needing less than `done`"),
+        text: z.record(z.string(), z.string()).optional().describe("named values the loop may type into a text field; the values are never sent to the model"),
+        uiLanguage: z.string().min(2).max(35).optional().describe("the app's UI language, e.g. nb-NO, when it differs from the device's; read from the device otherwise"),
+      },
+    },
+    (args) =>
+      audited("navigate", { ...args, text: args.text ? Object.keys(args.text) : undefined }, async () => {
+        const denied = requireLivePreview(args.previewId);
+        if (denied) return denied;
+        const appId = engine.appIdFor(args.previewId);
+        const locale = args.uiLanguage ?? (await engine.uiLanguage(args.previewId, args.deviceId));
+        const result = await navigate(
+          { goal: args.goal, maxSteps: args.maxSteps ?? 10, minConfidence: args.minConfidence, text: args.text ?? {}, locale },
+          {
+            describe: () => engine.describe(args.previewId, args.deviceId, { source: "auto" }),
+            act: (a) => engine.ui(args.previewId, args.deviceId, a),
+            frame: () => engine.screenshot(args.previewId, args.deviceId),
+            jev: decider,
+            onEgress: (e) => {
+              if (!ctx.jev?.().ok) throw new Error("the TypeSafe key was removed while it ran");
+              audit.record({
+                actor: principal.name,
+                tool: "navigate:egress",
+                args: { app: appId, previewId: args.previewId, deviceId: args.deviceId, to: EGRESS_HOST, candidates: e.candidates, bytes: e.bytes },
+                result: "ok",
+              });
+            },
+          },
+        );
+        const nextStep =
+          result.outcome === "done"
+            ? "The decision model judged the goal reached. Confirm it with one `ui` assert or waitFor on what the goal promised before you report it."
+            : `navigate handed back: ${result.message}. Continue from finalScreen yourself with describe + ui, or call navigate again with a narrower goal.`;
+        return ok({ ...result, nextStep, ...testRunNudge(args.previewId, "tap") });
       }),
   );
 

@@ -90,6 +90,11 @@ export function parseDevices(json: unknown): SimDevice[] {
   return out;
 }
 
+/** The first entry of `defaults read -g AppleLanguages`, which prints an old-style plist array. */
+export function parseAppleLanguages(stdout: string): string | null {
+  return stdout.match(/^\s*\(\s*"?([A-Za-z]{2,3}(?:-[A-Za-z0-9]+)*)"?/)?.[1] ?? null;
+}
+
 export function parseDeviceTypes(json: unknown): DeviceType[] {
   const types = (json as { devicetypes?: unknown[] }).devicetypes ?? [];
   return types
@@ -296,6 +301,12 @@ export class Simctl {
     }
   }
   private shotSeq = 0;
+
+  /** The simulator's first UI language (`nb-NO`), or null when it cannot be read. */
+  async uiLanguage(udid: string): Promise<string | null> {
+    const res = await this.run(["spawn", udid, "defaults", "read", "-g", "AppleLanguages"], { timeoutMs: 5_000 });
+    return res.code === 0 ? parseAppleLanguages(res.stdout.toString()) : null;
+  }
 
   async shutdown(udid: string): Promise<void> {
     await this.run(["shutdown", udid]);

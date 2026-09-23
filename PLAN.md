@@ -37,6 +37,7 @@ implementation:
 | Streaming (Android) | **adb-based**, not scrcpy. The decision gate (ws-scrcpy vs embedded scrcpy-server) resolved against both: scrcpy's raw H.264 wire protocol is version-specific and needs extensive on-device iteration, which cannot be validated without a live emulator. Shipped: `screencap` MJPEG plus on-device `screenrecord` H.264, behind the same `StreamingBackend` seam — see §8 for the full outcome. A scrcpy upgrade remains possible behind that seam; it is not planned. |
 | NO physical devices, either platform | Real iPhones/Androids plugged into the machine are not previewed on, and since **2026-08-08** are not reported either. A read-only scanner shipped first (`devicectl` for iOS, `adb devices -l` for Android) with `list_devices` carrying a `physical` section and a `targetable: false` beside it; it was **deleted** rather than finished, because detection with no targeting behind it is not half a feature, it is an expectation — an agent handed "here is the iPhone I can see" offers what deckhand cannot do, and it can say "simulators only" perfectly well without a scan. The two platforms are not equally far away, which is what a future reader needs: **iOS is walled, Android is unfinished.** iOS building needs a developer certificate, a provisioning profile and a registered device UDID; serve-sim is simulator-only (CoreSimulator APIs), so streaming would need a new backend on AVFoundation capture over USB; and there is **no public API to inject touch into a physical iPhone from a Mac** — XCUITest can, but only through a test runner app deckhand would have to build, sign and install first. Android has none of those walls: the whole streaming and input path is serial-based adb (`wm size`, `exec-out screencap`, `exec-out screenrecord`, `input tap/keyevent/text`, `uiautomator dump`) and does not care whether a serial is an emulator. What Android lacks is **device lifecycle**: skip create/boot/delete for hardware that already exists, keep it out of the orphan reaper, and `adb install` a debug APK. So if physical devices come back, start with Android, and expect a lifecycle job rather than a new backend. |
 | NOT WebRTC/TURN; SimDeck for CONTROL only | An earlier revision of this plan used SimDeck + WebRTC relayed through Cloudflare TURN. **Rejected (2026-07-09):** TURN costs $0.05/GB and adds a credential/relay subsystem; SimDeck removed its WS transport (v0.1.31) and its display bridge rides private CoreSimulator APIs (unhedgeable risk against future Xcode); most of the predecessor project's operational scar tissue (display-heal ladder, daemon port cleanup, token discovery) was SimDeck-specific pathology. Serving H.264 over the ordinary HTTP tunnel has none of these problems: free, no relay to run or pay for, and exactly as firewall-proof as claude.ai itself — video and input ride the same HTTPS/WSS a browser already reaches claude.ai with. What SimDeck IS used for, since 2026-07-17, is its control/inspection REST surface behind `describe` and `ui` — see `.claude/rules/testing-control.md`. |
+| Navigate: a decider inside deckhand, opt-in by key | **Accepted (2026-09-23).** `navigate` (§6) runs `describe` → one TypeSafe Jev decision → `ui` on the server. It is not the "hand the drive loop to a cheaper model" advice §6 records as removed on 2026-08-02: that added agent round trips (66 MCP calls, 583s, ~5% of it deckhand) and let a weaker agent author confident wrong findings. Here the caller makes ONE call; the decider picks from a closed list code built from the tree — tap an on-screen element's centre, back, scroll, type a value the caller named, `done`, `stuck`, never `openUrl`, free text or a coordinate of its own — and it can author no finding, so judging the app stays with the caller. It is also the **first path by which app content leaves this machine for a third party**, and the key is the whole opt-in: with no key the tool does not exist; with one, it drives every app's previews and sends their screens, minimised and masked, auditing every request (§11 item 5). **Until a DPA with zero data retention is signed with TypeSafe, set the key only on a machine whose apps show test data and test accounts.** |
 | App types (day one) | React Native (Expo **and** bare) + NativeScript. Flutter / plain-Xcode later. **Amended (2026-07-15): `web`.** A fourth app type hosts a **frontend web project** (a dev server). It is unlike the mobile types: no device/simulator, **local-`path` only** (registered on the machine via `deckhand app add <id> --path <dir> --type web`, never over MCP), and the "preview" IS the running dev server — `start_preview` starts `npm run dev` as a long-lived process (reusing `DevProcessManager`, like NativeScript livesync) on a loopback port and reverse-proxies it through the share URL. Ready = the dev server gives back **any** HTTP answer on its port (`WebBackend` returns `res.status > 0`, so a 404 or a 500 from a still-warming framework reads as ready; a dead port throws instead) — no first-frame/screenshot, and `screenshot` returns a clear error for web. Vite is started with `--base=/s/<shareId>/web/ --host 127.0.0.1 --port <p>` so every asset URL (and HMR) sits under the share path. Nuxt/Next **ship**, hosted at the root of their own host instead (§8 "Host-based web hosting"), because they cannot be given a base at runtime and deckhand may not edit the checkout. Git-based web previews are still a follow-up. |
 | Build strategy | Build locally on the mini: git worktree → install deps → native build. No CI artifacts. |
 | Local dev mode + daily-loop contract | **Amended (2026-07-15):** an app may declare a local `path` (instead of, or alongside, `repo`). Local previews build **in place** in the developer's working copy — no worktree, no push — and NativeScript runs as a long-lived **livesync** process (`ns run --no-hmr`, watch on, HMR off — NS HMR is unreliable) so file saves reach the running sim with no tool calls. The loop rides in the tools themselves: `start_preview` is **idempotent** per (app, source, ref), share ids are **stable per app** (persisted; a bookmarked viewer URL never rots), and `restart_preview` rebuilds in place (git: fetch new tip + reset worktree; local: re-run) on the same booted devices. Consequence: named branches/PRs now **always fetch** (the old local-first shortcut served stale commits; SHAs remain local-first). Local previews trade snapshot determinism for the loop — the build mirrors whatever is on disk; the source dir is borrowed, never wiped (`npm ci` guarded) and never removed. Local apps are registered on the machine itself (`deckhand app add <id> --path <dir>`), not over MCP. |
@@ -241,6 +242,7 @@ doctor-builds, reports `ready` → agent offers the first `start_preview`.
 | `screenshot` | `{previewId, deviceId}` → MCP image content (PNG). iOS: `xcrun simctl io <udid> screenshot`; Android: `adb -s <serial> exec-out screencap -p` |
 | `describe` | `{previewId, deviceId}` → accessibility tree. iOS: serve-sim's ax endpoint (token-efficient, built for agents); Android: `adb shell uiautomator dump` (parsed/compacted) |
 | `ui` | `{previewId, deviceId, action}` where action ∈ `{tap {x,y}, type {text}, key {name}, button {name}, home, openUrl {url}}` (normalized 0..1 coords) — validated passthrough. iOS: serve-sim gesture/button/type commands; Android: adb input |
+| `navigate` | `{previewId, deviceId, goal, maxSteps?=10, minConfidence?, text?: {name: value}, uiLanguage?}` → a server-side loop: wait for a still screen → `describe` → a closed candidate list (tap the centre of an on-screen interactive element, scroll toward one past the edge, back, scroll up/down, type a caller-supplied value by NAME into a text field, `done`, `stuck`; capped at 255) → one TypeSafe Jev Choice + a "goal reached?" Noul → `ui` → repeat. Returns `outcome` (`done`/`escalated`/`limit`), a `reason` on hand-back (`NavigateReason` in `navigate/loop.ts`), a per-step trace (choice, confidence and the threshold it needed, top alternatives, settle/describe/decide/act ms, estimated and billed tokens) and `finalScreen`. **Exists only while a TypeSafe key is configured**: with none, `tools/list` does not carry it and nothing an agent reads mentions it, so an install that never set a key is exactly what it was before `navigate`. The key is looked up on every MCP request (each builds a fresh server), so `deckhand secret set|rm typesafe` takes effect on the next call with no restart. Once listed it works on every live preview (§11 item 5). |
 | `logs` | `{previewId?\|app?, deviceId?, source?: "build"\|"stream"\|"metro"\|"app", tailLines?}` → the last `tailLines` (500 retained per source) of one device's captured log. `build` (default) is build/install output plus the NativeScript livesync and web dev-server streams — where a failed build says why. `stream` is the browser→helper trace, the one to read when the device says ready and the viewer shows nothing (see §7 "Streaming diagnostics"). `metro`/`app` are reserved and capture nothing yet. |
 | `add_app` | `{repo, type?}` → clone, detect, **doctor build** on a default device, structured report (`ready` or `missing: [...]`) |
 | `remove_app` | `{id, deleteCheckout?}` |
@@ -277,6 +279,48 @@ more round trips. And the real cost was not tokens but two confident, wrong root
 ("the permission dialog is unresponsive"; "critical UI bugs, button ID mapping broken"),
 both nearly filed as app bugs. The agent that calls the tool does the work; a test in
 `server.test.ts` fails if any model advice comes back.
+
+**Amended (2026-09-23): a decision loop that runs INSIDE deckhand** — the `navigate` tool, and
+the §2 row "Navigate" says why it is not the advice removed above. How it avoids what that
+measurement priced:
+
+- **No extra agent round trips.** Each step is deckhand's own `describe`, one HTTP decision
+  (0.3–0.5s measured), and deckhand's own `ui`. The decider does not plan, write text or call
+  tools.
+- **No findings.** It picks from options code built from the tree plus `done`/`stuck`, and
+  `done` goes back as the model's judgement with an instruction to confirm it with one `ui`
+  assert/waitFor.
+- **Mis-aims cost one hand-back.** Each kind of action has its own confidence threshold
+  (`DEFAULT_THRESHOLDS` in `navigate/loop.ts`: a scroll needs least, `done` most, and a
+  `done` under its threshold stands only when the independent "goal reached" Noul agrees
+  strongly); it hands back on a repeated move on an unchanged screen, on a `done` the Noul
+  disputes, and when the screen changed but the tree did not — Android's `uiautomator` cannot
+  capture a screen that never goes idle, and SimDeck then answers with the previous screen.
+- **It acts on the screen it read.** Before each describe it waits until screenshots stop
+  changing for a window, not for two frames in a row: a push transition starts after the tap
+  has returned, so two early frames read as still. Before acting it takes one more screenshot and
+  re-reads instead of tapping if the screen moved. Taps land on the centre of the element's own
+  frame from that tree, not on a selector SimDeck resolves later.
+- **Language.** State carries the device's UI language (`uiLanguage`, read from the simulator or
+  emulator unless the caller passes one) and element ids, which are often English where labels
+  are not.
+- **Size.** `state` plus the Choice is kept under jev-1.13's 32k-token limit for state and the
+  longest question, estimated at two and a half characters a token — three undercounted the bill
+  by ~7% on Norwegian labels, and every step's trace carries both the estimate and the tokens TypeSafe billed; over it, screen lines
+  and the options naming them are dropped from the bottom and `stateTruncated` says so.
+
+`describe` is the slow part once the round trips are gone, and it is SimDeck's capture, not the
+network: on an iOS 26.5 Settings screen the compact snapshot and the full tree each take ~1.2s
+(of it ~0.2s is a zero-size WidgetRenderer application root that the full capture walks), the
+`interactiveOnly` capture ~0.2s; on Android every capture is a `uiautomator` dump of ~2s. The
+0.03–0.59s above was not reproduced — SimDeck answers a repeated identical query from a cache in
+~1ms, which looks like the same number. So `describe {interactiveOnly: true}` now reaches the fast
+iOS capture instead of being ignored; `navigate` still reads the full tree, because the fast one
+drops the headings that say which screen this is.
+
+The guard stands: `server.test.ts` "gives the agent no model advice in any output it reads"
+now also reads `navigate`'s payload — the server may run its own decision model, and
+nothing it says tells the CALLER which model to use or to hand its work away.
 
 **Migration features (added 2026-07-18).** Deckhand can host a **NativeScript → React
 Native** (or any app→app) migration as a *parity harness*, never a migration engine. Most
@@ -809,6 +853,10 @@ change eases in/out — nothing snaps.
 - `deckhand serve` — run the server (what launchd invokes).
 - `deckhand token add|rm|list|url`, `deckhand app add|list`,
   `deckhand env set <appId> KEY=VALUE`.
+- `deckhand secret set|rm typesafe` — the TypeSafe key `navigate` needs, from stdin or
+  `TYPESAFE_API_KEY`, never argv. Setting it is the consent: `navigate` then sends screens from
+  every app it drives to TypeSafe, and `deckhand doctor` prints a `navigate egress` warning line.
+  With no key file there is no tool and no line.
 - `deckhand verify <appId> --scenario FILE [--ref REF | --path DIR] [--compare REF|DIR] [--share public]` —
   the headless check for an unattended agent: no MCP, and no share link unless `--share public`
   asks for one (see "Live verify shares" in §9). It runs in its
@@ -901,6 +949,44 @@ change eases in/out — nothing snaps.
    SSH CLI, or the one-time setup URL (§6 onboarding contract — 128-bit single-use nonce,
    short TTL, direct browser→mini). Both land as mode-0600 files; the MCP/agent side sees
    only "configured: yes/no".
+   **The TypeSafe key for `navigate`** is a deckhand secret, not an app secret:
+   `deckhand secret set typesafe` reads it from `TYPESAFE_API_KEY` or stdin (never argv) into
+   `secrets/typesafe.key` (0600), or the server's environment carries `TYPESAFE_API_KEY`.
+   `mcp/` is handed a provider that yields a client or a reason there is none, never the key
+   — `navigate/secrets.ts` is named so that "keeps secrets out of the MCP surface" refuses its
+   import there.
+   **Egress — the one path by which app content leaves this machine for a third party.**
+   `navigate` POSTs to `api.typesafe.ai`, once per step. What decides it, in order:
+   - **Consent is the key, and it covers every app.** Configuring the key sends screen text from
+     ALL apps' previews that `navigate` drives to `api.typesafe.ai`; there is no per-app switch.
+     No key file (or an empty one) and the tool is not registered at all. Removing the key stops
+     a run already in progress before its next request (it hands back), because the key is
+     looked up again before every send.
+   - **Minimisation** (`navigate/screen.ts`). Sent: the goal, the UI language, the action
+     history, and per element its role, its label clipped to 60 characters and its id — for
+     interactive elements — which include list rows iOS reports as static text and Android as
+     unclickable, since they are what a user taps — plus headings of 40 characters or fewer. Never
+     sent: any field's value (on Android the `text` of an EditText IS its value), a secure field's label or value, static
+     text, or a long heading. Emails, every run of six or more digits (phone, national id,
+     card, account) and letter-and-digit codes of eight or more (serials, order ids) are masked in
+     everything sent, the goal included. Values the caller supplies in `text` are typed on the device; only their names are sent.
+     → `navigate/egress.test.ts` "never carries a field value, a secure field, long static text or
+     a masked pattern in the request body"
+   - **Screen text is untrusted.** It can steer the model, so what the model can pick is closed:
+     taps on the tree's own element centres, back, scroll up/down, a caller-named value. No
+     `openUrl`, no free text, no coordinate of its own. → `navigate/screen.test.ts` "offers only
+     taps on the tree's own elements, back and scrolls — whatever the screen text says", and a
+     type-level pin on `NavigateAction` in the same file.
+   - **Every request is audited** as a `navigate:egress` line in `audit.jsonl`: app, preview,
+     device, destination, candidate count and byte size, never content, written before the
+     request goes out.
+   - **Visible.** Once a key file exists, `deckhand doctor` prints a `navigate egress` warning —
+     that screens can leave the machine, or that the key cannot be read. With no key file there is
+     no line and no tool.
+   - **Contract.** TypeSafe states that requests are not used for training and offers zero data
+     retention on enterprise plans; no DPA or ZDR agreement is in place for this install. Until
+     one is, and until where the data is processed is settled (a GDPR transfer question), set
+     the key only on a machine whose apps show test data and test accounts.
 6. **Shares**: 144-bit IDs, scrypt-hashed PINs, HMAC-signed unlock cookies, the
    `deck_unlock` cookie stripped before proxying so the HMAC never reaches the app,
    shares die with their preview. Of the helper, the proxy forwards only video, `ax` and input
