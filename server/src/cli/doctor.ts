@@ -186,13 +186,36 @@ function checkServeSim(): Check {
  * nothing runs automatically (auto-loading agents on npm install would restart
  * the server mid-work).
  */
+/** `launchctl list <label>` output → whether the job has a live process, and how it last exited. */
+export function parseAgentStatus(out: string): { running: boolean; lastExit: number | null } {
+  const exit = /"LastExitStatus"\s*=\s*(-?\d+);/.exec(out);
+  return { running: /"PID"\s*=\s*\d+;/.test(out), lastExit: exit ? Number(exit[1]) : null };
+}
+
+function launchctlList(label: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile("launchctl", ["list", label], { timeout: 15_000 }, (err, stdout) => resolve(err ? null : String(stdout)));
+  });
+}
+
 async function checkServices(): Promise<Check> {
   const name = "auto-restart services (launchd)";
-  const loaded = await Promise.all(
-    ["no.deckhand.server", "no.deckhand.tunnel"].map(async (label) => (await which("launchctl", ["list", label])).ok),
-  );
-  const [server, tunnel] = loaded;
-  if (server && tunnel) return { name, ok: true, detail: "server + tunnel agents loaded" };
+  const [server, tunnel] = await Promise.all(["no.deckhand.server", "no.deckhand.tunnel"].map(launchctlList));
+  if (server && tunnel) {
+    // Loaded is not running: a server agent whose WorkingDirectory launchd cannot enter exits 78 on every respawn while `launchctl list` still succeeds.
+    const down = (["server", "tunnel"] as const)
+      .map((which, i) => ({ which, s: parseAgentStatus([server, tunnel][i]!) }))
+      .filter(({ s }) => !s.running);
+    if (!down.length) return { name, ok: true, detail: "server + tunnel agents loaded and running" };
+    const what = down.map(({ which, s }) => `${which} (last exit ${s.lastExit ?? "?"})`).join(" + ");
+    return {
+      name,
+      ok: false,
+      detail:
+        `${what} loaded but not running — read ~/.deckhand/logs/server.log; if the checkout moved or lives under ~/Documents, ~/Desktop or ~/Downloads (launchd may not enter those), ` +
+        "move it out and re-run `./ops/install-services.sh` from the new place",
+    };
+  }
   const missing = [!server && "server", !tunnel && "tunnel"].filter(Boolean).join(" + ");
   return { name, ok: false, warn: true, detail: `${missing} not loaded — run \`./ops/install-services.sh\` so it survives sleep/reboot` };
 }

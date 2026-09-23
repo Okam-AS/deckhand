@@ -14,6 +14,7 @@ import {
   readTokens,
   releaseSmokeAvd,
   type Check,
+  parseAgentStatus,
 } from "./doctor.ts";
 import { fakeAndroid } from "../test-support/fakes.ts";
 import { orphanAvds, orphanSims } from "../engine/reaper.ts";
@@ -409,3 +410,12 @@ function stripComments(src: string): string {
   }
   return out;
 }
+
+describe("parseAgentStatus", () => {
+  it("tells a loaded agent that is crash-looping from one that is running", () => {
+    const dead = '{\n\t"Label" = "no.deckhand.server";\n\t"LastExitStatus" = 19968;\n};';
+    const live = '{\n\t"LastExitStatus" = 15;\n\t"PID" = 38428;\n};';
+    assert.deepEqual(parseAgentStatus(dead), { running: false, lastExit: 19968 });
+    assert.deepEqual(parseAgentStatus(live), { running: true, lastExit: 15 });
+  });
+});

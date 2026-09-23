@@ -9,6 +9,12 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# launchd is refused entry to these (privacy-protected); the server agent then exits 78 on every respawn.
+case "$REPO/" in
+  "$HOME/Documents/"*|"$HOME/Desktop/"*|"$HOME/Downloads/"*)
+    echo "error: $REPO is under a folder launchd cannot enter — move the checkout (e.g. to ~/src/deckhand) and run this again from there" >&2
+    exit 1 ;;
+esac
 AGENTS="$HOME/Library/LaunchAgents"
 LOG_DIR="$HOME/.deckhand/logs"
 TEMPLATES="$REPO/ops/launchd"
