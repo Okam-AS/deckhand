@@ -13,6 +13,7 @@ import type { CommandStep } from "./recipes.ts";
 import type { DevRunSpec } from "./devProcess.ts";
 import type { AttachedStream, StreamDeviceRef } from "../streaming/backend.ts";
 import { StateStore } from "../state.ts";
+import { LiveShareRegistry } from "../share/liveShares.ts";
 
 const config: Config = {
   hostname: "mate.example.com",
@@ -2961,5 +2962,32 @@ describe("an emulator that would not die keeps its AVD", () => {
 
     assert.ok(calls.some((c) => c.startsWith("shutdown ")), `the abandoned emulator must be killed by its port — saw ${JSON.stringify(calls)}`);
     assert.deepEqual(calls.filter((c) => c.startsWith("deleteAvd ")), [], "a boot timeout that would not die keeps its AVD too");
+  });
+});
+
+describe("a verify run's live share", () => {
+  it("resolves as a view-only, public, single-device page and ends with its registry entry", async () => {
+    const stream: AttachedStream = { origin: "http://127.0.0.1:9", helperBasePath: "/h", waitForFirstFrame: async () => true, describe: async () => "", detach: async () => {} };
+    const liveShares = new LiveShareRegistry({
+      attach: async () => stream,
+      listDevices: async () => [{ udid: "U1", name: "verify-iPad-1", state: "Booted" }],
+      pidAlive: () => true,
+      genShareId: () => "live1",
+    });
+    const h = makeEngine({ liveShares });
+    await liveShares.create({ udid: "U1", appId: "pos", pid: 1 });
+    const found = h.engine.findByShareId("live1");
+    assert.equal(found?.viewOnly, true);
+    assert.equal(found?.devices[0]?.stream, stream);
+    const state = h.engine.shareState("live1");
+    assert.equal(state?.viewOnly, true);
+    assert.equal(state?.ready, true);
+    assert.deepEqual(state?.panes.map((p) => p.devices.map((d) => d.label)), [["verify-iPad-1"]]);
+    assert.equal(h.engine.pinInfoForShare("live1").required, false);
+    assert.equal(h.engine.liveShareRevoked("live1"), false);
+    await liveShares.revoke("live1");
+    assert.equal(h.engine.findByShareId("live1"), null);
+    assert.equal(h.engine.shareState("live1"), null);
+    assert.equal(h.engine.liveShareRevoked("live1"), true);
   });
 });

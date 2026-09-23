@@ -224,6 +224,40 @@ describe("Verifier", () => {
     assert.equal(under.exitCode, 0);
   });
 
+  it("--share: opens once the app is up, records liveUrl, and a failed share does not fail the run", async () => {
+    const h = harness({ fingerprint: () => "sh" });
+    const asked: string[] = [];
+    const r = await h.verifier.verify({
+      app,
+      source: { kind: "local", dir: checkout("sh1") },
+      compare: { kind: "local", dir: checkout("sh2") },
+      scenario,
+      outDir: join(root, "sh-out"),
+      share: async (udid) => {
+        asked.push(`${udid} after ${h.log.filter((l) => l.startsWith("simctl openUrl")).length} launch`);
+        return "https://deck.example/s/abc";
+      },
+    });
+    assert.equal(r.exitCode, 0);
+    assert.deepEqual(asked, ["UDID-verify-ipad-9th-generation-ios-26-5 after 1 launch"]);
+    assert.equal(JSON.parse(readFileSync(join(root, "sh-out", "result.json"), "utf8")).liveUrl, "https://deck.example/s/abc");
+
+    const refused = await h.verifier.verify({
+      app,
+      source: { kind: "local", dir: checkout("sh3") },
+      scenario,
+      outDir: join(root, "sh-out2"),
+      share: async () => {
+        throw new Error("server down");
+      },
+    });
+    assert.equal(refused.exitCode, 0);
+    assert.equal(JSON.parse(readFileSync(join(root, "sh-out2", "result.json"), "utf8")).liveUrl, null);
+
+    await h.verifier.verify({ app, source: { kind: "local", dir: checkout("sh4") }, scenario, outDir: join(root, "sh-out3") });
+    assert.equal("liveUrl" in JSON.parse(readFileSync(join(root, "sh-out3", "result.json"), "utf8")), false);
+  });
+
   it("records an unreadable screenshot as a compare error instead of throwing", () => {
     const a = join(root, "bad-a");
     const b = join(root, "bad-b");

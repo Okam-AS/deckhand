@@ -59,6 +59,8 @@ export interface VerifyRequest {
   env?: Record<string, string>;
   /** With --compare: fail when any screenshot's changed-pixel ratio exceeds this. */
   maxDiffRatio?: number;
+  /** `--share`: called once, when the app has launched on the run's simulator; resolves to the live URL or null. */
+  share?: (udid: string) => Promise<string | null>;
 }
 
 /** 0 passed, 1 a step or the compare budget failed, 2 infrastructure (build, device, launch), 3 bad input. */
@@ -121,6 +123,7 @@ export class Verifier {
   private readonly cache: BuildCache;
   private readonly held = new Set<() => void>();
   private xcode: Promise<string> | null = null;
+  private shared: Promise<string | null> | null = null;
 
   constructor(private readonly d: VerifyDeps) {
     this.now = d.now ?? Date.now;
@@ -317,6 +320,7 @@ export class Verifier {
         if (!result.launch.settled) throw new Error(`the app's screen never settled within ${Math.round(settleMs / 1000)}s`);
       }
       t.launchMs = this.now() - t0;
+      if (req.share) this.shared ??= req.share(device.udid).catch(() => null);
 
       t0 = this.now();
       const run = await runSteps(req.scenario.steps, control, out, this.now, this.d.sleep);
@@ -338,10 +342,12 @@ export class Verifier {
 
   async verify(req: VerifyRequest): Promise<{ passed: boolean; exitCode: ExitCode; summary: Record<string, unknown> }> {
     const t0 = this.now();
+    this.shared = null;
     mkdirSync(req.outDir, { recursive: true });
-    const finish = (summary: Record<string, unknown>, exitCode: ExitCode) => {
-      writeFileSync(join(req.outDir, "result.json"), JSON.stringify({ ...summary, exitCode, totalMs: this.now() - t0 }, null, 2));
-      return { passed: exitCode === 0, exitCode, summary };
+    const finish = async (summary: Record<string, unknown>, exitCode: ExitCode) => {
+      const live = req.share ? { liveUrl: this.shared ? await this.shared : null } : {};
+      writeFileSync(join(req.outDir, "result.json"), JSON.stringify({ ...summary, ...live, exitCode, totalMs: this.now() - t0 }, null, 2));
+      return { passed: exitCode === 0, exitCode, summary: { ...summary, ...live } };
     };
     const base = { scenario: req.scenario.name, app: req.app.id };
 
@@ -364,7 +370,7 @@ export class Verifier {
         },
       });
     } catch (e) {
-      return finish({ ...base, passed: false, outcome: "infra", error: `no simulator: ${e instanceof Error ? e.message : String(e)}` }, 2);
+      return await finish({ ...base, passed: false, outcome: "infra", error: `no simulator: ${e instanceof Error ? e.message : String(e)}` }, 2);
     }
     const releaseDevice = this.hold(device.release);
     const deviceInfo = {
@@ -380,7 +386,7 @@ export class Verifier {
     try {
       if (!req.compare) {
         const r = await this.runOne(req, req.source, device, req.outDir);
-        return finish({ ...r, ...base, device: deviceInfo }, exitFor([r.outcome]));
+        return await finish({ ...r, ...base, device: deviceInfo }, exitFor([r.outcome]));
       }
       const a = await this.runOne(req, req.source, device, join(req.outDir, "ref"));
       const b = await this.runOne(req, req.compare, device, join(req.outDir, "compare"));
@@ -398,7 +404,7 @@ export class Verifier {
       );
       let exitCode = exitFor([a.outcome, b.outcome]);
       if (exitCode === 0 && overBudget.length) exitCode = 1;
-      return finish(
+      return await finish(
         {
           ...base,
           passed: exitCode === 0,

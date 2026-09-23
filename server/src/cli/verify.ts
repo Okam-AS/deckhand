@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, extname, isAbsolute, join, resolve } from "node:path";
-import { loadApps, loadConfig, type App } from "../config.ts";
+import { loadApps, loadConfig, loadTokens, type App } from "../config.ts";
 import { paths } from "../paths.ts";
 import { Simctl } from "../devices/ios.ts";
 import { MetroManager } from "../engine/metro.ts";
@@ -12,10 +12,12 @@ import { SimDeckControl } from "../testing/control.ts";
 import { lintScenario, parseScenario, type Diagnostic, type Scenario } from "../verify/scenario.ts";
 import { Verifier, type VerifySource } from "../verify/run.ts";
 import { parseEnvAssignment } from "./configWrite.ts";
+import { LiveShareClient } from "./liveShare.ts";
 
 export const VERIFY_USAGE = `deckhand verify <appId> --scenario <file.yaml|json> [--ref <git ref> | --path <dir>]
                 [--compare <git ref | /abs/dir>] [--max-diff-ratio 0..1] [--out <dir>] [--env KEY=VALUE]...
                 [--device <model>] [--runtime <iOS x.y>] [--orientation landscape|portrait] [--timeout <seconds>]
+                [--share public]   watch the run live: prints DECKHAND_LIVE_URL=<url> on stderr, revoked at the end
        deckhand verify --lint --scenario <file.yaml|json>     validate only; JSON diagnostics on stdout
 exit: 0 passed, 1 a step or the diff budget failed, 2 build/device/launch, 3 bad arguments or scenario
 scenario schema: docs/verify-scenarios.md`;
@@ -39,12 +41,13 @@ export interface VerifyArgs {
   orientation?: string;
   timeout?: string;
   "max-diff-ratio"?: string;
+  share?: string;
 }
 
 /** Repeated `--env` survives here; the shared parser keeps only the last value of a flag. */
 export function parseVerifyArgs(argv: string[]): VerifyArgs {
   const a: VerifyArgs = { env: [] };
-  const valued = new Set(["scenario", "ref", "path", "compare", "out", "env", "device", "runtime", "orientation", "timeout", "max-diff-ratio"]);
+  const valued = new Set(["scenario", "ref", "path", "compare", "out", "env", "device", "runtime", "orientation", "timeout", "max-diff-ratio", "share"]);
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i]!;
     if (!tok.startsWith("--")) {
@@ -87,6 +90,7 @@ interface Prepared {
   outDir: string;
   timeoutS: number;
   maxDiffRatio?: number;
+  share: boolean;
 }
 
 function prepare(argv: string[]): Prepared {
@@ -96,6 +100,7 @@ function prepare(argv: string[]): Prepared {
   if (args.orientation && args.orientation !== "landscape" && args.orientation !== "portrait") {
     throw new VerifyInputError("--orientation is landscape or portrait");
   }
+  if (args.share != null && args.share !== "public") throw new VerifyInputError("--share takes public (a view-only link anyone holding it can watch)");
   const timeoutS = positive(args.timeout, "timeout") ?? DEFAULT_TIMEOUT_S;
   const maxDiffRatio = positive(args["max-diff-ratio"], "max-diff-ratio", 1);
 
@@ -132,7 +137,7 @@ function prepare(argv: string[]): Prepared {
   }
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const outDir = resolve(args.out ?? join(paths.home(), "verify", "runs", `${stamp}-${scenario.name}`));
-  return { config, app, scenario, source, compare: args.compare ? toSource(args.compare) : undefined, env, outDir, timeoutS, maxDiffRatio };
+  return { config, app, scenario, source, compare: args.compare ? toSource(args.compare) : undefined, env, outDir, timeoutS, maxDiffRatio, share: args.share === "public" };
 }
 
 /** Exit 0 or 3, and always one JSON object on stdout, bad arguments included: a caller parses it rather than scraping stderr. */
@@ -149,7 +154,7 @@ function lint(argv: string[]): number {
     return refuse(e instanceof Error ? e.message : String(e));
   }
   if (!args.scenario) return refuse("--lint needs --scenario <file>");
-  const extra = (["ref", "path", "compare", "out", "device", "runtime", "orientation", "timeout", "max-diff-ratio"] as const).filter((k) => args[k] != null);
+  const extra = (["ref", "path", "compare", "out", "device", "runtime", "orientation", "timeout", "max-diff-ratio", "share"] as const).filter((k) => args[k] != null);
   const stray = [args.appId, ...(args.env.length ? ["--env"] : []), ...extra.map((k) => `--${k}`)].filter(Boolean);
   const file = resolve(args.scenario);
   if (stray.length) return refuse(`--lint takes only --scenario; drop ${stray.join(", ")}`, file);
@@ -188,10 +193,15 @@ export async function cmdVerify(argv: string[]): Promise<number> {
     log: (line) => console.error(line),
   });
 
+  const live = p.share
+    ? new LiveShareClient({ port: p.config.port, token: firstToken(), appId: p.app.id, pid: process.pid, log: (line) => console.error(line) })
+    : null;
+  let liveUrl: string | null = null;
   const bail = (code: number, why: string) => {
-    void verifier.abort().finally(() => {
+    void Promise.all([verifier.abort(), live?.close()]).finally(() => {
       mkdirSync(p.outDir, { recursive: true });
-      writeFileSync(join(p.outDir, "result.json"), JSON.stringify({ passed: false, outcome: "infra", exitCode: code, error: why }, null, 2));
+      const shared = live ? { liveUrl } : {};
+      writeFileSync(join(p.outDir, "result.json"), JSON.stringify({ passed: false, outcome: "infra", exitCode: code, error: why, ...shared }, null, 2));
       console.error(`error: ${why}`);
       process.exit(code);
     });
@@ -210,6 +220,7 @@ export async function cmdVerify(argv: string[]): Promise<number> {
       outDir: p.outDir,
       env: p.env,
       maxDiffRatio: p.maxDiffRatio,
+      ...(live ? { share: async (udid: string) => (liveUrl = await live.open(udid)) } : {}),
     });
     console.log(JSON.stringify({ passed: r.passed, exitCode: r.exitCode, result: join(p.outDir, "result.json") }));
     return r.exitCode;
@@ -219,5 +230,14 @@ export async function cmdVerify(argv: string[]): Promise<number> {
     return 2;
   } finally {
     clearTimeout(timer);
+    await live?.close();
+  }
+}
+
+function firstToken(): string | null {
+  try {
+    return loadTokens()[0]?.token ?? null;
+  } catch {
+    return null;
   }
 }

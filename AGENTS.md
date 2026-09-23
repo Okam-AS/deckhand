@@ -68,6 +68,8 @@ PLAN describes the architecture. The invariants that bind every change:
 - **`deckhand verify` is the headless path** (PLAN §10): a scenario file in, screenshots,
   accessibility trees and `result.json` out, exit 0/1. It is a separate process with its own
   `verify-…` simulators, so it must never lease from the server's `deckhand-pool-…` devices.
+  `--share public` borrows the server's stream for that simulator as a view-only link that
+  ends with the run (PLAN §9 "Live verify shares").
 - **Physical devices are OUT** on both platforms; PLAN §2 says why. **Three known gaps, so
   do not imply otherwise:** the local (`path`) livesync build path is unvalidated on-device,
   the `metro`/`app` `logs` sources are accepted and capture nothing, and PLAN §11 item 7's

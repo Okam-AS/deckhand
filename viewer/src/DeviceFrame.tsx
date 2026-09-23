@@ -50,6 +50,8 @@ interface Props {
    * the sim as a separate, larger control.
    */
   topbarLead?: React.ReactNode;
+  /** Watch only: no input socket, no device controls. */
+  viewOnly?: boolean;
 }
 
 // iPhone Safari has no element fullscreen; there we hide the button (the mobile
@@ -57,7 +59,7 @@ interface Props {
 const fullscreenSupported = typeof document !== "undefined" && Boolean(document.fullscreenEnabled);
 
 /** One live device: canvas + player + touch input, with a calm building overlay. */
-export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = "grid", onSelect, registerControls, onRotationChange, hidden, topbarLead }: Props) {
+export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = "grid", onSelect, registerControls, onRotationChange, hidden, topbarLead, viewOnly }: Props) {
   // Identity for the registry/FLIP map; the stream paths still use the raw deviceId.
   const key = paneKey ?? device.deviceId;
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -176,7 +178,7 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
         }
       },
     });
-    const input = new DeviceInput(canvas, deviceWsUrl(shareId, device.deviceId));
+    const input = viewOnly ? null : new DeviceInput(canvas, deviceWsUrl(shareId, device.deviceId));
     inputRef.current = input;
     playerRef.current = player;
     // DevicePlayer is born with active=true, and setActive no-ops on equal
@@ -186,7 +188,7 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
     // re-running this effect on a switch would rebuild both streams.
     if (onScreenRef.current && !hiddenRef.current && !document.hidden) player.start();
     else player.setActive(false);
-    input.start();
+    input?.start();
     registerControls?.(key, {
       home: pressHome,
       rotate,
@@ -235,10 +237,10 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
       registerControls?.(key, null);
       inputRef.current = null;
       playerRef.current = null;
-      input.dispose();
+      input?.dispose();
       player.dispose();
     };
-  }, [ready, shareId, device.deviceId, key, syncActive]);
+  }, [ready, shareId, device.deviceId, key, syncActive, viewOnly]);
 
   // Showing/hiding a frame (a source column switching device) starts or drops its
   // stream directly — the observer can't, since it ignores zero-area reports.
@@ -272,37 +274,41 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
           {topbarLead}
           {ready && (
             <>
-              <button
-                type="button"
-                className="ctrl-btn"
-                onClick={pressHome}
-                title="Home"
-                aria-label="Press the device home button"
-              >
-                <HomeIcon />
-              </button>
-              <button
-                type="button"
-                className="ctrl-btn"
-                onClick={rotate}
-                title="Rotate"
-                aria-label="Rotate the device 90 degrees"
-              >
-                <RotateIcon />
-              </button>
-              {/* Always offered. Typing into the focused canvas works with a real
-                  keyboard, but it is invisible — the button is the only affordance
-                  that says typing is possible at all, and it is also the path for
-                  text a raw keydown cannot send. */}
-              <button
-                type="button"
-                className="ctrl-btn"
-                onClick={() => setTyping(true)}
-                title="Keyboard"
-                aria-label="Type with your keyboard"
-              >
-                <KeyboardIcon />
-              </button>
+              {!viewOnly && (
+                <>
+                  <button
+                    type="button"
+                    className="ctrl-btn"
+                    onClick={pressHome}
+                    title="Home"
+                    aria-label="Press the device home button"
+                  >
+                    <HomeIcon />
+                  </button>
+                  <button
+                    type="button"
+                    className="ctrl-btn"
+                    onClick={rotate}
+                    title="Rotate"
+                    aria-label="Rotate the device 90 degrees"
+                  >
+                    <RotateIcon />
+                  </button>
+                  {/* Always offered. Typing into the focused canvas works with a real
+                      keyboard, but it is invisible — the button is the only affordance
+                      that says typing is possible at all, and it is also the path for
+                      text a raw keydown cannot send. */}
+                  <button
+                    type="button"
+                    className="ctrl-btn"
+                    onClick={() => setTyping(true)}
+                    title="Keyboard"
+                    aria-label="Type with your keyboard"
+                  >
+                    <KeyboardIcon />
+                  </button>
+                </>
+              )}
               {/* What this pane IS lives here rather than in a caption under the
                   sim: the caption repeated the same three facts beneath every
                   device and pushed the frames apart, and on a page with several
