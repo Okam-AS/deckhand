@@ -46,6 +46,7 @@ import { createPairRouter } from "./oauth/pairRouter.ts";
 import { createOAuthRouter, createOAuthMetadataRouter } from "./oauth/router.ts";
 import { writeApps } from "./cli/configWrite.ts";
 import { serverInfo } from "./meta.ts";
+import { LiveShareRegistry, createLiveShareRouter } from "./share/liveShares.ts";
 
 export interface AppDeps {
   engine: PreviewEngine;
@@ -65,6 +66,8 @@ export interface AppDeps {
    * stored or queued for approval — see `oauth/pairing.ts`.
    */
   connector?: { store: OAuthStore; pairing: PairingStore; baseUrl: string };
+  /** `deckhand verify --share`: the loopback admin route that opens and revokes a run's share. */
+  liveShares?: { registry: LiveShareRegistry; baseUrl: string };
 }
 
 /** Build the Express app (no listener). Split out so tests can inject deps. */
@@ -118,6 +121,9 @@ export function createApp(deps: AppDeps): express.Application {
       baseUrl: deps.connector?.baseUrl,
     }),
   );
+  if (deps.liveShares) {
+    app.use("/admin/live-shares", createLiveShareRouter({ registry: deps.liveShares.registry, auth: deps.auth, baseUrl: deps.liveShares.baseUrl }));
+  }
   app.use("/s", createShareRouter({ engine: deps.engine, pinGate: deps.pinGate, viewerDist: deps.viewerDist }));
   if (deps.setup) app.use("/setup", createSetupRouter({ store: deps.setup.store, patPath: deps.setup.patPath }));
 
@@ -189,13 +195,16 @@ export function createServer(): DeckhandServer {
     new WebBackend(),
   );
 
+  const simctl = new Simctl();
+  const liveShares = new LiveShareRegistry({ attach: (d) => streaming.attach(d), listDevices: () => simctl.listDevices() });
   const engine = new PreviewEngine({
     config,
+    liveShares,
     worktrees: new WorktreeManager({
       tokenResolver: buildTokenResolver(config),
       allowAnonymous: config.allowPublicRepos,
     }),
-    simctl: new Simctl(),
+    simctl,
     android: new AndroidManager(),
     streaming,
     metro: new MetroManager(),
@@ -216,6 +225,7 @@ export function createServer(): DeckhandServer {
     persistApps: writeApps,
     setup: { store: new SetupStore(), patPath: githubPatPath(config) },
     connector: { store: new OAuthStore(), pairing: new PairingStore(), baseUrl: publicBaseUrl(config) },
+    liveShares: { registry: liveShares, baseUrl: publicBaseUrl(config) },
   });
   const httpServer = createHttpServer(app);
   attachUpgrade(httpServer, engine, pinGate);
@@ -243,6 +253,7 @@ export function createServer(): DeckhandServer {
       // sweeping idle previews for as long as we run.
       await engine.reapOrphans().catch(() => {});
       engine.startJanitor();
+      liveShares.startSweeper();
       // Loud, and next to the listen line, because a server that came up with NO apps looks
       // healthy from the outside and its first `list_apps` looks like a fresh install.
       if (appsError) {

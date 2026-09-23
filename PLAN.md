@@ -710,6 +710,18 @@ does not cover. Mechanics: `docs/web-wildcard-hosting-plan.md`.
   the option for zero PIN exposure.
 - Share dies with the preview (`stop_preview`) → viewer shows a calm
   "this preview has ended" state.
+- **Live verify shares (2026-09-23).** `deckhand verify --share public` asks the running server,
+  over loopback `POST /admin/live-shares` (a `tokens.yaml` bearer; refused with a 404 when
+  Cloudflare headers show it came through the tunnel), for a share of the run's own `verify-…`
+  simulator once the app has launched. The server attaches the ordinary iOS stream and answers
+  only after a first frame; the CLI prints one `DECKHAND_LIVE_URL=<url>` line on stderr and
+  records `liveUrl` in `result.json`. The share is **view-only and public**: the proxy forwards
+  only `stream.avcc`/`stream.mjpeg` (no `ax`, no input socket) and `shareState` carries
+  `viewOnly`, so the viewer opens no input and shows no device controls. It ends with the run —
+  the CLI `DELETE`s it on pass, fail, timeout and SIGINT/SIGTERM, and the server revokes any whose
+  verify pid is gone (checked every 5 s and on each lookup) or that is 12 h old. A revoked link's
+  viewer page answers 410 until the server restarts. No server, no credential, or a refusal is a
+  warning, never a failed run. Registry and admin route: `server/src/share/liveShares.ts`.
 
 ### Stream client (ours, in `viewer/`)
 
@@ -797,8 +809,9 @@ change eases in/out — nothing snaps.
 - `deckhand serve` — run the server (what launchd invokes).
 - `deckhand token add|rm|list|url`, `deckhand app add|list`,
   `deckhand env set <appId> KEY=VALUE`.
-- `deckhand verify <appId> --scenario FILE [--ref REF | --path DIR] [--compare REF|DIR]` —
-  the headless check for an unattended agent: no MCP, no share link, no viewer. It runs in its
+- `deckhand verify <appId> --scenario FILE [--ref REF | --path DIR] [--compare REF|DIR] [--share public]` —
+  the headless check for an unattended agent: no MCP, and no share link unless `--share public`
+  asks for one (see "Live verify shares" in §9). It runs in its
   own process against the engine's parts (`buildPlan`, `MetroManager`, `WorktreeManager`,
   SimDeck control) and writes `<name>.png`, `<name>.ax.json`, `result.json` and, with
   `--compare`, `<name>.diff.png` + `compare.json`. Exit 0 passed, 1 a step or the
@@ -891,7 +904,7 @@ change eases in/out — nothing snaps.
 6. **Shares**: 144-bit IDs, scrypt-hashed PINs, HMAC-signed unlock cookies, the
    `deck_unlock` cookie stripped before proxying so the HMAC never reaches the app,
    shares die with their preview. Of the helper, the proxy forwards only video, `ax` and input
-   for the share's own devices — serve-sim's other endpoints (camera, devtools, exec) are never
+   for the share's own devices (a live verify share, §9, only video) — serve-sim's other endpoints (camera, devtools, exec) are never
    forwarded. It serves two routes of its own behind the same PIN gate, and they are part of the
    surface even though neither reaches the helper: `POST …/restart`, the viewer's Rebuild button
    for a local share (throttled), and `POST …/dev/:deviceId/clientlog`, which takes the browser's

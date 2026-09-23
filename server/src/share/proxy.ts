@@ -52,6 +52,7 @@ function upstreamMissReason(engine: PreviewEngine, shareId: string, deviceId: st
   if (!isAllowedSubpath(sub)) return `subpath "${sub}" is not on the allow-list`;
   const found = engine.findByShareId(shareId);
   if (!found) return "no live preview for this share (ended, or never started)";
+  if (found.viewOnly && !isVideoSubpath(sub)) return `subpath "${sub}" is not served by a view-only share`;
   const dev = found.devices.find((d) => d.deviceId === deviceId);
   if (!dev) return `preview has no device "${deviceId}" (has: ${found.devices.map((d) => d.deviceId).join(", ")})`;
   return "device has no attached stream (the helper never came up, or was detached)";
@@ -79,12 +80,15 @@ function errLabel(e: unknown): string {
   return (code ? `${code} ${msg}` : msg).slice(0, 160);
 }
 
+const isVideoSubpath = (sub: string) => sub === "stream.avcc" || sub === "stream.mjpeg";
+
 /** Resolve the loopback upstream URL for a device subpath within a share, or null. */
 function resolveUpstream(engine: PreviewEngine, shareId: string, deviceId: string, sub: string): string | null {
   if (!isAllowedSubpath(sub)) return null;
   const found = engine.findByShareId(shareId);
   const dev = found?.devices.find((d) => d.deviceId === deviceId);
   if (!found || !dev?.stream) return null;
+  if (found.viewOnly && !isVideoSubpath(sub)) return null;
   return `${dev.stream.origin}${dev.stream.helperBasePath}/${sub}`;
 }
 
@@ -759,8 +763,11 @@ export function createShareRouter(deps: ShareDeps): express.Router {
   // hashed bundle after a deploy (a stale index.html → old bundle crashes on new
   // states like the PIN gate). The hashed /assets/* stay cacheable.
   if (deps.viewerDist) {
-    router.get("/:shareId", (_req, res) =>
-      res.set("Cache-Control", "no-cache").sendFile(join(deps.viewerDist!, "index.html")),
+    router.get("/:shareId", (req, res) =>
+      res
+        .status(deps.engine.liveShareRevoked(req.params.shareId) ? 410 : 200)
+        .set("Cache-Control", "no-cache")
+        .sendFile(join(deps.viewerDist!, "index.html")),
     );
   }
 
@@ -863,7 +870,7 @@ export function handleShareUpgrade(
     const [, shareId, deviceId] = mDev as unknown as [string, string, string];
     const found = engine.findByShareId(shareId);
     const dev = found?.devices.find((d) => d.deviceId === deviceId);
-    if (!found || !dev?.stream || !pinGate.allowed(req.headers.cookie, shareId)) {
+    if (!found || found.viewOnly || !dev?.stream || !pinGate.allowed(req.headers.cookie, shareId)) {
       // A destroyed upgrade is indistinguishable from a network problem in the
       // browser — the viewer just retries forever. Record which gate rejected it.
       trace(engine, 
@@ -872,7 +879,9 @@ export function handleShareUpgrade(
         `ws upgrade REFUSED: ${
           !found
             ? "no live preview for this share"
-            : !dev
+            : found.viewOnly
+              ? "the share is view-only"
+              : !dev
               ? `no device "${deviceId}"`
               : !dev.stream
                 ? "device has no attached stream"

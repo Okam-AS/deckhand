@@ -11,6 +11,10 @@ describe("deckhand verify arguments", () => {
     assert.deepEqual(a, { appId: "app", scenario: "s.yaml", ref: "main", env: ["A=1", "B=2"], "max-diff-ratio": "0.01" });
   });
 
+  it("takes --share with its value", () => {
+    assert.equal(parseVerifyArgs(["app", "--scenario", "s.yaml", "--share", "public"]).share, "public");
+  });
+
   it("refuses an unknown flag or a flag without its value", () => {
     assert.throws(() => parseVerifyArgs(["app", "--scenarios", "s.yaml"]), /unknown flag --scenarios/);
     assert.throws(() => parseVerifyArgs(["app", "--scenario"]), /needs a value/);
@@ -39,6 +43,7 @@ describe("deckhand verify exit code 3", () => {
     assert.equal(await cmdVerify(["mobile", "--bogus", "x"]), 3);
     assert.equal(await cmdVerify(["nobody", "--scenario", join(home, "bad.yaml")]), 3);
     assert.equal(await cmdVerify(["mobile", "--scenario", join(home, "bad.yaml"), "--max-diff-ratio", "2"]), 3);
+    assert.equal(await cmdVerify(["mobile", "--scenario", join(home, "good.yaml"), "--share", "pin"]), 3);
   });
 
   it("refuses a JSON string where a selector belongs, naming the step and the field, before anything is built", async () => {

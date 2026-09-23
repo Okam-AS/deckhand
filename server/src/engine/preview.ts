@@ -40,6 +40,7 @@ import { loadSecretsEnv } from "../secrets.ts";
 import { readMigrationLedger } from "./migrationLedger.ts";
 import { DevProcessManager } from "./devProcess.ts";
 import type { AttachedStream, StreamingBackend } from "../streaming/backend.ts";
+import { LIVE_DEVICE_ID, type LiveShareRegistry } from "../share/liveShares.ts";
 import { SimDeckControl, type SimDeckTarget, type DescribeOptions, type UiAction } from "../testing/control.ts";
 
 // ---------------------------------------------------------------------------
@@ -387,6 +388,8 @@ export interface PreviewEngineDeps {
   now?: () => number;
   genPreviewId?: () => string;
   genShareId?: () => string;
+  /** View-only shares of `deckhand verify` simulators, resolved beside the previews' own. */
+  liveShares?: LiveShareRegistry;
 }
 
 export class PreviewError extends Error {
@@ -619,10 +622,17 @@ export class PreviewEngine {
     return wh ? `https://${wh}/` : `http://${this.hostIdForShare(p.record.shareId)}.localhost:${this.d.config.port}/`;
   }
 
+  /** A verify run's share that has ended; its viewer link answers 410. */
+  liveShareRevoked(shareId: string): boolean {
+    return this.d.liveShares?.wasRevoked(shareId) ?? false;
+  }
+
   /** Look up a live preview by its shareId (used by the share proxy). */
   findByShareId(
     shareId: string,
-  ): { previewId: string; devices: { deviceId: string; platform: Platform; stream?: AttachedStream }[] } | null {
+  ): { previewId: string; viewOnly?: true; devices: { deviceId: string; platform: Platform; stream?: AttachedStream }[] } | null {
+    const live = this.d.liveShares?.find(shareId);
+    if (live) return { previewId: `live-${shareId}`, viewOnly: true, devices: [{ deviceId: LIVE_DEVICE_ID, platform: "ios", stream: live.stream }] };
     for (const p of this.previews.values()) {
       if (p.record.shareId === shareId) {
         this.markActive(p); // a proxied request/stream attach means someone is watching
@@ -748,7 +758,23 @@ export class PreviewEngine {
     }[];
     /** Migration target only: the agent-maintained parity ledger, if the file exists. */
     ledger?: { screens: { name: string; status: string; note?: string }[] };
+    /** A verify run's share: watch only, so the viewer opens no input socket. */
+    viewOnly?: true;
   } | null {
+    const live = this.d.liveShares?.find(shareId);
+    if (live) {
+      const devices = [{ deviceId: LIVE_DEVICE_ID, platform: "ios" as const, label: live.label, phase: "ready" }];
+      return {
+        ready: true,
+        ref: "deckhand verify",
+        repo: live.appId,
+        source: "local",
+        canRestart: false,
+        devices,
+        panes: [{ shareId, repo: live.appId, ref: "deckhand verify", self: true, devices }],
+        viewOnly: true,
+      };
+    }
     const sanitizeDevices = (pv: LivePreview) =>
       pv.devices.map((d) => ({
         deviceId: d.record.deviceId,
