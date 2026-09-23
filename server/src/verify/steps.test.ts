@@ -58,7 +58,7 @@ steps:
       r.steps.map((x) => x.action),
       ["type (2 chars)", "waitFor absent text=Busy", "assert present #done", "assert absent text=Error", "sleep 10", "screenshot home"],
     );
-    assert.ok(r.steps.every((x) => x.ok && x.ms === 5));
+    assert.ok(r.steps.every((x) => x.ok && x.ms === 5 && !("kind" in x)));
     assert.equal(String(f.files.get("home.png")), "png-1");
     assert.match(r.steps.at(-1)!.observed, /2 labels/);
   });
@@ -123,6 +123,7 @@ steps:
     assert.equal(r.passed, false);
     assert.equal(r.steps.length, 1);
     assert.equal(r.steps[0]!.observed, "no element matches #missing");
+    assert.equal(r.steps[0]!.kind, "navigation");
     assert.ok(f.files.has("failure.png"));
     assert.ok(f.files.has("failure.ax.json"));
     assert.ok(!f.files.has("never.png"));
@@ -134,6 +135,15 @@ steps:
     const r = await runSteps(s.steps, f.control, f.out, tick, noSleep);
     assert.equal(r.passed, false);
     assert.equal(r.steps[0]!.observed, "expected text=Paid");
+    assert.equal(r.steps[0]!.kind, "assert");
+  });
+
+  it("marks a failed waitFor as navigation and leaves kind off the steps that passed", async () => {
+    const s = parseScenario("steps:\n  - sleep: 1\n  - waitFor: '#settings'");
+    const f = fakeControl({ answer: () => ({ ok: false, message: "timed out" }) });
+    const r = await runSteps(s.steps, f.control, f.out, tick, noSleep);
+    assert.deepEqual(r.steps.map((x) => x.kind), [undefined, "navigation"]);
+    assert.ok(!("kind" in r.steps[0]!));
   });
 });
 

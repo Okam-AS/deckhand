@@ -16,11 +16,19 @@ export interface VerifyControl {
   screenshot(): Promise<Buffer>;
 }
 
+/** On a failed step: `assert` means the app got there and was wrong; `navigation` means the scenario could not drive it there. */
+export type FailureKind = "assert" | "navigation";
+
 export interface StepResult {
   action: string;
   ok: boolean;
   observed: string;
   ms: number;
+  kind?: FailureKind;
+}
+
+export function failureKind(step: Step): FailureKind {
+  return step.action === "assert" ? "assert" : "navigation";
 }
 
 export interface Artifacts {
@@ -248,7 +256,7 @@ export async function runSteps(
     } catch (e) {
       r = { ok: false, observed: e instanceof Error ? e.message : String(e) };
     }
-    results.push({ action: stepLabel(step), ok: r.ok, observed: r.observed, ms: now() - t0 });
+    results.push({ action: stepLabel(step), ok: r.ok, observed: r.observed, ms: now() - t0, ...(r.ok ? {} : { kind: failureKind(step) }) });
     if (!r.ok) {
       await captureFailure(control, out);
       return { passed: false, steps: results };

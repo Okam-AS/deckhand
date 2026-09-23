@@ -807,7 +807,12 @@ change eases in/out — nothing snaps.
   JSON or YAML) is ordered `openUrl`/`tap`/`type`/`scroll`/`scrollUntilVisible`/`waitFor`/
   `assert`/`sleep`/`screenshot` steps plus a device shape (default iPad 9th generation, iOS
   26.5, landscape) and Metro env; typed text is recorded by length only. `assert` means on screen;
-  `{ present: … }` means anywhere in the tree. Taps and scrolls are placed by verify, not by
+  `{ present: … }` means anywhere in the tree. The grammar is strict: a selector string is `#id` or
+  `id=`/`text=`/`label=`/`value=`, never bare text, and an unknown key anywhere is refused, so a
+  malformed scenario exits 3 instead of failing as the app's fault. `deckhand verify --lint
+  --scenario FILE` checks one without building (exit 0 or 3, JSON diagnostics on stdout); the
+  schema with examples is [docs/verify-scenarios.md](docs/verify-scenarios.md). A failed step in
+  `result.json` carries `kind`: `assert` or `navigation`. Taps and scrolls are placed by verify, not by
   SimDeck: SimDeck injects touches in the unrotated screen's coordinates and does not rotate the
   frames it matches, so a landscape selector tap lands elsewhere. SpringBoard's own elements (the
   «Open in …?» prompt a fresh simulator shows once per URL scheme, which `openUrl` confirms)
