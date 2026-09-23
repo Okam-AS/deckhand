@@ -23,6 +23,8 @@ import type { AuditLog } from "../audit.ts";
 import { summarizeArgs } from "../audit.ts";
 import { SimDeckUnavailableError } from "../testing/simdeck.ts";
 import { SimDeckActionError, type UiAction } from "../testing/control.ts";
+import type { JevProvider } from "../navigate/jev.ts";
+import { navigate } from "../navigate/loop.ts";
 
 // ---------------------------------------------------------------------------
 // MCP tool registrations (PLAN §6). Bound per request to the authenticated
@@ -42,6 +44,8 @@ export interface ToolContext {
   persistApps?: (apps: App[]) => void;
   /** Mints one-time setup URLs for credential onboarding. */
   setup?: SetupStore;
+  /** The `navigate` decider; holds the TypeSafe key so this layer never does. */
+  jev?: JevProvider;
 }
 
 /**
@@ -341,7 +345,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
    * (the dev-menu overlay was eating the tap). Both were nearly reported to the user as
    * app bugs. Steering toward a cheaper model bought slower runs and false findings.
    *
-   * So: no model advice at all. The agent that called the tool does the work.
+   * So: no model advice to the caller. `navigate` runs deckhand's own decider server-side,
+   * which adds no round trip and cannot author a finding — PLAN §6 says why that differs.
    */
   const TEST_RUN_CONTRACT =
     "ALWAYS open a run before you drive the app — not just for tests: start_test_run with a title saying what you are about to do (\"Verify the new tab bar\", \"Reproduce the crash\", \"Look at the wash flow\") and the steps you plan, mark each one running→passed/failed with update_test_run as you go, and close it with finish_test_run. That is what puts a live spinner and step list in the viewer; without it the user sees a cursor moving over a silent app and cannot tell what you are doing.";
@@ -375,6 +380,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
    * of these FAILED is the shape of a verdict with no evidence behind it — see
    * `unevidencedPass`. `query` is absent: it returns matches, it does not assert anything.
    */
+  const NAVIGATE_SETTLE_MS = 400;
+
   const VERIFIER_ACTIONS = new Set(["waitFor", "waitForNot", "assert", "assertNot"]);
 
   // `sleep` and the waitForNot/assertNot verifiers are absent on purpose: they move nothing
@@ -1102,6 +1109,48 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           const msg = e instanceof Error ? e.message : String(e);
           return failWith("ui_error", msg, hint ? { screen: hint } : {});
         }
+      }),
+  );
+
+  server.registerTool(
+    "navigate",
+    {
+      title: "Navigate toward a goal (server-side loop)",
+      description:
+        "Reach a screen or state in ONE call instead of one describe→ui round trip per step: deckhand reads the accessibility tree, a fast decision model (TypeSafe Jev, text-only) picks the next action from a closed list (tap an element, back, scroll, type a value YOU supplied, done, stuck), deckhand performs it, and repeats — all on the deckhand machine. " +
+        "Use it for plain navigation (\"open Settings → About\", \"get to the checkout screen\"), not for judging whether the app is right: it never writes text of its own, it cannot see pixels, and it stops and hands back on low confidence, a repeated move, a failed action or maxSteps. " +
+        "`text` maps a name to a value to type (e.g. {\"email\": \"a@b.no\"}); only the NAMES reach the decision model. The screen's accessibility text does leave the machine for TypeSafe's API. " +
+        "Always read `outcome`: `done` is the model's judgement, so confirm it with one `ui` assert/waitFor before you report it; `escalated`/`limit` means continue yourself from `finalScreen` with describe + ui. Off unless the operator has configured a TypeSafe key.",
+      inputSchema: {
+        previewId: z.string(),
+        deviceId: z.string(),
+        goal: z.string().min(1).describe("what the screen should show when navigation is finished, stated literally"),
+        maxSteps: z.number().int().min(1).max(30).optional().describe("actions before it hands back (default 10)"),
+        minConfidence: z.number().min(0).max(1).optional().describe("below this, stop and hand back instead of acting (default 0.7)"),
+        text: z.record(z.string(), z.string()).optional().describe("named values the loop may type into a text field; the values are never sent to the model"),
+      },
+    },
+    (args) =>
+      audited("navigate", { ...args, text: args.text ? Object.keys(args.text) : undefined }, async () => {
+        const denied = requireLivePreview(args.previewId);
+        if (denied) return denied;
+        const access = ctx.jev?.() ?? null;
+        if (!access) return fail("navigate_disabled", "navigate is not available on this deckhand server", "Drive with `describe` + `ui` instead.");
+        if (!access.ok) return fail(access.code, access.message, access.hint);
+        const result = await navigate(
+          { goal: args.goal, maxSteps: args.maxSteps ?? 10, minConfidence: args.minConfidence ?? 0.7, text: args.text ?? {} },
+          {
+            describe: () => engine.describe(args.previewId, args.deviceId, {}),
+            act: (a) => engine.ui(args.previewId, args.deviceId, a),
+            jev: access.client,
+            settle: () => new Promise((r) => setTimeout(r, NAVIGATE_SETTLE_MS)),
+          },
+        );
+        const nextStep =
+          result.outcome === "done"
+            ? "The decision model judged the goal reached. Confirm it with one `ui` assert or waitFor on what the goal promised before you report it."
+            : `navigate handed back: ${result.message}. Continue from finalScreen yourself with describe + ui, or call navigate again with a narrower goal.`;
+        return ok({ ...result, nextStep, ...testRunNudge(args.previewId, "tap") });
       }),
   );
 

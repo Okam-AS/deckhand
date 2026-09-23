@@ -241,6 +241,7 @@ doctor-builds, reports `ready` → agent offers the first `start_preview`.
 | `screenshot` | `{previewId, deviceId}` → MCP image content (PNG). iOS: `xcrun simctl io <udid> screenshot`; Android: `adb -s <serial> exec-out screencap -p` |
 | `describe` | `{previewId, deviceId}` → accessibility tree. iOS: serve-sim's ax endpoint (token-efficient, built for agents); Android: `adb shell uiautomator dump` (parsed/compacted) |
 | `ui` | `{previewId, deviceId, action}` where action ∈ `{tap {x,y}, type {text}, key {name}, button {name}, home, openUrl {url}}` (normalized 0..1 coords) — validated passthrough. iOS: serve-sim gesture/button/type commands; Android: adb input |
+| `navigate` | `{previewId, deviceId, goal, maxSteps?=10, minConfidence?=0.7, text?: {name: value}}` → a server-side loop: `describe` → a closed candidate list (tap each labelled interactive element by id/label, back, scroll up/down, type a caller-supplied value by NAME into a text field, `done`, `stuck`; capped at 255) → one TypeSafe Jev Choice + a "goal reached?" Noul → `ui` → repeat. Returns `outcome` (`done`/`escalated`/`limit`), a `reason` on hand-back (`NavigateReason` in `navigate/loop.ts`), a per-step trace (choice, confidence, top alternatives, describe/decide/act ms) and `finalScreen`. Off until a TypeSafe key is configured (§11 item 5), and the error it returns until then says how. |
 | `logs` | `{previewId?\|app?, deviceId?, source?: "build"\|"stream"\|"metro"\|"app", tailLines?}` → the last `tailLines` (500 retained per source) of one device's captured log. `build` (default) is build/install output plus the NativeScript livesync and web dev-server streams — where a failed build says why. `stream` is the browser→helper trace, the one to read when the device says ready and the viewer shows nothing (see §7 "Streaming diagnostics"). `metro`/`app` are reserved and capture nothing yet. |
 | `add_app` | `{repo, type?}` → clone, detect, **doctor build** on a default device, structured report (`ready` or `missing: [...]`) |
 | `remove_app` | `{id, deleteCheckout?}` |
@@ -277,6 +278,45 @@ more round trips. And the real cost was not tokens but two confident, wrong root
 ("the permission dialog is unresponsive"; "critical UI bugs, button ID mapping broken"),
 both nearly filed as app bugs. The agent that calls the tool does the work; a test in
 `server.test.ts` fails if any model advice comes back.
+
+**Proposed amendment (2026-09-23, spike on `feature/jev-navigate` — not accepted until the
+operator merges it): a decision loop that runs INSIDE deckhand.** `navigate` puts a model in
+the drive loop, which reads like the thing rejected above. It is a different mechanism, and
+the difference is exactly what that measurement priced:
+
+- **What was rejected was extra agent round trips.** The delegated run was a second LLM agent
+  making its own MCP calls — 66 of them, 583s, ~5% deckhand — and a weaker agent needs more
+  of them. `navigate` adds no MCP round trip: the caller makes one call, and each step inside
+  it is deckhand's own `describe`, one HTTP decision (~0.3–1.0s measured), and deckhand's own
+  `ui`. The model it calls does not plan, write text, or call tools.
+- **What cost most was confident wrong findings.** Jev cannot author one. It picks from a
+  closed list of actions code built from the tree, plus `done`/`stuck`; it never returns a
+  diagnosis, and `navigate` never reports one. Judging whether the app is RIGHT stays with
+  the caller, and `done` is returned as the model's judgement with an instruction to confirm
+  it with one `ui` assert/waitFor.
+- **What stays true:** a weaker chooser mis-aims taps. The defences are the ones a closed
+  choice makes possible — hand back below `minConfidence` (Jev's confidence is calibrated),
+  hand back on a repeated move on an unchanged screen, hand back when the `done` choice and
+  the "goal reached" Noul disagree — so a mis-aim costs one hand-back, not three round trips.
+
+Measured once, on the spike: iOS 26.5 simulator, the Settings app (Norwegian locale), goal
+"Open the About page under General settings". `navigate`: 13.4–14.0s warm over two actions
+and three decisions, of which Jev was 1.2–2.5s (23.6s on the first, cold run); each run
+reached About and stopped `done`. The same path driven step by step by the agent that built
+the spike, one device call per turn (describe, tap, describe, tap, describe): 39.9s wall,
+10.3s of it device. On that screen `describe` itself took 1.8–4.6s,
+far above the 0.03–0.59s measured earlier, so deckhand's own `describe` becomes the next
+bottleneck once the model round trips are gone. Three harder goals on the same app ("Open
+the Keyboard settings", "Open Display and Brightness settings", "Switch the appearance to
+Dark mode", English goals over Norwegian labels) all handed back — mostly on low confidence at
+0.5–0.67 on the first or a later step, once going in circles between two scrolls — rather than
+reaching the goal. The hand-backs were the design working; the reach rate was not good. One
+run tapped "Tastatur" at confidence 1.0 and landed on the row above it, which looks like a tap
+racing the push animation. One app, a handful of runs — a spike result, not a benchmark.
+
+The guard stands: `server.test.ts` "gives the agent no model advice in any output it reads"
+now also reads `navigate`'s payload — the server may run its own decision model, and
+nothing it says tells the CALLER which model to use or to hand its work away.
 
 **Migration features (added 2026-07-18).** Deckhand can host a **NativeScript → React
 Native** (or any app→app) migration as a *parity harness*, never a migration engine. Most
@@ -901,6 +941,16 @@ change eases in/out — nothing snaps.
    SSH CLI, or the one-time setup URL (§6 onboarding contract — 128-bit single-use nonce,
    short TTL, direct browser→mini). Both land as mode-0600 files; the MCP/agent side sees
    only "configured: yes/no".
+   **The TypeSafe key for `navigate`** is a deckhand secret, not an app secret:
+   `deckhand secret set typesafe` reads it from `TYPESAFE_API_KEY` or stdin (never argv) into
+   `secrets/typesafe.key` (0600), or the server's environment carries `TYPESAFE_API_KEY`.
+   `mcp/` is handed a provider that yields a client or a reason there is none, never the key
+   — `navigate/secrets.ts` is named so that "keeps secrets out of the MCP surface" refuses its
+   import there. **Egress:** with a key configured, `navigate` sends each screen's
+   accessibility text (labels and values, which can include personal data shown in the app)
+   to `api.typesafe.ai` — the first path by which app content leaves the machine to a third
+   party, and the reason it is off by default. Values the caller supplies in `text` are typed
+   on the device and never sent; only their names are.
 6. **Shares**: 144-bit IDs, scrypt-hashed PINs, HMAC-signed unlock cookies, the
    `deck_unlock` cookie stripped before proxying so the HMAC never reaches the app,
    shares die with their preview. Of the helper, the proxy forwards only video, `ax` and input

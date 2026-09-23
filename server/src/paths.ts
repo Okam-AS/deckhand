@@ -38,6 +38,8 @@ export const paths = {
   shareSecret: () => join(deckhandHome(), "share-secret"),
   secretsDir: () => join(deckhandHome(), "secrets"),
   secretsEnv: (appId: string) => join(deckhandHome(), "secrets", `${appId}.env`),
+  /** TypeSafe API key for `navigate` (mode 0600); `.key`, so no app id's `.env` can collide. */
+  typesafeKey: () => join(deckhandHome(), "secrets", "typesafe.key"),
   reposDir: () => join(deckhandHome(), "repos"),
   repo: (appId: string) => join(deckhandHome(), "repos", appId),
   worktreesDir: () => join(deckhandHome(), "worktrees"),

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { stringify as toYaml } from "yaml";
@@ -14,6 +14,7 @@ import {
   writeTokens,
   writeApps,
   writeSecretEnv,
+  writeTypesafeKey,
 } from "./cli/configWrite.ts";
 import { runDoctor, formatChecks, deviceGateExit } from "./cli/doctor.ts";
 
@@ -75,6 +76,9 @@ Everything else, for when you already know what you want:
       any of the above also take [--migrates-from <id>]                   the app this one is a port of
   deckhand app list
   deckhand env set <appId> KEY=VALUE
+  deckhand secret set typesafe                     store the TypeSafe API key that turns on \`navigate\`
+                                                   (read from TYPESAFE_API_KEY or stdin, never argv)
+  deckhand secret rm typesafe
   deckhand verify <appId> --scenario FILE [--ref REF | --path DIR] [--compare REF|DIR] [--out DIR]
                   [--env K=V]... [--device MODEL] [--runtime "iOS x.y"] [--orientation landscape|portrait]
                                                    run a scenario headless: screenshots, a11y trees, result.json
@@ -187,6 +191,12 @@ async function main(): Promise<void> {
       const { cmdVerify } = await import("./cli/verify.ts");
       process.exit(await cmdVerify(process.argv.slice(3)));
     }
+
+    case "secret":
+      if (_[2] !== "typesafe") return fail("usage: deckhand secret set|rm typesafe");
+      if (sub === "set") return cmdSecretSetTypesafe();
+      if (sub === "rm") return cmdSecretRmTypesafe();
+      return fail("usage: deckhand secret set|rm typesafe");
 
     case "env":
       if (sub === "set") return cmdEnvSet(_[2], _[3]);
@@ -459,6 +469,25 @@ function cmdEnvSet(appId: string | undefined, assignment: string | undefined): v
   const { key, value } = parseEnvAssignment(assignment!);
   writeSecretEnv(appId!, key, value);
   console.log(`set ${key} for app "${appId}" (stored 0600, never exposed via MCP)`);
+}
+
+async function cmdSecretSetTypesafe(): Promise<void> {
+  let key = process.env.TYPESAFE_API_KEY?.trim();
+  if (!key) {
+    if (process.stdin.isTTY) console.error("Paste the TypeSafe API key, then press Enter and Ctrl-D:");
+    const chunks: Buffer[] = [];
+    for await (const c of process.stdin) chunks.push(c as Buffer);
+    key = Buffer.concat(chunks).toString("utf8").trim();
+  }
+  if (!key) fail("no key: set TYPESAFE_API_KEY or pipe the key on stdin");
+  if (/\s/.test(key!)) fail("that key contains whitespace — paste only the key");
+  writeTypesafeKey(key!);
+  console.log(`stored the TypeSafe key at ${paths.typesafeKey()} (0600, never exposed via MCP) — navigate is on, no restart needed`);
+}
+
+function cmdSecretRmTypesafe(): void {
+  rmSync(paths.typesafeKey(), { force: true });
+  console.log("removed the TypeSafe key — navigate is off (unless TYPESAFE_API_KEY is set in the server's environment)");
 }
 
 function str(v: string | boolean | undefined): string | undefined {

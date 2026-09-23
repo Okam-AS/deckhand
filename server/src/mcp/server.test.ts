@@ -19,6 +19,9 @@ import { PairingStore } from "../oauth/pairing.ts";
 import { CredentialsMissingError } from "../github/credentials.ts";
 import type { App, Config, TokenEntry } from "../config.ts";
 import type { AttachedStream, StreamDeviceRef } from "../streaming/backend.ts";
+import type { JevAccess } from "../navigate/jev.ts";
+import { typesafeProvider } from "../navigate/secrets.ts";
+import type { AuditEntry } from "../audit.ts";
 
 const config: Config = {
   hostname: "mate.example.com",
@@ -54,6 +57,9 @@ const tokens: TokenEntry[] = [
   { name: "audun", token: ADMIN },
   { name: "audun-laptop", token: SECOND },
 ];
+
+/** Every action the fake SimDeck was asked to perform, in order. */
+const simdeckActions: unknown[] = [];
 
 function fakeEngine(): PreviewEngine {
   const fakeStream: AttachedStream = {
@@ -102,6 +108,7 @@ function fakeEngine(): PreviewEngine {
       // A verifier that could never fail meant no test could reach the failure path at all.
       // SimDeck answers a selector it cannot match by throwing, so this does too.
       action: async (_t: unknown, a: { type?: string; selector?: { text?: string } }) => {
+        simdeckActions.push(a);
         const verifier =
           a?.type === "waitFor" || a?.type === "assert" || a?.type === "waitForNot" || a?.type === "assertNot" || a?.type === "tapElement";
         if (verifier && a?.selector?.text === "nope") throw new Error("No accessibility element matched.");
@@ -122,6 +129,31 @@ let engine: PreviewEngine;
  * A grant is the credential every claude.ai user arrives with.
  */
 let oauthStore: OAuthStore;
+const JEV_TEST_KEY = "ts-live-key-must-not-leak-81c2";
+/** What `navigate` is handed on its next call; each navigate test sets its own. */
+let jevAccess: JevAccess = { ok: false, code: "navigate_disabled", message: "navigate is off", hint: "deckhand secret set typesafe" };
+const audited: Array<Omit<AuditEntry, "ts">> = [];
+/** The real client and provider against a fake TypeSafe API: taps the one button once, then answers done. */
+function scriptedJev(): { access: JevAccess; seen: string[] } {
+  const seen: string[] = [];
+  let n = 0;
+  const fetchImpl: typeof fetch = async (_url, init) => {
+    seen.push(JSON.stringify(init?.body ?? ""));
+    const criteria = (JSON.parse(String(init?.body)) as { questions: { next: { criteria: Record<string, unknown> } } }).questions.next.criteria;
+    const pick = n++ === 0 ? Object.keys(criteria).find((k) => k.startsWith("tap_"))! : "done";
+    const body = {
+      model: "jev-1.13.0",
+      answers: {
+        next: { type: "choice", choice: pick, probabilities: { [pick]: 0.97 }, confidence: 0.97 },
+        reached: { type: "noul", noul: pick === "done" ? 0.9 : 0.1 },
+      },
+      usage: { input_tokens: 100, output_tokens: 10 },
+    };
+    return new Response(JSON.stringify(body), { status: 200 });
+  };
+  return { access: typesafeProvider(() => ({ state: "ok", key: JEV_TEST_KEY }), fetchImpl)(), seen };
+}
+
 const CONNECTOR_BASE = "https://deckhand.example.com";
 
 before(async () => {
@@ -132,10 +164,11 @@ before(async () => {
     engine,
     apps,
     config,
-    audit: { record: () => {} } as never,
+    audit: { record: (e: Omit<AuditEntry, "ts">) => void audited.push(e) } as never,
     auth: new TokenAuthenticator(tokens),
     pinGate: createPinGate(engine, "test-secret"),
     connector: { store: oauthStore, pairing: new PairingStore(), baseUrl: CONNECTOR_BASE },
+    jev: () => jevAccess,
   });
   server = createServer(app);
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
@@ -1262,6 +1295,8 @@ describe("agent-driven testing tools (describe/ui + test runs)", () => {
   });
 
   it("gives the agent no model advice in any output it reads", async () => {
+    // `navigate` runs a decision model on the server; that is deckhand's own loop, and this still
+    // holds for it: nothing tells the CALLER which model to use or to hand its work away.
     // Deckhand used to ask for the drive loop to be handed to a cheap fast model. Measured:
     // deckhand answers in well under a second (ui 0.43-0.69s, describe 0.03-0.59s), so it was
     // never the slow part — and a delegated five-step run took 583s over 66 tool calls, then
@@ -1295,6 +1330,8 @@ describe("agent-driven testing tools (describe/ui + test runs)", () => {
     ]);
     payloads.push(["finish_test_run", parse(await admin.callTool({ name: "finish_test_run", arguments: { previewId, status: "passed" } }))]);
     payloads.push(["restart_preview", parse(await admin.callTool({ name: "restart_preview", arguments: { previewId } }))]);
+    jevAccess = scriptedJev().access;
+    payloads.push(["navigate", parse(await admin.callTool({ name: "navigate", arguments: { previewId, deviceId, goal: "Get past the intro" } }))]);
 
     for (const [name, payload] of payloads) {
       const text = JSON.stringify(payload);
@@ -1617,5 +1654,50 @@ describe("agent-driven testing tools (describe/ui + test runs)", () => {
     assert.equal(logs.ok, false);
     assert.equal((logs.error as { code: string }).code, "unknown_preview");
     await c.close();
+  });
+});
+
+describe("navigate (server-side drive loop)", () => {
+  const TYPED = "typed-value-must-not-leak-5d0e";
+
+  it("says how the operator turns it on when no TypeSafe key is configured", async () => {
+    const admin = await client(ADMIN);
+    const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
+    await waitReadyByApp(admin, "app-local");
+    jevAccess = { ok: false, code: "navigate_disabled", message: "navigate is off: no TypeSafe API key is configured", hint: "`deckhand secret set typesafe`" };
+    const r = parse(await admin.callTool({ name: "navigate", arguments: { previewId: started.previewId, deviceId: "ios-0", goal: "Open About" } }));
+    assert.equal(r.ok, false);
+    const err = r.error as { code: string; hint: string };
+    assert.equal(err.code, "navigate_disabled");
+    assert.match(err.hint, /deckhand secret set typesafe/);
+    await admin.close();
+  });
+
+  it("drives the preview to done and keeps the key and typed values out of the result and the audit", async () => {
+    const admin = await client(ADMIN);
+    const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
+    await waitReadyByApp(admin, "app-local");
+    const { access, seen } = scriptedJev();
+    jevAccess = access;
+    audited.length = 0;
+    simdeckActions.length = 0;
+    const raw = await admin.callTool({
+      name: "navigate",
+      arguments: { previewId: started.previewId, deviceId: "ios-0", goal: "Get past the intro", text: { password: TYPED, email: TYPED } },
+    });
+    const r = parse(raw);
+    assert.equal(r.ok, true);
+    assert.equal(r.outcome, "done");
+    assert.equal((r.steps as unknown[]).length, 2);
+    assert.deepEqual(simdeckActions, [{ type: "tapElement", selector: { label: "Continue" } }], "the chosen tap reached the device");
+    assert.match(String(r.nextStep), /assert or waitFor/);
+    const out = JSON.stringify(raw);
+    assert.ok(!out.includes(JEV_TEST_KEY) && !out.includes(TYPED), "neither the key nor a typed value comes back to the caller");
+    const entry = audited.find((e) => e.tool === "navigate");
+    assert.ok(entry, "navigate is audited");
+    assert.ok(!JSON.stringify(entry).includes(TYPED), "the audit records which names were supplied, not their values");
+    assert.equal(seen.length, 2);
+    assert.ok(!seen.some((b) => b.includes(TYPED)), "a typed value never goes to TypeSafe");
+    await admin.close();
   });
 });

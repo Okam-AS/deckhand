@@ -141,6 +141,10 @@ export function writeApps(apps: App[]): void {
   atomicWrite(paths.apps(), body, 0o644);
 }
 
+export function writeTypesafeKey(key: string): void {
+  atomicWrite(paths.typesafeKey(), `${key}\n`, 0o600);
+}
+
 export function writeSecretEnv(appId: string, key: string, value: string): void {
   let env: Record<string, string> = {};
   try {

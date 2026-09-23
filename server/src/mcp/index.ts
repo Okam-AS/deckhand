@@ -9,6 +9,7 @@ import type { PreviewEngine } from "../engine/preview.ts";
 import type { AuditLog } from "../audit.ts";
 import type { SetupStore } from "../setup/setupStore.ts";
 import { serverInfo } from "../meta.ts";
+import type { JevProvider } from "../navigate/jev.ts";
 
 export interface McpRouterDeps {
   engine: PreviewEngine;
@@ -22,6 +23,7 @@ export interface McpRouterDeps {
   oauth?: OAuthStore;
   /** Public origin, for the `WWW-Authenticate` pointer that starts the OAuth flow. */
   baseUrl?: string;
+  jev?: JevProvider;
 }
 
 /**
@@ -85,6 +87,7 @@ export function createMcpRouter(deps: McpRouterDeps): express.Router {
       audit: deps.audit,
       persistApps: deps.persistApps,
       setup: deps.setup,
+      jev: deps.jev,
     });
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // stateless
