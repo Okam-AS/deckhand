@@ -10,6 +10,7 @@ export interface LiveShareClientOptions {
   pid: number;
   log: (line: string) => void;
   fetchImpl?: typeof fetch;
+  closeWaitMs?: number;
 }
 
 /**
@@ -64,10 +65,12 @@ export class LiveShareClient {
     return body.url;
   }
 
-  /** Revoke the share. Waits for an open still in flight, so a share can never outlive the run. */
+  /** Revoke the share. An open still in flight gets a bounded wait; if it lands later it revokes itself, and the server drops it once this pid is gone. */
   async close(): Promise<void> {
     this.closed = true;
-    if (!this.shareId && this.opening) await this.opening.catch(() => null);
+    if (!this.shareId && this.opening) {
+      await Promise.race([this.opening.catch(() => null), new Promise((r) => setTimeout(r, this.o.closeWaitMs ?? CLOSE_TIMEOUT_MS))]);
+    }
     const id = this.shareId;
     if (!id) return;
     this.shareId = null;

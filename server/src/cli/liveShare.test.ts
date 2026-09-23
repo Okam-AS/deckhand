@@ -2,14 +2,14 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { LiveShareClient, LIVE_URL_PREFIX } from "./liveShare.ts";
 
-function client(fetchImpl: typeof fetch, token: string | null = "tok") {
+function client(fetchImpl: typeof fetch, token: string | null = "tok", closeWaitMs?: number) {
   const lines: string[] = [];
   const calls: string[] = [];
   const wrapped = (async (url: string | URL, init?: RequestInit) => {
     calls.push(`${init?.method} ${String(url).replace(/^http:\/\/127\.0\.0\.1:7777/, "")}`);
     return fetchImpl(url, init);
   }) as typeof fetch;
-  const c = new LiveShareClient({ port: 7777, token, appId: "pos", pid: 42, log: (l) => lines.push(l), fetchImpl: wrapped });
+  const c = new LiveShareClient({ port: 7777, token, appId: "pos", pid: 42, log: (l) => lines.push(l), fetchImpl: wrapped, closeWaitMs });
   return { c, lines, calls };
 }
 
@@ -63,5 +63,13 @@ describe("LiveShareClient", () => {
     await closing;
     assert.deepEqual(lines, []);
     assert.deepEqual(calls, ["POST /admin/live-shares", "DELETE /admin/live-shares/s1"]);
+  });
+
+  it("close does not hang on an open that never answers", async () => {
+    const { c } = client(() => new Promise<Response>(() => {}), "tok", 20);
+    void c.open("U1");
+    const started = Date.now();
+    await c.close();
+    assert.ok(Date.now() - started < 1000);
   });
 });
