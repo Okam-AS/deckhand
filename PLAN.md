@@ -307,7 +307,8 @@ measurement priced:
   emulator unless the caller passes one) and element ids, which are often English where labels
   are not.
 - **Size.** `state` plus the Choice is kept under jev-1.13's 32k-token limit for state and the
-  longest question, estimated pessimistically at three characters a token; over it, screen lines
+  longest question, estimated at two and a half characters a token — three undercounted the bill
+  by ~7% on Norwegian labels, and every step's trace carries both the estimate and the tokens TypeSafe billed; over it, screen lines
   and the options naming them are dropped from the bottom and `stateTruncated` says so.
 
 `describe` is the slow part once the round trips are gone, and it is SimDeck's capture, not the

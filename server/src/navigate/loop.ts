@@ -95,8 +95,8 @@ const DONE_CORROBORATED = { confidence: 0.6, reached: 0.75 };
 const FINAL_SCREEN_LINES = 80;
 /** jev-1.13: 32k tokens for `state` plus the longest question. Kept under it with a margin. */
 export const TOKEN_BUDGET = 28_000;
-/** Deliberately pessimistic: labels in Norwegian or German tokenise worse than English prose. */
-const CHARS_PER_TOKEN = 3;
+/** Checked against TypeSafe's billed input_tokens (live only, no test can): on large Norwegian screens the bill ran ~7% ABOVE chars/3, ~11% below chars/2.5. */
+const CHARS_PER_TOKEN = 2.5;
 const SETTLE_TIMEOUT_MS = 4_000;
 const MAX_SCREEN_CHANGES = 2;
 const STILL_RATIO = 0.002;
