@@ -69,7 +69,9 @@ export class LiveShareClient {
   async close(): Promise<void> {
     this.closed = true;
     if (!this.shareId && this.opening) {
-      await Promise.race([this.opening.catch(() => null), new Promise((r) => setTimeout(r, this.o.closeWaitMs ?? CLOSE_TIMEOUT_MS))]);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([this.opening.catch(() => null), new Promise((r) => (timer = setTimeout(r, this.o.closeWaitMs ?? CLOSE_TIMEOUT_MS)))]);
+      clearTimeout(timer);
     }
     const id = this.shareId;
     if (!id) return;
