@@ -1738,17 +1738,29 @@ describe("navigate (server-side drive loop)", () => {
     await admin.close();
   });
 
-  it("says how the operator turns it on when no TypeSafe key is configured", async () => {
+  it("does not exist without a TypeSafe key: no tool, and no word of it anywhere an agent reads", async () => {
     const admin = await client(ADMIN);
-    const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
-    await waitReadyByApp(admin, "app-local");
-    jevAccess = { ok: false, code: "navigate_disabled", message: "navigate is off: no TypeSafe API key is configured", hint: "`deckhand secret set typesafe`" };
-    const r = parse(await admin.callTool({ name: "navigate", arguments: { previewId: started.previewId, deviceId: "ios-0", goal: "Open About" } }));
-    assert.equal(r.ok, false);
-    const err = r.error as { code: string; hint: string };
-    assert.equal(err.code, "navigate_disabled");
-    assert.match(err.hint, /deckhand secret set typesafe/);
-    await admin.close();
+    try {
+      jevAccess = { ok: false, code: "navigate_disabled", message: "navigate is off: no TypeSafe API key is configured", hint: "`deckhand secret set typesafe`" };
+      const listed = await admin.listTools();
+      assert.ok(!listed.tools.some((t) => t.name === "navigate"), "navigate is not listed");
+      const read = JSON.stringify([listed, await admin.callTool({ name: "get_guide", arguments: {} }), await admin.callTool({ name: "list_apps", arguments: {} })]);
+      assert.ok(!/navigate|typesafe|jev\b/i.test(read), "no tool description, guide or nextStep mentions it");
+      const called = await admin.callTool({ name: "navigate", arguments: { previewId: "x", deviceId: "ios-0", goal: "Open About" } });
+      assert.equal(called.isError, true, "calling it is an unknown-tool error, as before navigate existed");
+    } finally {
+      await admin.close();
+    }
+  });
+
+  it("is listed once a key is configured", async () => {
+    const admin = await client(ADMIN);
+    try {
+      jevAccess = scriptedJev().access;
+      assert.ok((await admin.listTools()).tools.some((t) => t.name === "navigate"));
+    } finally {
+      await admin.close();
+    }
   });
 
   it("drives the preview to done and keeps the key and typed values out of the result and the audit", async () => {

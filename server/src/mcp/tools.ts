@@ -1111,7 +1111,10 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       }),
   );
 
-  server.registerTool(
+  // Registered only while a TypeSafe key is readable, read per MCP request (a fresh server each time): with no key, deckhand is what it was without navigate.
+  const access = ctx.jev?.();
+  const decider = access?.ok ? access.client : null;
+  if (decider) server.registerTool(
     "navigate",
     {
       title: "Navigate toward a goal (server-side loop)",
@@ -1155,9 +1158,6 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             `Only the operator can enable it, on the deckhand machine: \`deckhand navigate enable ${app.id}\`. That sends this app's screen labels to TypeSafe, a third party, so it is for apps showing test data only. Until then, drive with \`describe\` + \`ui\`.`,
           );
         }
-        const access = ctx.jev?.() ?? null;
-        if (!access) return fail("navigate_disabled", "navigate is not available on this deckhand server", "Drive with `describe` + `ui` instead.");
-        if (!access.ok) return fail(access.code, access.message, access.hint);
         const locale = args.uiLanguage ?? (await engine.uiLanguage(args.previewId, args.deviceId));
         const result = await navigate(
           { goal: args.goal, maxSteps: args.maxSteps ?? 10, minConfidence: args.minConfidence, text: args.text ?? {}, locale },
@@ -1165,7 +1165,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             describe: () => engine.describe(args.previewId, args.deviceId, { source: "auto" }),
             act: (a) => engine.ui(args.previewId, args.deviceId, a),
             frame: () => engine.screenshot(args.previewId, args.deviceId),
-            jev: access.client,
+            jev: decider,
             onEgress: (e) => {
               if (apps.find((a) => a.id === app.id)?.navigateEgress !== true) throw new Error(`navigate was disabled for app "${app.id}" while it ran`);
               audit.record({

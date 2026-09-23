@@ -311,12 +311,6 @@ async function checkGitHub(config: Config): Promise<Check> {
  * framework (Nuxt/Next/static) with no `webHost` configured is a WARNING, not a
  * failure: the preview still works on loopback, it just isn't publicly shareable.
  */
-/** Informational: whether app content can leave this machine through `navigate`, and whose. A warning while it can. */
-export function checkNavigateEgress(apps: App[], key: KeyLookup): Check {
-  const s = egressStatus(apps, key);
-  return { name: "navigate egress", ok: true, ...(s.sending ? { warn: true } : {}), detail: s.detail };
-}
-
 function checkWebHost(config: Config, apps: App[]): Check {
   const webApps = apps.filter((a) => a.type === "web");
   if (webApps.length === 0) return { name: "web host", ok: true, skipped: true, detail: "no web apps" };
@@ -329,6 +323,17 @@ function checkWebHost(config: Config, apps: App[]): Check {
     warn: true,
     detail: `${subdomain.length} web app(s) (Nuxt/Next/static) need subdomain hosting but no webHost is set — previews work on loopback only. Set webHost (+ a DNS route/ingress) to share them publicly.`,
   };
+}
+
+/**
+ * Whether app content can leave this machine through `navigate`, and whose; a warning while it can.
+ * No line at all without a key file: an install that never set one is exactly what it was before navigate.
+ */
+export function checkNavigateEgress(apps: App[], key: KeyLookup): Check | null {
+  if (key.state === "missing") return null;
+  if (key.state === "error") return { name: "navigate egress", ok: true, warn: true, detail: `navigate is off: ${key.message}` };
+  const s = egressStatus(apps, key);
+  return { name: "navigate egress", ok: true, ...(s.sending ? { warn: true } : {}), detail: s.detail };
 }
 
 /**
@@ -654,7 +659,8 @@ export async function runDoctor(opts: { smoke?: boolean } = {}): Promise<{ check
     checks.push(await checkServices());
     checks.push(await checkGitHub(config));
     checks.push(checkWebHost(config, apps));
-    checks.push(checkNavigateEgress(apps, lookupTypesafeKey()));
+    const egress = checkNavigateEgress(apps, lookupTypesafeKey());
+    if (egress) checks.push(egress);
     checks.push(await checkServerFreshness(config));
     checks.push(await checkPublicUrl(config));
     if (opts.smoke) {

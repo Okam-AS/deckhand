@@ -79,17 +79,17 @@ describe("egress consent", () => {
     assert.deepEqual(egressApps([app("a"), app("b", true), app("c")]), ["b"]);
   });
 
-  it("puts a doctor line on every install, a warning only while screens can leave the machine", () => {
-    const off = checkNavigateEgress([app("a")], { state: "ok", key: "k" });
+  it("prints no doctor line without a key file, and a warning only while screens can leave the machine", () => {
+    assert.equal(checkNavigateEgress([app("b", true)], { state: "missing" }), null, "no key: doctor reads as it did before navigate");
+    const off = checkNavigateEgress([app("a")], { state: "ok", key: "k" })!;
     assert.equal(off.name, "navigate egress");
     assert.ok(off.ok && !off.warn);
     assert.match(off.detail!, /off for every app/);
-    const noKey = checkNavigateEgress([app("b", true)], { state: "missing" });
-    assert.ok(!noKey.warn);
-    assert.match(noKey.detail!, /b.*no TypeSafe key/);
-    const on = checkNavigateEgress([app("a"), app("b", true)], { state: "ok", key: "k" });
+    const on = checkNavigateEgress([app("a"), app("b", true)], { state: "ok", key: "k" })!;
     assert.ok(on.ok && on.warn);
     assert.match(on.detail!, /api\.typesafe\.ai.*for: b\b/);
+    const unreadable = checkNavigateEgress([app("b", true)], { state: "error", message: "typesafe.key is empty" })!;
+    assert.ok(unreadable.warn && /navigate is off/.test(unreadable.detail!), "a key file that exists but cannot be read is said out loud");
     assert.equal(egressStatus([app("b", true)], { state: "error", message: "x" }).sending, false, "an unreadable key sends nothing");
   });
 });

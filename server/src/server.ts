@@ -70,7 +70,7 @@ export interface AppDeps {
   connector?: { store: OAuthStore; pairing: PairingStore; baseUrl: string };
   /** `deckhand verify --share`: the loopback admin route that opens and revokes a run's share. */
   liveShares?: { registry: LiveShareRegistry; baseUrl: string };
-  /** The `navigate` decider. Absent → the tool reports itself disabled. */
+  /** The `navigate` decider. Absent, or no key readable → the tool is not registered at all. */
   jev?: JevProvider;
 }
 
