@@ -53,6 +53,7 @@ export type UiAction =
   | { type: "sleep"; ms: number }
   | { type: "scrollUntilVisible"; selector: Selector }
   | { type: "toggleAppearance" }
+  | { type: "rotate"; direction: "left" | "right" }
   | { type: "waitFor"; selector: Selector; timeoutMs?: number }
   | { type: "waitForNot"; selector: Selector; timeoutMs?: number }
   | { type: "assert"; selector: Selector }
@@ -217,6 +218,8 @@ export class SimDeckControl {
         return { action: "scrollUntilVisible", selector: a.selector };
       case "toggleAppearance":
         return { action: "toggleAppearance" };
+      case "rotate":
+        return { action: a.direction === "left" ? "rotateLeft" : "rotateRight" };
       case "waitFor":
         return { action: "waitFor", selector: a.selector, ...(a.timeoutMs != null ? { timeoutMs: a.timeoutMs } : {}) };
       case "waitForNot":

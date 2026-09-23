@@ -189,6 +189,8 @@ describe("SimDeckControl.action", () => {
       [{ type: "sleep", ms: 250 }, { action: "sleep", ms: 250 }],
       [{ type: "scrollUntilVisible", selector: { id: "row-9" } }, { action: "scrollUntilVisible", selector: { id: "row-9" } }],
       [{ type: "toggleAppearance" }, { action: "toggleAppearance" }],
+      [{ type: "rotate", direction: "left" }, { action: "rotateLeft" }],
+      [{ type: "rotate", direction: "right" }, { action: "rotateRight" }],
       [{ type: "assertNot", selector: { text: "Spinner" } }, { action: "assertNot", selector: { text: "Spinner" } }],
       [{ type: "waitForNot", selector: { text: "Spinner" } }, { action: "waitForNot", selector: { text: "Spinner" } }],
       [

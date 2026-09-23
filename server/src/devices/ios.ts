@@ -215,8 +215,13 @@ export class Simctl {
     return (await this.listDevices()).some((d) => d.udid === udid && d.state === "Booted");
   }
 
+  /** Best-effort: an app that is not installed is already uninstalled. */
+  async uninstall(udid: string, bundleId: string): Promise<void> {
+    await this.run(["uninstall", udid, bundleId], { timeoutMs: 60_000 });
+  }
+
   async install(udid: string, appPath: string): Promise<void> {
-    const res = await this.run(["install", udid, appPath]);
+    const res = await this.run(["install", udid, appPath], { timeoutMs: 5 * 60_000 });
     if (res.code !== 0) throw new SimctlError(`simctl install failed: ${res.stderr.trim().slice(0, 200)}`);
   }
 
@@ -257,6 +262,11 @@ export class Simctl {
   async launch(udid: string, bundleId: string): Promise<void> {
     const res = await this.run(["launch", udid, bundleId]);
     if (res.code !== 0) throw new SimctlError(`simctl launch failed: ${res.stderr.trim().slice(0, 200)}`);
+  }
+
+  /** Best-effort: an app that is not running is already terminated. */
+  async terminate(udid: string, bundleId: string): Promise<void> {
+    await this.run(["terminate", udid, bundleId], { timeoutMs: 30_000 });
   }
 
   async openUrl(udid: string, url: string): Promise<void> {

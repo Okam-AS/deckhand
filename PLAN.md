@@ -797,6 +797,30 @@ change eases in/out — nothing snaps.
 - `deckhand serve` — run the server (what launchd invokes).
 - `deckhand token add|rm|list|url`, `deckhand app add|list`,
   `deckhand env set <appId> KEY=VALUE`.
+- `deckhand verify <appId> --scenario FILE [--ref REF | --path DIR] [--compare REF|DIR]` —
+  the headless check for an unattended agent: no MCP, no share link, no viewer. It runs in its
+  own process against the engine's parts (`buildPlan`, `MetroManager`, `WorktreeManager`,
+  SimDeck control) and writes `<name>.png`, `<name>.ax.json`, `result.json` and, with
+  `--compare`, `<name>.diff.png` + `compare.json`. Exit 0 passed, 1 a step or the
+  `--max-diff-ratio` budget failed, 2 build/device/launch (including a screen that never
+  settles and `--timeout`), 3 bad arguments or scenario. The scenario (`verify/scenario.ts`,
+  JSON or YAML) is ordered `openUrl`/`tap`/`type`/`scroll`/`scrollUntilVisible`/`waitFor`/
+  `assert`/`sleep`/`screenshot` steps plus a device shape (default iPad 9th generation, iOS
+  26.5, landscape) and Metro env; typed text is recorded by length only. `assert` means on screen;
+  `{ present: … }` means anywhere in the tree. Taps and scrolls are placed by verify, not by
+  SimDeck: SimDeck injects touches in the unrotated screen's coordinates and does not rotate the
+  frames it matches, so a landscape selector tap lands elsewhere. SpringBoard's own elements (the
+  «Open in …?» prompt a fresh simulator shows once per URL scheme, which `openUrl` confirms)
+  already come in unrotated points (`verify/geometry.ts`). It shares nothing
+  mutable with the server: its simulators are `verify-…` (outside the `deckhand-` reaper and
+  pool), its checkouts live in `~/.deckhand/verify/worktrees` (outside the server's prune),
+  and its builds and Metro carry `DECKHAND_VERIFY=<pid>`, which the server's boot sweep skips
+  and the next verify run reaps once that pid is gone. Devices and checkouts are held by
+  atomic `mkdir` locks. A native build is cached under `~/.deckhand/verify/builds` keyed by
+  the project's own `@expo/fingerprint`, Xcode version and runtime; without a fingerprint the
+  build is made fresh and not cached. A JS-only change reinstalls the cached `.app` and only
+  swaps Metro. Expo and react-native iOS apps only; the react-native Release build embeds its
+  JS, so it is never cached.
 
 ## 11. Security model (recap, enforced in code)
 

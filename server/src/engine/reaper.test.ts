@@ -2,7 +2,7 @@ import { fakeSimctl, fakeAndroid } from "../test-support/fakes.ts";
 import { execFile, spawn } from "node:child_process";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { Reaper, makeKiller, orphanSims, orphanAvds, SIM_PREFIX, POOL_SIM_PREFIX, POOL_AVD_PREFIX, type ReaperDeps } from "./reaper.ts";
+import { Reaper, makeKiller, orphanSims, orphanAvds, SIM_PREFIX, POOL_SIM_PREFIX, POOL_AVD_PREFIX, type ReaperDeps, markedPidsIn } from "./reaper.ts";
 import { AVD_PREFIX } from "../devices/android.ts";
 import type { SimDevice } from "../devices/ios.ts";
 
@@ -347,5 +347,18 @@ describe("the default killer", () => {
     } finally {
       child.kill("SIGKILL");
     }
+  });
+});
+
+describe("markedPidsIn", () => {
+  it("finds the server's marked processes and leaves a verify run's alone", () => {
+    const ps = [
+      "  101 node metro.js DECKHAND_METRO=1 HOME=/u",
+      "  102 node metro.js DECKHAND_METRO=1 DECKHAND_VERIFY=4242 HOME=/u",
+      "  103 xcodebuild DECKHAND_BUILD=1",
+      "  104 node expo start HOME=/u",
+    ].join("\n");
+    assert.deepEqual(markedPidsIn(ps, "DECKHAND_METRO"), [101]);
+    assert.deepEqual(markedPidsIn(ps, "DECKHAND_BUILD"), [103]);
   });
 });

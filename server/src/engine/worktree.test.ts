@@ -289,6 +289,22 @@ describe("WorktreeManager.prepareRef", () => {
     assert.equal(existsSync(paths.worktree(keep)), true, "a live checkout must survive");
   });
 
+  it("keeps a separate root's checkouts out of the server's prune, and the server's out of its own", async () => {
+    const root = join(paths.home(), "verify-root");
+    const git: GitRunner = async () => ({ stdout: "", stderr: "", code: 0 });
+    const verify = new WorktreeManager({ tokenResolver: async () => "tok", git, root });
+    const wt = await verify.createWorktree(app, "verify", parseRefSpec({ ref: "main" }));
+    assert.equal(wt.path, join(root, `dh-${worktreeKey(app.id, parseRefSpec({ ref: "main" }))}`));
+    mkdirSync(wt.path, { recursive: true });
+    mkdirSync(paths.worktree("my-app-server-deadbeef"), { recursive: true });
+    const server = new WorktreeManager({ tokenResolver: async () => "tok", git });
+    await server.pruneWorktrees(new Set(), 0);
+    assert.ok(existsSync(wt.path), "the server never reclaims a verify checkout");
+    mkdirSync(paths.worktree("my-app-server2-deadbeef"), { recursive: true });
+    await verify.pruneWorktrees(new Set(), 0);
+    assert.ok(existsSync(paths.worktree("my-app-server2-deadbeef")), "verify never reclaims a server checkout");
+  });
+
   it("keeps a recently used checkout even when no preview is live (warm-cache grace)", async () => {
     // Boot is the case that matters: the live set is empty by definition there,
     // so an ungraced prune deleted every warm checkout on the machine.
