@@ -97,11 +97,31 @@ describe("reading a screen", () => {
       roots: [{ type: "ListView", frame: { x: 0, y: 0, width: 1080, height: 2400 }, children: [{ type: "LinearLayout", clickable: false, frame: { x: 0, y: 300, width: 1080, height: 120 }, children: [{ type: "TextView", text: "Settings", AXIdentifier: "com.x:id/title", frame: { x: 40, y: 320, width: 300, height: 60 } }] }] }],
     });
     assert.deepEqual(android.lines, ['e1 Item "Settings"']);
+    const recycler = readScreen({
+      roots: [
+        {
+          type: "RecyclerView",
+          frame: { x: 0, y: 0, width: 1080, height: 2400 },
+          children: [
+            { type: "TextView", text: "Display & touch", AXIdentifier: "android:id/title", frame: { x: 40, y: 200, width: 600, height: 80 } },
+            { type: "LinearLayout", clickable: true, frame: { x: 0, y: 300, width: 1080, height: 120 }, children: [{ type: "TextView", text: "Brightness", frame: { x: 40, y: 320, width: 300, height: 60 } }] },
+          ],
+        },
+      ],
+    });
+    assert.deepEqual(recycler.lines, ['e1 TextView "Display & touch"', 'e2 Item "Brightness"'], "a list whose rows click for themselves keeps its titles as titles");
   });
 
   it("takes a short text inside a header view for the title, on iOS too", () => {
     const s = readScreen({ roots: [{ role: "Application", frame: VP, children: [{ role: "StaticText", label: "Kate Bell", id: "ContactCardHeaderView", frame: { x: 115, y: 393, width: 162, height: 48 } }] }] });
     assert.equal(s.elements[0]!.heading, true);
+    const wide = readScreen({ roots: [{ role: "Application", frame: VP, children: [{ role: "StaticText", label: "Daniel Higgins Jr.", id: "ContactCardHeaderView", frame: { x: 16, y: 358, width: 380, height: 66 } }] }] });
+    assert.deepEqual(wide.lines, ['e1 StaticText "Daniel Higgins Jr."'], "a full-width header is a title, not a list row");
+  });
+
+  it("reads an Android screen's title off the collapsing toolbar that carries it", () => {
+    const s = readScreen({ roots: [{ type: "FrameLayout", frame: { x: 0, y: 0, width: 1080, height: 2400 }, children: [{ type: "FrameLayout", title: "Sound & vibration", AXIdentifier: "com.android.settings:id/collapsing_toolbar", frame: { x: 0, y: 100, width: 1080, height: 300 } }] }] });
+    assert.deepEqual(s.lines, ['e1 FrameLayout "Sound & vibration"']);
   });
 
   it("does not take an iOS toolbar group for the screen's title", () => {

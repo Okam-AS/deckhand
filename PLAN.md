@@ -964,11 +964,12 @@ change eases in/out — nothing snaps.
      effect on the next call because apps.yaml is watched.
    - **Minimisation** (`navigate/screen.ts`). Sent: the goal, the UI language, the action
      history, and per element its role, its label clipped to 60 characters and its id — for
-     interactive elements, plus headings of 40 characters or fewer. Never sent: any field's value
-     (on Android the `text` of an EditText IS its value), a secure field's label or value, static
-     text, or a long heading. Emails and every run of six or more digits (phone, national id,
-     card, account) are masked in everything sent, the goal included. Values the caller supplies
-     in `text` are typed on the device; only their names are sent.
+     interactive elements — which include list rows iOS reports as static text and Android as
+     unclickable, since they are what a user taps — plus headings of 40 characters or fewer. Never
+     sent: any field's value (on Android the `text` of an EditText IS its value), a secure field's label or value, static
+     text, or a long heading. Emails, every run of six or more digits (phone, national id,
+     card, account) and letter-and-digit codes of eight or more (serials, order ids) are masked in
+     everything sent, the goal included. Values the caller supplies in `text` are typed on the device; only their names are sent.
      → `navigate/egress.test.ts` "never carries a field value, a secure field, long static text or
      a masked pattern in the request body"
    - **Screen text is untrusted.** It can steer the model, so what the model can pick is closed:

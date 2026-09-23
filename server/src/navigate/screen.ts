@@ -60,7 +60,8 @@ const SECURE_ROLE = /^securetextfield$/i;
 const HEADING_ROLE = /^(heading|header)$/i;
 /** Android has no heading role, and iOS headers are often plain text: a short text counts as a title inside a header, toolbar or app bar. */
 const TITLE_SCOPE_ID = /toolbar|action_bar|app_bar|collapsing|header|title/i;
-const TEXT_ROLE = /^(statictext|textview|text)$/i;
+/** iOS groups carry the toolbar's own name ("Toolbar"); an Android CollapsingToolbarLayout carries the screen's title. */
+const NOT_A_TITLE_ROLE = /^(group|toolbar|application|window)$/i;
 const ROW_ROLE = /^(statictext|genericelement)$/i;
 /** Android lists take the click themselves, so uiautomator reports their rows as not clickable. */
 const LIST_ROLE = /^(listview|recyclerview|gridview|expandablelistview)$/i;
@@ -160,7 +161,7 @@ export function readScreen(tree: unknown, shot?: { width: number; height: number
     const raw: Raw = { node: n, role, frame: frameOf(n), interactive, textInput, secure, ownText, value, id, insideInteractive, titleScope: inTitle, children: [] };
     into.push(raw);
     const kids = n.children;
-    if (kids && typeof kids === "object") build(kids, insideInteractive || interactive, inTitle, raw.children, LIST_ROLE.test(role));
+    if (kids && typeof kids === "object") build(kids, insideInteractive || interactive, inTitle, raw.children, LIST_ROLE.test(role) && !anyClickable(kids));
   };
   build(roots(tree), false, false, top);
 
@@ -225,6 +226,14 @@ export function pngSize(buf: Buffer): { width: number; height: number } | null {
   return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
 }
 
+/** A list whose rows report no click of their own takes the click itself (a ListView popup); one with clickable rows does not. */
+function anyClickable(node: unknown): boolean {
+  if (!node || typeof node !== "object") return false;
+  if (Array.isArray(node)) return node.some(anyClickable);
+  const n = node as Record<string, unknown>;
+  return n.clickable === true || anyClickable(n.children);
+}
+
 function descendantText(r: Raw): string | undefined {
   const out: string[] = [];
   const walk = (c: Raw): void => {
@@ -238,14 +247,14 @@ function descendantText(r: Raw): string | undefined {
 
 /** SwiftUI lists expose a tappable row as static text: full width, row height, a short label. */
 function isListRow(r: Raw, viewport: Rect | null): boolean {
-  if (!ROW_ROLE.test(r.role) || r.insideInteractive || !r.frame || !viewport || !r.ownText || r.ownText.length > LABEL_MAX) return false;
+  if (!ROW_ROLE.test(r.role) || r.insideInteractive || r.titleScope || !r.frame || !viewport || !r.ownText || r.ownText.length > LABEL_MAX) return false;
   const h = r.frame.height / viewport.height;
   return r.frame.width >= viewport.width * 0.85 && h >= 0.045 && h <= 0.15;
 }
 
 function isHeading(r: Raw, label: string): boolean {
   if (label.length > TITLE_MAX) return false;
-  return HEADING_ROLE.test(r.role) || r.node.heading === true || (r.titleScope && TEXT_ROLE.test(r.role));
+  return HEADING_ROLE.test(r.role) || r.node.heading === true || (r.titleScope && !NOT_A_TITLE_ROLE.test(r.role));
 }
 
 /** What the decider may read about one element: role, a masked label, a masked id. Never a value. */
