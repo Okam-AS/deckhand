@@ -14,7 +14,7 @@ import { SIM_PREFIX } from "../engine/reaper.ts";
 import { detectWebFrameworkFromDir, webHostingMode } from "../engine/detect.ts";
 import { repoRoot } from "../version.ts";
 import { lookupTypesafeKey, type KeyLookup } from "../navigate/secrets.ts";
-import { egressStatus } from "../navigate/egress.ts";
+import { EGRESS_HOST } from "../navigate/egress.ts";
 
 /** Helper ports for the Android smoke leg — outside the configured preview range, so a gate run cannot evict a live preview's helper. */
 const ANDROID_SMOKE_PORTS: [number, number] = [3290, 3299];
@@ -326,14 +326,13 @@ function checkWebHost(config: Config, apps: App[]): Check {
 }
 
 /**
- * Whether app content can leave this machine through `navigate`, and whose; a warning while it can.
+ * A warning while app content can leave this machine through `navigate`.
  * No line at all without a key file: an install that never set one is exactly what it was before navigate.
  */
-export function checkNavigateEgress(apps: App[], key: KeyLookup): Check | null {
+export function checkNavigateEgress(key: KeyLookup): Check | null {
   if (key.state === "missing") return null;
   if (key.state === "error") return { name: "navigate egress", ok: true, warn: true, detail: `navigate is off: ${key.message}` };
-  const s = egressStatus(apps, key);
-  return { name: "navigate egress", ok: true, ...(s.sending ? { warn: true } : {}), detail: s.detail };
+  return { name: "navigate egress", ok: true, warn: true, detail: `navigate sends screen labels from every app it drives to ${EGRESS_HOST} (a third party) — test data and test accounts only. Off: \`deckhand secret rm typesafe\`` };
 }
 
 /**
@@ -659,7 +658,7 @@ export async function runDoctor(opts: { smoke?: boolean } = {}): Promise<{ check
     checks.push(await checkServices());
     checks.push(await checkGitHub(config));
     checks.push(checkWebHost(config, apps));
-    const egress = checkNavigateEgress(apps, lookupTypesafeKey());
+    const egress = checkNavigateEgress(lookupTypesafeKey());
     if (egress) checks.push(egress);
     checks.push(await checkServerFreshness(config));
     checks.push(await checkPublicUrl(config));

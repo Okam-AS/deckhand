@@ -22,7 +22,7 @@ export function lookupTypesafeKey(env: NodeJS.ProcessEnv = process.env, file = p
     return { state: "error", message: `${file} exists but could not be read (${(e as NodeJS.ErrnoException).code ?? "error"})` };
   }
   const key = text.trim();
-  return key ? { state: "ok", key } : { state: "error", message: `${file} is empty` };
+  return key ? { state: "ok", key } : { state: "missing" };
 }
 
 export function typesafeProvider(lookup: () => KeyLookup = lookupTypesafeKey, fetchImpl?: typeof fetch): JevProvider {

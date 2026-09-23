@@ -1,5 +1,5 @@
 import { fakeMetro, fakeDevProcs, fakeSimctl, fakeWorktrees } from "../test-support/fakes.ts";
-import { describe, it, before, after, beforeEach, afterEach } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1334,15 +1334,9 @@ describe("agent-driven testing tools (describe/ui + test runs)", () => {
     payloads.push(["finish_test_run", parse(await admin.callTool({ name: "finish_test_run", arguments: { previewId, status: "passed" } }))]);
     payloads.push(["restart_preview", parse(await admin.callTool({ name: "restart_preview", arguments: { previewId } }))]);
     jevAccess = scriptedJev().access;
-    const navApp = apps.find((a) => a.id === engine.appIdFor(previewId))!;
-    navApp.navigateEgress = true;
-    try {
-      const nav = parse(await admin.callTool({ name: "navigate", arguments: { previewId, deviceId, goal: "Get past the intro" } }));
-      assert.equal(nav.ok, true, "the navigate payload read here is a real run, not a refusal");
-      payloads.push(["navigate", nav]);
-    } finally {
-      delete navApp.navigateEgress;
-    }
+    const nav = parse(await admin.callTool({ name: "navigate", arguments: { previewId, deviceId, goal: "Get past the intro" } }));
+    assert.equal(nav.ok, true, "the navigate payload read here is a real run, not a refusal");
+    payloads.push(["navigate", nav]);
 
     for (const [name, payload] of payloads) {
       const text = JSON.stringify(payload);
@@ -1670,27 +1664,6 @@ describe("agent-driven testing tools (describe/ui + test runs)", () => {
 
 describe("navigate (server-side drive loop)", () => {
   const TYPED = "typed-value-must-not-leak-5d0e";
-  const local = () => apps.find((a) => a.id === "app-local")!;
-  beforeEach(() => void (local().navigateEgress = true));
-  afterEach(() => void delete local().navigateEgress);
-
-  it("refuses an app the operator has not enabled, and says who can enable it", async () => {
-    const admin = await client(ADMIN);
-    const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
-    await waitReadyByApp(admin, "app-local");
-    delete local().navigateEgress;
-    const { access, seen } = scriptedJev();
-    jevAccess = access;
-    audited.length = 0;
-    const r = parse(await admin.callTool({ name: "navigate", arguments: { previewId: started.previewId, deviceId: "ios-0", goal: "Open About" } }));
-    assert.equal(r.ok, false);
-    const err = r.error as { code: string; hint: string };
-    assert.equal(err.code, "navigate_not_enabled");
-    assert.match(err.hint, /deckhand navigate enable app-local/);
-    assert.equal(seen.length, 0, "nothing was sent to TypeSafe");
-    assert.ok(!audited.some((e) => e.tool === "navigate:egress"));
-    await admin.close();
-  });
 
   it("audits every request that leaves the machine: app, candidate count and size, never content", async () => {
     const admin = await client(ADMIN);
@@ -1713,7 +1686,7 @@ describe("navigate (server-side drive loop)", () => {
     await admin.close();
   });
 
-  it("stops sending the moment the operator disables the app, mid-run", async () => {
+  it("stops sending the moment the key is removed, mid-run", async () => {
     const admin = await client(ADMIN);
     const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
     await waitReadyByApp(admin, "app-local");
@@ -1725,7 +1698,7 @@ describe("navigate (server-side drive loop)", () => {
             client: {
               ask: async (s, q) => {
                 const r = await access.client.ask(s, q);
-                delete local().navigateEgress;
+                jevAccess = { ok: false, code: "navigate_disabled", message: "navigate is off", hint: "deckhand secret set typesafe" };
                 return r;
               },
             },

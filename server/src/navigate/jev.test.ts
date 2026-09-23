@@ -78,9 +78,9 @@ describe("TypeSafe key lookup", () => {
     assert.deepEqual(lookupTypesafeKey({ TYPESAFE_API_KEY: KEY }, file), { state: "ok", key: KEY });
   });
 
-  it("reports an unreadable or empty key file as an error, never as 'not configured'", () => {
+  it("treats an empty key file as no key, and an unreadable one as an error", () => {
     writeFileSync(file, "  \n");
-    assert.equal(lookupTypesafeKey({}, file).state, "error");
+    assert.deepEqual(lookupTypesafeKey({}, file), { state: "missing" });
     rmSync(file, { force: true });
     mkdirSync(file);
     const found = lookupTypesafeKey({}, file);

@@ -1,10 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import type { App } from "../config.ts";
 import { checkNavigateEgress } from "../cli/doctor.ts";
 import { JevClient } from "./jev.ts";
 import { navigate } from "./loop.ts";
-import { egressApps, egressStatus } from "./egress.ts";
 
 /**
  * Everything on this screen that must never reach TypeSafe. The screen mixes both backends'
@@ -72,24 +70,14 @@ describe("what navigate sends to TypeSafe", () => {
   });
 });
 
-describe("egress consent", () => {
-  const app = (id: string, navigateEgress?: boolean): App => ({ id, path: "/x", type: "expo", defaultBranch: "main", env: {}, ...(navigateEgress ? { navigateEgress } : {}) });
-
-  it("lists only the apps the operator enabled", () => {
-    assert.deepEqual(egressApps([app("a"), app("b", true), app("c")]), ["b"]);
-  });
-
-  it("prints no doctor line without a key file, and a warning only while screens can leave the machine", () => {
-    assert.equal(checkNavigateEgress([app("b", true)], { state: "missing" }), null, "no key: doctor reads as it did before navigate");
-    const off = checkNavigateEgress([app("a")], { state: "ok", key: "k" })!;
-    assert.equal(off.name, "navigate egress");
-    assert.ok(off.ok && !off.warn);
-    assert.match(off.detail!, /off for every app/);
-    const on = checkNavigateEgress([app("a"), app("b", true)], { state: "ok", key: "k" })!;
+describe("egress in doctor", () => {
+  it("prints no doctor line without a key, and a warning while screens can leave the machine", () => {
+    assert.equal(checkNavigateEgress({ state: "missing" }), null, "no key: doctor reads as it did before navigate");
+    const on = checkNavigateEgress({ state: "ok", key: "k" })!;
+    assert.equal(on.name, "navigate egress");
     assert.ok(on.ok && on.warn);
-    assert.match(on.detail!, /api\.typesafe\.ai.*for: b\b/);
-    const unreadable = checkNavigateEgress([app("b", true)], { state: "error", message: "typesafe.key is empty" })!;
+    assert.match(on.detail!, /every app.*api\.typesafe\.ai/);
+    const unreadable = checkNavigateEgress({ state: "error", message: "typesafe.key is a directory" })!;
     assert.ok(unreadable.warn && /navigate is off/.test(unreadable.detail!), "a key file that exists but cannot be read is said out loud");
-    assert.equal(egressStatus([app("b", true)], { state: "error", message: "x" }).sending, false, "an unreadable key sends nothing");
   });
 });

@@ -75,8 +75,8 @@ PLAN describes the architecture. The invariants that bind every change:
   deckhand's own `describe` → a closed action list → one TypeSafe Jev decision → `ui`, handing
   back on low confidence, a repeated move or a disputed `done`. It picks, it never diagnoses;
   the caller still verifies. It is the one path by which app content leaves the machine for a
-  third party, so it needs a key AND `deckhand navigate enable <app>` per app — never enable it
-  on an agent's say-so, and only for apps showing test data. What is sent is minimised in
+  third party, and the key is the only opt-in: once set, every app's screens can go. Never set it
+  on an agent's say-so, and only on a machine whose apps show test data. What is sent is minimised in
   `navigate/screen.ts`; a change there is a privacy change, and `navigate/egress.test.ts` is its
   guardrail.
 - **Physical devices are OUT** on both platforms; PLAN §2 says why. **Three known gaps, so
