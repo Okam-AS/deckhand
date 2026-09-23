@@ -173,7 +173,7 @@ describe("Verifier", () => {
     assert.ok(existsSync(join(root, "fail", "failure.png")));
     const result = JSON.parse(readFileSync(join(root, "fail", "result.json"), "utf8"));
     assert.equal(result.passed, false);
-    assert.deepEqual(result.steps.map((x: { ok: boolean }) => x.ok), [false]);
+    assert.deepEqual(result.steps.map((x: { ok: boolean; kind?: string }) => [x.ok, x.kind]), [[false, "assert"]]);
   });
   it("builds fresh and caches nothing when the project's fingerprint is unavailable", async () => {
     const h = harness({ fingerprint: () => null });

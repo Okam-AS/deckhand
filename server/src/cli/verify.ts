@@ -9,14 +9,16 @@ import { runStep } from "../engine/procs.ts";
 import { buildTokenResolver } from "../github/credentials.ts";
 import { loadSecretsEnv } from "../secrets.ts";
 import { SimDeckControl } from "../testing/control.ts";
-import { parseScenario, type Scenario } from "../verify/scenario.ts";
+import { lintScenario, parseScenario, type Diagnostic, type Scenario } from "../verify/scenario.ts";
 import { Verifier, type VerifySource } from "../verify/run.ts";
 import { parseEnvAssignment } from "./configWrite.ts";
 
 export const VERIFY_USAGE = `deckhand verify <appId> --scenario <file.yaml|json> [--ref <git ref> | --path <dir>]
                 [--compare <git ref | /abs/dir>] [--max-diff-ratio 0..1] [--out <dir>] [--env KEY=VALUE]...
                 [--device <model>] [--runtime <iOS x.y>] [--orientation landscape|portrait] [--timeout <seconds>]
-exit: 0 passed, 1 a step or the diff budget failed, 2 build/device/launch, 3 bad arguments or scenario`;
+       deckhand verify --lint --scenario <file.yaml|json>     validate only; JSON diagnostics on stdout
+exit: 0 passed, 1 a step or the diff budget failed, 2 build/device/launch, 3 bad arguments or scenario
+scenario schema: docs/verify-scenarios.md`;
 
 export const DEFAULT_TIMEOUT_S = 30 * 60;
 
@@ -31,6 +33,7 @@ export interface VerifyArgs {
   compare?: string;
   out?: string;
   env: string[];
+  lint?: boolean;
   device?: string;
   runtime?: string;
   orientation?: string;
@@ -50,6 +53,10 @@ export function parseVerifyArgs(argv: string[]): VerifyArgs {
       continue;
     }
     const key = tok.slice(2);
+    if (key === "lint") {
+      a.lint = true;
+      continue;
+    }
     if (!valued.has(key)) throw new VerifyInputError(`unknown flag --${key}`);
     const v = argv[++i];
     if (v == null) throw new VerifyInputError(`--${key} needs a value`);
@@ -128,7 +135,36 @@ function prepare(argv: string[]): Prepared {
   return { config, app, scenario, source, compare: args.compare ? toSource(args.compare) : undefined, env, outDir, timeoutS, maxDiffRatio };
 }
 
+/** Exit 0 or 3, and always one JSON object on stdout, bad arguments included: a caller parses it rather than scraping stderr. */
+function lint(argv: string[]): number {
+  const emit = (ok: boolean, scenario: string | null, steps: number, diagnostics: Diagnostic[]) => {
+    console.log(JSON.stringify({ ok, scenario, steps, diagnostics }));
+    return ok ? 0 : 3;
+  };
+  const refuse = (message: string, file: string | null = null) => emit(false, file, 0, [{ step: null, field: "arguments", message }]);
+  let args: VerifyArgs;
+  try {
+    args = parseVerifyArgs(argv);
+  } catch (e) {
+    return refuse(e instanceof Error ? e.message : String(e));
+  }
+  if (!args.scenario) return refuse("--lint needs --scenario <file>");
+  const extra = (["ref", "path", "compare", "out", "device", "runtime", "orientation", "timeout", "max-diff-ratio"] as const).filter((k) => args[k] != null);
+  const stray = [args.appId, ...(args.env.length ? ["--env"] : []), ...extra.map((k) => `--${k}`)].filter(Boolean);
+  const file = resolve(args.scenario);
+  if (stray.length) return refuse(`--lint takes only --scenario; drop ${stray.join(", ")}`, file);
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch (e) {
+    return emit(false, file, 0, [{ step: null, field: "scenario", message: `cannot read the scenario: ${e instanceof Error ? e.message : String(e)}` }]);
+  }
+  const r = lintScenario(text);
+  return emit(r.ok, file, r.steps, r.diagnostics);
+}
+
 export async function cmdVerify(argv: string[]): Promise<number> {
+  if (argv.includes("--lint")) return lint(argv);
   let p: Prepared;
   try {
     p = prepare(argv);

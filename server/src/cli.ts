@@ -77,7 +77,8 @@ Everything else, for when you already know what you want:
   deckhand env set <appId> KEY=VALUE
   deckhand verify <appId> --scenario FILE [--ref REF | --path DIR] [--compare REF|DIR] [--out DIR]
                   [--env K=V]... [--device MODEL] [--runtime "iOS x.y"] [--orientation landscape|portrait]
-                                                   run a scenario headless: screenshots, a11y trees, result.json`;
+                                                   run a scenario headless: screenshots, a11y trees, result.json
+  deckhand verify --lint --scenario FILE           validate a scenario only (docs/verify-scenarios.md), exit 0 or 3`;
 
 /**
  * Keep one bad request from taking every live preview down with it.
