@@ -109,6 +109,8 @@ export interface WorktreeManagerOptions {
    */
   allowAnonymous?: boolean;
   git?: GitRunner;
+  /** Where checkouts live; defaults to ~/.deckhand/worktrees. `deckhand verify` keeps its own, out of the server's prune. */
+  root?: string;
 }
 
 /**
@@ -218,6 +220,14 @@ export class WorktreeManager {
   private readonly locks = new Map<string, Promise<unknown>>();
   constructor(private readonly opts: WorktreeManagerOptions) {
     this.git = opts.git ?? defaultRunner;
+  }
+
+  private root(): string {
+    return this.opts.root ?? paths.worktreesDir();
+  }
+
+  private checkoutPath(key: string): string {
+    return this.opts.root ? join(this.opts.root, `dh-${key}`) : paths.worktree(key);
   }
 
   private serialize<T>(key: string, fn: () => Promise<T>): Promise<T> {
@@ -381,7 +391,7 @@ export class WorktreeManager {
   private async createWorktreeLocked(app: App, spec: RefSpec): Promise<PreparedWorktree> {
     const base = await this.ensureBaseClone(app);
     const { localRef, usedToken } = await this.prepareRef(app, spec);
-    const wtPath = paths.worktree(worktreeKey(app.id, spec));
+    const wtPath = this.checkoutPath(worktreeKey(app.id, spec));
     // Already checked out for this app+ref: reuse it (warm node_modules, Pods and
     // DerivedData) by resetting in place instead of throwing it away.
     if (existsSync(join(wtPath, ".git"))) {
@@ -396,7 +406,7 @@ export class WorktreeManager {
       // every live stream on the server for its duration.
       await rm(wtPath, { recursive: true, force: true });
     }
-    mkdirSync(paths.worktreesDir(), { recursive: true });
+    mkdirSync(this.root(), { recursive: true });
     // Remove any stale worktree registration for this path before re-adding.
     await this.git(["worktree", "remove", "--force", wtPath], { cwd: base });
     const add = await this.git(["worktree", "add", "--detach", wtPath, localRef], { cwd: base });
@@ -419,7 +429,7 @@ export class WorktreeManager {
 
   private async updateWorktreeLocked(app: App, spec: RefSpec): Promise<PreparedWorktree> {
     const { localRef, usedToken } = await this.prepareRef(app, spec);
-    const wtPath = paths.worktree(worktreeKey(app.id, spec));
+    const wtPath = this.checkoutPath(worktreeKey(app.id, spec));
     if (!existsSync(wtPath)) throw new RefError(`the checkout for ${app.id} at ${refDescription(spec)} no longer exists`);
     const reset = await this.git(["reset", "--hard", localRef], { cwd: wtPath });
     if (reset.code !== 0) {
@@ -513,14 +523,14 @@ export class WorktreeManager {
   ): Promise<string[]> {
     let entries: string[];
     try {
-      entries = readdirSync(paths.worktreesDir());
+      entries = readdirSync(this.root());
     } catch {
       return [];
     }
     const now = Date.now();
     const idle = entries
       .filter((name) => name.startsWith("dh-") && !keep.has(name.slice(3)))
-      .map((name) => ({ name, idleMs: worktreeIdleMs(join(paths.worktreesDir(), name), now) }))
+      .map((name) => ({ name, idleMs: worktreeIdleMs(join(this.root(), name), now) }))
       .sort((a, b) => b.idleMs - a.idleMs); // oldest first
     // The grace window alone is not a bound: a week of PR review can leave a
     // dozen checkouts of one RN app (node_modules + Pods + platforms, GBs each)
@@ -532,7 +542,7 @@ export class WorktreeManager {
     const inUseMs = Math.min(CHECKOUT_IN_USE_MS, idleGraceMs);
     const removed: string[] = [];
     for (const { name } of doomed) {
-      const wtPath = join(paths.worktreesDir(), name);
+      const wtPath = join(this.root(), name);
       // Under the same per-key lock as create/update, so a start_preview that
       // began after `keep` was computed can't have the directory pulled out from
       // under it mid-checkout.

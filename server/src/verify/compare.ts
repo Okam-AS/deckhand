@@ -10,8 +10,8 @@ export interface PixelDiff {
   image: Rgba | null;
 }
 
-/** pixelmatch's default: a YIQ distance above 10% of the maximum counts as changed. */
-export const DEFAULT_THRESHOLD = 0.1;
+/** Per-pixel colour tolerance, pixelmatch's default: a YIQ distance above 10% of the maximum counts as changed. */
+export const PIXEL_COLOR_THRESHOLD = 0.1;
 const MAX_YIQ_DELTA = 35215;
 
 function blendWhite(c: number, a: number): number {
@@ -31,12 +31,12 @@ function yiqDelta(a: Buffer, b: Buffer, i: number): number {
   return 0.5053 * y * y + 0.299 * iq * iq + 0.1957 * q * q;
 }
 
-export function diffImages(a: Rgba, b: Rgba, threshold = DEFAULT_THRESHOLD): PixelDiff {
+export function diffImages(a: Rgba, b: Rgba, pixelColorThreshold = PIXEL_COLOR_THRESHOLD): PixelDiff {
   const totalPixels = Math.max(a.width * a.height, b.width * b.height);
   if (a.width !== b.width || a.height !== b.height) {
     return { changedPixels: totalPixels, totalPixels, ratio: 1, sizeMismatch: true, image: null };
   }
-  const limit = MAX_YIQ_DELTA * threshold * threshold;
+  const limit = MAX_YIQ_DELTA * pixelColorThreshold * pixelColorThreshold;
   const out = Buffer.alloc(a.data.length);
   let changed = 0;
   for (let i = 0; i < a.data.length; i += 4) {

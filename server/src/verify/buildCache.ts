@@ -1,17 +1,16 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { execFile } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
-
-export interface NativeFingerprint {
-  hash: string;
-  /** `expo` when @expo/fingerprint answered; `files` when the key fell back to hashing native inputs. */
-  source: "expo" | "files";
-}
+import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
+import { pidAlive } from "./lock.ts";
 
 export type FingerprintRunner = (dir: string, env: Record<string, string>) => Promise<string | null>;
 
-/** `fingerprint fingerprint:generate` from the project's own @expo/fingerprint; null when it is not there or fails. */
+/**
+ * `fingerprint fingerprint:generate` from the project's own @expo/fingerprint; null when it is not
+ * there or fails. There is deliberately no weaker fallback: a key that misses a native input hands a
+ * stale binary to a changed app, so no fingerprint means no cache.
+ */
 export const expoFingerprint: FingerprintRunner = (dir, env) =>
   new Promise((resolve) => {
     execFile(
@@ -30,45 +29,33 @@ export const expoFingerprint: FingerprintRunner = (dir, env) =>
     );
   });
 
-const NATIVE_INPUTS = ["package.json", "app.json", "app.config.js", "app.config.cjs", "app.config.mjs", "app.config.ts", "eas.json", "Podfile.lock", "ios/Podfile.lock"];
-const LOCKFILES = ["pnpm-lock.yaml", "yarn.lock", "package-lock.json", "bun.lock", "bun.lockb"];
+export const xcodeVersion = (): Promise<string> =>
+  new Promise((resolve) =>
+    execFile("xcodebuild", ["-version"], { timeout: 30_000 }, (err, out) => resolve(err ? "unknown" : String(out).trim().replace(/\s+/g, " "))),
+  );
 
-/** Every native input a JS-only change leaves alone: the app's config files and the nearest lockfile up to the repo root. */
-export function fileFingerprint(dir: string): string {
-  const h = createHash("sha256");
-  for (const f of NATIVE_INPUTS) {
-    const p = join(dir, f);
-    if (existsSync(p)) h.update(`${f}\0`).update(readFileSync(p)).update("\0");
-  }
-  for (let d = dir; ; d = dirname(d)) {
-    const lock = LOCKFILES.find((f) => existsSync(join(d, f)));
-    if (lock) {
-      h.update(`lock:${lock}\0`).update(readFileSync(join(d, lock)));
-      break;
-    }
-    if (existsSync(join(d, ".git")) || dirname(d) === d) break;
-  }
-  return h.digest("hex");
+export interface CacheKeyInput {
+  appId: string;
+  bundleId: string;
+  fingerprint: string;
+  xcode: string;
+  runtime: string;
 }
 
-export async function nativeFingerprint(
-  dir: string,
-  env: Record<string, string>,
-  runner: FingerprintRunner = expoFingerprint,
-): Promise<NativeFingerprint> {
-  const hash = await runner(dir, env);
-  return hash ? { hash, source: "expo" } : { hash: fileFingerprint(dir), source: "files" };
-}
-
-/** Directory-safe cache key: the fingerprint plus everything else that makes a binary not interchangeable. */
-export function buildCacheKey(input: { appId: string; bundleId: string; platform: "ios-simulator"; fingerprint: NativeFingerprint }): string {
+export function buildCacheKey(input: CacheKeyInput): string {
   return createHash("sha256")
-    .update(JSON.stringify([input.appId, input.bundleId, input.platform, input.fingerprint.source, input.fingerprint.hash]))
+    .update(JSON.stringify(["ios-simulator", input.appId, input.bundleId, input.fingerprint, input.xcode, input.runtime]))
     .digest("hex")
     .slice(0, 32);
 }
 
 export const MAX_CACHED_BUILDS = 6;
+
+export interface CacheHit {
+  app: string;
+  /** Call once the app is installed; until then the prune leaves the entry alone. */
+  done: () => void;
+}
 
 export class BuildCache {
   constructor(
@@ -76,36 +63,61 @@ export class BuildCache {
     private readonly max = MAX_CACHED_BUILDS,
   ) {}
 
-  /** The cached `.app` for a key, or null. A hit refreshes its age so the prune keeps it. */
-  lookup(key: string): string | null {
+  lookup(key: string): CacheHit | null {
     const entry = join(this.dir, key);
+    if (!existsSync(entry)) return null;
+    // Marked in use before it is read, so a prune in another run cannot remove it between the two.
+    const mark = join(this.dir, `.inuse-${key}-${process.pid}-${randomBytes(4).toString("hex")}`);
+    writeFileSync(mark, "");
     const app = existsSync(entry) ? readdirSync(entry).find((f) => f.endsWith(".app")) : undefined;
-    if (!app) return null;
+    if (!app) {
+      rmSync(mark, { force: true });
+      return null;
+    }
     const now = new Date();
     utimesSync(entry, now, now);
-    return join(entry, app);
+    return { app: join(entry, app), done: () => rmSync(mark, { force: true }) };
   }
 
-  /** Copy a built `.app` in under `key`, atomically: a half-copied bundle is never a hit. */
-  store(key: string, appPath: string, meta: Record<string, unknown>): string {
+  /** A copy lands under a private name and is renamed into place; if another run stored the key first, theirs stands. */
+  store(key: string, appPath: string, meta: Record<string, unknown>): void {
     mkdirSync(this.dir, { recursive: true });
-    const tmp = join(this.dir, `.tmp-${key}-${process.pid}`);
-    rmSync(tmp, { recursive: true, force: true });
+    const tmp = join(this.dir, `.tmp-${key}-${process.pid}-${randomBytes(4).toString("hex")}`);
     mkdirSync(tmp);
-    cpSync(appPath, join(tmp, basename(appPath)), { recursive: true, verbatimSymlinks: true });
-    writeFileSync(join(tmp, "meta.json"), JSON.stringify({ ...meta, storedAt: new Date().toISOString() }, null, 2));
-    const entry = join(this.dir, key);
-    rmSync(entry, { recursive: true, force: true });
-    renameSync(tmp, entry);
+    try {
+      cpSync(appPath, join(tmp, basename(appPath)), { recursive: true, verbatimSymlinks: true });
+      writeFileSync(join(tmp, "meta.json"), JSON.stringify({ ...meta, storedAt: new Date().toISOString() }, null, 2));
+      try {
+        renameSync(tmp, join(this.dir, key));
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code !== "ENOTEMPTY" && code !== "EEXIST") throw e;
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
     this.prune(key);
-    return join(entry, basename(appPath));
+  }
+
+  private inUse(): Set<string> {
+    const keys = new Set<string>();
+    for (const f of readdirSync(this.dir)) {
+      const m = /^\.inuse-(.+)-(\d+)-[0-9a-f]{8}$/.exec(f);
+      if (!m) continue;
+      if (pidAlive(Number(m[2]))) keys.add(m[1]!);
+      else rmSync(join(this.dir, f), { force: true });
+    }
+    return keys;
   }
 
   private prune(keep: string): void {
+    const busy = this.inUse();
     const entries = readdirSync(this.dir)
       .filter((f) => !f.startsWith(".") && f !== keep)
       .map((f) => ({ f, t: statSync(join(this.dir, f)).mtimeMs }))
       .sort((a, b) => b.t - a.t);
-    for (const { f } of entries.slice(Math.max(0, this.max - 1))) rmSync(join(this.dir, f), { recursive: true, force: true });
+    for (const { f } of entries.slice(Math.max(0, this.max - 1))) {
+      if (!busy.has(f)) rmSync(join(this.dir, f), { recursive: true, force: true });
+    }
   }
 }

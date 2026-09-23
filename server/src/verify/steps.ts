@@ -34,7 +34,7 @@ export function stepLabel(step: Step): string {
     case "openUrl":
       return `openUrl ${step.url}`;
     case "type":
-      return `type ${JSON.stringify(step.text)}`;
+      return `type (${step.text.length} chars)`;
     case "scroll":
       return `scroll ${step.direction}`;
     case "sleep":

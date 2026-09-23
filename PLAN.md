@@ -801,15 +801,21 @@ change eases in/out — nothing snaps.
   the headless check for an unattended agent: no MCP, no share link, no viewer. It runs in its
   own process against the engine's parts (`buildPlan`, `MetroManager`, `WorktreeManager`,
   SimDeck control) and writes `<name>.png`, `<name>.ax.json`, `result.json` and, with
-  `--compare`, `<name>.diff.png` + `compare.json`; exit 0 only when every step passed. The
-  scenario (`verify/scenario.ts`, JSON or YAML) is ordered `openUrl`/`tap`/`type`/`scroll`/
-  `scrollUntilVisible`/`waitFor`/`assert`/`sleep`/`screenshot` steps plus a device shape
-  (default iPad 9th generation, iOS 26.5, landscape) and Metro env. Two decisions hold it
-  together: its simulators are named `verify-…`, outside the server's `deckhand-` reaper and
-  pool, with a lock per device; and a native build is cached under `~/.deckhand/verify/builds`
-  by the project's own `@expo/fingerprint` (a hash of config files and the lockfile when that
-  is missing), so a JS-only change reinstalls the cached `.app` and only swaps Metro. Expo and
-  react-native iOS apps only; the react-native Release build embeds its JS, so it is never cached.
+  `--compare`, `<name>.diff.png` + `compare.json`. Exit 0 passed, 1 a step or the
+  `--max-diff-ratio` budget failed, 2 build/device/launch (including a screen that never
+  settles and `--timeout`), 3 bad arguments or scenario. The scenario (`verify/scenario.ts`,
+  JSON or YAML) is ordered `openUrl`/`tap`/`type`/`scroll`/`scrollUntilVisible`/`waitFor`/
+  `assert`/`sleep`/`screenshot` steps plus a device shape (default iPad 9th generation, iOS
+  26.5, landscape) and Metro env; typed text is recorded by length only. It shares nothing
+  mutable with the server: its simulators are `verify-…` (outside the `deckhand-` reaper and
+  pool), its checkouts live in `~/.deckhand/verify/worktrees` (outside the server's prune),
+  and its builds and Metro carry `DECKHAND_VERIFY=<pid>`, which the server's boot sweep skips
+  and the next verify run reaps once that pid is gone. Devices and checkouts are held by
+  atomic `mkdir` locks. A native build is cached under `~/.deckhand/verify/builds` keyed by
+  the project's own `@expo/fingerprint`, Xcode version and runtime; without a fingerprint the
+  build is made fresh and not cached. A JS-only change reinstalls the cached `.app` and only
+  swaps Metro. Expo and react-native iOS apps only; the react-native Release build embeds its
+  JS, so it is never cached.
 
 ## 11. Security model (recap, enforced in code)
 

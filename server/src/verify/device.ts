@@ -1,4 +1,5 @@
-import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { tryLock } from "./lock.ts";
 import { join } from "node:path";
 import { selectDeviceType, selectRuntime, type Simctl } from "../devices/ios.ts";
 import type { UiAction } from "../testing/control.ts";
@@ -15,33 +16,6 @@ const MAX_SLOTS = 3;
 export function verifySimName(model: string, runtime: string, slot: number): string {
   const slug = `${model}-${runtime}`.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
   return `${VERIFY_SIM_PREFIX}${slug}${slot > 1 ? `-${slot}` : ""}`;
-}
-
-function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
-/** One process per verify simulator. A lock whose holder is gone is taken over. */
-export function tryLock(file: string): (() => void) | null {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const fd = openSync(file, "wx");
-      writeSync(fd, String(process.pid));
-      closeSync(fd);
-      return () => rmSync(file, { force: true });
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      const holder = Number(readFileSync(file, "utf8").trim());
-      if (Number.isInteger(holder) && holder > 0 && pidAlive(holder)) return null;
-      rmSync(file, { force: true });
-    }
-  }
-  return null;
 }
 
 interface DeviceRecord {

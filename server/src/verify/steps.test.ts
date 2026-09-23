@@ -57,7 +57,7 @@ steps:
     ]);
     assert.deepEqual(
       r.steps.map((x) => x.action),
-      ["openUrl app://x", "tap #go", 'type "hi"', "scroll up", "scrollUntilVisible text=End", "waitFor absent text=Busy", "assert #done", "assert absent text=Error", "sleep 10", "screenshot home"],
+      ["openUrl app://x", "tap #go", "type (2 chars)", "scroll up", "scrollUntilVisible text=End", "waitFor absent text=Busy", "assert #done", "assert absent text=Error", "sleep 10", "screenshot home"],
     );
     assert.ok(r.steps.every((x) => x.ok && x.ms === 5));
     assert.equal(String(f.files.get("home.png")), "png-1");

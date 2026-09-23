@@ -1,13 +1,13 @@
 import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fakeSimctl } from "../test-support/fakes.ts";
 import { isPooled, orphanSims } from "../engine/reaper.ts";
 import type { SimDevice } from "../devices/ios.ts";
 import type { UiAction } from "../testing/control.ts";
-import { acquireDevice, tryLock, verifySimName } from "./device.ts";
+import { acquireDevice, verifySimName } from "./device.ts";
 import { DEFAULT_DEVICE } from "./scenario.ts";
 
 const root = mkdtempSync(join(tmpdir(), "verify-device-"));
@@ -37,19 +37,6 @@ describe("verify simulators", () => {
     assert.equal(verifySimName("iPad (9th generation)", "iOS 26.5", 2), `${name}-2`);
     assert.deepEqual(orphanSims([{ name, udid: "U", state: "Booted" } as SimDevice]), []);
     assert.equal(isPooled(name), false);
-  });
-
-  it("are held by one process at a time, and a dead holder's lock is taken over", () => {
-    const file = join(root, "one.lock");
-    const release = tryLock(file);
-    assert.ok(release);
-    assert.equal(tryLock(file), null);
-    release!();
-    writeFileSync(file, "999999");
-    const again = tryLock(file);
-    assert.ok(again, "pid 999999 is not running");
-    assert.equal(readFileSync(file, "utf8"), String(process.pid));
-    again!();
   });
 
   it("boots a fresh device and turns it to landscape once, remembering the turn", async () => {
