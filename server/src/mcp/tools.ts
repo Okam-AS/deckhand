@@ -1166,13 +1166,15 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             act: (a) => engine.ui(args.previewId, args.deviceId, a),
             frame: () => engine.screenshot(args.previewId, args.deviceId),
             jev: access.client,
-            onEgress: (e) =>
+            onEgress: (e) => {
+              if (apps.find((a) => a.id === app.id)?.navigateEgress !== true) throw new Error(`navigate was disabled for app "${app.id}" while it ran`);
               audit.record({
                 actor: principal.name,
                 tool: "navigate:egress",
                 args: { app: app.id, previewId: args.previewId, deviceId: args.deviceId, to: EGRESS_HOST, candidates: e.candidates, bytes: e.bytes },
                 result: "ok",
-              }),
+              });
+            },
           },
         );
         const nextStep =

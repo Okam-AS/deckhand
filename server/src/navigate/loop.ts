@@ -27,7 +27,7 @@ export interface NavigateDeps {
   jev: JevChooser;
   /** A screenshot, for telling a settled screen from one still moving. Absent: no settle wait. */
   frame?: () => Promise<Buffer>;
-  /** Called with the size of every request, BEFORE it is sent. */
+  /** Called with the size of every request BEFORE it is sent; throwing refuses the send. */
   onEgress?: (e: Egress) => void;
   now?: () => number;
 }
@@ -63,7 +63,8 @@ export type NavigateReason =
   | "stale_tree"
   | "action_failed"
   | "describe_failed"
-  | "decider_error";
+  | "decider_error"
+  | "egress_refused";
 
 export interface NavigateResult {
   outcome: "done" | "escalated" | "limit";
@@ -186,6 +187,10 @@ export async function navigate(req: NavigateRequest, deps: NavigateDeps): Promis
     let usage: number | null = null;
     try {
       deps.onEgress?.({ candidates: candidates.length, bytes: Buffer.byteLength(JSON.stringify({ state, questions })) });
+    } catch (e) {
+      return finish("escalated", `nothing was sent: ${errMsg(e)}`, "egress_refused");
+    }
+    try {
       const res = await deps.jev.ask(state, questions);
       model = res.model;
       usage = res.usage?.input_tokens ?? null;

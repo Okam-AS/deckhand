@@ -1713,6 +1713,31 @@ describe("navigate (server-side drive loop)", () => {
     await admin.close();
   });
 
+  it("stops sending the moment the operator disables the app, mid-run", async () => {
+    const admin = await client(ADMIN);
+    const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
+    await waitReadyByApp(admin, "app-local");
+    const { access, seen } = scriptedJev();
+    jevAccess = {
+      ...access,
+      ...(access.ok
+        ? {
+            client: {
+              ask: async (s, q) => {
+                const r = await access.client.ask(s, q);
+                delete local().navigateEgress;
+                return r;
+              },
+            },
+          }
+        : {}),
+    } as JevAccess;
+    const r = parse(await admin.callTool({ name: "navigate", arguments: { previewId: started.previewId, deviceId: "ios-0", goal: "Get past the intro" } }));
+    assert.equal(r.reason, "egress_refused", String(r.message));
+    assert.equal(seen.length, 1, "the second screen was not sent");
+    await admin.close();
+  });
+
   it("says how the operator turns it on when no TypeSafe key is configured", async () => {
     const admin = await client(ADMIN);
     const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
