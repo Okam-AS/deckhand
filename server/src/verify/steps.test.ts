@@ -86,7 +86,7 @@ steps:
 
   it("scrolls a landscape pane by dragging up in the rotated UI until the match is on screen", async () => {
     const at = (y: number) => appTree([{ label: "Levert av factory", frame: { x: 147, y, width: 640, height: 22 } }]);
-    const f = fakeControl({ trees: [at(2356), at(1600), at(700)], quarterTurns: 1 });
+    const f = fakeControl({ trees: [at(2356), at(1600), at(400)], quarterTurns: 1 });
     const r = await runSteps(parseScenario("steps:\n  - scrollUntilVisible: text=Levert av factory").steps, f.control, f.out, tick, noSleep);
     assert.equal(r.passed, true);
     assert.equal(r.steps[0]!.observed, "visible after 2 scroll(s)");
@@ -96,6 +96,15 @@ steps:
     assert.equal(swipe.startY, swipe.endY, "an upward drag in landscape is a horizontal one on the unrotated screen");
     assert.ok(swipe.startX < swipe.endX);
     assert.equal(swipe.startY, 0.4324, "the drag runs through the pane that holds the match");
+  });
+
+  it("does not stop with the match on the screen's edge, where a card can still clip it", async () => {
+    const at = (y: number) => appTree([{ label: "Levert av factory", frame: { x: 147, y, width: 640, height: 22 } }]);
+    const f = fakeControl({ trees: [at(2356), at(760), at(360)], quarterTurns: 1 });
+    const r = await runSteps(parseScenario("steps:\n  - scrollUntilVisible: text=Levert av factory").steps, f.control, f.out, tick, noSleep);
+    assert.equal(r.steps[0]!.observed, "visible after 1 scroll(s) and 1 nudge(s) towards the middle");
+    const nudge = f.actions[1] as Extract<UiAction, { type: "swipe" }>;
+    assert.ok(Math.abs(nudge.endX - nudge.startX) < 0.5, "a nudge is shorter than a page");
   });
 
   it("gives up when scrolling stops moving the match", async () => {

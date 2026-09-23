@@ -87,10 +87,10 @@ function round(n: number): number {
 }
 
 /** A finger drag in the rotated UI's normalized coordinates, sent as the native swipe it is. */
-async function drag(control: VerifyControl, from: [number, number], to: [number, number]): Promise<void> {
+async function drag(control: VerifyControl, from: [number, number], to: [number, number], durationMs = 350): Promise<void> {
   const a = toNative(from[0], from[1], control.quarterTurns);
   const b = toNative(to[0], to[1], control.quarterTurns);
-  await control.action({ type: "swipe", startX: round(a.x), startY: round(a.y), endX: round(b.x), endY: round(b.y), durationMs: 350 });
+  await control.action({ type: "swipe", startX: round(a.x), startY: round(a.y), endX: round(b.x), endY: round(b.y), durationMs });
 }
 
 /** Scrolling `down` reveals what is below: the finger moves up. */
@@ -115,25 +115,51 @@ async function waitForMatch(control: VerifyControl, s: Selector, timeoutMs: numb
   }
 }
 
+/**
+ * The accessibility tree says nothing about the scroll view that clips an element, so an element
+ * whose centre is barely inside the screen can still sit under a card's edge or fade. Visible is not
+ * enough here: the match is brought towards the middle band, where no container edge reaches.
+ */
+const BAND: [number, number] = [0.15, 0.7];
+const MAX_NUDGES = 2;
+
 async function scrollUntilVisible(control: VerifyControl, s: Selector, pace: Pace): Promise<Verdict> {
   let lastY: number | null = null;
   let stuck = 0;
+  let nudges = 0;
   for (let i = 0; i <= MAX_SCROLLS; i++) {
     const m = pick(findAll(await control.describe(), s), s);
-    if (m && isVisible(m)) return { ok: true, observed: `visible after ${i} scroll(s)` };
+    const scrolls = i - nudges;
+    if (m && isVisible(m)) {
+      const cy = (m.frame.y + m.frame.height / 2) / m.viewport.height;
+      const moved = lastY === null || Math.abs(m.frame.y - lastY) >= 1;
+      if ((cy >= BAND[0] && cy <= BAND[1]) || nudges >= MAX_NUDGES || (nudges > 0 && !moved)) {
+        return { ok: true, observed: `visible after ${scrolls} scroll(s)${nudges ? ` and ${nudges} nudge(s) towards the middle` : ""}` };
+      }
+      lastY = m.frame.y;
+      nudges++;
+      const u = columnOf(m);
+      const shift = Math.max(-0.4, Math.min(0.4, cy - 0.45));
+      await drag(control, [u, 0.5 + shift / 2], [u, 0.5 - shift / 2], 900);
+      await pace.sleep(800);
+      continue;
+    }
     if (i === MAX_SCROLLS) break;
     if (m) {
       stuck = lastY !== null && Math.abs(m.frame.y - lastY) < 1 ? stuck + 1 : 0;
       if (stuck >= 2) return { ok: false, observed: `${describeSelector(s)} is in the tree but scrolling does not move it into view` };
       lastY = m.frame.y;
-      const u = Math.min(0.95, Math.max(0.05, (m.frame.x + m.frame.width / 2) / m.viewport.width));
-      await scroll(control, m.frame.y + m.frame.height / 2 < 0 ? "up" : "down", [u, 0.5]);
+      await scroll(control, m.frame.y + m.frame.height / 2 < 0 ? "up" : "down", [columnOf(m), 0.5]);
     } else {
       await scroll(control, "down");
     }
     await pace.sleep(600);
   }
   return { ok: false, observed: `${describeSelector(s)} not on screen after ${MAX_SCROLLS} scrolls` };
+}
+
+function columnOf(m: Match): number {
+  return Math.min(0.95, Math.max(0.05, (m.frame.x + m.frame.width / 2) / m.viewport.width));
 }
 
 /**
