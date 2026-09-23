@@ -213,7 +213,7 @@ describe("docs describe the code that exists", () => {
     // growing allow-list of exemptions and a check that fails with a message about MCP tools
     // when someone documents an error code. `.claude/rules/mcp-tools.md` carries the rule for
     // a reader instead.
-    const NOT_TOOLS = new Set(["app_is_a_pane", "deck_unlock", "github_auth_missing", "needs_access_choice", "node_modules", "web_needs_pin"]);
+    const NOT_TOOLS = new Set(["app_is_a_pane", "deck_unlock", "github_auth_missing", "navigate_not_enabled", "needs_access_choice", "node_modules", "web_needs_pin"]);
     // Anti-vacuity, the same form the citation loops use: this loop's only input is a regex over
     // prose, so a regex that stops matching leaves `ghosts` empty and the check green while
     // examining nothing. Verified by mutation — neutering the pattern left this file 15/15.

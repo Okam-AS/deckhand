@@ -119,6 +119,7 @@ export function fakeSimctl(over: Partial<Simctl> = {}, log: string[] = []): Simc
     openUrl: async (udid: string, url: string) => void log.push(`simctl openUrl ${udid} ${url}`),
     appContainer: async () => "/tmp/container",
     screenshotPng: async () => Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+    uiLanguage: async () => "en-US",
     shutdown: async (udid: string) => void log.push(`simctl shutdown ${udid}`),
     // The one whose absence was the cross-tenant hazard: a pooled simulator handed to a new
     // app without an erase carries the previous tenant's storage.
@@ -146,6 +147,7 @@ export function fakeAndroid(over: Partial<AndroidManager> = {}, log: string[] = 
     openUrl: async (serial: string, url: string) => void log.push(`open-url ${serial} ${url}`),
     launch: async (serial: string, pkg: string) => void log.push(`launch ${serial} ${pkg}`),
     screenshotPng: async () => Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+    uiLanguage: async () => "en-US",
     describe: async () => "<hierarchy/>",
     findApk: async () => "/wt/app-debug.apk",
     shutdown: async (serial: string) => {

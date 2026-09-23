@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   parseRuntimes,
   parseDeviceTypes,
+  parseAppleLanguages,
   selectRuntime,
   selectDeviceType,
   deviceLabel,
@@ -168,5 +169,13 @@ describe("Simctl calls a verify run cannot afford to hang on", () => {
     await simctl.uninstall("U", "b");
     await simctl.terminate("U", "b");
     for (const verb of ["install", "uninstall", "terminate"]) assert.ok((seen[verb] ?? 0) > 0, `${verb} has no timeout`);
+  });
+});
+
+describe("parseAppleLanguages", () => {
+  it("reads the first UI language from the plist array defaults prints, quoted or not", () => {
+    assert.equal(parseAppleLanguages('(\n    "nb-NO",\n    "en-NO"\n)\n'), "nb-NO");
+    assert.equal(parseAppleLanguages("(\n    en,\n    de\n)\n"), "en");
+    assert.equal(parseAppleLanguages("The domain/default pair of (kCFPreferencesAnyApplication, AppleLanguages) does not exist"), null);
   });
 });

@@ -1,5 +1,5 @@
 import { fakeMetro, fakeDevProcs, fakeSimctl, fakeWorktrees } from "../test-support/fakes.ts";
-import { describe, it, before, after } from "node:test";
+import { describe, it, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -104,7 +104,10 @@ function fakeEngine(): PreviewEngine {
     secretsEnv: () => ({}),
     simdeck: {
       // SimDeck answers with `roots`/`children` — verified against a live daemon.
-      describe: async () => ({ source: "native-ax", roots: [{ children: [{ role: "Button", label: "Continue" }] }] }),
+      describe: async () => ({
+        source: "native-ax",
+        roots: [{ role: "Application", frame: { x: 0, y: 0, width: 400, height: 800 }, children: [{ role: "Button", label: "Continue", frame: { x: 0, y: 380, width: 400, height: 40 } }] }],
+      }),
       // A verifier that could never fail meant no test could reach the failure path at all.
       // SimDeck answers a selector it cannot match by throwing, so this does too.
       action: async (_t: unknown, a: { type?: string; selector?: { text?: string } }) => {
@@ -140,12 +143,12 @@ function scriptedJev(): { access: JevAccess; seen: string[] } {
   const fetchImpl: typeof fetch = async (_url, init) => {
     seen.push(JSON.stringify(init?.body ?? ""));
     const criteria = (JSON.parse(String(init?.body)) as { questions: { next: { criteria: Record<string, unknown> } } }).questions.next.criteria;
-    const pick = n++ === 0 ? Object.keys(criteria).find((k) => k.startsWith("tap_"))! : "done";
+    const pick = n++ === 0 ? Object.keys(criteria).find((k) => k.startsWith("tap "))! : Object.keys(criteria).find((k) => k.startsWith("done"))!;
     const body = {
       model: "jev-1.13.0",
       answers: {
         next: { type: "choice", choice: pick, probabilities: { [pick]: 0.97 }, confidence: 0.97 },
-        reached: { type: "noul", noul: pick === "done" ? 0.9 : 0.1 },
+        reached: { type: "noul", noul: pick.startsWith("done") ? 0.9 : 0.1 },
       },
       usage: { input_tokens: 100, output_tokens: 10 },
     };
@@ -1331,7 +1334,15 @@ describe("agent-driven testing tools (describe/ui + test runs)", () => {
     payloads.push(["finish_test_run", parse(await admin.callTool({ name: "finish_test_run", arguments: { previewId, status: "passed" } }))]);
     payloads.push(["restart_preview", parse(await admin.callTool({ name: "restart_preview", arguments: { previewId } }))]);
     jevAccess = scriptedJev().access;
-    payloads.push(["navigate", parse(await admin.callTool({ name: "navigate", arguments: { previewId, deviceId, goal: "Get past the intro" } }))]);
+    const navApp = apps.find((a) => a.id === engine.appIdFor(previewId))!;
+    navApp.navigateEgress = true;
+    try {
+      const nav = parse(await admin.callTool({ name: "navigate", arguments: { previewId, deviceId, goal: "Get past the intro" } }));
+      assert.equal(nav.ok, true, "the navigate payload read here is a real run, not a refusal");
+      payloads.push(["navigate", nav]);
+    } finally {
+      delete navApp.navigateEgress;
+    }
 
     for (const [name, payload] of payloads) {
       const text = JSON.stringify(payload);
@@ -1659,6 +1670,48 @@ describe("agent-driven testing tools (describe/ui + test runs)", () => {
 
 describe("navigate (server-side drive loop)", () => {
   const TYPED = "typed-value-must-not-leak-5d0e";
+  const local = () => apps.find((a) => a.id === "app-local")!;
+  beforeEach(() => void (local().navigateEgress = true));
+  afterEach(() => void delete local().navigateEgress);
+
+  it("refuses an app the operator has not enabled, and says who can enable it", async () => {
+    const admin = await client(ADMIN);
+    const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
+    await waitReadyByApp(admin, "app-local");
+    delete local().navigateEgress;
+    const { access, seen } = scriptedJev();
+    jevAccess = access;
+    audited.length = 0;
+    const r = parse(await admin.callTool({ name: "navigate", arguments: { previewId: started.previewId, deviceId: "ios-0", goal: "Open About" } }));
+    assert.equal(r.ok, false);
+    const err = r.error as { code: string; hint: string };
+    assert.equal(err.code, "navigate_not_enabled");
+    assert.match(err.hint, /deckhand navigate enable app-local/);
+    assert.equal(seen.length, 0, "nothing was sent to TypeSafe");
+    assert.ok(!audited.some((e) => e.tool === "navigate:egress"));
+    await admin.close();
+  });
+
+  it("audits every request that leaves the machine: app, candidate count and size, never content", async () => {
+    const admin = await client(ADMIN);
+    const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
+    await waitReadyByApp(admin, "app-local");
+    const { access, seen } = scriptedJev();
+    jevAccess = access;
+    audited.length = 0;
+    await admin.callTool({ name: "navigate", arguments: { previewId: started.previewId, deviceId: "ios-0", goal: "Get past the intro" } });
+    const egress = audited.filter((e) => e.tool === "navigate:egress");
+    assert.equal(egress.length, seen.length, "one audit line per request sent");
+    assert.ok(egress.length > 0);
+    for (const e of egress) {
+      assert.deepEqual(Object.keys(e.args ?? {}).sort(), ["app", "bytes", "candidates", "deviceId", "previewId", "to"]);
+      assert.equal(e.args?.app, "app-local");
+      assert.equal(e.args?.to, "api.typesafe.ai");
+      assert.ok(Number(e.args?.bytes) > 0 && Number(e.args?.candidates) > 0);
+      assert.ok(!JSON.stringify(e).includes("Continue"), "no screen content in the audit");
+    }
+    await admin.close();
+  });
 
   it("says how the operator turns it on when no TypeSafe key is configured", async () => {
     const admin = await client(ADMIN);
@@ -1687,9 +1740,9 @@ describe("navigate (server-side drive loop)", () => {
     });
     const r = parse(raw);
     assert.equal(r.ok, true);
-    assert.equal(r.outcome, "done");
+    assert.equal(r.outcome, "done", String(r.message));
     assert.equal((r.steps as unknown[]).length, 2);
-    assert.deepEqual(simdeckActions, [{ type: "tapElement", selector: { label: "Continue" } }], "the chosen tap reached the device");
+    assert.deepEqual(simdeckActions, [{ type: "tap", x: 0.5, y: 0.5 }], "the chosen tap reached the device, at the centre of the element it named");
     assert.match(String(r.nextStep), /assert or waitFor/);
     const out = JSON.stringify(raw);
     assert.ok(!out.includes(JEV_TEST_KEY) && !out.includes(TYPED), "neither the key nor a typed value comes back to the caller");

@@ -70,10 +70,14 @@ PLAN describes the architecture. The invariants that bind every change:
   `verify-…` simulators, so it must never lease from the server's `deckhand-pool-…` devices.
   `--share public` borrows the server's stream for that simulator as a view-only link that
   ends with the run (PLAN §9 "Live verify shares").
-- **`navigate` is a server-side drive loop, off by default** (PLAN §6 amendment, §11 item 5):
+- **`navigate` is a server-side drive loop, off by default** (PLAN §2 "Navigate", §11 item 5):
   deckhand's own `describe` → a closed action list → one TypeSafe Jev decision → `ui`, handing
   back on low confidence, a repeated move or a disputed `done`. It picks, it never diagnoses;
-  the caller still verifies. With a key set, screen text goes to `api.typesafe.ai`.
+  the caller still verifies. It is the one path by which app content leaves the machine for a
+  third party, so it needs a key AND `deckhand navigate enable <app>` per app — never enable it
+  on an agent's say-so, and only for apps showing test data. What is sent is minimised in
+  `navigate/screen.ts`; a change there is a privacy change, and `navigate/egress.test.ts` is its
+  guardrail.
 - **Physical devices are OUT** on both platforms; PLAN §2 says why. **Three known gaps, so
   do not imply otherwise:** the local (`path`) livesync build path is unvalidated on-device,
   the `metro`/`app` `logs` sources are accepted and capture nothing, and PLAN §11 item 7's

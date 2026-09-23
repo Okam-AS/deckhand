@@ -1,22 +1,35 @@
-import type { UiAction } from "../testing/control.ts";
-import { JevError, type ChoiceAnswer, type JevChooser, type NoulAnswer } from "./jev.ts";
-import { candidatesFor, readScreen, type Candidate } from "./screen.ts";
+import { diffImages } from "../verify/compare.ts";
+import { decodePng } from "../verify/png.ts";
+import { JevError, type ChoiceAnswer, type JevChooser, type JevQuestion, type NoulAnswer } from "./jev.ts";
+import { candidatesFor, mask, readScreen, type ActionKind, type Candidate, type NavigateAction } from "./screen.ts";
+
+export type LoopAction = NavigateAction | { type: "type"; text: string };
 
 export interface NavigateRequest {
   goal: string;
   maxSteps: number;
-  minConfidence: number;
+  /** One floor for every action kind, replacing the per-kind defaults. */
+  minConfidence?: number;
   /** Values the caller supplies for typing. Only the NAMES reach the decider. */
   text: Record<string, string>;
+  /** The device's UI language, e.g. "nb-NO", when known. */
+  locale?: string | null;
+}
+
+export interface Egress {
+  candidates: number;
+  bytes: number;
 }
 
 export interface NavigateDeps {
   describe: () => Promise<unknown>;
-  act: (action: UiAction) => Promise<unknown>;
+  act: (action: LoopAction) => Promise<unknown>;
   jev: JevChooser;
+  /** A screenshot, for telling a settled screen from one still moving. Absent: no settle wait. */
+  frame?: () => Promise<Buffer>;
+  /** Called with the size of every request, BEFORE it is sent. */
+  onEgress?: (e: Egress) => void;
   now?: () => number;
-  /** Wait for the UI to settle after an action, before the next describe. */
-  settle?: () => Promise<void>;
 }
 
 export interface NavigateStep {
@@ -24,13 +37,20 @@ export interface NavigateStep {
   chose: string;
   did: string;
   confidence: number;
+  /** The confidence this kind of action needed. */
+  needed: number;
   /** Jev's probability that the goal was already reached on the screen this step saw. */
   goalReached: number | null;
   alternatives: Array<{ option: string; p: number }>;
   candidates: number;
+  /** false: the screen was still changing when the settle wait gave up. */
+  settled: boolean;
+  settleMs: number;
   describeMs: number;
   decideMs: number;
   actMs: number;
+  estimatedTokens: number;
+  inputTokens: number | null;
 }
 
 export type NavigateReason =
@@ -39,6 +59,8 @@ export type NavigateReason =
   | "repeating"
   | "done_disputed"
   | "empty_screen"
+  | "screen_unstable"
+  | "stale_tree"
   | "action_failed"
   | "describe_failed"
   | "decider_error";
@@ -57,16 +79,51 @@ export interface NavigateResult {
   inputTokens: number;
 }
 
-// About 15k tokens at ~4 chars/token, leaving the rest of Jev's 32k state+question budget to a 255-option Choice.
-const STATE_CHAR_BUDGET = 60_000;
+/** A wrong tap costs one hand-back; a wrong `done` is a false report, so it needs more. */
+export const DEFAULT_THRESHOLDS: Record<Exclude<ActionKind, "stuck">, number> = {
+  tap: 0.5,
+  reveal: 0.5,
+  scroll: 0.4,
+  back: 0.7,
+  fill: 0.8,
+  done: 0.8,
+};
 const DONE_DISPUTE_BELOW = 0.5;
+/** A `done` under its threshold still stands when the independent goal check agrees strongly. */
+const DONE_CORROBORATED = { confidence: 0.6, reached: 0.75 };
 const FINAL_SCREEN_LINES = 80;
+/** jev-1.13: 32k tokens for `state` plus the longest question. Kept under it with a margin. */
+export const TOKEN_BUDGET = 28_000;
+/** Deliberately pessimistic: labels in Norwegian or German tokenise worse than English prose. */
+const CHARS_PER_TOKEN = 3;
+const SETTLE_TIMEOUT_MS = 4_000;
+const MAX_SCREEN_CHANGES = 2;
+const STILL_RATIO = 0.002;
+/** Between reading a screen and acting on it, only a different screen matters — not a scroll indicator fading out (~0.5%). */
+const MOVED_RATIO = 0.02;
+const STILL_MS = 300;
+
+export function estimateTokens(v: unknown): number {
+  return Math.ceil(JSON.stringify(v).length / CHARS_PER_TOKEN);
+}
+
+const NEXT_INSTRUCTIONS = {
+  question: "Pick the single action that makes the most direct progress toward `goal` from the current `screen`.",
+  rules: [
+    "`screen` lists what is visible now, one element per line; each option names one element by its ref (e3, e4, …).",
+    "Labels are in the app's UI language (`ui_language`), which can differ from the language of `goal`: match by meaning. Ids after # are often English.",
+    "Pick done only when `screen` itself shows the goal reached, for example its heading names the page the goal asks for.",
+    "When the element the goal needs is not on `screen`, pick scroll down; pick back when this screen is the wrong branch.",
+    "`actions_taken` lists what was already done, oldest first; do not repeat one that did not help.",
+  ],
+};
+const REACHED_INSTRUCTIONS = "Does `screen` show that `goal` has already been achieved?";
 
 export async function navigate(req: NavigateRequest, deps: NavigateDeps): Promise<NavigateResult> {
   const now = deps.now ?? Date.now;
-  const settle = deps.settle ?? (async () => {});
   const started = now();
   const textKeys = Object.keys(req.text);
+  const goal = mask(req.goal);
   const steps: NavigateStep[] = [];
   const history: string[] = [];
   const tried = new Set<string>();
@@ -75,6 +132,8 @@ export async function navigate(req: NavigateRequest, deps: NavigateDeps): Promis
   let dropped = 0;
   let truncated = false;
   let inputTokens = 0;
+  let changes = 0;
+  let acted: { signature: string; shot: Buffer | null } | null = null;
 
   const finish = (outcome: NavigateResult["outcome"], message: string, reason?: NavigateReason): NavigateResult => ({
     outcome,
@@ -89,7 +148,11 @@ export async function navigate(req: NavigateRequest, deps: NavigateDeps): Promis
     inputTokens,
   });
 
-  for (let n = 1; ; n++) {
+  for (let n = 1; ; ) {
+    const ts = now();
+    const settle = await waitSettled(deps.frame, now);
+    const settleMs = now() - ts;
+
     const t0 = now();
     let tree: unknown;
     try {
@@ -100,34 +163,33 @@ export async function navigate(req: NavigateRequest, deps: NavigateDeps): Promis
     const describeMs = now() - t0;
     const screen = readScreen(tree);
     finalScreen = screen.lines;
-    if (screen.elements.length === 0) {
+    if (screen.lines.length === 0) {
       return finish("escalated", "the accessibility tree has nothing readable on this screen, so there is nothing to choose from — take a screenshot", "empty_screen");
     }
+    if (acted && acted.signature === screen.signature && acted.shot && settle.shot && !sameScreen(acted.shot, settle.shot, MOVED_RATIO)) {
+      return finish(
+        "escalated",
+        "the screen changed but the accessibility tree did not, so describe is answering with the previous screen (Android's uiautomator cannot capture a screen that never goes idle) — take a screenshot",
+        "stale_tree",
+      );
+    }
 
-    const { candidates, dropped: d } = candidatesFor(screen, textKeys);
-    dropped = Math.max(dropped, d);
-    const { lines, cut } = fitLines(screen.lines, STATE_CHAR_BUDGET - req.goal.length - history.join("").length);
-    truncated ||= cut;
+    const set = candidatesFor(screen, textKeys);
+    dropped = Math.max(dropped, set.dropped);
+    const fitted = fit(goal, req.locale ?? null, history, screen.lines, set.candidates);
+    truncated ||= fitted.cut;
+    const { state, questions, candidates } = fitted;
 
     const t1 = now();
     let next: ChoiceAnswer;
     let reached: number | null;
+    let usage: number | null = null;
     try {
-      const res = await deps.jev.ask(
-        { goal: req.goal, history: [...history], screen: lines },
-        {
-          next: {
-            type: "choice",
-            instructions:
-              "`screen` lists the elements of a mobile app screen, one per line. `history` lists the actions already taken, oldest first. " +
-              "Pick the single next action that makes the most direct progress toward `goal`. Pick `done` only if `screen` already shows `goal` achieved.",
-            criteria: Object.fromEntries(candidates.map((c) => [c.key, c.description])),
-          },
-          reached: { type: "noul", instructions: "Does `screen` show that `goal` has already been achieved?" },
-        },
-      );
+      deps.onEgress?.({ candidates: candidates.length, bytes: Buffer.byteLength(JSON.stringify({ state, questions })) });
+      const res = await deps.jev.ask(state, questions);
       model = res.model;
-      inputTokens += res.usage?.input_tokens ?? 0;
+      usage = res.usage?.input_tokens ?? null;
+      inputTokens += usage ?? 0;
       const a = res.answers.next;
       if (!a || a.type !== "choice") throw new JevError("TypeSafe API answered without the `next` choice", null);
       next = a;
@@ -139,35 +201,42 @@ export async function navigate(req: NavigateRequest, deps: NavigateDeps): Promis
     const decideMs = now() - t1;
 
     const chosen = candidates.find((c) => c.key === next.choice);
+    const needed = chosen && chosen.kind !== "stuck" ? (req.minConfidence ?? DEFAULT_THRESHOLDS[chosen.kind]) : 0;
     const step: NavigateStep = {
       n,
       chose: next.choice,
       did: chosen?.summary ?? next.choice,
       confidence: next.confidence,
+      needed,
       goalReached: reached,
       alternatives: top(next.probabilities, 3),
       candidates: candidates.length,
+      settled: settle.settled,
+      settleMs,
       describeMs,
       decideMs,
       actMs: 0,
+      estimatedTokens: fitted.tokens,
+      inputTokens: usage,
     };
     steps.push(step);
 
     if (!chosen) return finish("escalated", `the decision model chose "${next.choice}", which is not one of the offered actions`, "decider_error");
-    if (next.confidence < req.minConfidence) {
+    if (chosen.kind === "stuck") return finish("escalated", "the decision model found no listed action that moves toward the goal", "stuck");
+    const corroborated = chosen.kind === "done" && req.minConfidence === undefined && reached !== null && reached >= DONE_CORROBORATED.reached && next.confidence >= DONE_CORROBORATED.confidence;
+    if (next.confidence < needed && !corroborated) {
       return finish(
         "escalated",
-        `confidence ${next.confidence.toFixed(2)} is below ${req.minConfidence} — the top options were ${step.alternatives.map((x) => `${x.option} (${x.p.toFixed(2)})`).join(", ")}`,
+        `confidence ${next.confidence.toFixed(2)} for "${chosen.summary}" is below the ${needed} a ${chosen.kind} needs — the top options were ${step.alternatives.map((x) => `${x.option} (${x.p.toFixed(2)})`).join(", ")}`,
         "low_confidence",
       );
     }
-    if (chosen.key === "done") {
+    if (chosen.kind === "done") {
       if (reached !== null && reached < DONE_DISPUTE_BELOW) {
         return finish("escalated", `the choice said done but the goal check disagrees (p=${reached.toFixed(2)})`, "done_disputed");
       }
       return finish("done", "the decision model judged the goal reached on the final screen");
     }
-    if (chosen.key === "stuck") return finish("escalated", "the decision model found no listed action that moves toward the goal", "stuck");
     if (n > req.maxSteps) {
       step.did = `not run, step limit reached: ${chosen.summary}`;
       break;
@@ -175,6 +244,16 @@ export async function navigate(req: NavigateRequest, deps: NavigateDeps): Promis
 
     const attempt = `${screen.signature}\u0000${chosen.key}`;
     if (tried.has(attempt)) return finish("escalated", `it chose "${chosen.summary}" again on a screen it had already acted on — it is going in circles`, "repeating");
+
+    if (settle.shot && deps.frame) {
+      const before = await grab(deps.frame);
+      if (!before || !sameScreen(settle.shot, before, MOVED_RATIO)) {
+        step.did = `not run, the screen changed after it was read: ${chosen.summary}`;
+        if (++changes > MAX_SCREEN_CHANGES) return finish("escalated", "the screen kept changing between reading it and acting on it", "screen_unstable");
+        continue;
+      }
+    }
+    changes = 0;
     tried.add(attempt);
 
     const t2 = now();
@@ -186,23 +265,96 @@ export async function navigate(req: NavigateRequest, deps: NavigateDeps): Promis
     }
     step.actMs = now() - t2;
     history.push(chosen.summary);
-    await settle();
+    acted = { signature: screen.signature, shot: settle.shot };
+    n++;
   }
   return finish("limit", `stopped after ${req.maxSteps} actions without the goal judged reached`);
+}
+
+interface Fitted {
+  state: { goal: string; ui_language?: string; actions_taken: string[]; screen: string[] };
+  questions: Record<string, JevQuestion>;
+  candidates: Candidate[];
+  tokens: number;
+  cut: boolean;
+}
+
+function build(goal: string, locale: string | null, history: string[], lines: string[], candidates: Candidate[]): Omit<Fitted, "cut"> {
+  const state = { goal, ...(locale ? { ui_language: locale } : {}), actions_taken: [...history], screen: lines };
+  const questions: Record<string, JevQuestion> = {
+    next: { type: "choice", instructions: NEXT_INSTRUCTIONS, criteria: Object.fromEntries(candidates.map((c) => [c.key, null])) },
+    reached: { type: "noul", instructions: REACHED_INSTRUCTIONS },
+  };
+  return { state, questions, candidates, tokens: estimateTokens(state) + estimateTokens(questions.next) };
+}
+
+/** Keep `state` plus the Choice under Jev's limit: drop screen lines from the bottom, then the options they named. */
+function fit(goal: string, locale: string | null, history: string[], lines: string[], candidates: Candidate[]): Fitted {
+  let b = build(goal, locale, history, lines, candidates);
+  if (b.tokens <= TOKEN_BUDGET) return { ...b, cut: false };
+  let kept = lines.length;
+  while (kept > 1 && b.tokens > TOKEN_BUDGET) {
+    kept = Math.floor(kept * 0.8);
+    const shown = lines.slice(0, kept);
+    const refs = new Set(shown.map((l) => l.split(" ", 1)[0]));
+    const opts = candidates.filter((c) => c.kind !== "tap" && c.kind !== "fill" && c.kind !== "reveal" ? true : refs.has(refOf(c.key)));
+    b = build(goal, locale, history, shown, opts);
+  }
+  return { ...b, cut: true };
+}
+
+function refOf(key: string): string {
+  return key.match(/\b(e\d+)\b/)?.[1] ?? "";
+}
+
+async function grab(frame: () => Promise<Buffer>): Promise<Buffer | null> {
+  try {
+    return await frame();
+  } catch {
+    return null;
+  }
+}
+
+/** Equal but for a blinking caret or a ticking clock: under `ratio` of the pixels differ. */
+export function sameScreen(a: Buffer, b: Buffer, ratio = STILL_RATIO): boolean {
+  if (a.equals(b)) return true;
+  try {
+    const d = diffImages(decodePng(a), decodePng(b));
+    return !d.sizeMismatch && d.ratio < ratio;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The screen has matched itself for STILL_MS: nothing is animating. A window, not two frames in a
+ * row — a push transition starts after the tap returns, so two frames grabbed first read as still.
+ * A failed screenshot settles nothing.
+ */
+async function waitSettled(frame: NavigateDeps["frame"], now: () => number): Promise<{ settled: boolean; shot: Buffer | null }> {
+  if (!frame) return { settled: false, shot: null };
+  const deadline = now() + SETTLE_TIMEOUT_MS;
+  let last = await grab(frame);
+  let stillSince = now();
+  let matches = 0;
+  while (last && now() < deadline) {
+    const shot = await grab(frame);
+    if (!shot) return { settled: false, shot: null };
+    if (sameScreen(last, shot)) {
+      matches++;
+      if (matches >= 2 && now() - stillSince >= STILL_MS) return { settled: true, shot };
+    } else {
+      stillSince = now();
+      matches = 0;
+    }
+    last = shot;
+  }
+  return { settled: false, shot: last };
 }
 
 async function runCandidate(c: Candidate, text: Record<string, string>, act: NavigateDeps["act"]): Promise<void> {
   for (const a of c.actions) await act(a);
   if (c.typeKey !== undefined) await act({ type: "type", text: text[c.typeKey] ?? "" });
-}
-
-function fitLines(lines: string[], budget: number): { lines: string[]; cut: boolean } {
-  let used = 0;
-  for (let i = 0; i < lines.length; i++) {
-    used += lines[i]!.length + 1;
-    if (used > budget) return { lines: lines.slice(0, i), cut: true };
-  }
-  return { lines, cut: false };
 }
 
 function top(p: Record<string, number>, k: number): Array<{ option: string; p: number }> {

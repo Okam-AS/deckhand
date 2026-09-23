@@ -13,6 +13,8 @@ import { AndroidManager, AVD_PREFIX, selectSystemImage, serialForPort } from "..
 import { SIM_PREFIX } from "../engine/reaper.ts";
 import { detectWebFrameworkFromDir, webHostingMode } from "../engine/detect.ts";
 import { repoRoot } from "../version.ts";
+import { lookupTypesafeKey, type KeyLookup } from "../navigate/secrets.ts";
+import { egressStatus } from "../navigate/egress.ts";
 
 /** Helper ports for the Android smoke leg — outside the configured preview range, so a gate run cannot evict a live preview's helper. */
 const ANDROID_SMOKE_PORTS: [number, number] = [3290, 3299];
@@ -309,6 +311,12 @@ async function checkGitHub(config: Config): Promise<Check> {
  * framework (Nuxt/Next/static) with no `webHost` configured is a WARNING, not a
  * failure: the preview still works on loopback, it just isn't publicly shareable.
  */
+/** Informational: whether app content can leave this machine through `navigate`, and whose. A warning while it can. */
+export function checkNavigateEgress(apps: App[], key: KeyLookup): Check {
+  const s = egressStatus(apps, key);
+  return { name: "navigate egress", ok: true, ...(s.sending ? { warn: true } : {}), detail: s.detail };
+}
+
 function checkWebHost(config: Config, apps: App[]): Check {
   const webApps = apps.filter((a) => a.type === "web");
   if (webApps.length === 0) return { name: "web host", ok: true, skipped: true, detail: "no web apps" };
@@ -646,6 +654,7 @@ export async function runDoctor(opts: { smoke?: boolean } = {}): Promise<{ check
     checks.push(await checkServices());
     checks.push(await checkGitHub(config));
     checks.push(checkWebHost(config, apps));
+    checks.push(checkNavigateEgress(apps, lookupTypesafeKey()));
     checks.push(await checkServerFreshness(config));
     checks.push(await checkPublicUrl(config));
     if (opts.smoke) {

@@ -106,15 +106,16 @@ export class SimDeckControl {
    * noise on every node.
    *
    * The action takes no options — passing `source`, `interactiveOnly` or `maxDepth` to it
-   * changes nothing, verified against the daemon. So a caller that asks for `source` or
-   * `maxDepth` still gets the endpoint, because those are real levers: `source` picks the
-   * framework inspector over the native-AX fallback, which is the difference between a
-   * usable tree and 150 unlabelled nodes on a map-heavy screen. `interactiveOnly` alone
-   * does NOT force the endpoint — the action is strictly better on that axis.
+   * changes nothing, verified against the daemon. So a caller that asks for any of them gets
+   * the endpoint, because all three are real levers: `source` picks the framework inspector
+   * over the native-AX fallback, which is the difference between a usable tree and 150
+   * unlabelled nodes on a map-heavy screen, and `interactiveOnly` is a different, much
+   * faster iOS capture — measured on iOS 26.5 Settings at ~0.2s against ~1.2s for both the
+   * action and the full tree, at the price of headings and static text.
    */
   async describe(target: SimDeckTarget, opts: DescribeOptions = {}): Promise<unknown> {
     const origin = await this.daemon.ensureRunning();
-    if (opts.source == null && opts.maxDepth == null) {
+    if (opts.source == null && opts.maxDepth == null && !opts.interactiveOnly) {
       const compact = await this.describeCompact(origin, target);
       // Same degradation as below: iOS can hand back an empty capture. Fall through to
       // the endpoint rather than answering "nothing on screen", which is never true.

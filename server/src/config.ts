@@ -166,6 +166,8 @@ export const appSchema = z
     // show the two apps side by side and read the target's parity ledger. The
     // referenced id must exist (checked across the whole apps file, see appsSchema).
     migratesFrom: z.string().min(1).optional(),
+    /** The operator's consent for `navigate` to send this app's screens to TypeSafe. Set only by `deckhand navigate enable`. */
+    navigateEgress: z.boolean().optional(),
     env: z.record(z.string(), z.string()).default({}),
   })
   .strict()

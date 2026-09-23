@@ -17,6 +17,8 @@ import {
   writeTypesafeKey,
 } from "./cli/configWrite.ts";
 import { runDoctor, formatChecks, deviceGateExit } from "./cli/doctor.ts";
+import { navigateEgressLine } from "./navigate/egress.ts";
+import { lookupTypesafeKey } from "./navigate/secrets.ts";
 
 // Minimal, dependency-free arg parsing: positionals + `--key value` / `--flag`.
 interface Args {
@@ -79,6 +81,10 @@ Everything else, for when you already know what you want:
   deckhand secret set typesafe                     store the TypeSafe API key that turns on \`navigate\`
                                                    (read from TYPESAFE_API_KEY or stdin, never argv)
   deckhand secret rm typesafe
+  deckhand navigate enable <appId>                 consent to \`navigate\` sending this app's screen labels to
+                                                   TypeSafe (a third party) — test data and test accounts only
+  deckhand navigate disable <appId>
+  deckhand navigate status                         which apps navigate may send, and whether a key is set
   deckhand verify <appId> --scenario FILE [--ref REF | --path DIR] [--compare REF|DIR] [--out DIR]
                   [--env K=V]... [--device MODEL] [--runtime "iOS x.y"] [--orientation landscape|portrait]
                                                    run a scenario headless: screenshots, a11y trees, result.json
@@ -197,6 +203,11 @@ async function main(): Promise<void> {
       if (sub === "set") return cmdSecretSetTypesafe();
       if (sub === "rm") return cmdSecretRmTypesafe();
       return fail("usage: deckhand secret set|rm typesafe");
+
+    case "navigate":
+      if (sub === "enable" || sub === "disable") return cmdNavigateEgress(_[2], sub === "enable");
+      if (sub === "status") return console.log(navigateEgressLine(loadAppsSafe(), lookupTypesafeKey()));
+      return fail("usage: deckhand navigate enable|disable <appId>, or deckhand navigate status");
 
     case "env":
       if (sub === "set") return cmdEnvSet(_[2], _[3]);
@@ -482,7 +493,22 @@ async function cmdSecretSetTypesafe(): Promise<void> {
   if (!key) fail("no key: set TYPESAFE_API_KEY or pipe the key on stdin");
   if (/\s/.test(key!)) fail("that key contains whitespace — paste only the key");
   writeTypesafeKey(key!);
-  console.log(`stored the TypeSafe key at ${paths.typesafeKey()} (0600, never exposed via MCP) — navigate is on, no restart needed`);
+  console.log(`stored the TypeSafe key at ${paths.typesafeKey()} (0600, never exposed via MCP). navigate still sends nothing until you consent per app: deckhand navigate enable <appId>`);
+}
+
+function cmdNavigateEgress(appId: string | undefined, on: boolean): void {
+  if (!appId) fail(`usage: deckhand navigate ${on ? "enable" : "disable"} <appId>`);
+  const apps = loadAppsForWrite();
+  const app = apps.find((a) => a.id === appId);
+  if (!app) fail(`no app named "${appId}" — see deckhand app list`);
+  if (on) app!.navigateEgress = true;
+  else delete app!.navigateEgress;
+  writeApps(apps);
+  console.log(
+    on
+      ? `navigate may now send "${appId}"'s screens (element roles and labels, masked) to TypeSafe's API at api.typesafe.ai, a third party. Use it only with test data and test accounts. Undo: deckhand navigate disable ${appId}`
+      : `navigate is off for "${appId}" — nothing from it goes to TypeSafe`,
+  );
 }
 
 function cmdSecretRmTypesafe(): void {

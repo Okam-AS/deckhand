@@ -373,6 +373,16 @@ export class AndroidManager {
     return res.stdout;
   }
 
+  /** The system UI language (`nb-NO`), or null. An emulator nobody changed has only `ro.product.locale`. */
+  async uiLanguage(serial: string): Promise<string | null> {
+    for (const prop of ["persist.sys.locale", "ro.product.locale"]) {
+      const res = await this.adb(serial, ["shell", "getprop", prop], { timeoutMs: 5_000 });
+      const v = res.code === 0 ? res.stdout.toString().trim() : "";
+      if (/^[a-z]{2,3}(-[A-Za-z0-9]+)*$/.test(v)) return v;
+    }
+    return null;
+  }
+
   /**
    * The accessibility tree, or an actionable error — never an empty string.
    *

@@ -43,3 +43,21 @@ this: all four QUIC edge connections died together on a UDP timeout and took
 38 seconds to come back while the process stayed up. The plist comment carries
 the captured log. It does not close the gap in general — nothing here
 health-checks the tunnel, so a silent edge drop is still found by a person.
+
+## Turning on `navigate` sends app data to a third party
+
+`navigate` lets an agent reach a screen in one call, with a TypeSafe model choosing each
+step. Each step sends the screen's element roles and masked labels to `api.typesafe.ai`, which
+is outside this machine. It is off until you do both of these on the machine:
+
+```sh
+deckhand secret set typesafe          # paste the key on stdin; never on the command line
+deckhand navigate enable <appId>      # consent for this one app
+```
+
+Enable it only for apps that show test data and test accounts: no data processing agreement
+or zero-retention agreement with TypeSafe is in place. `deckhand navigate status` and the
+`navigate egress` line in `deckhand doctor` say which apps are on; `deckhand navigate disable
+<appId>` turns one off at its next call. Each request is logged as `navigate:egress` in
+`~/.deckhand/audit.jsonl`, with its size and never its content. PLAN §11 item 5 lists what is
+and is not sent.
