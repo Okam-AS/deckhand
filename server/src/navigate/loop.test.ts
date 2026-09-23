@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { JevChooser, JevQuestion, JevResult } from "./jev.ts";
+import { encodePng } from "../verify/png.ts";
 import { DEFAULT_THRESHOLDS, TOKEN_BUDGET, estimateTokens, navigate, type LoopAction, type NavigateRequest } from "./loop.ts";
 
 const VP = { x: 0, y: 0, width: 400, height: 800 };
@@ -254,6 +255,55 @@ describe("navigate waits for a still screen", () => {
     });
     assert.equal(r.steps[0]!.did.startsWith("not run"), true, r.steps[0]!.did);
     assert.equal(dev.acted.length, 1, "it re-read the screen and acted once, on the one it had read");
+  });
+
+  it("guards the tapped element's own pixels, so an animation elsewhere does not stop every tap", async () => {
+    // 40x80 px screen over the 400x800 tree: "Settings" (row 0) is pixel rows 10-17.
+    const png = (paint: (x: number, y: number) => number) => {
+      const data = Buffer.alloc(40 * 80 * 4, 255);
+      for (let y = 0; y < 80; y++) for (let x = 0; x < 40; x++) data.fill(paint(x, y), (y * 40 + x) * 4, (y * 40 + x) * 4 + 3);
+      return encodePng({ width: 40, height: 80, data });
+    };
+    const run = async (moving: (x: number, y: number) => boolean) => {
+      let described = 0;
+      const dev = device([home, about]);
+      const r = await navigate(req(), {
+        ...dev,
+        describe: async () => {
+          described++;
+          return dev.describe();
+        },
+        frame: async () => png((x, y) => (described > 0 && moving(x, y) ? 0 : 255)),
+        jev: scriptedJev([{ pick: "Settings" }, { pick: "Settings" }, { pick: "done" }]),
+        now: clock(),
+      });
+      return r.steps.filter((s) => s.did.startsWith("not run")).length;
+    };
+    assert.equal(await run((_x, y) => y >= 60), 0, "a change far from the target does not hold the tap back");
+    assert.equal(await run((_x, y) => y >= 10 && y < 18), 1, "a change on the target holds it back once, until it is still");
+    let heldBack = false;
+    const dev = device([home, about]);
+    let described = 0;
+    const r = await navigate(req(), {
+      ...dev,
+      describe: async () => {
+        described++;
+        return dev.describe();
+      },
+      frame: async () => png((_x, y) => (described === 1 && y >= 10 && y < 18 ? 0 : 255)),
+      jev: scriptedJev([{ pick: "Settings" }, { pick: "Settings" }, { pick: "done" }]),
+      now: clock(),
+    });
+    heldBack = r.steps[0]!.did.startsWith("not run");
+    assert.ok(heldBack, `a change inside the target's frame holds the tap back: ${JSON.stringify(r.steps.map((s) => s.did))}`);
+  });
+
+  it("measures the screen from the screenshot when a dialog's root is all the tree has", async () => {
+    const dialog = { roots: [{ type: "FrameLayout", frame: { x: 0, y: 20, width: 40, height: 40 }, children: [{ type: "Button", text: "Allow", frame: { x: 0, y: 50, width: 40, height: 10 } }] }] };
+    const shot = encodePng({ width: 40, height: 80, data: Buffer.alloc(40 * 80 * 4, 255) });
+    const dev = device([dialog, about]);
+    await navigate(req(), { ...dev, frame: async () => shot, jev: scriptedJev([{ pick: "Allow" }, { pick: "done" }]), now: clock() });
+    assert.deepEqual(dev.acted, [{ type: "tap", x: 0.5, y: 0.6875 }]);
   });
 
   it("hands back when the screen changed but the tree did not", async () => {

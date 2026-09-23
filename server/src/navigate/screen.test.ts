@@ -82,6 +82,28 @@ describe("reading a screen", () => {
     assert.deepEqual(ios.lines, ['e1 AXButton "Continue" #go'.replace("AXButton", "Button")]);
   });
 
+  it("normalises taps to the whole screen, not to a dialog's own root", () => {
+    const dialog = { roots: [{ type: "FrameLayout", frame: { x: 28, y: 390, width: 1024, height: 1229 }, children: [{ type: "Button", text: "Don’t allow", frame: { x: 100, y: 1500, width: 400, height: 100 } }] }] };
+    const s = readScreen(dialog, { width: 1080, height: 2400 });
+    assert.deepEqual(candidatesFor(s, []).candidates.at(-1)!.actions, [{ type: "tap", x: 0.2778, y: 0.6458 }]);
+    const ios = readScreen({ roots: [{ role: "Application", frame: VP, children: [{ role: "Button", label: "Go", frame: at(380) }] }] }, { width: 1200, height: 2400 });
+    assert.equal(ios.viewport!.width, 400, "iOS frames are points: the pixel size is divided by the scale");
+  });
+
+  it("offers the rows a list reports as plain text or as unclickable children", () => {
+    const ios = readScreen({ roots: [{ role: "Application", frame: VP, children: [{ role: "StaticText", label: "Kate Bell", frame: { x: 2, y: 250, width: 375, height: 60 } }, { role: "StaticText", label: "Caption", frame: { x: 20, y: 320, width: 100, height: 20 } }] }] });
+    assert.deepEqual(ios.lines, ['e1 Row "Kate Bell"']);
+    const android = readScreen({
+      roots: [{ type: "ListView", frame: { x: 0, y: 0, width: 1080, height: 2400 }, children: [{ type: "LinearLayout", clickable: false, frame: { x: 0, y: 300, width: 1080, height: 120 }, children: [{ type: "TextView", text: "Settings", AXIdentifier: "com.x:id/title", frame: { x: 40, y: 320, width: 300, height: 60 } }] }] }],
+    });
+    assert.deepEqual(android.lines, ['e1 Item "Settings"']);
+  });
+
+  it("takes a short text inside a header view for the title, on iOS too", () => {
+    const s = readScreen({ roots: [{ role: "Application", frame: VP, children: [{ role: "StaticText", label: "Kate Bell", id: "ContactCardHeaderView", frame: { x: 115, y: 393, width: 162, height: 48 } }] }] });
+    assert.equal(s.elements[0]!.heading, true);
+  });
+
   it("does not take an iOS toolbar group for the screen's title", () => {
     const s = readScreen({ roots: [{ role: "Application", frame: VP, children: [{ role: "Group", label: "Toolbar", id: "Toolbar", frame: at(760) }] }] });
     assert.ok(!s.elements[0]!.heading);
@@ -98,5 +120,6 @@ describe("mask", () => {
     assert.equal(mask("Mail a.b-c@firma.co.uk now"), "Mail [email] now");
     assert.equal(mask("+47 912 34 567 / 01019912345 / 4111-1111-1111-1111 / 12.34.56"), "[number] / [number] / [number] / [number]");
     assert.equal(mask("iOS 26.5, 39% used, 4.86 GB"), "iOS 26.5, 39% used, 4.86 GB");
+    assert.equal(mask("Serial H45W3FYXP9, order ab12cd34, model A3081H"), "Serial [code], order [code], model A3081H");
   });
 });

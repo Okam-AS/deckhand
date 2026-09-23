@@ -1,7 +1,7 @@
 import { diffImages } from "../verify/compare.ts";
-import { decodePng } from "../verify/png.ts";
+import { decodePng, type Rgba } from "../verify/png.ts";
 import { JevError, type ChoiceAnswer, type JevChooser, type JevQuestion, type NoulAnswer } from "./jev.ts";
-import { candidatesFor, mask, readScreen, type ActionKind, type Candidate, type NavigateAction } from "./screen.ts";
+import { candidatesFor, mask, pngSize, readScreen, type ActionKind, type Candidate, type NavigateAction, type Rect } from "./screen.ts";
 
 export type LoopAction = NavigateAction | { type: "type"; text: string };
 
@@ -99,8 +99,8 @@ const CHARS_PER_TOKEN = 3;
 const SETTLE_TIMEOUT_MS = 4_000;
 const MAX_SCREEN_CHANGES = 2;
 const STILL_RATIO = 0.002;
-/** Between reading a screen and acting on it, only a different screen matters — not a scroll indicator fading out (~0.5%). */
-const MOVED_RATIO = 0.02;
+/** Of the tapped element's region: a list that shifted by a row changes most of it, a blinking caret almost none. */
+const MOVED_RATIO = 0.05;
 const STILL_MS = 300;
 
 export function estimateTokens(v: unknown): number {
@@ -161,7 +161,7 @@ export async function navigate(req: NavigateRequest, deps: NavigateDeps): Promis
       return finish("escalated", `describe failed: ${errMsg(e)}`, "describe_failed");
     }
     const describeMs = now() - t0;
-    const screen = readScreen(tree);
+    const screen = readScreen(tree, settle.shot ? pngSize(settle.shot) : null);
     finalScreen = screen.lines;
     if (screen.lines.length === 0) {
       return finish("escalated", "the accessibility tree has nothing readable on this screen, so there is nothing to choose from — take a screenshot", "empty_screen");
@@ -245,9 +245,9 @@ export async function navigate(req: NavigateRequest, deps: NavigateDeps): Promis
     const attempt = `${screen.signature}\u0000${chosen.key}`;
     if (tried.has(attempt)) return finish("escalated", `it chose "${chosen.summary}" again on a screen it had already acted on — it is going in circles`, "repeating");
 
-    if (settle.shot && deps.frame) {
+    if (chosen.target && settle.shot && deps.frame) {
       const before = await grab(deps.frame);
-      if (!before || !sameScreen(settle.shot, before, MOVED_RATIO)) {
+      if (!before || !sameRegion(settle.shot, before, chosen.target)) {
         step.did = `not run, the screen changed after it was read: ${chosen.summary}`;
         if (++changes > MAX_SCREEN_CHANGES) return finish("escalated", "the screen kept changing between reading it and acting on it", "screen_unstable");
         continue;
@@ -305,6 +305,31 @@ function fit(goal: string, locale: string | null, history: string[], lines: stri
 
 function refOf(key: string): string {
   return key.match(/\b(e\d+)\b/)?.[1] ?? "";
+}
+
+/**
+ * The tapped element's own pixels still match what was read. Its region, not the screen: a looping
+ * illustration (Android Clock's Bedtime tab) changes ~3% of the screen forever.
+ */
+export function sameRegion(a: Buffer, b: Buffer, r: Rect): boolean {
+  if (a.equals(b)) return true;
+  try {
+    const [x, y] = [decodePng(a), decodePng(b)];
+    if (x.width !== y.width || x.height !== y.height) return false;
+    return diffImages(crop(x, r), crop(y, r)).ratio < MOVED_RATIO;
+  } catch {
+    return false;
+  }
+}
+
+function crop(img: Rgba, r: Rect): Rgba {
+  const x0 = Math.max(0, Math.floor(r.x * img.width));
+  const y0 = Math.max(0, Math.floor(r.y * img.height));
+  const w = Math.max(1, Math.min(img.width - x0, Math.ceil(r.width * img.width)));
+  const h = Math.max(1, Math.min(img.height - y0, Math.ceil(r.height * img.height)));
+  const data = Buffer.alloc(w * h * 4);
+  for (let row = 0; row < h; row++) img.data.copy(data, row * w * 4, ((y0 + row) * img.width + x0) * 4, ((y0 + row) * img.width + x0 + w) * 4);
+  return { width: w, height: h, data };
 }
 
 async function grab(frame: () => Promise<Buffer>): Promise<Buffer | null> {

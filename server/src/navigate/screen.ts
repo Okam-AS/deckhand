@@ -31,7 +31,7 @@ export interface ScreenElement {
 
 export interface Screen {
   elements: ScreenElement[];
-  /** The root frame every tap is normalised against. */
+  /** The whole screen, in the tree's units; every tap is normalised against it. */
   viewport: Rect | null;
   /** What the decider reads: minimised and masked. */
   lines: string[];
@@ -49,6 +49,8 @@ export interface Candidate {
   typeKey?: string;
   /** Trace text; never carries a caller-supplied text VALUE. */
   summary: string;
+  /** The tapped element's frame, screen-normalised: what must not move between reading and acting. */
+  target?: Rect;
 }
 
 const INTERACTIVE_ROLE =
@@ -56,8 +58,12 @@ const INTERACTIVE_ROLE =
 const TEXT_INPUT_ROLE = /^(textfield|securetextfield|searchfield|textarea|edittext|autocompletetextview)$/i;
 const SECURE_ROLE = /^securetextfield$/i;
 const HEADING_ROLE = /^(heading|header)$/i;
-/** Android has no heading role: a short text counts as the title only inside a toolbar or app bar. */
+/** Android has no heading role, and iOS headers are often plain text: a short text counts as a title inside a header, toolbar or app bar. */
 const TITLE_SCOPE_ID = /toolbar|action_bar|app_bar|collapsing|header|title/i;
+const TEXT_ROLE = /^(statictext|textview|text)$/i;
+const ROW_ROLE = /^(statictext|genericelement)$/i;
+/** Android lists take the click themselves, so uiautomator reports their rows as not clickable. */
+const LIST_ROLE = /^(listview|recyclerview|gridview|expandablelistview)$/i;
 const CONTAINER_ROLE = /layout|view$|container|group|^element$/i;
 const LABEL_MAX = 60;
 const ID_MAX = 40;
@@ -66,10 +72,12 @@ const TITLE_MAX = 40;
 const EMAIL = /[\p{L}\p{N}._%+-]+@[\p{L}\p{N}.-]+\.[\p{L}]{2,}/gu;
 // Six or more digits, allowing the separators people write them with: phone, national id, card, account.
 const LONG_NUMBER = /\+?\d(?:[\s.\-/]?\d){5,}/g;
+// Serials, order and account ids: eight or more letters and digits with at least two of each.
+const CODE = /\b(?=(?:[A-Za-z]*\d){2})(?=(?:\d*[A-Za-z]){2})[A-Za-z\d]{8,}\b/g;
 
 /** Mask what reads like personal data before it can leave the machine. */
 export function mask(s: string): string {
-  return s.replace(EMAIL, "[email]").replace(LONG_NUMBER, "[number]");
+  return s.replace(EMAIL, "[email]").replace(LONG_NUMBER, "[number]").replace(CODE, "[code]");
 }
 
 function clip(s: string, max: number): string {
@@ -121,12 +129,12 @@ interface Raw {
 }
 
 /** Flatten either tree shape (compact snapshot or AX-keyed endpoint, iOS or Android) into elements, document order. */
-export function readScreen(tree: unknown): Screen {
+export function readScreen(tree: unknown, shot?: { width: number; height: number } | null): Screen {
   const top: Raw[] = [];
-  const build = (node: unknown, insideInteractive: boolean, titleScope: boolean, into: Raw[]): void => {
+  const build = (node: unknown, insideInteractive: boolean, titleScope: boolean, into: Raw[], listItem = false): void => {
     if (!node || typeof node !== "object") return;
     if (Array.isArray(node)) {
-      for (const n of node) build(n, insideInteractive, titleScope, into);
+      for (const n of node) build(n, insideInteractive, titleScope, into, listItem);
       return;
     }
     const n = node as Record<string, unknown>;
@@ -134,7 +142,7 @@ export function readScreen(tree: unknown): Screen {
     const role = roleOf(n);
     const secure = n.password === true || SECURE_ROLE.test(role);
     const textInput = secure || TEXT_INPUT_ROLE.test(role) || /edittext/i.test(str(n.className) ?? "");
-    const interactive = textInput || n.clickable === true || n.checkable === true || INTERACTIVE_ROLE.test(role);
+    const interactive = textInput || (listItem && !insideInteractive) || n.clickable === true || n.checkable === true || INTERACTIVE_ROLE.test(role);
     const value = str(n.value) ?? str(n.AXValue) ?? (textInput ? str(n.text) : undefined);
     const labelSources = textInput
       ? [n.placeholder, n.hint, n.hintText, n.contentDescription, n.AXLabel, n.label]
@@ -148,29 +156,31 @@ export function readScreen(tree: unknown): Screen {
       }
     }
     const id = str(n.id) ?? str(n.AXUniqueId) ?? str(n.AXIdentifier) ?? str(n.resourceId) ?? str(n.androidResourceId);
-    const inTitle = titleScope || (!!id && id.includes(":id/") && TITLE_SCOPE_ID.test(shortId(id)));
+    const inTitle = titleScope || (!!id && TITLE_SCOPE_ID.test(shortId(id)));
     const raw: Raw = { node: n, role, frame: frameOf(n), interactive, textInput, secure, ownText, value, id, insideInteractive, titleScope: inTitle, children: [] };
     into.push(raw);
     const kids = n.children;
-    if (kids && typeof kids === "object") build(kids, insideInteractive || interactive, inTitle, raw.children);
+    if (kids && typeof kids === "object") build(kids, insideInteractive || interactive, inTitle, raw.children, LIST_ROLE.test(role));
   };
   build(roots(tree), false, false, top);
 
-  const viewport = findViewport(top);
+  const viewport = findViewport(top, shot ?? null);
   const elements: ScreenElement[] = [];
   const visit = (r: Raw): void => {
     let label = r.ownText;
+    const row = !r.interactive && isListRow(r, viewport);
+    const interactive = r.interactive || row;
     if (r.interactive && !r.textInput && !label) label = descendantText(r);
-    const heading = !r.interactive && !r.insideInteractive && !!label && isHeading(r, label);
-    if (r.interactive || heading || (!r.insideInteractive && (label || r.id))) {
+    const heading = !interactive && !r.insideInteractive && !!label && isHeading(r, label);
+    if (interactive || heading || (!r.insideInteractive && (label || r.id))) {
       elements.push({
         ref: `e${elements.length + 1}`,
-        role: r.interactive && CONTAINER_ROLE.test(r.role) ? "Item" : r.role,
+        role: row ? "Row" : r.interactive && CONTAINER_ROLE.test(r.role) ? "Item" : r.role,
         ...(label ? { label } : {}),
         ...(r.value ? { value: r.value } : {}),
         ...(r.id ? { id: r.id } : {}),
         ...(r.frame ? { frame: r.frame } : {}),
-        interactive: r.interactive,
+        interactive,
         textInput: r.textInput,
         secure: r.secure,
         heading,
@@ -190,9 +200,29 @@ export function readScreen(tree: unknown): Screen {
   return { elements, viewport, lines, signature };
 }
 
-function findViewport(top: Raw[]): Rect | null {
-  for (const r of top) if (r.frame && r.frame.width > 0 && r.frame.height > 0) return r.frame;
-  return null;
+/**
+ * The whole screen in the tree's units, from the origin — taps are screen-normalised. The roots do
+ * not say it: Android Clock's starts at y=136 and a permission dialog's root is the dialog alone.
+ * The screenshot does, in pixels; iOS frames are points, so it is divided by the integer scale.
+ */
+function findViewport(top: Raw[], shot: { width: number; height: number } | null): Rect | null {
+  let width = 0;
+  let height = 0;
+  for (const r of top) {
+    if (!r.frame || r.frame.width <= 0 || r.frame.height <= 0) continue;
+    width = Math.max(width, r.frame.x + r.frame.width);
+    height = Math.max(height, r.frame.y + r.frame.height);
+  }
+  if (width <= 0 || height <= 0) return null;
+  if (!shot || shot.width < width * 0.9) return { x: 0, y: 0, width, height };
+  const scale = Math.max(1, Math.round(shot.width / width));
+  return { x: 0, y: 0, width: shot.width / scale, height: shot.height / scale };
+}
+
+/** Width and height from a PNG's IHDR, or null for anything that is not a PNG. */
+export function pngSize(buf: Buffer): { width: number; height: number } | null {
+  if (buf.length < 24 || buf.readUInt32BE(0) !== 0x89504e47 || buf.toString("ascii", 12, 16) !== "IHDR") return null;
+  return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
 }
 
 function descendantText(r: Raw): string | undefined {
@@ -206,9 +236,16 @@ function descendantText(r: Raw): string | undefined {
   return out.length ? out.join(", ") : undefined;
 }
 
+/** SwiftUI lists expose a tappable row as static text: full width, row height, a short label. */
+function isListRow(r: Raw, viewport: Rect | null): boolean {
+  if (!ROW_ROLE.test(r.role) || r.insideInteractive || !r.frame || !viewport || !r.ownText || r.ownText.length > LABEL_MAX) return false;
+  const h = r.frame.height / viewport.height;
+  return r.frame.width >= viewport.width * 0.85 && h >= 0.045 && h <= 0.15;
+}
+
 function isHeading(r: Raw, label: string): boolean {
   if (label.length > TITLE_MAX) return false;
-  return HEADING_ROLE.test(r.role) || r.node.heading === true || r.titleScope;
+  return HEADING_ROLE.test(r.role) || r.node.heading === true || (r.titleScope && TEXT_ROLE.test(r.role));
 }
 
 /** What the decider may read about one element: role, a masked label, a masked id. Never a value. */
@@ -270,15 +307,16 @@ export function candidatesFor(screen: Screen, textKeys: string[]): CandidateSet 
     const p = vp ? center(e, vp) : null;
     if (p && onScreen(p)) {
       const at: NavigateAction = { type: "tap", x: p.x, y: p.y };
+      const target = { x: (e.frame!.x - vp!.x) / vp!.width, y: (e.frame!.y - vp!.y) / vp!.height, width: e.frame!.width / vp!.width, height: e.frame!.height / vp!.height };
       const dedupe = `${p.x},${p.y}`;
       if (seen.has(dedupe)) continue;
       seen.add(dedupe);
       if (e.textInput) {
         for (const k of textKeys) {
-          fills.push({ key: `type the "${k}" value into ${e.ref} ${name}`, kind: "fill", actions: [at], typeKey: k, summary: `typed "${k}" into ${name}` });
+          fills.push({ key: `type the "${k}" value into ${e.ref} ${name}`, kind: "fill", actions: [at], typeKey: k, summary: `typed "${k}" into ${name}`, target });
         }
       }
-      taps.push({ key: `tap ${e.ref} ${name}`, kind: "tap", actions: [at], summary: `tapped ${name}` });
+      taps.push({ key: `tap ${e.ref} ${name}`, kind: "tap", actions: [at], summary: `tapped ${name}`, target });
     } else if (p) {
       const preset = p.y >= 0.5 ? "scroll-down" : "scroll-up";
       taps.push({ key: `scroll to ${e.ref} ${name}`, kind: "reveal", actions: [{ type: "gesture", preset }], summary: `scrolled toward ${name}` });
