@@ -797,6 +797,19 @@ change eases in/out — nothing snaps.
 - `deckhand serve` — run the server (what launchd invokes).
 - `deckhand token add|rm|list|url`, `deckhand app add|list`,
   `deckhand env set <appId> KEY=VALUE`.
+- `deckhand verify <appId> --scenario FILE [--ref REF | --path DIR] [--compare REF|DIR]` —
+  the headless check for an unattended agent: no MCP, no share link, no viewer. It runs in its
+  own process against the engine's parts (`buildPlan`, `MetroManager`, `WorktreeManager`,
+  SimDeck control) and writes `<name>.png`, `<name>.ax.json`, `result.json` and, with
+  `--compare`, `<name>.diff.png` + `compare.json`; exit 0 only when every step passed. The
+  scenario (`verify/scenario.ts`, JSON or YAML) is ordered `openUrl`/`tap`/`type`/`scroll`/
+  `scrollUntilVisible`/`waitFor`/`assert`/`sleep`/`screenshot` steps plus a device shape
+  (default iPad 9th generation, iOS 26.5, landscape) and Metro env. Two decisions hold it
+  together: its simulators are named `verify-…`, outside the server's `deckhand-` reaper and
+  pool, with a lock per device; and a native build is cached under `~/.deckhand/verify/builds`
+  by the project's own `@expo/fingerprint` (a hash of config files and the lockfile when that
+  is missing), so a JS-only change reinstalls the cached `.app` and only swaps Metro. Expo and
+  react-native iOS apps only; the react-native Release build embeds its JS, so it is never cached.
 
 ## 11. Security model (recap, enforced in code)
 

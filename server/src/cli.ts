@@ -74,7 +74,10 @@ Everything else, for when you already know what you want:
   deckhand app add <id> --path /abs/dir --type web                        local web dev server (Vite)
       any of the above also take [--migrates-from <id>]                   the app this one is a port of
   deckhand app list
-  deckhand env set <appId> KEY=VALUE`;
+  deckhand env set <appId> KEY=VALUE
+  deckhand verify <appId> --scenario FILE [--ref REF | --path DIR] [--compare REF|DIR] [--out DIR]
+                  [--env K=V]... [--device MODEL] [--runtime "iOS x.y"] [--orientation landscape|portrait]
+                                                   run a scenario headless: screenshots, a11y trees, result.json`;
 
 /**
  * Keep one bad request from taking every live preview down with it.
@@ -178,6 +181,11 @@ async function main(): Promise<void> {
       if (sub === "add") return cmdAppAdd(_[2], _[3], flags);
       if (sub === "list") return cmdAppList();
       return fail(`unknown app subcommand; see 'deckhand'`);
+
+    case "verify": {
+      const { cmdVerify } = await import("./cli/verify.ts");
+      process.exit(await cmdVerify(process.argv.slice(3)));
+    }
 
     case "env":
       if (sub === "set") return cmdEnvSet(_[2], _[3]);
