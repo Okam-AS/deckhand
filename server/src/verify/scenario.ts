@@ -16,6 +16,9 @@ export const DEFAULT_DEVICE: DeviceShape = {
   orientation: "landscape",
 };
 
+/** `visible`: on screen now (the default). `present`: anywhere in the tree, scrolled away or not. `absent`: nowhere in the tree. */
+export type AssertMode = "visible" | "present" | "absent";
+
 export type ScrollDirection = "up" | "down" | "left" | "right";
 
 export type Step =
@@ -25,7 +28,7 @@ export type Step =
   | { action: "scroll"; direction: ScrollDirection }
   | { action: "scrollUntilVisible"; selector: Selector }
   | { action: "waitFor"; selector: Selector; absent: boolean; timeoutMs?: number }
-  | { action: "assert"; selector: Selector; absent: boolean }
+  | { action: "assert"; selector: Selector; mode: AssertMode }
   | { action: "sleep"; ms: number }
   | { action: "screenshot"; name: string };
 
@@ -76,9 +79,9 @@ const waitObject = z
   .refine((w) => Boolean(w.selector) !== Boolean(w.absent), { message: "waitFor takes exactly one of selector or absent" });
 
 const assertObject = z
-  .object({ present: selectorInput.optional(), absent: selectorInput.optional() })
+  .object({ visible: selectorInput.optional(), present: selectorInput.optional(), absent: selectorInput.optional() })
   .strict()
-  .refine((a) => Boolean(a.present) !== Boolean(a.absent), { message: "assert takes exactly one of present or absent" });
+  .refine((a) => [a.visible, a.present, a.absent].filter(Boolean).length === 1, { message: "assert takes exactly one of visible, present or absent" });
 
 const stepSchemas = {
   openUrl: z.string().min(1),
@@ -130,14 +133,15 @@ function parseStep(raw: unknown, i: number): Step {
       return { action: "waitFor", selector: parseSelector(v), absent: false };
     }
     case "assert": {
-      if (isObjectWith(v, ["present", "absent"])) {
+      if (isObjectWith(v, ["visible", "present", "absent"])) {
         const o = v as z.infer<typeof assertObject>;
-        return { action: "assert", selector: parseSelector((o.present ?? o.absent)!), absent: Boolean(o.absent) };
+        const mode: AssertMode = o.absent ? "absent" : o.present ? "present" : "visible";
+        return { action: "assert", selector: parseSelector((o.visible ?? o.present ?? o.absent)!), mode };
       }
-      return { action: "assert", selector: parseSelector(v), absent: false };
+      return { action: "assert", selector: parseSelector(v), mode: "visible" };
     }
     case "assertNot":
-      return { action: "assert", selector: parseSelector(v), absent: true };
+      return { action: "assert", selector: parseSelector(v), mode: "absent" };
     case "sleep":
       return { action: "sleep", ms: v };
     case "screenshot":

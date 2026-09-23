@@ -18,7 +18,7 @@ import { killBuildGroups, reapVerifyOrphans } from "./procs.ts";
 import { VERIFY_MARKER_ENV } from "../engine/reaper.ts";
 import { decodePng, encodePng, rotateCcw } from "./png.ts";
 import { diffImages, PIXEL_COLOR_THRESHOLD } from "./compare.ts";
-import { captureFailure, runSteps, waitForSettle, type Artifacts, type StepResult, type VerifyControl } from "./steps.ts";
+import { captureFailure, confirmOpenPrompt, runSteps, waitForSettle, type Artifacts, type StepResult, type VerifyControl } from "./steps.ts";
 import type { Scenario } from "./scenario.ts";
 
 export type VerifySource = { kind: "local"; dir: string } | { kind: "git"; ref: string };
@@ -184,6 +184,7 @@ export class Verifier {
   private control(device: VerifyDevice): VerifyControl {
     const target: SimDeckTarget = { platform: "ios", udid: device.udid };
     return {
+      quarterTurns: device.quarterTurns,
       action: (a) => this.d.simdeck.action(target, a),
       describe: () => this.d.simdeck.describe(target),
       screenshot: async () => {
@@ -302,12 +303,13 @@ export class Verifier {
         if (!slug) throw new Error(`could not resolve the Expo slug in ${dir}${error ? `: ${error}` : ""}`);
         const metro = await this.d.metro.ensure(`verify-${app.id}`, dir, appEnv);
         await this.d.simctl.openUrl(device.udid, expoDevClientUrl(slug, metro.manifestUrl));
+        await confirmOpenPrompt(control, { sleep: this.d.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))), now: this.now });
       } else {
         await this.d.simctl.launch(device.udid, bundleId);
       }
       const settleMs = this.d.settleTimeoutMs ?? 180_000;
       if (req.scenario.ready) {
-        const ready = await runSteps([{ action: "waitFor", selector: req.scenario.ready, absent: false, timeoutMs: settleMs }], control, out, this.now);
+        const ready = await runSteps([{ action: "waitFor", selector: req.scenario.ready, absent: false, timeoutMs: settleMs }], control, out, this.now, this.d.sleep);
         if (!ready.passed) throw new Error(`the app never showed the ready selector: ${ready.steps[0]?.observed ?? ""}`);
         result.launch = { settled: true, labels: 0 };
       } else {
@@ -317,7 +319,7 @@ export class Verifier {
       t.launchMs = this.now() - t0;
 
       t0 = this.now();
-      const run = await runSteps(req.scenario.steps, control, out, this.now);
+      const run = await runSteps(req.scenario.steps, control, out, this.now, this.d.sleep);
       t.stepsMs = this.now() - t0;
       result.steps = run.steps;
       result.passed = run.passed;

@@ -27,6 +27,7 @@ steps:
   - waitFor: { selector: "#receipt", timeoutMs: 5000 }
   - waitFor: { absent: text=Loading }
   - assert: text=Paid
+  - assert: { present: text=Receipt }
   - assert: { absent: "#error" }
   - assertNot: label=Retry
   - sleep: 250
@@ -47,9 +48,10 @@ steps:
       { action: "scrollUntilVisible", selector: { text: "Total" } },
       { action: "waitFor", selector: { id: "receipt" }, absent: false, timeoutMs: 5000 },
       { action: "waitFor", selector: { text: "Loading" }, absent: true, timeoutMs: undefined },
-      { action: "assert", selector: { text: "Paid" }, absent: false },
-      { action: "assert", selector: { id: "error" }, absent: true },
-      { action: "assert", selector: { label: "Retry" }, absent: true },
+      { action: "assert", selector: { text: "Paid" }, mode: "visible" },
+      { action: "assert", selector: { text: "Receipt" }, mode: "present" },
+      { action: "assert", selector: { id: "error" }, mode: "absent" },
+      { action: "assert", selector: { label: "Retry" }, mode: "absent" },
       { action: "sleep", ms: 250 },
       { action: "screenshot", name: "paid" },
     ]);

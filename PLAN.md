@@ -806,7 +806,12 @@ change eases in/out — nothing snaps.
   settles and `--timeout`), 3 bad arguments or scenario. The scenario (`verify/scenario.ts`,
   JSON or YAML) is ordered `openUrl`/`tap`/`type`/`scroll`/`scrollUntilVisible`/`waitFor`/
   `assert`/`sleep`/`screenshot` steps plus a device shape (default iPad 9th generation, iOS
-  26.5, landscape) and Metro env; typed text is recorded by length only. It shares nothing
+  26.5, landscape) and Metro env; typed text is recorded by length only. `assert` means on screen;
+  `{ present: … }` means anywhere in the tree. Taps and scrolls are placed by verify, not by
+  SimDeck: SimDeck injects touches in the unrotated screen's coordinates and does not rotate the
+  frames it matches, so a landscape selector tap lands elsewhere. SpringBoard's own elements (the
+  «Open in …?» prompt a fresh simulator shows once per URL scheme, which `openUrl` confirms)
+  already come in unrotated points (`verify/geometry.ts`). It shares nothing
   mutable with the server: its simulators are `verify-…` (outside the `deckhand-` reaper and
   pool), its checkouts live in `~/.deckhand/verify/worktrees` (outside the server's prune),
   and its builds and Metro carry `DECKHAND_VERIFY=<pid>`, which the server's boot sweep skips
