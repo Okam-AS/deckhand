@@ -136,19 +136,6 @@ export class SimDeckControl {
   }
 
   /**
-   * The cheapest fresh look at a screen, for telling whether it has stopped moving: ~0.1s on iOS
-   * against ~0.8s for `describe`, without static text.
-   */
-  async probe(target: SimDeckTarget): Promise<unknown> {
-    const origin = await this.daemon.ensureRunning();
-    // Quirk: SimDeck answers a repeated identical tree query from a cache that outlives a screen change, so every probe asks a different maxDepth.
-    this.probes = (this.probes + 1) % 1000;
-    return this.fetchTree(origin, target, { interactiveOnly: true, maxDepth: 1000 + this.probes });
-  }
-
-  private probes = 0;
-
-  /**
    * The compact snapshot, unwrapped to the same `{roots}` shape the endpoint returns so
    * callers never have to know which backend answered. SimDeck nests it under `snapshot`
    * alongside its own `action`/`ok` echo, which is bookkeeping the agent has no use for.

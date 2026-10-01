@@ -52,7 +52,6 @@ async function exerciseEveryPath(control: SimDeckControl): Promise<void> {
   await control.action(iosTarget, { type: "tap", x: 0.1, y: 0.1 });
   await control.action(iosTarget, { type: "type", text: "æ" });
   await control.screenshot(iosTarget);
-  await control.probe(iosTarget);
 }
 
 describe("SimDeckControl.describe", () => {
@@ -276,19 +275,6 @@ describe("SimDeckControl.action", () => {
     const control = new SimDeckControl({ fetchImpl: impl, autostart: false });
     await assert.rejects(() => control.action(iosTarget, { type: "tapElement", selector: { ref: "e3" } }), SimDeckActionError);
     assert.ok(!calls.some((c) => c.url.endsWith("/action")));
-  });
-
-  it("probes with a different query every time, because SimDeck caches a repeated one past a screen change", async () => {
-    // Measured on iOS 26.5: an identical interactiveOnly query kept answering with the previous
-    // screen for over two seconds after the app had moved on; a changed maxDepth read the new one.
-    const { impl, calls } = fakeFetch();
-    const control = new SimDeckControl({ fetchImpl: impl, autostart: false });
-    await control.probe(iosTarget);
-    await control.probe(iosTarget);
-    const urls = calls.filter((c) => c.url.includes("/accessibility-tree")).map((c) => c.url);
-    assert.equal(urls.length, 2);
-    assert.notEqual(urls[0], urls[1]);
-    for (const u of urls) assert.match(u, /interactiveOnly=true/);
   });
 
   it("surfaces a SimDeck error as SimDeckActionError", async () => {

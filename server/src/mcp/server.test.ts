@@ -108,8 +108,6 @@ function fakeEngine(): PreviewEngine {
         source: "native-ax",
         roots: [{ role: "Application", frame: { x: 0, y: 0, width: 400, height: 800 }, children: [{ role: "Button", label: "Continue", frame: { x: 0, y: 380, width: 400, height: 40 } }] }],
       }),
-      // Changes once per action, so a settle sees the screen move and then hold still.
-      probe: async () => ({ roots: [{ role: "Application", label: `after ${simdeckActions.length} actions` }] }),
       // A verifier that could never fail meant no test could reach the failure path at all.
       // SimDeck answers a selector it cannot match by throwing, so this does too.
       action: async (_t: unknown, a: { type?: string; selector?: { text?: string } }) => {

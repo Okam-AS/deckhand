@@ -31,6 +31,11 @@ describe("flattening a tree into listed elements", () => {
     assert.notEqual(shapeOf(screen(node("Button", "A", at(10, 10)))), shapeOf(screen(node("Button", "A", at(10, 60)))));
     assert.equal(shapeOf(screen(node("Button", "A", at(10, 10.2)))), shapeOf(screen(node("Button", "A", at(10, 10.4)))));
   });
+
+  it("does not let a running clock keep a screen from ever being still", () => {
+    assert.equal(shapeOf(screen(node("Button", "#214 · 4:04"))), shapeOf(screen(node("Button", "#214 · 4:05"))));
+    assert.notEqual(shapeOf(screen(node("Button", "#214 · 4 min"))), shapeOf(screen(node("Button", "#215 · 4 min"))));
+  });
 });
 
 describe("ScreenBook refs", () => {
@@ -52,12 +57,31 @@ describe("ScreenBook refs", () => {
     assert.match(update, /~ e2 TextField "Mobilnummer" #auth-phone value="99 99 99 99" \(was: TextField "Mobilnummer" #auth-phone\)/);
   });
 
-  it("tells apart two elements with the same label by their order", () => {
+  it("never moves a ref onto a different element when one of several identical rows goes", () => {
     const book = new ScreenBook();
-    const s = book.record(screen(node("Button", "Mer", at(10, 10)), node("Button", "Mer", at(10, 60))));
-    assert.deepEqual([...s.nodes.keys()], ["e1", "e2", "e3"]);
-    const again = book.record(screen(node("Button", "Mer", at(10, 10)), node("Button", "Mer", at(10, 60))));
-    assert.deepEqual([...again.nodes.keys()], ["e1", "e2", "e3"]);
+    const rows = (...ys: number[]) => screen(...ys.map((y) => node("Button", "+", at(10, y))));
+    const first = book.record(rows(100, 140, 180));
+    const plusRefs = [...first.nodes].filter(([, n]) => n.label === "+").map(([r]) => r);
+    assert.deepEqual(
+      [...book.record(rows(100, 140, 180)).nodes].filter(([, n]) => n.label === "+").map(([r]) => r),
+      plusRefs,
+      "a re-read of an unchanged screen keeps them",
+    );
+    const scrolled = book.record(rows(80, 120, 160));
+    for (const [ref, n] of scrolled.nodes) if (n.label === "+") assert.ok(!plusRefs.includes(ref), `${ref} kept across a move`);
+    book.record(rows(100, 140, 180));
+    // The first row is deleted and the other two slide up into its place.
+    const after = book.record(rows(100, 140));
+    for (const [ref, n] of after.nodes) if (n.label === "+") assert.ok(!plusRefs.includes(ref), `${ref} was reused for a row it may not name`);
+    assert.throws(() => book.resolve(plusRefs[2]!), /shared its name/, "a gone duplicate is not retried by an ambiguous label");
+  });
+
+  it("keeps a unique element's ref while identical rows around it change", () => {
+    const book = new ScreenBook();
+    const s1 = book.record(screen(node("Button", "Lagre", at(10, 10)), node("Button", "+", at(10, 100)), node("Button", "+", at(10, 140))));
+    const save = [...s1.nodes].find(([, n]) => n.label === "Lagre")![0];
+    const s2 = book.record(screen(node("Button", "Lagre", at(10, 10)), node("Button", "+", at(10, 140))));
+    assert.equal([...s2.nodes].find(([, n]) => n.label === "Lagre")![0], save);
   });
 });
 

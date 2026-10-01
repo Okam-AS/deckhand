@@ -2888,11 +2888,6 @@ export class PreviewEngine {
     return p ? (p.sourceDir ?? p.app.path) : undefined;
   }
 
-  /** A cheap fresh capture for telling when the screen has stopped moving. */
-  probe(previewId: string, deviceId: string): Promise<unknown> {
-    return this.simdeckControl().probe(this.simdeckTarget(previewId, deviceId));
-  }
-
   platformOf(previewId: string, deviceId: string): "ios" | "android" {
     return this.simdeckTarget(previewId, deviceId).platform;
   }

@@ -13,9 +13,7 @@ export interface DriveDeps {
   platform: "ios" | "android";
   book: ScreenBook;
   act(action: UiAction): Promise<unknown>;
-  /** A cheap fresh capture, compared only with itself to tell when the screen is still. */
-  probe(): Promise<unknown>;
-  /** The full capture the agent reads. */
+  /** A fresh capture of the screen — what the agent reads, and what settling compares. */
   observe(): Promise<unknown>;
   sleep?(ms: number): Promise<void>;
   now?(): number;
@@ -42,7 +40,7 @@ export interface DriveResult {
   settleMs: number;
 }
 
-/** Actions that can change what is on screen, and how long a still screen is given to start changing. */
+/** Actions that can change what is on screen, and how long a screen that still looks as it did is given to start changing. */
 const CHANGE_WAIT_MS: Partial<Record<UiAction["type"], number>> = {
   tap: 1000,
   tapElement: 1000,
@@ -60,10 +58,13 @@ const CHANGE_WAIT_MS: Partial<Record<UiAction["type"], number>> = {
   scrollUntilVisible: 500,
 };
 /** A screen still moving after this long is read as it is. */
-const SETTLE_MAX_MS = 4000;
-const PROBE_GAP_MS = 100;
+const SETTLE_MAX_MS = 5000;
+/** Captures are ~0.8s on iOS; this only keeps an instant answer from becoming a busy loop. */
+const CAPTURE_GAP_MS = 100;
 /** uiautomator dumps take ~2s each, so Android is not polled. */
 const ANDROID_SETTLE_MS = 700;
+/** Between the steps of a list: the next step's own selector wait does the rest. */
+const STEP_GAP_MS = 250;
 /** Inside a list, a later step's element may still be rendering when its turn comes. */
 const BATCH_TAP_WAIT_MS = 3000;
 
@@ -74,34 +75,33 @@ export function isMutating(a: UiAction): boolean {
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /**
- * Wait until two consecutive probes agree. Until `changeWaitMs` has passed, a screen still equal
- * to `before` does not count as settled: a tap's push transition can start after the tap returns.
+ * Capture until two captures in a row agree, and return the last. Until `changeWaitMs` has
+ * passed, a screen that still looks like `before` does not count: a tap's push transition, or a
+ * reply from the network, can start after the tap has returned.
  */
 export async function settle(
-  deps: Pick<DriveDeps, "probe" | "platform" | "sleep" | "now">,
+  deps: Pick<DriveDeps, "observe" | "platform" | "sleep" | "now">,
   before: string | undefined,
   changeWaitMs: number,
-): Promise<{ shape: string | undefined; ms: number }> {
+): Promise<{ tree: unknown; ms: number }> {
   const sleep = deps.sleep ?? defaultSleep;
   const now = deps.now ?? Date.now;
   const start = now();
   if (deps.platform === "android") {
     await sleep(ANDROID_SETTLE_MS);
-    return { shape: undefined, ms: now() - start };
+    return { tree: await deps.observe(), ms: now() - start };
   }
-  let prev: string | undefined;
+  let tree = await deps.observe();
+  let shape = shapeOf(tree);
   for (;;) {
-    const shape = await probeShape(deps);
+    await sleep(CAPTURE_GAP_MS);
+    const next = await deps.observe();
+    const nextShape = shapeOf(next);
     const elapsed = now() - start;
-    if (shape === undefined) {
-      if (elapsed >= changeWaitMs) return { shape, ms: elapsed };
-      await sleep(PROBE_GAP_MS);
-      continue;
-    }
-    if (prev !== undefined && shape === prev && (shape !== before || elapsed >= changeWaitMs)) return { shape, ms: elapsed };
-    if (elapsed >= SETTLE_MAX_MS) return { shape, ms: elapsed };
-    prev = shape;
-    await sleep(PROBE_GAP_MS);
+    if (nextShape === shape && (nextShape !== before || elapsed >= changeWaitMs)) return { tree: next, ms: elapsed };
+    if (elapsed >= SETTLE_MAX_MS) return { tree: next, ms: elapsed };
+    tree = next;
+    shape = nextShape;
   }
 }
 
@@ -130,12 +130,10 @@ async function resolveRefs(deps: DriveDeps, a: UiAction, freshAfter: number): Pr
 
 export async function drive(deps: DriveDeps, actions: UiAction[], observe: ObserveMode): Promise<DriveResult> {
   const results: unknown[] = [];
+  const sleep = deps.sleep ?? defaultSleep;
   let failure: DriveFailure | undefined;
-  let settleMs = 0;
   let freshAfter = deps.book.snapshot?.revision ?? 0;
-  let before: string | undefined;
-  const moves = actions.some(isMutating);
-  if (moves && observe !== "none" && deps.platform === "ios") before = await probeShape(deps);
+  let lastMove: UiAction | undefined;
   for (let i = 0; i < actions.length; i++) {
     let a = actions[i]!;
     try {
@@ -155,29 +153,26 @@ export async function drive(deps: DriveDeps, actions: UiAction[], observe: Obser
       break;
     }
     if (!isMutating(a)) continue;
+    lastMove = a;
     freshAfter = deps.book.snapshot?.revision ?? 0;
-    if (i === actions.length - 1 && observe === "none") break;
-    const s = await settle(deps, before, CHANGE_WAIT_MS[a.type]!);
-    settleMs += s.ms;
-    before = s.shape;
+    if (i < actions.length - 1) await sleep(STEP_GAP_MS);
   }
-  if (observe === "none" && !(failure && moves)) return { results, failure, settleMs };
+  if (observe === "none" && !(failure && lastMove)) return { results, failure, settleMs: 0 };
   // The action already happened: a look that fails must not turn it into a failure.
   let tree: unknown;
+  let settleMs = 0;
   try {
-    tree = await deps.observe();
+    if (lastMove && !failure) {
+      const s = await settle(deps, deps.book.snapshot?.shape, CHANGE_WAIT_MS[lastMove.type]!);
+      tree = s.tree;
+      settleMs = s.ms;
+    } else {
+      tree = await deps.observe();
+    }
   } catch (e) {
     return { results, failure, settleMs, screenError: e instanceof Error ? e.message : String(e) };
   }
   deps.book.record(tree);
   const screen = observe === "full" ? deps.book.full() : deps.book.update();
   return { results, failure, screen, tree, settleMs };
-}
-
-async function probeShape(deps: Pick<DriveDeps, "probe">): Promise<string | undefined> {
-  try {
-    return shapeOf(await deps.probe());
-  } catch {
-    return undefined;
-  }
 }

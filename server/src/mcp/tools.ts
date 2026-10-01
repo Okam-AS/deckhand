@@ -1122,7 +1122,6 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             platform: engine.platformOf(args.previewId, args.deviceId),
             book: engine.screenBook(args.previewId, args.deviceId),
             act: (a) => engine.ui(args.previewId, args.deviceId, a),
-            probe: () => engine.probe(args.previewId, args.deviceId),
             observe: () => engine.describe(args.previewId, args.deviceId, {}),
           },
           list,

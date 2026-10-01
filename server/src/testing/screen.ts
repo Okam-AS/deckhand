@@ -114,16 +114,17 @@ export function renderNode(ref: string, n: ScreenNode): string {
   return line;
 }
 
+/** `4:04`, `23:59:59`: a value that changes by itself every second or minute. */
+const CLOCK = /\b\d{1,2}:\d{2}(?::\d{2})?\b/g;
+
 /**
  * Two captures of the same screen are equal under this; a transition, a list still loading, or a
- * value being typed is not. Frames are in it because an element sliding in keeps its label.
+ * value being typed is not. Frames are in it because an element sliding in keeps its label; clock
+ * readings are not, or a screen with a running timer never holds still.
  */
 export function shapeOf(tree: unknown): string {
   return flattenTree(tree)
-    .map((n) => {
-      const f = n.frame;
-      return `${n.role}|${n.id ?? ""}|${n.label ?? ""}|${n.value ?? ""}|${f ? `${Math.round(f.x)},${Math.round(f.y)},${Math.round(f.width)},${Math.round(f.height)}` : ""}`;
-    })
+    .map((n) => `${n.role}|${n.id ?? ""}|${n.label ?? ""}|${n.value ?? ""}|${frameKey(n.frame)}`.replace(CLOCK, "<time>"))
     .join("\n");
 }
 
@@ -135,6 +136,8 @@ const MAX_REMEMBERED = 2000;
 
 export interface Snapshot {
   revision: number;
+  /** `shapeOf` the capture, so a later capture can be compared with it. */
+  shape: string;
   bounds?: Frame;
   /** ref → node, in document order. */
   nodes: Map<string, ScreenNode>;
@@ -161,27 +164,40 @@ export class ScreenBook {
   private revision = 0;
   private latest: Snapshot | null = null;
   private shown: Map<string, string> | null = null;
-  private readonly remembered = new Map<string, ScreenNode>();
-  private readonly byKey = new Map<string, string[]>();
+  private readonly remembered = new Map<string, Remembered>();
+  private readonly byKey = new Map<string, string>();
+  private readonly groups = new Map<string, { where: string; refs: string[] }>();
 
-  /** Record a capture: an element seen before, on this screen or an earlier one, keeps its ref. */
+  /**
+   * Record a capture. An element seen before, on this screen or an earlier one, keeps its ref.
+   * Elements that share role, id and label cannot be told apart once one of them moves or goes,
+   * so a group of them keeps its refs only while every one of them is exactly where it was.
+   */
   record(tree: unknown): Snapshot {
-    const taken = new Set<string>();
-    const next = new Map<string, ScreenNode>();
-    for (const n of flattenTree(tree)) {
-      const k = keyOf(n);
-      const known = this.byKey.get(k) ?? [];
-      let ref = known.find((r) => !taken.has(r));
-      if (!ref) {
-        ref = `e${++this.counter}`;
-        known.push(ref);
-        this.byKey.set(k, known);
+    const nodes = flattenTree(tree);
+    const groups = new Map<string, ScreenNode[]>();
+    for (const n of nodes) groups.set(keyOf(n), [...(groups.get(keyOf(n)) ?? []), n]);
+    const refs = new Map<ScreenNode, string>();
+    for (const [k, members] of groups) {
+      if (members.length === 1) {
+        const ref = this.byKey.get(k) ?? `e${++this.counter}`;
+        this.byKey.set(k, ref);
+        refs.set(members[0]!, ref);
+        continue;
       }
-      taken.add(ref);
-      next.set(ref, n);
-      this.remember(ref, n);
+      const where = members.map((n) => frameKey(n.frame)).join(";");
+      const held = this.groups.get(k);
+      const group = held?.where === where ? held.refs : members.map(() => `e${++this.counter}`);
+      this.groups.set(k, { where, refs: group });
+      members.forEach((n, i) => refs.set(n, group[i]!));
     }
-    this.latest = { revision: ++this.revision, bounds: screenBounds(tree), nodes: next };
+    const next = new Map<string, ScreenNode>();
+    for (const n of nodes) {
+      const ref = refs.get(n)!;
+      next.set(ref, n);
+      this.remember(ref, groups.get(keyOf(n))!.length === 1 ? n : { ...n, ambiguous: true });
+    }
+    this.latest = { revision: ++this.revision, shape: shapeOf(tree), bounds: screenBounds(tree), nodes: next };
     return this.latest;
   }
 
@@ -246,22 +262,29 @@ export class ScreenBook {
       throw new RefError(`${r} has no unique id or label, and no frame to tap`);
     }
     const old = this.remembered.get(r);
-    if (old?.id) return { kind: "selector", selector: { id: old.id } };
-    if (old?.label) return { kind: "selector", selector: { label: old.label } };
-    throw new RefError(old ? `${r} is no longer on screen and has no id or label to find it by` : `unknown ref ${r}`);
+    if (!old) throw new RefError(`unknown ref ${r}`);
+    if (old.ambiguous) throw new RefError(`${r} is no longer on screen, and it shared its name with other elements, so it cannot be found again by name`);
+    if (old.id) return { kind: "selector", selector: { id: old.id } };
+    if (old.label) return { kind: "selector", selector: { label: old.label } };
+    throw new RefError(`${r} is no longer on screen and has no id or label to find it by`);
   }
 
-  private remember(ref: string, n: ScreenNode): void {
+  private remember(ref: string, n: Remembered): void {
     this.remembered.delete(ref);
     this.remembered.set(ref, n);
     if (this.remembered.size <= MAX_REMEMBERED) return;
     const [oldRef, oldNode] = this.remembered.entries().next().value!;
     this.remembered.delete(oldRef);
     const k = keyOf(oldNode);
-    const left = (this.byKey.get(k) ?? []).filter((r) => r !== oldRef);
-    if (left.length) this.byKey.set(k, left);
-    else this.byKey.delete(k);
+    if (this.byKey.get(k) === oldRef) this.byKey.delete(k);
+    if (this.groups.get(k)?.refs.includes(oldRef)) this.groups.delete(k);
   }
+}
+
+type Remembered = ScreenNode & { ambiguous?: boolean };
+
+function frameKey(f: Frame | undefined): string {
+  return f ? `${Math.round(f.x)},${Math.round(f.y)},${Math.round(f.width)},${Math.round(f.height)}` : "";
 }
 
 function keyOf(n: ScreenNode): string {
