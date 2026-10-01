@@ -217,4 +217,15 @@ describe("drive", () => {
     const listed = await drive(deps, [{ type: "openUrl", url: "app://x" }], "auto");
     assert.equal(typeof listed.screen, "string", "a list still shows where it stopped");
   });
+
+  it("judges a gone ref on a fresh capture, not on the one from before the call", async () => {
+    const { deps, acted } = fakeDevice(() => tree("Ny", "Slett"));
+    const ref = [...deps.book.record(tree("Slett")).nodes].find(([, n]) => n.label === "Slett")![0];
+    deps.book.record(tree("Avbryt"));
+    // Since that capture the viewer has moved on to a screen where another element says "Slett".
+    deps.observe = async () => ({ roots: [{ role: "Application", label: "App", frame: { x: 0, y: 0, width: 400, height: 800 }, children: [{ role: "Link", label: "Slett", frame: { x: 0, y: 0, width: 400, height: 40 } }] }] });
+    const r = await drive(deps, [{ type: "tapElement", selector: { ref } }], "none");
+    assert.ok(r.failure?.error instanceof RefError);
+    assert.equal(acted.length, 0);
+  });
 });

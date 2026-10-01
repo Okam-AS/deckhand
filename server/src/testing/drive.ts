@@ -118,9 +118,11 @@ async function resolveRefs(deps: DriveDeps, a: UiAction, freshAfter: number, mov
   const ref = a.selector.ref;
   // Decided: on Android a ref is tapped at its element's centre, never matched by name — how SimDeck's selectors match uiautomator fields is unverified.
   const opts = { preferPoint: deps.platform === "android" && a.type === "tapElement" };
+  const stale = () => (deps.book.snapshot?.revision ?? 0) <= freshAfter;
+  // After an earlier step of this call a name may no longer be unique, and a gone ref is judged on what is on screen now.
+  if (stale() && (moved || !deps.book.snapshot?.nodes.has(ref.replace(/^@/, "")))) deps.book.record(await deps.observe());
   let target = deps.book.resolve(ref, opts);
-  // After an earlier step of this call a name may no longer be unique, so any ref is re-read then.
-  if ((target.kind === "point" || moved) && (deps.book.snapshot?.revision ?? 0) <= freshAfter) {
+  if (target.kind === "point" && stale()) {
     deps.book.record(await deps.observe());
     target = deps.book.resolve(ref, opts);
   }

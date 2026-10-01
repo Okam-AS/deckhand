@@ -283,16 +283,19 @@ export class ScreenBook {
     const shared = `${r} is no longer on screen, and it shared its name with other elements, so it cannot be found again by name`;
     if (old.ambiguous) throw new RefError(shared);
     // Its name on the current screen belongs to another element: its own would still carry the ref.
-    const taken = `${r} is no longer on screen; what now carries its name is a different element — target that by its own ref`;
-    const now = s ? [...s.nodes.values()] : [];
+    const now = s ? [...s.nodes.entries()] : [];
+    const taken = (by: Array<[string, ScreenNode]>) =>
+      new RefError(`${r} is no longer on screen; its name is now on ${by.map(([ref]) => ref).join(", ")}, a different element — target that by its own ref`);
     if (old.id) {
-      // The same id on the same kind of element is the element itself with a new label (a timer, a count).
-      const holders = now.filter((n) => n.id === old.id);
-      if (holders.length > 1 || holders.some((n) => n.role !== old.role)) throw new RefError(taken);
+      // The same id on the same kind of element, its label changed only in its digits (a timer, a count), is the element itself.
+      const holders = now.filter(([, n]) => n.id === old.id);
+      const same = (n: ScreenNode) => n.role === old.role && digitless(n.label) === digitless(old.label);
+      if (holders.length > 1 || holders.some(([, n]) => !same(n))) throw taken(holders);
       return { kind: "selector", selector: { id: old.id } };
     }
     if (old.label) {
-      if (now.some((n) => n.label === old.label)) throw new RefError(taken);
+      const holders = now.filter(([, n]) => n.label === old.label);
+      if (holders.length) throw taken(holders);
       return { kind: "selector", selector: { label: old.label } };
     }
     throw new RefError(`${r} is no longer on screen and has no id or label to find it by`);
@@ -316,6 +319,8 @@ export class ScreenBook {
 }
 
 type Remembered = ScreenNode & { ambiguous?: boolean };
+
+const digitless = (s: string | undefined): string => (s ?? "").replace(/\d+/g, "#");
 
 /** iOS screens are portrait in hardware; a wider app root means the device is turned. */
 export function isRotatedIos(platform: "ios" | "android", bounds: Frame | undefined): boolean {

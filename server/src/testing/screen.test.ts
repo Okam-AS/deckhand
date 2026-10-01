@@ -134,6 +134,28 @@ describe("ScreenBook refs that lost their element", () => {
     assert.throws(() => book.resolve(ref), /different element/, "nor by a name one other element holds");
   });
 
+  it("does not retry a gone ref by a label another element now holds, and names that element", () => {
+    const book = new ScreenBook();
+    const ref = [...book.record(screen(node("Button", "Slett", at(10, 100)))).nodes].find(([, n]) => n.label === "Slett")![0];
+    const now = book.record(screen(node("Link", "Slett", at(10, 300))));
+    const link = [...now.nodes].find(([, n]) => n.role === "Link")![0];
+    assert.throws(() => book.resolve(ref), new RegExp(`now on ${link}, a different element`));
+  });
+
+  it("retries a gone ref by its name while nothing on screen holds it", () => {
+    const book = new ScreenBook();
+    const ref = [...book.record(screen(node("Button", "Slett", at(10, 100)))).nodes].find(([, n]) => n.label === "Slett")![0];
+    book.record(screen(node("Button", "Avbryt", at(10, 300))));
+    assert.deepEqual(book.resolve(ref), { kind: "selector", selector: { label: "Slett" } });
+  });
+
+  it("does not retry a gone ref by an id whose element now says something else", () => {
+    const book = new ScreenBook();
+    const ref = [...book.record(screen(node("Button", "Neste", { id: "primary", ...at(10, 100) }))).nodes].find(([, n]) => n.id === "primary")![0];
+    book.record(screen(node("Button", "Betal", { id: "primary", ...at(10, 100) })));
+    assert.throws(() => book.resolve(ref), /different element/);
+  });
+
   it("still retries a gone ref by its id when the same kind of element holds it under a new label", () => {
     const book = new ScreenBook();
     const ref = [...book.record(screen(node("Button", "#102 · 6:05", { id: "ticket-1002", ...at(10, 100) }))).nodes].find(([, n]) => n.id === "ticket-1002")![0];
