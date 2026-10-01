@@ -28,4 +28,11 @@ describe("summarizeArgs redaction", () => {
     const out = summarizeArgs({ blob: "a".repeat(300) });
     assert.equal((out?.blob as string).length, 201); // 200 + ellipsis
   });
+
+  it("redacts and truncates inside a list, as `ui` sends its actions", () => {
+    const out = summarizeArgs({ actions: [{ type: "type", text: "a".repeat(300) }, { type: "x", password: "hunter2" }] });
+    const [typed, secret] = out?.actions as Array<Record<string, unknown>>;
+    assert.equal((typed!.text as string).length, 201);
+    assert.equal(secret!.password, "[redacted]");
+  });
 });

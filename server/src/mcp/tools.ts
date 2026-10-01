@@ -25,7 +25,7 @@ import { SimDeckUnavailableError } from "../testing/simdeck.ts";
 import { SimDeckActionError, type UiAction } from "../testing/control.ts";
 import { drive, isMutating } from "../testing/drive.ts";
 import { FLOWS_FILENAME, readFlow } from "../engine/flows.ts";
-import { RefError as ScreenRefError } from "../testing/screen.ts";
+import { RefError as ScreenRefError, isRotatedIos } from "../testing/screen.ts";
 import type { JevProvider } from "../navigate/jev.ts";
 import { navigate } from "../navigate/loop.ts";
 import { EGRESS_HOST } from "../navigate/egress.ts";
@@ -151,10 +151,23 @@ function toFail(e: unknown): CallToolResult {
 
 const MAX_UI_ACTIONS = 25;
 
+/** One `ui` or text `describe` at a time per device: they share the device's refs and the screen last shown. */
+const deviceQueues = new Map<string, Promise<unknown>>();
+function onDevice<T>(previewId: string, deviceId: string, run: () => Promise<T>): Promise<T> {
+  const key = `${previewId}/${deviceId}`;
+  const next = (deviceQueues.get(key) ?? Promise.resolve()).catch(() => {}).then(run);
+  const tail = next.catch(() => {});
+  deviceQueues.set(key, tail);
+  void tail.then(() => {
+    if (deviceQueues.get(key) === tail) deviceQueues.delete(key);
+  });
+  return next;
+}
+
 const selectorSchema = z.object({
   ref: z
     .string()
-    .regex(/^@?e\d+$/)
+    .regex(/^e\d+$/)
     .optional()
     .describe("a ref from the screen `ui` or describe {format: \"text\"} returned, e.g. \"e12\"; when set, the other fields are ignored"),
   id: z.string().optional(),
@@ -272,7 +285,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             "Start with `list_apps`. When you can run commands on the deckhand host, prefer its existing checkout: register it with `deckhand app add <id> --path <dir>`; otherwise use `add_app` for a GitHub source. Never ask for or relay a credential or app secret in chat; relay the one-time setup link if `add_app` returns one.",
             "Before `start_preview`, ask the user to choose public access or a PIN. A public link is open to anyone with its URL; web previews require a PIN. Pass a user-chosen 4–6 digit PIN without repeating it in chat.",
             "Give the `start_preview` URL to the user immediately, then poll `preview_status` until the target is ready before driving it. Reuse an equivalent live preview; use `restart_preview` for a local native/dependency change or after pushing new git commits, not for ordinary hot reloads.",
-            "For visible, end-to-end work, start a test run, then use `describe` to orient, `ui` to act, and `describe` or `screenshot` to verify. Update each test step as it runs and finish the run with an evidence-based verdict.",
+            "For visible, end-to-end work, start a test run, then use `describe` to orient and `ui` to act — `ui` returns the screen after it, and takes a list of `actions` for a known sequence — and `screenshot` to verify. Update each test step as it runs and finish the run with an evidence-based verdict.",
             "When build or launch fails, read `logs` with its default build source. When a ready viewer has no video, read `logs` with source `stream`. Stop previews you no longer need with `stop_preview`.",
             "If any JSON tool response includes `deckhandUpdate`, ask the operator before pulling or restarting. Never update or restart automatically: a restart tears down booted simulators and emulators.",
           ],
@@ -1073,9 +1086,11 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         // The dev menu is the one thing on screen that is not the app. An agent that
         // does not know that files the overlay's behaviour as an app bug — observed.
         if (args.format === "text") {
-          const book = engine.screenBook(args.previewId, args.deviceId);
-          book.record(tree);
-          return ok({ screen: book.full(), ...devMenuHint(tree) });
+          return onDevice(args.previewId, args.deviceId, async () => {
+            const book = engine.screenBook(args.previewId, args.deviceId);
+            book.record(tree);
+            return ok({ screen: book.full(), ...devMenuHint(tree) });
+          });
         }
         return ok({ describe: tree, ...devMenuHint(tree) });
       }),
@@ -1112,21 +1127,27 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         const single = args.action != null;
         let list = (args.actions ?? [args.action]) as UiAction[];
         if (args.flow != null) {
-          const found = readFlow(engine.sourceDirOf(args.previewId), args.flow, uiActionSchema);
+          const found = readFlow(engine.sourceDirOf(args.previewId), args.flow, uiActionSchema, MAX_UI_ACTIONS);
           if (!found.ok) return failWith(found.code, found.message, found.available ? { available: found.available } : {});
           list = found.actions as UiAction[];
         }
         const observe = args.observe ?? (list.some(isMutating) ? "auto" : "none");
-        const run = await drive(
+        const platform = engine.platformOf(args.previewId, args.deviceId);
+        const book = engine.screenBook(args.previewId, args.deviceId);
+        const run = await onDevice(args.previewId, args.deviceId, () => drive(
           {
-            platform: engine.platformOf(args.previewId, args.deviceId),
-            book: engine.screenBook(args.previewId, args.deviceId),
+            platform,
+            book,
             act: (a) => engine.ui(args.previewId, args.deviceId, a),
             observe: () => engine.describe(args.previewId, args.deviceId, {}),
           },
           list,
           observe,
-        );
+        ));
+        const rotated =
+          isRotatedIos(platform, book.snapshot?.bounds) && list.some((a) => a.type === "tapElement")
+            ? { rotated: "This iOS device is turned to landscape, and SimDeck places element taps as if it were not: tapElement can land on a different element. Check the returned screen after every tap." }
+            : {};
         // A failed verifier is noted HERE or the fact is lost before update_test_run can use it.
         run.results.forEach((_, i) => {
           const t = list[i]!.type;
@@ -1137,7 +1158,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         const nudgeType = list.find((a) => DRIVING_UI_ACTIONS.has(a.type))?.type ?? list[0]!.type;
         const f = run.failure;
         if (!f) {
-          return ok({ ...(single ? { result: run.results[0] } : { results: run.results }), ...look, ...devMenu, ...testRunNudge(args.previewId, nudgeType) });
+          return ok({ ...(single ? { result: run.results[0] } : { results: run.results }), ...look, ...devMenu, ...rotated, ...testRunNudge(args.previewId, nudgeType) });
         }
         const failed = f.action;
         if (single && !("selector" in failed) && !(f.error instanceof ScreenRefError)) throw f.error;
@@ -1162,6 +1183,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           ...(run.screen ? { currentScreen: run.screen } : {}),
           ...(run.screenError ? { screenUnavailable: run.screenError } : {}),
           ...devMenu,
+          ...rotated,
         });
       }),
   );

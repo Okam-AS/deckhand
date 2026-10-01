@@ -294,7 +294,7 @@ describe("MCP server (end-to-end over HTTP)", () => {
       "Start with `list_apps`. When you can run commands on the deckhand host, prefer its existing checkout: register it with `deckhand app add <id> --path <dir>`; otherwise use `add_app` for a GitHub source. Never ask for or relay a credential or app secret in chat; relay the one-time setup link if `add_app` returns one.",
       "Before `start_preview`, ask the user to choose public access or a PIN. A public link is open to anyone with its URL; web previews require a PIN. Pass a user-chosen 4–6 digit PIN without repeating it in chat.",
       "Give the `start_preview` URL to the user immediately, then poll `preview_status` until the target is ready before driving it. Reuse an equivalent live preview; use `restart_preview` for a local native/dependency change or after pushing new git commits, not for ordinary hot reloads.",
-      "For visible, end-to-end work, start a test run, then use `describe` to orient, `ui` to act, and `describe` or `screenshot` to verify. Update each test step as it runs and finish the run with an evidence-based verdict.",
+      "For visible, end-to-end work, start a test run, then use `describe` to orient and `ui` to act — `ui` returns the screen after it, and takes a list of `actions` for a known sequence — and `screenshot` to verify. Update each test step as it runs and finish the run with an evidence-based verdict.",
       "When build or launch fails, read `logs` with its default build source. When a ready viewer has no video, read `logs` with source `stream`. Stop previews you no longer need with `stop_preview`.",
       "If any JSON tool response includes `deckhandUpdate`, ask the operator before pulling or restarting. Never update or restart automatically: a restart tears down booted simulators and emulators.",
     ]);
@@ -1296,6 +1296,31 @@ describe("agent-driven testing tools (describe/ui + test runs)", () => {
     assert.equal(err.code, "ui_error");
     assert.equal(err.failedStep, 1);
     assert.equal(typeof err.currentScreen, "string");
+    // Re-arm the once-per-stretch run nudge that this untracked driving spent, for the tests after.
+    await admin.callTool({ name: "start_test_run", arguments: { previewId, title: "Re-arm", steps: ["x"] } });
+    await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 1, status: "passed" } } });
+    await admin.callTool({ name: "finish_test_run", arguments: { previewId, status: "passed" } });
+    await admin.close();
+  });
+
+  it("runs one ui call at a time per device, and takes deckhand's refs only", async () => {
+    const admin = await client(ADMIN);
+    const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
+    const previewId = started.previewId as string;
+    await waitReadyByApp(admin, "app-local");
+    const deviceId = "ios-0";
+    simdeckActions.length = 0;
+    const list = (x: number) => ({ name: "ui", arguments: { previewId, deviceId, observe: "none", actions: [{ type: "tap", x, y: 0.1 }, { type: "tap", x, y: 0.2 }] } });
+    await Promise.all([admin.callTool(list(0.1)), admin.callTool(list(0.9))]);
+    assert.deepEqual(
+      simdeckActions.map((a) => (a as { x: number }).x),
+      [0.1, 0.1, 0.9, 0.9],
+      "the second call's steps did not interleave with the first's",
+    );
+    simdeckActions.length = 0;
+    const agentDeviceRef = await admin.callTool({ name: "ui", arguments: { previewId, deviceId, action: { type: "tapElement", selector: { ref: "@e2" } } } });
+    assert.equal(agentDeviceRef.isError, true, "an @e ref from another tool is refused, not resolved against deckhand's own");
+    assert.equal(simdeckActions.length, 0);
     // Re-arm the once-per-stretch run nudge that this untracked driving spent, for the tests after.
     await admin.callTool({ name: "start_test_run", arguments: { previewId, title: "Re-arm", steps: ["x"] } });
     await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 1, status: "passed" } } });

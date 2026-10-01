@@ -46,16 +46,14 @@ export function summarizeArgs(args: unknown): Record<string, unknown> | undefine
 
 function redactObject(obj: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(obj)) {
-    if (SENSITIVE_KEY.test(k)) {
-      out[k] = "[redacted]";
-    } else if (v != null && typeof v === "object" && !Array.isArray(v)) {
-      out[k] = redactObject(v as Record<string, unknown>);
-    } else if (typeof v === "string" && v.length > 200) {
-      out[k] = v.slice(0, 200) + "…";
-    } else {
-      out[k] = v;
-    }
-  }
+  for (const [k, v] of Object.entries(obj)) out[k] = SENSITIVE_KEY.test(k) ? "[redacted]" : redactValue(v);
   return out;
+}
+
+/** Lists too: `ui` takes its actions as one. */
+function redactValue(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(redactValue);
+  if (v != null && typeof v === "object") return redactObject(v as Record<string, unknown>);
+  if (typeof v === "string" && v.length > 200) return v.slice(0, 200) + "…";
+  return v;
 }

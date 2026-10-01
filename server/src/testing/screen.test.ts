@@ -109,6 +109,46 @@ describe("ScreenBook refs", () => {
   });
 });
 
+describe("ScreenBook refs that lost their element", () => {
+  it("does not hand a ref to a twin that appeared next to its element", () => {
+    const book = new ScreenBook();
+    const ref = [...book.record(screen(node("Button", "Slett", at(10, 100)))).nodes].find(([, n]) => n.label === "Slett")![0];
+    book.record(screen(node("Button", "Slett", at(10, 100)), node("Button", "Slett", at(10, 200))));
+    assert.throws(() => book.resolve(ref), /shared its name/);
+  });
+
+  it("does not hand a ref to the twin that stays when its element goes", () => {
+    const book = new ScreenBook();
+    const ref = [...book.record(screen(node("Button", "Slett", at(10, 100)))).nodes].find(([, n]) => n.label === "Slett")![0];
+    book.record(screen(node("Button", "Slett", at(10, 100)), node("Button", "Slett", at(10, 200))));
+    const left = book.record(screen(node("Button", "Slett", at(10, 200))));
+    assert.notEqual([...left.nodes].find(([, n]) => n.label === "Slett")![0], ref);
+  });
+
+  it("does not retry a gone ref by a name the current screen holds twice", () => {
+    const book = new ScreenBook();
+    const ref = [...book.record(screen(node("Button", "Lagre", { id: "save", ...at(10, 100) }))).nodes].find(([, n]) => n.id === "save")![0];
+    book.record(screen(node("Link", "Lagre", { id: "save", ...at(10, 100) }), node("Link", "Lagre", { id: "save", ...at(10, 300) })));
+    assert.throws(() => book.resolve(ref), /shared its name/);
+  });
+
+  it("keeps a ref on an element whose label carries a running clock", () => {
+    const book = new ScreenBook();
+    const ref = [...book.record(screen(node("Button", "#102 · 6:05", at(10, 100)))).nodes].find(([, n]) => n.role === "Button")![0];
+    const later = book.record(screen(node("Button", "#102 · 6:16", at(10, 100))));
+    assert.equal([...later.nodes].find(([, n]) => n.role === "Button")![0], ref);
+  });
+
+  it("keeps an Android field's ref when what is typed shows up as its label", () => {
+    // SimDeck's compact Android tree: label and value are both the field's text.
+    const book = new ScreenBook();
+    const field = (text: string) => screen(node("EditText", text, { value: text, ...at(10, 100) }));
+    const ref = [...book.record(field("First name")).nodes].find(([, n]) => n.role === "EditText")![0];
+    const typed = book.record(field("Ola"));
+    assert.equal([...typed.nodes].find(([, n]) => n.role === "EditText")![0], ref);
+  });
+});
+
 describe("ScreenBook rendering", () => {
   it("sends only what changed, saying which refs are gone", () => {
     const book = new ScreenBook();

@@ -92,8 +92,10 @@ export function flattenTree(tree: unknown): ScreenNode[] {
     const raw = n as RawNode;
     const role = str(raw.role, raw.AXRole, raw.type, raw.className) ?? "Element";
     const input = TEXT_INPUT.test(role);
-    const label = input ? str(raw.label, raw.AXLabel, raw.hint, raw.contentDescription) : str(raw.label, raw.AXLabel, raw.text, raw.contentDescription, raw.title);
+    const named = input ? str(raw.label, raw.AXLabel, raw.hint, raw.contentDescription) : str(raw.label, raw.AXLabel, raw.text, raw.contentDescription, raw.title);
     const value = str(raw.value, raw.AXValue, input ? raw.text : undefined);
+    // SimDeck's compact Android tree copies a field's text into its label: typing would rename the field.
+    const label = input && named === value ? undefined : named;
     const id = str(raw.id, raw.AXUniqueId, raw.AXIdentifier, raw.resourceId);
     if (label || value || id) {
       const frame = frameOf(raw.frame);
@@ -194,12 +196,18 @@ export class ScreenBook {
       if (members.length === 1) {
         const ref = this.byKey.get(k) ?? `e${++this.counter}`;
         this.byKey.set(k, ref);
+        this.groups.delete(k);
         refs.set(members[0]!, ref);
         continue;
       }
       const where = members.map((n) => frameKey(n.frame)).join(";");
       const held = this.groups.get(k);
-      const group = held?.where === where ? held.refs : members.map(() => `e${++this.counter}`);
+      let group = held?.where === where ? held.refs : undefined;
+      if (!group) {
+        for (const old of [this.byKey.get(k), ...(held?.refs ?? [])]) if (old) this.markAmbiguous(old);
+        this.byKey.delete(k);
+        group = members.map(() => `e${++this.counter}`);
+      }
       this.groups.set(k, { where, refs: group });
       members.forEach((n, i) => refs.set(n, group[i]!));
     }
@@ -272,10 +280,23 @@ export class ScreenBook {
     }
     const old = this.remembered.get(r);
     if (!old) throw new RefError(`unknown ref ${r}`);
-    if (old.ambiguous) throw new RefError(`${r} is no longer on screen, and it shared its name with other elements, so it cannot be found again by name`);
-    if (old.id) return { kind: "selector", selector: { id: old.id } };
-    if (old.label) return { kind: "selector", selector: { label: old.label } };
+    const shared = `${r} is no longer on screen, and it shared its name with other elements, so it cannot be found again by name`;
+    if (old.ambiguous) throw new RefError(shared);
+    const now = s ? [...s.nodes.values()] : [];
+    if (old.id) {
+      if (now.filter((n) => n.id === old.id).length > 1) throw new RefError(shared);
+      return { kind: "selector", selector: { id: old.id } };
+    }
+    if (old.label) {
+      if (now.filter((n) => n.label === old.label).length > 1) throw new RefError(shared);
+      return { kind: "selector", selector: { label: old.label } };
+    }
     throw new RefError(`${r} is no longer on screen and has no id or label to find it by`);
+  }
+
+  private markAmbiguous(ref: string): void {
+    const n = this.remembered.get(ref);
+    if (n) this.remembered.set(ref, { ...n, ambiguous: true });
   }
 
   private remember(ref: string, n: Remembered): void {
@@ -292,6 +313,11 @@ export class ScreenBook {
 
 type Remembered = ScreenNode & { ambiguous?: boolean };
 
+/** iOS screens are portrait in hardware; a wider app root means the device is turned. */
+export function isRotatedIos(platform: "ios" | "android", bounds: Frame | undefined): boolean {
+  return platform === "ios" && !!bounds && bounds.width > bounds.height;
+}
+
 function centre(f: Frame, b: Frame): RefTarget {
   return { kind: "point", x: (f.x + f.width / 2 - b.x) / b.width, y: (f.y + f.height / 2 - b.y) / b.height };
 }
@@ -301,7 +327,7 @@ function frameKey(f: Frame | undefined): string {
 }
 
 function keyOf(n: ScreenNode): string {
-  return `${n.role}\u0000${n.id ?? ""}\u0000${n.label ?? ""}`;
+  return `${n.role}\u0000${n.id ?? ""}\u0000${(n.label ?? "").replace(CLOCK, "<time>")}`;
 }
 
 function linesOf(s: Snapshot): Map<string, string> {

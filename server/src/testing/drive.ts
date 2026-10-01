@@ -1,5 +1,5 @@
 import type { Selector, UiAction } from "./control.ts";
-import { RefError, shapeOf, type ScreenBook } from "./screen.ts";
+import { isRotatedIos, RefError, shapeOf, type ScreenBook } from "./screen.ts";
 
 // ---------------------------------------------------------------------------
 // Running `ui` actions so that one call is one step for the agent: resolve refs, act, wait for
@@ -113,15 +113,19 @@ function withSelector(a: UiAction, selector: Selector): UiAction {
  * Turn a `{ref}` selector into what SimDeck understands. A point is only taken from a capture made
  * after the last action — the viewer's own taps move the screen too, so an older one is re-read.
  */
-async function resolveRefs(deps: DriveDeps, a: UiAction, freshAfter: number): Promise<UiAction> {
+async function resolveRefs(deps: DriveDeps, a: UiAction, freshAfter: number, moved: boolean): Promise<UiAction> {
   if (!("selector" in a) || !a.selector.ref) return a;
   const ref = a.selector.ref;
   // Decided: on Android a ref is tapped at its element's centre, never matched by name — how SimDeck's selectors match uiautomator fields is unverified.
   const opts = { preferPoint: deps.platform === "android" && a.type === "tapElement" };
   let target = deps.book.resolve(ref, opts);
-  if (target.kind === "point" && (deps.book.snapshot?.revision ?? 0) <= freshAfter) {
+  // After an earlier step of this call a name may no longer be unique, so any ref is re-read then.
+  if ((target.kind === "point" || moved) && (deps.book.snapshot?.revision ?? 0) <= freshAfter) {
     deps.book.record(await deps.observe());
     target = deps.book.resolve(ref, opts);
+  }
+  if (target.kind === "point" && isRotatedIos(deps.platform, deps.book.snapshot?.bounds)) {
+    throw new RefError(`${ref} has no unique id or label, and this iOS device is rotated: SimDeck touches the unrotated screen, so a tap at its centre would land elsewhere`);
   }
   if (target.kind === "point") {
     if (a.type !== "tapElement") throw new RefError(`${ref} can only be tapped: it has no unique id or label for ${a.type} to match`);
@@ -139,7 +143,7 @@ export async function drive(deps: DriveDeps, actions: UiAction[], observe: Obser
   for (let i = 0; i < actions.length; i++) {
     let a = actions[i]!;
     try {
-      a = await resolveRefs(deps, a, freshAfter);
+      a = await resolveRefs(deps, a, freshAfter, lastMove !== undefined);
       if (i > 0 && a.type === "tapElement" && a.waitTimeoutMs == null) a = { ...a, waitTimeoutMs: BATCH_TAP_WAIT_MS };
       results.push(await deps.act(a));
     } catch (e) {
@@ -160,6 +164,8 @@ export async function drive(deps: DriveDeps, actions: UiAction[], observe: Obser
     if (i < actions.length - 1) await sleep(STEP_GAP_MS);
   }
   if (observe === "none" && !(failure && lastMove)) return { results, failure, settleMs: 0 };
+  // Nothing moved and the failure is thrown to the caller as is: a look would advance what it was shown.
+  if (failure && !lastMove && !("selector" in failure.action)) return { results, failure, settleMs: 0 };
   // The action already happened: a look that fails must not turn it into a failure.
   let tree: unknown;
   let settleMs = 0;

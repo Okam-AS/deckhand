@@ -181,4 +181,38 @@ describe("drive", () => {
     assert.ok(r.failure?.error instanceof RefError);
     assert.equal(acted.length, 0);
   });
+
+  it("re-reads the screen before resolving any ref after an earlier step of the same list", async () => {
+    let added = false;
+    const { deps, acted } = fakeDevice(() => (added ? tree("Legg til", "Slett", "Slett") : tree("Legg til", "Slett")));
+    const s = deps.book.record(tree("Legg til", "Slett"));
+    const ref = [...s.nodes].find(([, n]) => n.label === "Slett")![0];
+    const act = deps.act;
+    deps.act = async (a) => {
+      if (a.type === "tapElement" && "selector" in a && a.selector.label === "Legg til") added = true;
+      return act(a);
+    };
+    const r = await drive(deps, [{ type: "tapElement", selector: { label: "Legg til" } }, { type: "tapElement", selector: { ref } }], "none");
+    assert.ok(r.failure?.error instanceof RefError, "a name that is no longer unique is not sent to SimDeck");
+    assert.equal(acted.length, 1);
+  });
+
+  it("refuses to tap a ref at its centre on a turned iOS device, where SimDeck would touch elsewhere", async () => {
+    const wide = { roots: [{ role: "Application", label: "App", frame: { x: 0, y: 0, width: 1376, height: 1032 }, children: [0, 1].map((i) => ({ role: "Button", label: "Mer", frame: { x: 0, y: i * 50, width: 100, height: 40 } })) }] };
+    const { deps, acted } = fakeDevice(() => wide);
+    const ref = [...deps.book.record(wide).nodes].filter(([, n]) => n.label === "Mer")[1]![0];
+    const r = await drive(deps, [{ type: "tapElement", selector: { ref } }], "none");
+    assert.match(String((r.failure?.error as Error)?.message), /rotated/);
+    assert.equal(acted.length, 0);
+  });
+
+  it("takes no look when nothing moved and the failure is thrown to the caller as is", async () => {
+    const { deps, looks } = fakeDevice(() => tree("A"));
+    deps.act = async () => {
+      throw new Error("SimDeck is down");
+    };
+    const r = await drive(deps, [{ type: "openUrl", url: "app://x" }], "auto");
+    assert.equal(r.failure?.message, "SimDeck is down");
+    assert.equal(looks(), 0);
+  });
 });
