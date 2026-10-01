@@ -51,7 +51,6 @@ const CHANGE_WAIT_MS: Partial<Record<UiAction["type"], number>> = {
   back: 1000,
   dismissKeyboard: 600,
   toggleAppearance: 600,
-  rotate: 1000,
   type: 300,
   swipe: 500,
   gesture: 500,

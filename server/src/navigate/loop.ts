@@ -1,5 +1,5 @@
-import { diffImages } from "../verify/compare.ts";
-import { decodePng, type Rgba } from "../verify/png.ts";
+import { diffImages } from "./compare.ts";
+import { decodePng, type Rgba } from "./png.ts";
 import { JevError, type ChoiceAnswer, type JevChooser, type JevQuestion, type NoulAnswer } from "./jev.ts";
 import { candidatesFor, mask, pngSize, readScreen, type ActionKind, type Candidate, type NavigateAction, type Rect } from "./screen.ts";
 
