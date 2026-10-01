@@ -94,8 +94,8 @@ export function flattenTree(tree: unknown): ScreenNode[] {
     const input = TEXT_INPUT.test(role);
     const named = input ? str(raw.label, raw.AXLabel, raw.hint, raw.contentDescription) : str(raw.label, raw.AXLabel, raw.text, raw.contentDescription, raw.title);
     const value = str(raw.value, raw.AXValue, input ? raw.text : undefined);
-    // SimDeck's compact Android tree copies a field's text into its label: typing would rename the field.
-    const label = input && named === value ? undefined : named;
+    // SimDeck's compact Android tree copies an EditText's text into its label: typing would rename the field.
+    const label = /edittext/i.test(role) && named === value ? undefined : named;
     const id = str(raw.id, raw.AXUniqueId, raw.AXIdentifier, raw.resourceId);
     if (label || value || id) {
       const frame = frameOf(raw.frame);
@@ -180,6 +180,7 @@ export class ScreenBook {
   private shown: Map<string, string> | null = null;
   private readonly remembered = new Map<string, Remembered>();
   private readonly byKey = new Map<string, string>();
+  private readonly byClock = new Map<string, string>();
   private readonly groups = new Map<string, { where: string; refs: string[] }>();
 
   /**
@@ -192,9 +193,15 @@ export class ScreenBook {
     const groups = new Map<string, ScreenNode[]>();
     for (const n of nodes) groups.set(keyOf(n), [...(groups.get(keyOf(n)) ?? []), n]);
     const refs = new Map<ScreenNode, string>();
+    const clockCount = new Map<string, number>();
+    for (const n of nodes) clockCount.set(clockKeyOf(n), (clockCount.get(clockKeyOf(n)) ?? 0) + 1);
+    for (const [ck, count] of clockCount) if (count > 1) this.byClock.delete(ck);
     for (const [k, members] of groups) {
       if (members.length === 1) {
-        const ref = this.byKey.get(k) ?? `e${++this.counter}`;
+        const ck = clockKeyOf(members[0]!);
+        // Only a reading that tells this element from no other may carry its ref across a tick.
+        const ticked = clockCount.get(ck) === 1 ? this.byClock.get(ck) : undefined;
+        const ref = this.byKey.get(k) ?? ticked ?? `e${++this.counter}`;
         this.byKey.set(k, ref);
         this.groups.delete(k);
         refs.set(members[0]!, ref);
@@ -206,6 +213,7 @@ export class ScreenBook {
       if (!group) {
         for (const old of [this.byKey.get(k), ...(held?.refs ?? [])]) if (old) this.markAmbiguous(old);
         this.byKey.delete(k);
+        this.byClock.delete(clockKeyOf(members[0]!));
         group = members.map(() => `e${++this.counter}`);
       }
       this.groups.set(k, { where, refs: group });
@@ -214,6 +222,7 @@ export class ScreenBook {
     const next = new Map<string, ScreenNode>();
     for (const n of nodes) {
       const ref = refs.get(n)!;
+      if (clockCount.get(clockKeyOf(n)) === 1 && groups.get(keyOf(n))!.length === 1) this.byClock.set(clockKeyOf(n), ref);
       next.set(ref, n);
       this.remember(ref, groups.get(keyOf(n))!.length === 1 ? n : { ...n, ambiguous: true });
     }
@@ -307,6 +316,7 @@ export class ScreenBook {
     this.remembered.delete(oldRef);
     const k = keyOf(oldNode);
     if (this.byKey.get(k) === oldRef) this.byKey.delete(k);
+    if (this.byClock.get(clockKeyOf(oldNode)) === oldRef) this.byClock.delete(clockKeyOf(oldNode));
     if (this.groups.get(k)?.refs.includes(oldRef)) this.groups.delete(k);
   }
 }
@@ -327,7 +337,12 @@ function frameKey(f: Frame | undefined): string {
 }
 
 function keyOf(n: ScreenNode): string {
-  return `${n.role}\u0000${n.id ?? ""}\u0000${(n.label ?? "").replace(CLOCK, "<time>")}`;
+  return `${n.role}\u0000${n.id ?? ""}\u0000${n.label ?? ""}`;
+}
+
+/** The key with clock readings masked: a ticket's running timer must not re-mint its ref. */
+function clockKeyOf(n: ScreenNode): string {
+  return keyOf(n).replace(CLOCK, "<time>");
 }
 
 function linesOf(s: Snapshot): Map<string, string> {

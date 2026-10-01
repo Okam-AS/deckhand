@@ -1078,20 +1078,23 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       audited("describe", args, async () => {
         const denied = requireLivePreview(args.previewId);
         if (denied) return denied;
-        const tree = await engine.describe(args.previewId, args.deviceId, {
-          source: args.source,
-          interactiveOnly: args.interactiveOnly,
-          maxDepth: args.maxDepth,
-        });
+        const capture = () =>
+          engine.describe(args.previewId, args.deviceId, {
+            source: args.source,
+            interactiveOnly: args.interactiveOnly,
+            maxDepth: args.maxDepth,
+          });
         // The dev menu is the one thing on screen that is not the app. An agent that
         // does not know that files the overlay's behaviour as an app bug — observed.
         if (args.format === "text") {
           return onDevice(args.previewId, args.deviceId, async () => {
+            const tree = await capture();
             const book = engine.screenBook(args.previewId, args.deviceId);
             book.record(tree);
             return ok({ screen: book.full(), ...devMenuHint(tree) });
           });
         }
+        const tree = await capture();
         return ok({ describe: tree, ...devMenuHint(tree) });
       }),
   );
@@ -1143,6 +1146,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           },
           list,
           observe,
+          single,
         ));
         const rotated =
           isRotatedIos(platform, book.snapshot?.bounds) && list.some((a) => a.type === "tapElement")

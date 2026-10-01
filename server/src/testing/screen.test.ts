@@ -139,6 +139,33 @@ describe("ScreenBook refs that lost their element", () => {
     assert.equal([...later.nodes].find(([, n]) => n.role === "Button")![0], ref);
   });
 
+  it("keeps elements apart whose labels differ only by a time", () => {
+    const book = new ScreenBook();
+    const slots = (y: number) => screen(...["12:00", "12:15", "12:30"].map((t, i) => node("Button", t, at(10, y + i * 50))));
+    const refOf = (s: ReturnType<ScreenBook["record"]>, label: string) => [...s.nodes].find(([, n]) => n.label === label)![0];
+    const first = book.record(slots(100));
+    const scrolled = book.record(slots(60));
+    for (const t of ["12:00", "12:15", "12:30"]) assert.equal(refOf(scrolled, t), refOf(first, t), `${t} kept its ref across a scroll`);
+    assert.deepEqual(book.resolve(refOf(first, "12:30")), { kind: "selector", selector: { label: "12:30" } });
+    const one = book.record(screen(node("Button", "12:30", at(10, 100))));
+    assert.equal(refOf(one, "12:30"), refOf(first, "12:30"));
+    const other = book.record(screen(node("Button", "12:45", at(10, 100))));
+    assert.notEqual(refOf(other, "12:45"), refOf(first, "12:00"), "a reading that was shared never carries a ref");
+  });
+
+  it("does not let a ticking reading bring back a ref that became ambiguous", () => {
+    const book = new ScreenBook();
+    const ref = [...book.record(screen(node("Button", "Slett", at(10, 100)))).nodes].find(([, n]) => n.label === "Slett")![0];
+    book.record(screen(node("Button", "Slett", at(10, 100)), node("Button", "Slett", at(10, 200))));
+    const left = book.record(screen(node("Button", "Slett", at(10, 300))));
+    assert.notEqual([...left.nodes].find(([, n]) => n.label === "Slett")![0], ref);
+  });
+
+  it("keeps an iOS field's name when its value repeats it", () => {
+    const field = flattenTree(screen(node("TextField", "Søk", { value: "Søk", ...at(10, 100) }))).find((n) => n.role === "TextField");
+    assert.equal(field!.label, "Søk");
+  });
+
   it("keeps an Android field's ref when what is typed shows up as its label", () => {
     // SimDeck's compact Android tree: label and value are both the field's text.
     const book = new ScreenBook();

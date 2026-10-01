@@ -134,7 +134,8 @@ async function resolveRefs(deps: DriveDeps, a: UiAction, freshAfter: number, mov
   return withSelector(a, target.selector);
 }
 
-export async function drive(deps: DriveDeps, actions: UiAction[], observe: ObserveMode): Promise<DriveResult> {
+/** `single`: the caller passed one `action`, whose non-selector failure is thrown to it as is. */
+export async function drive(deps: DriveDeps, actions: UiAction[], observe: ObserveMode, single = false): Promise<DriveResult> {
   const results: unknown[] = [];
   const sleep = deps.sleep ?? defaultSleep;
   let failure: DriveFailure | undefined;
@@ -165,7 +166,7 @@ export async function drive(deps: DriveDeps, actions: UiAction[], observe: Obser
   }
   if (observe === "none" && !(failure && lastMove)) return { results, failure, settleMs: 0 };
   // Nothing moved and the failure is thrown to the caller as is: a look would advance what it was shown.
-  if (failure && !lastMove && !("selector" in failure.action)) return { results, failure, settleMs: 0 };
+  if (single && failure && !("selector" in failure.action)) return { results, failure, settleMs: 0 };
   // The action already happened: a look that fails must not turn it into a failure.
   let tree: unknown;
   let settleMs = 0;

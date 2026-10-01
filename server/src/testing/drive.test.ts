@@ -211,8 +211,10 @@ describe("drive", () => {
     deps.act = async () => {
       throw new Error("SimDeck is down");
     };
-    const r = await drive(deps, [{ type: "openUrl", url: "app://x" }], "auto");
+    const r = await drive(deps, [{ type: "openUrl", url: "app://x" }], "auto", true);
     assert.equal(r.failure?.message, "SimDeck is down");
     assert.equal(looks(), 0);
+    const listed = await drive(deps, [{ type: "openUrl", url: "app://x" }], "auto");
+    assert.equal(typeof listed.screen, "string", "a list still shows where it stopped");
   });
 });
