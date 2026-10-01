@@ -42,6 +42,7 @@ import { DevProcessManager } from "./devProcess.ts";
 import type { AttachedStream, StreamingBackend } from "../streaming/backend.ts";
 import { LIVE_DEVICE_ID, type LiveShareRegistry } from "../share/liveShares.ts";
 import { SimDeckControl, type SimDeckTarget, type DescribeOptions, type UiAction } from "../testing/control.ts";
+import { ScreenBook } from "../testing/screen.ts";
 
 // ---------------------------------------------------------------------------
 // Preview engine: the orchestrator. Holds live previews in memory, persists to
@@ -2880,6 +2881,28 @@ export class PreviewEngine {
   ui(previewId: string, deviceId: string, action: UiAction): Promise<unknown> {
     return this.simdeckControl().action(this.simdeckTarget(previewId, deviceId), action);
   }
+
+  /** Where the app's own files are for this preview: the worktree once prepared, else the registered path. */
+  sourceDirOf(previewId: string): string | undefined {
+    const p = this.active(previewId);
+    return p ? (p.sourceDir ?? p.app.path) : undefined;
+  }
+
+  platformOf(previewId: string, deviceId: string): "ios" | "android" {
+    return this.simdeckTarget(previewId, deviceId).platform;
+  }
+
+  /** The refs and last-shown screen of one device, kept for as long as the device is. */
+  screenBook(previewId: string, deviceId: string): ScreenBook {
+    const key = `${previewId}/${deviceId}/${this.simdeckTarget(previewId, deviceId).udid}`;
+    const book = this.screenBooks.get(key) ?? new ScreenBook();
+    this.screenBooks.delete(key);
+    this.screenBooks.set(key, book);
+    if (this.screenBooks.size > 32) this.screenBooks.delete(this.screenBooks.keys().next().value!);
+    return book;
+  }
+
+  private readonly screenBooks = new Map<string, ScreenBook>();
 
   // --- agent-driven test runs (ephemeral; rendered live in the viewer) --------
 

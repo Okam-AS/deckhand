@@ -240,8 +240,8 @@ doctor-builds, reports `ready` → agent offers the first `start_preview`.
 | `stop_preview` | `{previewId|app}` → teardown (devices deleted, worktree removed per policy; a local app's source dir is never touched) |
 | `stop_device` | `{previewId|app, deviceId}` → tear down ONE device, leave the rest running and the URL unchanged. The way back from `start_preview` with an extra platform. Refuses the last device — that is `stop_preview`, which also frees the worktree and the share |
 | `screenshot` | `{previewId, deviceId}` → MCP image content (PNG). iOS: `xcrun simctl io <udid> screenshot`; Android: `adb -s <serial> exec-out screencap -p` |
-| `describe` | `{previewId, deviceId}` → accessibility tree. iOS: serve-sim's ax endpoint (token-efficient, built for agents); Android: `adb shell uiautomator dump` (parsed/compacted) |
-| `ui` | `{previewId, deviceId, action}` where action ∈ `{tap {x,y}, type {text}, key {name}, button {name}, home, openUrl {url}}` (normalized 0..1 coords) — validated passthrough. iOS: serve-sim gesture/button/type commands; Android: adb input |
+| `describe` | `{previewId, deviceId, format?, source?, interactiveOnly?, maxDepth?}` → the accessibility tree from SimDeck (iOS by UDID, Android via `uiautomator`). `format: "text"` returns it as one line per element with a ref (`e12`) instead of JSON, and makes that the base the next `ui` screen is diffed against. |
+| `ui` | `{previewId, deviceId, action \| actions \| flow, observe?}` → one action, a list run in order (stops at the first failure; max 25), or a list saved by name in the checkout's `deckhand.flows.yaml`. Selectors take `ref` (from the screen listing) besides `id`/`text`/`label`. After an action that can move the screen it captures until two captures agree (iOS; Android waits a fixed beat) and returns `screen`: the whole listing the first time, then only what changed. See "One call per step" below. |
 | `navigate` | `{previewId, deviceId, goal, maxSteps?=10, minConfidence?, text?: {name: value}, uiLanguage?}` → a server-side loop: wait for a still screen → `describe` → a closed candidate list (tap the centre of an on-screen interactive element, scroll toward one past the edge, back, scroll up/down, type a caller-supplied value by NAME into a text field, `done`, `stuck`; capped at 255) → one TypeSafe Jev Choice + a "goal reached?" Noul → `ui` → repeat. Returns `outcome` (`done`/`escalated`/`limit`), a `reason` on hand-back (`NavigateReason` in `navigate/loop.ts`), a per-step trace (choice, confidence and the threshold it needed, top alternatives, settle/describe/decide/act ms, estimated and billed tokens) and `finalScreen`. **Exists only while a TypeSafe key is configured**: with none, `tools/list` does not carry it and nothing an agent reads mentions it, so an install that never set a key is exactly what it was before `navigate`. The key is looked up on every MCP request (each builds a fresh server), so `deckhand secret set|rm typesafe` takes effect on the next call with no restart. Once listed it works on every live preview (§11 item 5). |
 | `logs` | `{previewId?\|app?, deviceId?, source?: "build"\|"stream"\|"metro"\|"app", tailLines?}` → the last `tailLines` (500 retained per source) of one device's captured log. `build` (default) is build/install output plus the NativeScript livesync and web dev-server streams — where a failed build says why. `stream` is the browser→helper trace, the one to read when the device says ready and the viewer shows nothing (see §7 "Streaming diagnostics"). `metro`/`app` are reserved and capture nothing yet. |
 | `add_app` | `{repo, type?}` → clone, detect, **doctor build** on a default device, structured report (`ready` or `missing: [...]`) |
@@ -321,6 +321,25 @@ drops the headings that say which screen this is.
 The guard stands: `server.test.ts` "gives the agent no model advice in any output it reads"
 now also reads `navigate`'s payload — the server may run its own decision model, and
 nothing it says tells the CALLER which model to use or to hand its work away.
+
+**One call per step (2026-10-01).** An agent paid two round trips for every step — `ui` to act,
+`describe` to see what it did — and each round trip is a full turn of the caller's model behind
+the tunnel, which costs more than anything deckhand does. So `ui` now returns the screen after
+the action itself, a known sequence is one `actions` list or a saved `flow`, and an element is
+named by a ref from the listing rather than by a selector that can miss. Refs belong to deckhand
+(`testing/screen.ts`): an element keeps its ref for as long as it is listed and gets the same one
+back when it returns; elements that share role, id and label keep theirs only while none of them
+moves. A ref is sent to SimDeck as the element's unique id, else its unique label, else the centre
+of its frame from a capture taken after the last action (on Android always the centre: how SimDeck's
+selectors match uiautomator fields is unverified). Settling (`testing/drive.ts`) repeats the
+compact capture until two agree; it cannot use the ~0.2s `interactiveOnly` capture, because
+SimDeck answers that query from a cache that outlives a screen change (measured on iOS 26.5: the
+previous screen for over two seconds, and a changed `maxDepth` above ~54 is the same cache entry) —
+which also means `describe {interactiveOnly: true}` can return the previous screen. Between the
+steps of a list it only pauses briefly and lets the next step's selector wait for its element.
+Measured on an iPhone 17 Pro simulator, iOS 26.5: a KDS menu → Innstillinger → back flow took 7
+round trips before and 4 after (1 as a list); a POS sign-in → store change took 12 before and 5
+after (1 as a list).
 
 **Migration features (added 2026-07-18).** Deckhand can host a **NativeScript → React
 Native** (or any app→app) migration as a *parity harness*, never a migration engine. Most
