@@ -120,7 +120,8 @@ function withSelector(a: UiAction, selector: Selector): UiAction {
  * Turn a `{ref}` selector into what SimDeck understands, judged on a capture made after the last
  * action — the viewer's own taps move the screen too, so an older one is re-read.
  */
-async function resolveRefs(deps: DriveDeps, a: UiAction, freshAfter: number): Promise<UiAction> {
+/** `null`: the action asked for an element to be absent, and the ref's element is already gone. */
+async function resolveRefs(deps: DriveDeps, a: UiAction, freshAfter: number): Promise<UiAction | null> {
   if (!("selector" in a) || !a.selector.ref) return a;
   const ref = a.selector.ref;
   // Decided: on Android a ref is tapped at its element's centre, never matched by name — how SimDeck's selectors match uiautomator fields is unverified.
@@ -128,6 +129,7 @@ async function resolveRefs(deps: DriveDeps, a: UiAction, freshAfter: number): Pr
   // A ref is only as good as the screen it is resolved on, and the screen moves between calls
   // (the viewer's own taps, a call with observe "none"): resolve it on a capture newer than the last action.
   if ((deps.book.snapshot?.revision ?? 0) <= freshAfter) deps.book.record(await deps.observe(), { keepGone: true });
+  if ((a.type === "waitForNot" || a.type === "assertNot") && deps.book.knows(ref) && !deps.book.snapshot?.nodes.has(ref.replace(/^@/, ""))) return null;
   const target = deps.book.resolve(ref, opts);
   if (target.kind === "point" && isRotatedIos(deps.platform, deps.book.snapshot?.bounds)) {
     throw new RefError(`${ref} has no unique id or label, and this iOS device is rotated: SimDeck touches the unrotated screen, so a tap at its centre would land elsewhere`);
@@ -149,7 +151,12 @@ export async function drive(deps: DriveDeps, actions: UiAction[], observe: Obser
   for (let i = 0; i < actions.length; i++) {
     let a = actions[i]!;
     try {
-      a = await resolveRefs(deps, a, freshAfter);
+      const resolved = await resolveRefs(deps, a, freshAfter);
+      if (resolved === null) {
+        results.push({ action: a.type, ok: true, gone: true });
+        continue;
+      }
+      a = resolved;
       if (i > 0 && a.type === "tapElement" && a.waitTimeoutMs == null) a = { ...a, waitTimeoutMs: BATCH_TAP_WAIT_MS };
       results.push(await deps.act(a));
     } catch (e) {

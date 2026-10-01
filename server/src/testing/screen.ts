@@ -227,6 +227,11 @@ export class ScreenBook {
     return this.latest;
   }
 
+  /** A ref this book has handed out, on screen or not. */
+  knows(ref: string): boolean {
+    return this.remembered.has(ref.replace(/^@/, ""));
+  }
+
   get snapshot(): Snapshot | null {
     return this.latest;
   }

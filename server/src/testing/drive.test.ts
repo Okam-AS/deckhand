@@ -248,4 +248,25 @@ describe("drive", () => {
     assert.equal(rotationWarning("android", wide, [{ type: "tap", x: 0.5, y: 0.5 }]), undefined);
     assert.equal(rotationWarning("ios", wide, [{ type: "waitFor", selector: { id: "x" } }]), undefined);
   });
+
+  it("passes waitForNot / assertNot on a ref whose element is already gone, without asking SimDeck", async () => {
+    const { deps, acted } = fakeDevice(() => tree("Lukk"));
+    const ref = [...deps.book.record(tree("Lukk", "Ark")).nodes].find(([, n]) => n.label === "Ark")![0];
+    const r = await drive(deps, [{ type: "waitForNot", selector: { ref } }, { type: "assertNot", selector: { ref } }], "none");
+    assert.equal(r.failure, undefined);
+    assert.equal(acted.length, 0);
+    assert.deepEqual(r.results, [{ action: "waitForNot", ok: true, gone: true }, { action: "assertNot", ok: true, gone: true }]);
+  });
+
+  it("does not let the capture taken to resolve a ref free the refs of elements it missed", async () => {
+    let looks = 0;
+    const { deps } = fakeDevice(() => (looks++ === 0 ? tree("Lagre") : tree("Lagre", "Ark")));
+    const s0 = deps.book.record(tree("Lagre", "Ark"));
+    deps.book.full();
+    const save = [...s0.nodes].find(([, n]) => n.label === "Lagre")![0];
+    const sheet = [...s0.nodes].find(([, n]) => n.label === "Ark")![0];
+    const r = await drive(deps, [{ type: "tapElement", selector: { ref: save } }], "auto");
+    assert.equal(r.failure, undefined);
+    assert.ok([...deps.book.snapshot!.nodes.keys()].includes(sheet), "«Ark», missed by one mid-animation capture, kept its ref");
+  });
 });
