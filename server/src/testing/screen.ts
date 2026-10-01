@@ -180,7 +180,8 @@ export class ScreenBook {
   private shown: Map<string, string> | null = null;
   private readonly remembered = new Map<string, Remembered>();
   private readonly byKey = new Map<string, string>();
-  private readonly byClock = new Map<string, string>();
+  /** Masked key → the ref and place of the one element that last showed it. */
+  private readonly byClock = new Map<string, { ref: string; where: string }>();
   private readonly groups = new Map<string, { where: string; refs: string[] }>();
 
   /**
@@ -196,12 +197,20 @@ export class ScreenBook {
     const clockCount = new Map<string, number>();
     for (const n of nodes) clockCount.set(clockKeyOf(n), (clockCount.get(clockKeyOf(n)) ?? 0) + 1);
     for (const [ck, count] of clockCount) if (count > 1) this.byClock.delete(ck);
+    const taken = new Set<string>();
+    for (const [k, members] of groups) if (members.length === 1 && this.byKey.has(k)) taken.add(this.byKey.get(k)!);
     for (const [k, members] of groups) {
       if (members.length === 1) {
         const ck = clockKeyOf(members[0]!);
         // Only a reading that tells this element from no other may carry its ref across a tick.
-        const ticked = clockCount.get(ck) === 1 ? this.byClock.get(ck) : undefined;
+        // A tick leaves the element where it was; a different element in its place would not be told apart.
+        const prior = clockCount.get(ck) === 1 ? this.byClock.get(ck) : undefined;
+        const ticked = prior && prior.where === frameKey(members[0]!.frame) && !taken.has(prior.ref) ? prior.ref : undefined;
+        if (ticked && !this.byKey.has(k)) {
+          for (const [key, r] of this.byKey) if (r === ticked) this.byKey.delete(key);
+        }
         const ref = this.byKey.get(k) ?? ticked ?? `e${++this.counter}`;
+        taken.add(ref);
         this.byKey.set(k, ref);
         this.groups.delete(k);
         refs.set(members[0]!, ref);
@@ -222,7 +231,7 @@ export class ScreenBook {
     const next = new Map<string, ScreenNode>();
     for (const n of nodes) {
       const ref = refs.get(n)!;
-      if (clockCount.get(clockKeyOf(n)) === 1 && groups.get(keyOf(n))!.length === 1) this.byClock.set(clockKeyOf(n), ref);
+      if (clockCount.get(clockKeyOf(n)) === 1 && groups.get(keyOf(n))!.length === 1) this.byClock.set(clockKeyOf(n), { ref, where: frameKey(n.frame) });
       next.set(ref, n);
       this.remember(ref, groups.get(keyOf(n))!.length === 1 ? n : { ...n, ambiguous: true });
     }
@@ -316,7 +325,7 @@ export class ScreenBook {
     this.remembered.delete(oldRef);
     const k = keyOf(oldNode);
     if (this.byKey.get(k) === oldRef) this.byKey.delete(k);
-    if (this.byClock.get(clockKeyOf(oldNode)) === oldRef) this.byClock.delete(clockKeyOf(oldNode));
+    if (this.byClock.get(clockKeyOf(oldNode))?.ref === oldRef) this.byClock.delete(clockKeyOf(oldNode));
     if (this.groups.get(k)?.refs.includes(oldRef)) this.groups.delete(k);
   }
 }
