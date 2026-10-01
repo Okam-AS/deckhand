@@ -754,18 +754,6 @@ does not cover. Mechanics: `docs/web-wildcard-hosting-plan.md`.
   the option for zero PIN exposure.
 - Share dies with the preview (`stop_preview`) → viewer shows a calm
   "this preview has ended" state.
-- **Live verify shares (2026-09-23).** `deckhand verify --share public` asks the running server,
-  over loopback `POST /admin/live-shares` (a `tokens.yaml` bearer; refused with a 404 when
-  Cloudflare headers show it came through the tunnel), for a share of the run's own `verify-…`
-  simulator once the app has launched. The server attaches the ordinary iOS stream and answers
-  only after a first frame; the CLI prints one `DECKHAND_LIVE_URL=<url>` line on stderr and
-  records `liveUrl` in `result.json`. The share is **view-only and public**: the proxy forwards
-  only `stream.avcc`/`stream.mjpeg` (no `ax`, no input socket) and `shareState` carries
-  `viewOnly`, so the viewer opens no input and shows no device controls. It ends with the run —
-  the CLI `DELETE`s it on pass, fail, timeout and SIGINT/SIGTERM, and the server revokes any whose
-  verify pid is gone (checked every 5 s and on each lookup) or that is 12 h old. A revoked link's
-  viewer page answers 410 until the server restarts. No server, no credential, or a refusal is a
-  warning, never a failed run. Registry and admin route: `server/src/share/liveShares.ts`.
 
 ### Stream client (ours, in `viewer/`)
 
@@ -857,36 +845,6 @@ change eases in/out — nothing snaps.
   `TYPESAFE_API_KEY`, never argv. Setting it is the consent: `navigate` then sends screens from
   every app it drives to TypeSafe, and `deckhand doctor` prints a `navigate egress` warning line.
   With no key file there is no tool and no line.
-- `deckhand verify <appId> --scenario FILE [--ref REF | --path DIR] [--compare REF|DIR] [--share public]` —
-  the headless check for an unattended agent: no MCP, and no share link unless `--share public`
-  asks for one (see "Live verify shares" in §9). It runs in its
-  own process against the engine's parts (`buildPlan`, `MetroManager`, `WorktreeManager`,
-  SimDeck control) and writes `<name>.png`, `<name>.ax.json`, `result.json` and, with
-  `--compare`, `<name>.diff.png` + `compare.json`. Exit 0 passed, 1 a step or the
-  `--max-diff-ratio` budget failed, 2 build/device/launch (including a screen that never
-  settles and `--timeout`), 3 bad arguments or scenario. The scenario (`verify/scenario.ts`,
-  JSON or YAML) is ordered `openUrl`/`tap`/`type`/`scroll`/`scrollUntilVisible`/`waitFor`/
-  `assert`/`sleep`/`screenshot` steps plus a device shape (default iPad 9th generation, iOS
-  26.5, landscape) and Metro env; typed text is recorded by length only. `assert` means on screen;
-  `{ present: … }` means anywhere in the tree. The grammar is strict: a selector string is `#id` or
-  `id=`/`text=`/`label=`/`value=`, never bare text, and an unknown key anywhere is refused, so a
-  malformed scenario exits 3 instead of failing as the app's fault. `deckhand verify --lint
-  --scenario FILE` checks one without building (exit 0 or 3, JSON diagnostics on stdout); the
-  schema with examples is [docs/verify-scenarios.md](docs/verify-scenarios.md). A failed step in
-  `result.json` carries `kind`: `assert` or `navigation`. Taps and scrolls are placed by verify, not by
-  SimDeck: SimDeck injects touches in the unrotated screen's coordinates and does not rotate the
-  frames it matches, so a landscape selector tap lands elsewhere. SpringBoard's own elements (the
-  «Open in …?» prompt a fresh simulator shows once per URL scheme, which `openUrl` confirms)
-  already come in unrotated points (`verify/geometry.ts`). It shares nothing
-  mutable with the server: its simulators are `verify-…` (outside the `deckhand-` reaper and
-  pool), its checkouts live in `~/.deckhand/verify/worktrees` (outside the server's prune),
-  and its builds and Metro carry `DECKHAND_VERIFY=<pid>`, which the server's boot sweep skips
-  and the next verify run reaps once that pid is gone. Devices and checkouts are held by
-  atomic `mkdir` locks. A native build is cached under `~/.deckhand/verify/builds` keyed by
-  the project's own `@expo/fingerprint`, Xcode version and runtime; without a fingerprint the
-  build is made fresh and not cached. A JS-only change reinstalls the cached `.app` and only
-  swaps Metro. Expo and react-native iOS apps only; the react-native Release build embeds its
-  JS, so it is never cached.
 
 ## 11. Security model (recap, enforced in code)
 
@@ -990,7 +948,7 @@ change eases in/out — nothing snaps.
 6. **Shares**: 144-bit IDs, scrypt-hashed PINs, HMAC-signed unlock cookies, the
    `deck_unlock` cookie stripped before proxying so the HMAC never reaches the app,
    shares die with their preview. Of the helper, the proxy forwards only video, `ax` and input
-   for the share's own devices (a live verify share, §9, only video) — serve-sim's other endpoints (camera, devtools, exec) are never
+   for the share's own devices — serve-sim's other endpoints (camera, devtools, exec) are never
    forwarded. It serves two routes of its own behind the same PIN gate, and they are part of the
    surface even though neither reaches the helper: `POST …/restart`, the viewer's Rebuild button
    for a local share (throttled), and `POST …/dev/:deviceId/clientlog`, which takes the browser's

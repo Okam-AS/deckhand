@@ -78,11 +78,7 @@ Everything else, for when you already know what you want:
   deckhand env set <appId> KEY=VALUE
   deckhand secret set typesafe                     store the TypeSafe API key that turns on \`navigate\`
                                                    (read from TYPESAFE_API_KEY or stdin, never argv)
-  deckhand secret rm typesafe
-  deckhand verify <appId> --scenario FILE [--ref REF | --path DIR] [--compare REF|DIR] [--out DIR]
-                  [--env K=V]... [--device MODEL] [--runtime "iOS x.y"] [--orientation landscape|portrait]
-                                                   run a scenario headless: screenshots, a11y trees, result.json
-  deckhand verify --lint --scenario FILE           validate a scenario only (docs/verify-scenarios.md), exit 0 or 3`;
+  deckhand secret rm typesafe`;
 
 /**
  * Keep one bad request from taking every live preview down with it.
@@ -186,11 +182,6 @@ async function main(): Promise<void> {
       if (sub === "add") return cmdAppAdd(_[2], _[3], flags);
       if (sub === "list") return cmdAppList();
       return fail(`unknown app subcommand; see 'deckhand'`);
-
-    case "verify": {
-      const { cmdVerify } = await import("./cli/verify.ts");
-      process.exit(await cmdVerify(process.argv.slice(3)));
-    }
 
     case "secret":
       if (_[2] !== "typesafe") return fail("usage: deckhand secret set|rm typesafe");

@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { JevChooser, JevQuestion, JevResult } from "./jev.ts";
-import { encodePng } from "../verify/png.ts";
+import { encodePng } from "./png.ts";
 import { DEFAULT_THRESHOLDS, TOKEN_BUDGET, estimateTokens, navigate, type LoopAction, type NavigateRequest } from "./loop.ts";
 
 const VP = { x: 0, y: 0, width: 400, height: 800 };

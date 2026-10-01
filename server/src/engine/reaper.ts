@@ -100,17 +100,11 @@ const defaultKiller: Killer = makeKiller();
 /** Pids of processes whose environment carries `marker`. Injected for tests. */
 export type MarkedPidLister = (marker: string) => Promise<number[]>;
 
-/**
- * `deckhand verify` runs Metro and builds in its own process, stamped with this as well as the
- * usual marker; the server's sweep must leave them alone, and verify reaps its own by owner pid.
- */
-export const VERIFY_MARKER_ENV = "DECKHAND_VERIFY";
-
-/** Pids in `ps -E` output carrying `marker`, minus anything a verify run owns. */
+/** Pids in `ps -E` output carrying `marker`. */
 export function markedPidsIn(psOut: string, marker: string): number[] {
   return psOut
     .split("\n")
-    .filter((l) => l.includes(`${marker}=1`) && !l.includes(`${VERIFY_MARKER_ENV}=`))
+    .filter((l) => l.includes(`${marker}=1`))
     .map((l) => Number(l.trim().split(/\s+/)[0]))
     .filter((n) => Number.isInteger(n) && n > 0);
 }
