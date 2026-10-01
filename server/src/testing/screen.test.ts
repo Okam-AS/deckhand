@@ -22,6 +22,30 @@ describe("flattening a tree into listed elements", () => {
     }
   });
 
+  it("reads an Android tree's names, ids and typed text", () => {
+    const android = {
+      roots: [
+        {
+          type: "FrameLayout",
+          frame: { x: 0, y: 0, width: 1080, height: 2400 },
+          children: [
+            { type: "TextView", text: "Display & touch", AXIdentifier: "android:id/title", frame: { x: 40, y: 200, width: 600, height: 80 } },
+            { type: "ImageButton", contentDescription: "Navigate up", resourceId: "com.x:id/up", frame: { x: 0, y: 60, width: 120, height: 120 } },
+            { type: "EditText", text: "99999999", hint: "Mobilnummer", frame: { x: 40, y: 400, width: 1000, height: 120 } },
+          ],
+        },
+      ],
+    };
+    assert.deepEqual(
+      flattenTree(android).map((n) => [n.role, n.label, n.id, n.value]),
+      [
+        ["TextView", "Display & touch", "android:id/title", undefined],
+        ["ImageButton", "Navigate up", "com.x:id/up", undefined],
+        ["EditText", "Mobilnummer", undefined, "99999999"],
+      ],
+    );
+  });
+
   it("marks an element outside the screen's bounds as offscreen", () => {
     const nodes = flattenTree(screen(node("Button", "Below", at(10, 900)), node("Button", "Here", at(10, 10))));
     assert.deepEqual(nodes.filter((n) => n.offscreen).map((n) => n.label), ["Below"]);

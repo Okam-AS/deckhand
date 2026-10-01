@@ -330,7 +330,8 @@ named by a ref from the listing rather than by a selector that can miss. Refs be
 (`testing/screen.ts`): an element keeps its ref for as long as it is listed and gets the same one
 back when it returns; elements that share role, id and label keep theirs only while none of them
 moves. A ref is sent to SimDeck as the element's unique id, else its unique label, else the centre
-of its frame from a capture taken after the last action. Settling (`testing/drive.ts`) repeats the
+of its frame from a capture taken after the last action (on Android always the centre: how SimDeck's
+selectors match uiautomator fields is unverified). Settling (`testing/drive.ts`) repeats the
 compact capture until two agree; it cannot use the ~0.2s `interactiveOnly` capture, because
 SimDeck answers that query from a cache that outlives a screen change (measured on iOS 26.5: the
 previous screen for over two seconds, and a changed `maxDepth` above ~54 is the same cache entry) —

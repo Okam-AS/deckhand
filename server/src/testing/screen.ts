@@ -24,15 +24,25 @@ interface RawNode {
   role?: unknown;
   AXRole?: unknown;
   type?: unknown;
+  className?: unknown;
   label?: unknown;
   AXLabel?: unknown;
+  text?: unknown;
+  contentDescription?: unknown;
+  title?: unknown;
+  hint?: unknown;
   value?: unknown;
   AXValue?: unknown;
   id?: unknown;
   AXUniqueId?: unknown;
+  AXIdentifier?: unknown;
+  resourceId?: unknown;
   frame?: unknown;
   children?: unknown;
 }
+
+/** On Android a text field's `text` is what was typed, not its name. */
+const TEXT_INPUT = /edittext|textfield|searchfield/i;
 
 function str(...vs: unknown[]): string | undefined {
   for (const v of vs) if (typeof v === "string" && v.trim()) return v;
@@ -80,12 +90,14 @@ export function flattenTree(tree: unknown): ScreenNode[] {
       return;
     }
     const raw = n as RawNode;
-    const label = str(raw.label, raw.AXLabel);
-    const value = str(raw.value, raw.AXValue);
-    const id = str(raw.id, raw.AXUniqueId);
+    const role = str(raw.role, raw.AXRole, raw.type, raw.className) ?? "Element";
+    const input = TEXT_INPUT.test(role);
+    const label = input ? str(raw.label, raw.AXLabel, raw.hint, raw.contentDescription) : str(raw.label, raw.AXLabel, raw.text, raw.contentDescription, raw.title);
+    const value = str(raw.value, raw.AXValue, input ? raw.text : undefined);
+    const id = str(raw.id, raw.AXUniqueId, raw.AXIdentifier, raw.resourceId);
     if (label || value || id) {
       const frame = frameOf(raw.frame);
-      const node: ScreenNode = { role: str(raw.role, raw.AXRole, raw.type) ?? "Element" };
+      const node: ScreenNode = { role };
       if (label) node.label = label;
       if (value && value !== label) node.value = value;
       if (id) node.id = id;
@@ -243,21 +255,18 @@ export class ScreenBook {
    * survives a screen that moved since the snapshot; the element's own centre is the last resort,
    * and is only as current as `snapshot` — the caller decides whether that is current enough.
    */
-  resolve(ref: string): RefTarget {
+  resolve(ref: string, opts: { preferPoint?: boolean } = {}): RefTarget {
     const r = ref.replace(/^@/, "");
     const s = this.latest;
     const node = s?.nodes.get(r);
     if (s && node) {
       const all = [...s.nodes.values()];
+      if (opts.preferPoint && node.frame && s.bounds && !node.offscreen) return centre(node.frame, s.bounds);
       if (node.id && all.filter((n) => n.id === node.id).length === 1) return { kind: "selector", selector: { id: node.id } };
       if (node.label && all.filter((n) => n.label === node.label).length === 1) return { kind: "selector", selector: { label: node.label } };
       if (node.frame && s.bounds) {
         if (node.offscreen) throw new RefError(`${r} is off screen — scroll it into view first (scrollUntilVisible, or a gesture), then use the ref from the new screen`);
-        return {
-          kind: "point",
-          x: (node.frame.x + node.frame.width / 2 - s.bounds.x) / s.bounds.width,
-          y: (node.frame.y + node.frame.height / 2 - s.bounds.y) / s.bounds.height,
-        };
+        return centre(node.frame, s.bounds);
       }
       throw new RefError(`${r} has no unique id or label, and no frame to tap`);
     }
@@ -282,6 +291,10 @@ export class ScreenBook {
 }
 
 type Remembered = ScreenNode & { ambiguous?: boolean };
+
+function centre(f: Frame, b: Frame): RefTarget {
+  return { kind: "point", x: (f.x + f.width / 2 - b.x) / b.width, y: (f.y + f.height / 2 - b.y) / b.height };
+}
 
 function frameKey(f: Frame | undefined): string {
   return f ? `${Math.round(f.x)},${Math.round(f.y)},${Math.round(f.width)},${Math.round(f.height)}` : "";

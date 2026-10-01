@@ -116,10 +116,12 @@ function withSelector(a: UiAction, selector: Selector): UiAction {
 async function resolveRefs(deps: DriveDeps, a: UiAction, freshAfter: number): Promise<UiAction> {
   if (!("selector" in a) || !a.selector.ref) return a;
   const ref = a.selector.ref;
-  let target = deps.book.resolve(ref);
+  // Decided: on Android a ref is tapped at its element's centre, never matched by name — how SimDeck's selectors match uiautomator fields is unverified.
+  const opts = { preferPoint: deps.platform === "android" && a.type === "tapElement" };
+  let target = deps.book.resolve(ref, opts);
   if (target.kind === "point" && (deps.book.snapshot?.revision ?? 0) <= freshAfter) {
     deps.book.record(await deps.observe());
-    target = deps.book.resolve(ref);
+    target = deps.book.resolve(ref, opts);
   }
   if (target.kind === "point") {
     if (a.type !== "tapElement") throw new RefError(`${ref} can only be tapped: it has no unique id or label for ${a.type} to match`);

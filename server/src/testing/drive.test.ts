@@ -167,6 +167,14 @@ describe("drive", () => {
     assert.deepEqual(acted.map((a) => a.type), ["tap", "back", "tap"]);
   });
 
+  it("taps an Android ref at its centre rather than matching its name", async () => {
+    const { deps, acted } = fakeDevice(() => tree("Innstillinger"), "android");
+    const s = deps.book.record(tree("Innstillinger"));
+    const ref = [...s.nodes].find(([, n]) => n.label === "Innstillinger")![0];
+    await drive(deps, [{ type: "tapElement", selector: { ref } }], "none");
+    assert.equal(acted[0]!.type, "tap");
+  });
+
   it("fails a ref it cannot resolve without acting", async () => {
     const { deps, acted } = fakeDevice(() => tree("A"));
     const r = await drive(deps, [{ type: "tapElement", selector: { ref: "e42" } }], "none");
