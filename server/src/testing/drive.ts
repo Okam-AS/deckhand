@@ -127,7 +127,7 @@ async function resolveRefs(deps: DriveDeps, a: UiAction, freshAfter: number): Pr
   const opts = { preferPoint: deps.platform === "android" && a.type === "tapElement" };
   // A ref is only as good as the screen it is resolved on, and the screen moves between calls
   // (the viewer's own taps, a call with observe "none"): resolve it on a capture newer than the last action.
-  if ((deps.book.snapshot?.revision ?? 0) <= freshAfter) deps.book.record(await deps.observe());
+  if ((deps.book.snapshot?.revision ?? 0) <= freshAfter) deps.book.record(await deps.observe(), { keepGone: true });
   const target = deps.book.resolve(ref, opts);
   if (target.kind === "point" && isRotatedIos(deps.platform, deps.book.snapshot?.bounds)) {
     throw new RefError(`${ref} has no unique id or label, and this iOS device is rotated: SimDeck touches the unrotated screen, so a tap at its centre would land elsewhere`);

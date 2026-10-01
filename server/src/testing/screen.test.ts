@@ -100,7 +100,7 @@ describe("ScreenBook refs", () => {
     // The first row is deleted and the other two slide up into its place.
     const after = book.record(rows(100, 140));
     for (const [ref, n] of after.nodes) if (n.label === "+") assert.ok(!plusRefs.includes(ref), `${ref} was reused for a row it may not name`);
-    assert.throws(() => book.resolve(plusRefs[2]!), /shared its name/, "a gone duplicate is not retried by an ambiguous label");
+    assert.throws(() => book.resolve(plusRefs[2]!), /no longer on screen/, "a gone duplicate is not retried by an ambiguous label");
   });
 
   it("keeps a unique element's ref while identical rows around it change", () => {
@@ -117,7 +117,7 @@ describe("ScreenBook refs that lost their element", () => {
     const book = new ScreenBook();
     const ref = [...book.record(screen(node("Button", "Slett", at(10, 100)))).nodes].find(([, n]) => n.label === "Slett")![0];
     book.record(screen(node("Button", "Slett", at(10, 100)), node("Button", "Slett", at(10, 200))));
-    assert.throws(() => book.resolve(ref), /shared its name/);
+    assert.throws(() => book.resolve(ref), /no longer on screen/);
   });
 
   it("does not hand a ref to the twin that stays when its element goes", () => {
@@ -145,13 +145,6 @@ describe("ScreenBook refs that lost their element", () => {
     assert.throws(() => book.resolve(ref), new RegExp(`now on ${link}, a different element`));
   });
 
-  it("retries a gone ref by its name while nothing on screen holds it", () => {
-    const book = new ScreenBook();
-    const ref = [...book.record(screen(node("Button", "Slett", at(10, 100)))).nodes].find(([, n]) => n.label === "Slett")![0];
-    book.record(screen(node("Button", "Avbryt", at(10, 300))));
-    assert.deepEqual(book.resolve(ref), { kind: "selector", selector: { label: "Slett" } });
-  });
-
   it("does not retry a gone ref by an id whose element now says something else", () => {
     const book = new ScreenBook();
     const ref = [...book.record(screen(node("Button", "Neste", { id: "primary", ...at(10, 100) }))).nodes].find(([, n]) => n.id === "primary")![0];
@@ -164,14 +157,6 @@ describe("ScreenBook refs that lost their element", () => {
     const ref = [...book.record(screen(node("Button", "Ordre 12", { id: "order-row", ...at(10, 100) }))).nodes].find(([, n]) => n.label === "Ordre 12")![0];
     book.record(screen(node("Button", "Ordre 13", { id: "order-row", ...at(10, 100) })));
     assert.throws(() => book.resolve(ref), /different element/);
-  });
-
-  it("retries a gone ref only by a name it alone had where it was seen", () => {
-    const book = new ScreenBook();
-    const rows = book.record(screen(node("Button", "Ordre 12", { id: "order-row", ...at(10, 100) }), node("Button", "Ordre 13", { id: "order-row", ...at(10, 200) })));
-    const ref = [...rows.nodes].find(([, n]) => n.label === "Ordre 12")![0];
-    book.record(screen(node("Button", "Tilbake", at(10, 300))));
-    assert.deepEqual(book.resolve(ref), { kind: "selector", selector: { label: "Ordre 12" } }, "the shared id is not used; the unique label is");
   });
 
   it("keeps elements apart whose labels differ only by a time", () => {
@@ -290,11 +275,19 @@ describe("ScreenBook.resolve", () => {
     assert.throws(() => book.resolve("e2"), /off screen/);
   });
 
-  it("retries a ref that left the screen by the id or label it had", () => {
+  it("keeps the refs of elements a mid-animation capture missed, when told to", () => {
+    const book = new ScreenBook();
+    const ref = [...book.record(BOARD).nodes].find(([, n]) => n.label === "Meny")![0];
+    book.record(screen(node("StaticText", "Nye", at(10, 40))), { keepGone: true });
+    assert.equal([...book.record(BOARD).nodes].find(([, n]) => n.label === "Meny")![0], ref);
+  });
+
+  it("never retries a ref that left the screen by its name, even when nothing holds that name now", () => {
     const book = new ScreenBook();
     book.record(BOARD);
     book.record(MENU);
-    assert.deepEqual(book.resolve("e2"), { kind: "selector", selector: { id: "kitchen-menu" } });
+    // e2 was «Meny» #kitchen-menu; the order it belonged to may be gone, and the next one's would answer.
+    assert.throws(() => book.resolve("e2"), /no longer on screen — target what you want/);
     assert.throws(() => book.resolve("e99"), /unknown ref e99/);
   });
 });

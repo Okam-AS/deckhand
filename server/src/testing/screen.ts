@@ -187,7 +187,7 @@ export class ScreenBook {
    * Elements that share role, id and label cannot be told apart once one of them moves or goes,
    * so a group of them keeps its refs only while every one of them is exactly where it was.
    */
-  record(tree: unknown): Snapshot {
+  record(tree: unknown, opts: { keepGone?: boolean } = {}): Snapshot {
     const nodes = flattenTree(tree);
     const groups = new Map<string, ScreenNode[]>();
     for (const n of nodes) groups.set(keyOf(n), [...(groups.get(keyOf(n)) ?? []), n]);
@@ -204,7 +204,6 @@ export class ScreenBook {
       const held = this.groups.get(k);
       let group = held?.where === where ? held.refs : undefined;
       if (!group) {
-        for (const old of [this.byKey.get(k), ...(held?.refs ?? [])]) if (old) this.markAmbiguous(old);
         this.byKey.delete(k);
         group = members.map(() => `e${++this.counter}`);
       }
@@ -213,14 +212,16 @@ export class ScreenBook {
     }
     // A key gone from the screen gives up its ref: what shows up under it later may be another
     // element of the same name (the «Slett» of the next order), so it gets a ref of its own.
-    for (const k of [...this.byKey.keys()]) if (!groups.has(k)) this.byKey.delete(k);
-    for (const k of [...this.groups.keys()]) if (!groups.has(k)) this.groups.delete(k);
+    // A capture taken mid-animation (before resolving a ref) may miss an element that is still there.
+    if (!opts.keepGone) {
+      for (const k of [...this.byKey.keys()]) if (!groups.has(k)) this.byKey.delete(k);
+      for (const k of [...this.groups.keys()]) if (!groups.has(k)) this.groups.delete(k);
+    }
     const next = new Map<string, ScreenNode>();
     for (const n of nodes) {
       const ref = refs.get(n)!;
       next.set(ref, n);
-      const single = groups.get(keyOf(n))!.length === 1;
-      this.remember(ref, single ? { ...n, idUnique: !!n.id && nodes.filter((m) => m.id === n.id).length === 1, labelUnique: !!n.label && nodes.filter((m) => m.label === n.label).length === 1 } : { ...n, ambiguous: true });
+      this.remember(ref, n);
     }
     this.latest = { revision: ++this.revision, shape: shapeOf(tree), bounds: screenBounds(tree), nodes: next };
     return this.latest;
@@ -285,24 +286,11 @@ export class ScreenBook {
     }
     const old = this.remembered.get(r);
     if (!old) throw new RefError(`unknown ref ${r}`);
-    const shared = `${r} is no longer on screen, and it shared its name with other elements, so it cannot be found again by name`;
-    if (old.ambiguous) throw new RefError(shared);
-    // Its name on the current screen belongs to another element: its own would still carry the ref.
+    // A ref is never retried by its name: whatever answers to that name now may be another element
+    // (the «Slett» of the next order once this one is deleted), and SimDeck would tap it.
     const now = s ? [...s.nodes.entries()] : [];
-    const taken = (by: Array<[string, ScreenNode]>) =>
-      new RefError(`${r} is no longer on screen; its name is now on ${by.map(([ref]) => ref).join(", ")}, a different element — target that by its own ref`);
-    const holders = now.filter(([, n]) => (old.id && n.id === old.id) || (old.label && n.label === old.label));
-    if (holders.length) throw taken(holders);
-    // Retried by a name only if that name was its alone where it was seen: rows of a list share an id.
-    if (old.id && old.idUnique) return { kind: "selector", selector: { id: old.id } };
-    if (old.label && old.labelUnique) return { kind: "selector", selector: { label: old.label } };
-    if (old.id || old.label) throw new RefError(shared);
-    throw new RefError(`${r} is no longer on screen and has no id or label to find it by`);
-  }
-
-  private markAmbiguous(ref: string): void {
-    const n = this.remembered.get(ref);
-    if (n) this.remembered.set(ref, { ...n, ambiguous: true });
+    const holders = now.filter(([, n]) => (old.id && n.id === old.id) || (old.label && n.label === old.label)).map(([ref]) => ref);
+    throw new RefError(`${r} is no longer on screen${holders.length ? `; its name is now on ${holders.join(", ")}, a different element` : ""} — target what you want by a ref from the current screen`);
   }
 
   private remember(ref: string, n: Remembered): void {
@@ -317,7 +305,7 @@ export class ScreenBook {
   }
 }
 
-type Remembered = ScreenNode & { ambiguous?: boolean; idUnique?: boolean; labelUnique?: boolean };
+type Remembered = ScreenNode;
 
 /** iOS screens are portrait in hardware; a wider app root means the device is turned. */
 export function isRotatedIos(platform: "ios" | "android", bounds: Frame | undefined): boolean {
