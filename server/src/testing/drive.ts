@@ -37,6 +37,8 @@ export interface DriveResult {
   screen?: string;
   /** The raw tree behind `screen`, for hints that read it. */
   tree?: unknown;
+  /** Why no screen came back although one was asked for. */
+  screenError?: string;
   settleMs: number;
 }
 
@@ -89,8 +91,13 @@ export async function settle(
   }
   let prev: string | undefined;
   for (;;) {
-    const shape = shapeOf(await deps.probe());
+    const shape = await probeShape(deps);
     const elapsed = now() - start;
+    if (shape === undefined) {
+      if (elapsed >= changeWaitMs) return { shape, ms: elapsed };
+      await sleep(PROBE_GAP_MS);
+      continue;
+    }
     if (prev !== undefined && shape === prev && (shape !== before || elapsed >= changeWaitMs)) return { shape, ms: elapsed };
     if (elapsed >= SETTLE_MAX_MS) return { shape, ms: elapsed };
     prev = shape;
@@ -102,15 +109,15 @@ function withSelector(a: UiAction, selector: Selector): UiAction {
   return { ...a, selector } as UiAction;
 }
 
-/** Turn a `{ref}` selector into what SimDeck understands, re-reading the screen once if the ref needs a fresh frame. */
-async function resolveRefs(deps: DriveDeps, a: UiAction): Promise<UiAction> {
+/**
+ * Turn a `{ref}` selector into what SimDeck understands. A point is only taken from a capture made
+ * after the last action — the viewer's own taps move the screen too, so an older one is re-read.
+ */
+async function resolveRefs(deps: DriveDeps, a: UiAction, freshAfter: number): Promise<UiAction> {
   if (!("selector" in a) || !a.selector.ref) return a;
   const ref = a.selector.ref;
-  let target;
-  try {
-    target = deps.book.resolve(ref);
-  } catch (e) {
-    if (!(e instanceof RefError) || !deps.book.stale) throw e;
+  let target = deps.book.resolve(ref);
+  if (target.kind === "point" && (deps.book.snapshot?.revision ?? 0) <= freshAfter) {
     deps.book.record(await deps.observe());
     target = deps.book.resolve(ref);
   }
@@ -125,13 +132,14 @@ export async function drive(deps: DriveDeps, actions: UiAction[], observe: Obser
   const results: unknown[] = [];
   let failure: DriveFailure | undefined;
   let settleMs = 0;
+  let freshAfter = deps.book.snapshot?.revision ?? 0;
   let before: string | undefined;
   const moves = actions.some(isMutating);
-  if (moves && observe !== "none" && deps.platform === "ios") before = shapeOf(await deps.probe());
+  if (moves && observe !== "none" && deps.platform === "ios") before = await probeShape(deps);
   for (let i = 0; i < actions.length; i++) {
     let a = actions[i]!;
     try {
-      a = await resolveRefs(deps, a);
+      a = await resolveRefs(deps, a, freshAfter);
       if (i > 0 && a.type === "tapElement" && a.waitTimeoutMs == null) a = { ...a, waitTimeoutMs: BATCH_TAP_WAIT_MS };
       results.push(await deps.act(a));
     } catch (e) {
@@ -144,20 +152,32 @@ export async function drive(deps: DriveDeps, actions: UiAction[], observe: Obser
         error: e,
         ...(sel ? { searched: sel.ref ?? sel.text ?? sel.label ?? sel.id } : {}),
       };
-      if (!(e instanceof RefError)) deps.book.stale = true;
       break;
     }
     if (!isMutating(a)) continue;
-    deps.book.stale = true;
-    const last = i === actions.length - 1;
-    if (last && observe === "none") break;
+    freshAfter = deps.book.snapshot?.revision ?? 0;
+    if (i === actions.length - 1 && observe === "none") break;
     const s = await settle(deps, before, CHANGE_WAIT_MS[a.type]!);
     settleMs += s.ms;
     before = s.shape;
   }
   if (observe === "none" && !(failure && moves)) return { results, failure, settleMs };
-  const tree = await deps.observe();
+  // The action already happened: a look that fails must not turn it into a failure.
+  let tree: unknown;
+  try {
+    tree = await deps.observe();
+  } catch (e) {
+    return { results, failure, settleMs, screenError: e instanceof Error ? e.message : String(e) };
+  }
   deps.book.record(tree);
   const screen = observe === "full" ? deps.book.full() : deps.book.update();
   return { results, failure, screen, tree, settleMs };
+}
+
+async function probeShape(deps: Pick<DriveDeps, "probe">): Promise<string | undefined> {
+  try {
+    return shapeOf(await deps.probe());
+  } catch {
+    return undefined;
+  }
 }

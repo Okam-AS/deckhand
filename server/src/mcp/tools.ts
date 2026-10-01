@@ -1133,7 +1133,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           const t = list[i]!.type;
           if (VERIFIER_ACTIONS.has(t)) engine.noteVerification(args.previewId, true, t);
         });
-        const look = run.screen ? { screen: run.screen } : {};
+        const look = run.screen ? { screen: run.screen } : run.screenError ? { screenUnavailable: `the action ran; reading the screen after it failed: ${run.screenError}` } : {};
         const devMenu = run.tree ? devMenuHint(run.tree) : {};
         const nudgeType = list.find((a) => DRIVING_UI_ACTIONS.has(a.type))?.type ?? list[0]!.type;
         const f = run.failure;
@@ -1161,6 +1161,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           ...(hint ? { screen: hint } : {}),
           ...(single ? {} : { failedStep: f.index, results: run.results }),
           ...(run.screen ? { currentScreen: run.screen } : {}),
+          ...(run.screenError ? { screenUnavailable: run.screenError } : {}),
           ...devMenu,
         });
       }),

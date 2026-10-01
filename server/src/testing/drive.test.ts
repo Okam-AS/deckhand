@@ -117,6 +117,21 @@ describe("drive", () => {
     assert.equal(probes.length, 0);
   });
 
+  it("returns the action's result when the look after it fails", async () => {
+    const { deps } = fakeDevice(() => tree("A"));
+    deps.observe = async () => {
+      throw new Error("describe failed (500)");
+    };
+    deps.probe = async () => {
+      throw new Error("tree failed (500)");
+    };
+    const r = await drive(deps, [{ type: "tap", x: 0.5, y: 0.5 }], "auto");
+    assert.equal(r.failure, undefined);
+    assert.equal(r.results.length, 1);
+    assert.equal(r.screen, undefined);
+    assert.match(r.screenError!, /describe failed/);
+  });
+
   it("sends SimDeck a selector for a ref, and a point for a ref that has no unique name", async () => {
     const { deps, acted } = fakeDevice(() => tree("Mer", "Mer", "Innstillinger"));
     deps.book.record(tree("Mer", "Mer", "Innstillinger"));
@@ -126,7 +141,7 @@ describe("drive", () => {
     assert.equal(acted[1]!.type, "tap", "a duplicate label is tapped at the element's centre");
   });
 
-  it("re-reads the screen before tapping a ref's centre after an unobserved action", async () => {
+  it("re-reads the screen before tapping a ref's centre from a capture older than this call", async () => {
     const { deps, acted } = fakeDevice(() => tree("Mer", "Mer"));
     deps.book.record(tree("Mer", "Mer"));
     let looks = 0;
@@ -135,9 +150,11 @@ describe("drive", () => {
       looks++;
       return observe();
     };
+    await drive(deps, [{ type: "tapElement", selector: { ref: "e3" } }], "none");
+    assert.equal(looks, 1, "a capture from before the call was replaced before the tap");
     await drive(deps, [{ type: "back" }, { type: "tapElement", selector: { ref: "e3" } }], "none");
-    assert.equal(looks, 1, "the stale snapshot was replaced before the tap");
-    assert.equal(acted[1]!.type, "tap");
+    assert.equal(looks, 2, "and so was one from before an action in the same list");
+    assert.deepEqual(acted.map((a) => a.type), ["tap", "back", "tap"]);
   });
 
   it("fails a ref it cannot resolve without acting", async () => {

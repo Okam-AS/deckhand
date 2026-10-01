@@ -118,14 +118,6 @@ describe("ScreenBook.resolve", () => {
     assert.deepEqual(book.resolve("e5"), { kind: "point", x: 0.75, y: 450 / 800 });
   });
 
-  it("refuses a centre from a snapshot an action may have invalidated", () => {
-    const book = new ScreenBook();
-    book.record(screen(node("Button", "Mer", at(0, 400)), node("Button", "Mer", at(200, 400))));
-    book.stale = true;
-    assert.throws(() => book.resolve("e2"), RefError);
-    assert.deepEqual(book.resolve("e1"), { kind: "selector", selector: { label: "App" } }, "a unique label needs no fresh frame");
-  });
-
   it("refuses to tap an offscreen element by its centre", () => {
     const book = new ScreenBook();
     book.record(screen(node("Button", "Mer", at(0, 900)), node("Button", "Mer", at(0, 1000))));

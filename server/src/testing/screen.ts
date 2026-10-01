@@ -163,8 +163,6 @@ export class ScreenBook {
   private shown: Map<string, string> | null = null;
   private readonly remembered = new Map<string, ScreenNode>();
   private readonly byKey = new Map<string, string[]>();
-  /** True once an action may have moved the screen since `latest` was read. */
-  stale = true;
 
   /** Record a capture: an element seen before, on this screen or an earlier one, keeps its ref. */
   record(tree: unknown): Snapshot {
@@ -184,7 +182,6 @@ export class ScreenBook {
       this.remember(ref, n);
     }
     this.latest = { revision: ++this.revision, bounds: screenBounds(tree), nodes: next };
-    this.stale = false;
     return this.latest;
   }
 
@@ -228,7 +225,7 @@ export class ScreenBook {
   /**
    * How to hit a ref. A unique id or label is resolved by SimDeck at the moment of the tap, so it
    * survives a screen that moved since the snapshot; the element's own centre is the last resort,
-   * and only from a snapshot no action has invalidated.
+   * and is only as current as `snapshot` — the caller decides whether that is current enough.
    */
   resolve(ref: string): RefTarget {
     const r = ref.replace(/^@/, "");
@@ -238,7 +235,7 @@ export class ScreenBook {
       const all = [...s.nodes.values()];
       if (node.id && all.filter((n) => n.id === node.id).length === 1) return { kind: "selector", selector: { id: node.id } };
       if (node.label && all.filter((n) => n.label === node.label).length === 1) return { kind: "selector", selector: { label: node.label } };
-      if (!this.stale && node.frame && s.bounds) {
+      if (node.frame && s.bounds) {
         if (node.offscreen) throw new RefError(`${r} is off screen — scroll it into view first (scrollUntilVisible, or a gesture), then use the ref from the new screen`);
         return {
           kind: "point",
@@ -246,7 +243,7 @@ export class ScreenBook {
           y: (node.frame.y + node.frame.height / 2 - s.bounds.y) / s.bounds.height,
         };
       }
-      throw new RefError(`${r} has no unique id or label and the screen may have moved since it was read`);
+      throw new RefError(`${r} has no unique id or label, and no frame to tap`);
     }
     const old = this.remembered.get(r);
     if (old?.id) return { kind: "selector", selector: { id: old.id } };
