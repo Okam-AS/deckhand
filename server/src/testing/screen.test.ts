@@ -156,11 +156,19 @@ describe("ScreenBook refs that lost their element", () => {
     assert.throws(() => book.resolve(ref), /different element/);
   });
 
-  it("still retries a gone ref by its id when the same kind of element holds it under a new label", () => {
+  it("does not retry a gone ref by an id that a row of the same kind now holds", () => {
     const book = new ScreenBook();
-    const ref = [...book.record(screen(node("Button", "#102 · 6:05", { id: "ticket-1002", ...at(10, 100) }))).nodes].find(([, n]) => n.id === "ticket-1002")![0];
-    book.record(screen(node("Button", "#102 · 6:06", { id: "ticket-1002", ...at(10, 100) })));
-    assert.deepEqual(book.resolve(ref), { kind: "selector", selector: { id: "ticket-1002" } });
+    const ref = [...book.record(screen(node("Button", "Ordre 12", { id: "order-row", ...at(10, 100) }))).nodes].find(([, n]) => n.label === "Ordre 12")![0];
+    book.record(screen(node("Button", "Ordre 13", { id: "order-row", ...at(10, 100) })));
+    assert.throws(() => book.resolve(ref), /different element/);
+  });
+
+  it("retries a gone ref only by a name it alone had where it was seen", () => {
+    const book = new ScreenBook();
+    const rows = book.record(screen(node("Button", "Ordre 12", { id: "order-row", ...at(10, 100) }), node("Button", "Ordre 13", { id: "order-row", ...at(10, 200) })));
+    const ref = [...rows.nodes].find(([, n]) => n.label === "Ordre 12")![0];
+    book.record(screen(node("Button", "Tilbake", at(10, 300))));
+    assert.deepEqual(book.resolve(ref), { kind: "selector", selector: { label: "Ordre 12" } }, "the shared id is not used; the unique label is");
   });
 
   it("keeps elements apart whose labels differ only by a time", () => {

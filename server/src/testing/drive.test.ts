@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { UiAction } from "./control.ts";
-import { drive, settle, type DriveDeps } from "./drive.ts";
+import { drive, rotationWarning, settle, type DriveDeps } from "./drive.ts";
 import { RefError, ScreenBook, shapeOf } from "./screen.ts";
 
 const tree = (...labels: string[]) => ({
@@ -227,5 +227,24 @@ describe("drive", () => {
     const r = await drive(deps, [{ type: "tapElement", selector: { ref } }], "none");
     assert.ok(r.failure?.error instanceof RefError);
     assert.equal(acted.length, 0);
+  });
+
+  it("checks a ref still on the book's screen against a fresh capture before the first step", async () => {
+    const { deps, acted } = fakeDevice(() => tree("Slett", "Slett"));
+    const ref = [...deps.book.record(tree("Slett")).nodes].find(([, n]) => n.label === "Slett")![0];
+    // Between calls the viewer added a second «Slett»: the label is no longer unique.
+    await drive(deps, [{ type: "tapElement", selector: { ref } }], "none");
+    assert.ok(acted.every((a) => !("selector" in a && a.selector.label === "Slett")), "the ref did not go to SimDeck as a now-ambiguous label");
+  });
+
+  it("warns about every kind of touch on a turned iOS device, and only there", () => {
+    const wide = { x: 0, y: 0, width: 1376, height: 1032 };
+    const tall = { x: 0, y: 0, width: 1032, height: 1376 };
+    for (const a of [{ type: "tap", x: 0.5, y: 0.5 }, { type: "swipe", startX: 0.5, startY: 0.8, endX: 0.5, endY: 0.2 }, { type: "gesture", preset: "scroll-down" }] as UiAction[]) {
+      assert.ok(rotationWarning("ios", wide, [a]), `${a.type} on a turned iPad`);
+    }
+    assert.equal(rotationWarning("ios", tall, [{ type: "tap", x: 0.5, y: 0.5 }]), undefined);
+    assert.equal(rotationWarning("android", wide, [{ type: "tap", x: 0.5, y: 0.5 }]), undefined);
+    assert.equal(rotationWarning("ios", wide, [{ type: "waitFor", selector: { id: "x" } }]), undefined);
   });
 });

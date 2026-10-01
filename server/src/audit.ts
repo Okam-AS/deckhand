@@ -46,7 +46,9 @@ export function summarizeArgs(args: unknown): Record<string, unknown> | undefine
 
 function redactObject(obj: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(obj)) out[k] = SENSITIVE_KEY.test(k) ? "[redacted]" : redactValue(v);
+  // What a `type` action types is what the operator keys in: a PIN, a code, a password.
+  const typed = obj.type === "type";
+  for (const [k, v] of Object.entries(obj)) out[k] = SENSITIVE_KEY.test(k) || (typed && k === "text") ? "[redacted]" : redactValue(v);
   return out;
 }
 

@@ -23,9 +23,9 @@ import type { AuditLog } from "../audit.ts";
 import { summarizeArgs } from "../audit.ts";
 import { SimDeckUnavailableError } from "../testing/simdeck.ts";
 import { SimDeckActionError, type UiAction } from "../testing/control.ts";
-import { drive, isMutating } from "../testing/drive.ts";
+import { drive, isMutating, rotationWarning } from "../testing/drive.ts";
 import { FLOWS_FILENAME, readFlow } from "../engine/flows.ts";
-import { RefError as ScreenRefError, isRotatedIos } from "../testing/screen.ts";
+import { RefError as ScreenRefError } from "../testing/screen.ts";
 import type { JevProvider } from "../navigate/jev.ts";
 import { navigate } from "../navigate/loop.ts";
 import { EGRESS_HOST } from "../navigate/egress.ts";
@@ -1148,10 +1148,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           observe,
           single,
         ));
-        const rotated =
-          isRotatedIos(platform, book.snapshot?.bounds) && list.some((a) => a.type === "tapElement")
-            ? { rotated: "This iOS device is turned to landscape, and SimDeck places element taps as if it were not: tapElement can land on a different element. Check the returned screen after every tap." }
-            : {};
+        const warning = rotationWarning(platform, book.snapshot?.bounds, list);
+        const rotated = warning ? { rotated: warning } : {};
         // A failed verifier is noted HERE or the fact is lost before update_test_run can use it.
         run.results.forEach((_, i) => {
           const t = list[i]!.type;
@@ -1225,7 +1223,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         if (denied) return denied;
         const appId = engine.appIdFor(args.previewId);
         const locale = args.uiLanguage ?? (await engine.uiLanguage(args.previewId, args.deviceId));
-        const result = await navigate(
+        const result = await onDevice(args.previewId, args.deviceId, () => navigate(
           { goal: args.goal, maxSteps: args.maxSteps ?? 10, minConfidence: args.minConfidence, text: args.text ?? {}, locale },
           {
             describe: () => engine.describe(args.previewId, args.deviceId, { source: "auto" }),
@@ -1242,7 +1240,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
               });
             },
           },
-        );
+        ));
         const nextStep =
           result.outcome === "done"
             ? "The decision model judged the goal reached. Confirm it with one `ui` assert or waitFor on what the goal promised before you report it."

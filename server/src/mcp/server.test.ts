@@ -1318,6 +1318,18 @@ describe("agent-driven testing tools (describe/ui + test runs)", () => {
       "the second call's steps did not interleave with the first's",
     );
     simdeckActions.length = 0;
+    const before = jevAccess;
+    jevAccess = scriptedJev().access;
+    const longList = { name: "ui", arguments: { previewId, deviceId, observe: "none", actions: [0.1, 0.2, 0.3, 0.4].map((y) => ({ type: "tap", x: 0.7, y })) } };
+    const listed = admin.callTool(longList);
+    await new Promise((r) => setTimeout(r, 30));
+    await Promise.all([admin.callTool({ name: "navigate", arguments: { previewId, deviceId, goal: "Get past the intro" } }), listed]);
+    jevAccess = before;
+    const at = simdeckActions.map((a) => (a as { x?: number }).x === 0.7);
+    assert.equal(at.filter(Boolean).length, 4);
+    assert.equal(at.indexOf(true) + 3, at.lastIndexOf(true), "navigate did not act between the steps of a ui list");
+    assert.ok(simdeckActions.length > 2, "navigate acted too");
+    simdeckActions.length = 0;
     const agentDeviceRef = await admin.callTool({ name: "ui", arguments: { previewId, deviceId, action: { type: "tapElement", selector: { ref: "@e2" } } } });
     assert.equal(agentDeviceRef.isError, true, "an @e ref from another tool is refused, not resolved against deckhand's own");
     assert.equal(simdeckActions.length, 0);

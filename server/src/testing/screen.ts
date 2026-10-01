@@ -215,7 +215,8 @@ export class ScreenBook {
     for (const n of nodes) {
       const ref = refs.get(n)!;
       next.set(ref, n);
-      this.remember(ref, groups.get(keyOf(n))!.length === 1 ? n : { ...n, ambiguous: true });
+      const single = groups.get(keyOf(n))!.length === 1;
+      this.remember(ref, single ? { ...n, idUnique: !!n.id && nodes.filter((m) => m.id === n.id).length === 1, labelUnique: !!n.label && nodes.filter((m) => m.label === n.label).length === 1 } : { ...n, ambiguous: true });
     }
     this.latest = { revision: ++this.revision, shape: shapeOf(tree), bounds: screenBounds(tree), nodes: next };
     return this.latest;
@@ -286,18 +287,12 @@ export class ScreenBook {
     const now = s ? [...s.nodes.entries()] : [];
     const taken = (by: Array<[string, ScreenNode]>) =>
       new RefError(`${r} is no longer on screen; its name is now on ${by.map(([ref]) => ref).join(", ")}, a different element — target that by its own ref`);
-    if (old.id) {
-      // The same id on the same kind of element, its label changed only in its digits (a timer, a count), is the element itself.
-      const holders = now.filter(([, n]) => n.id === old.id);
-      const same = (n: ScreenNode) => n.role === old.role && digitless(n.label) === digitless(old.label);
-      if (holders.length > 1 || holders.some(([, n]) => !same(n))) throw taken(holders);
-      return { kind: "selector", selector: { id: old.id } };
-    }
-    if (old.label) {
-      const holders = now.filter(([, n]) => n.label === old.label);
-      if (holders.length) throw taken(holders);
-      return { kind: "selector", selector: { label: old.label } };
-    }
+    const holders = now.filter(([, n]) => (old.id && n.id === old.id) || (old.label && n.label === old.label));
+    if (holders.length) throw taken(holders);
+    // Retried by a name only if that name was its alone where it was seen: rows of a list share an id.
+    if (old.id && old.idUnique) return { kind: "selector", selector: { id: old.id } };
+    if (old.label && old.labelUnique) return { kind: "selector", selector: { label: old.label } };
+    if (old.id || old.label) throw new RefError(shared);
     throw new RefError(`${r} is no longer on screen and has no id or label to find it by`);
   }
 
@@ -318,9 +313,7 @@ export class ScreenBook {
   }
 }
 
-type Remembered = ScreenNode & { ambiguous?: boolean };
-
-const digitless = (s: string | undefined): string => (s ?? "").replace(/\d+/g, "#");
+type Remembered = ScreenNode & { ambiguous?: boolean; idUnique?: boolean; labelUnique?: boolean };
 
 /** iOS screens are portrait in hardware; a wider app root means the device is turned. */
 export function isRotatedIos(platform: "ios" | "android", bounds: Frame | undefined): boolean {

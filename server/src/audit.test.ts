@@ -30,9 +30,15 @@ describe("summarizeArgs redaction", () => {
   });
 
   it("redacts and truncates inside a list, as `ui` sends its actions", () => {
-    const out = summarizeArgs({ actions: [{ type: "type", text: "a".repeat(300) }, { type: "x", password: "hunter2" }] });
-    const [typed, secret] = out?.actions as Array<Record<string, unknown>>;
-    assert.equal((typed!.text as string).length, 201);
+    const out = summarizeArgs({ actions: [{ type: "openUrl", url: "a".repeat(300) }, { type: "x", password: "hunter2" }] });
+    const [long, secret] = out?.actions as Array<Record<string, unknown>>;
+    assert.equal((long!.url as string).length, 201);
     assert.equal(secret!.password, "[redacted]");
+  });
+
+  it("never keeps what a type action typed, alone or in a list", () => {
+    const out = summarizeArgs({ action: { type: "type", text: "123123" }, actions: [{ type: "type", text: "4321" }, { type: "tapElement", selector: { text: "Logg inn" } }] });
+    assert.doesNotMatch(JSON.stringify(out), /123123|4321/);
+    assert.match(JSON.stringify(out), /Logg inn/, "a selector's text is not what was typed");
   });
 });

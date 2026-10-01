@@ -1,4 +1,4 @@
-import { lstatSync, readFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { ZodType } from "zod";
@@ -22,10 +22,22 @@ export function readFlow<T>(sourceDir: string | undefined, name: string, actionS
   try {
     if (!sourceDir) throw Object.assign(new Error("no source dir"), { code: "ENOENT" });
     // A branch decides what is in its checkout: a link could point the read at any file on this Mac.
-    const st = lstatSync(file);
-    if (!st.isFile()) return { ok: false, code: "invalid_flows_file", message: `${FLOWS_FILENAME} must be a regular file, not a link` };
-    if (st.size > MAX_FLOWS_BYTES) return { ok: false, code: "invalid_flows_file", message: `${FLOWS_FILENAME} is larger than ${MAX_FLOWS_BYTES} bytes` };
-    text = readFileSync(file, "utf8");
+    // O_NOFOLLOW refuses a link at open, and the checks run on what was opened, not on the path.
+    let fd: number;
+    try {
+      fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ELOOP") return { ok: false, code: "invalid_flows_file", message: `${FLOWS_FILENAME} must be a regular file, not a link` };
+      throw e;
+    }
+    try {
+      const st = fstatSync(fd);
+      if (!st.isFile()) return { ok: false, code: "invalid_flows_file", message: `${FLOWS_FILENAME} must be a regular file, not a link` };
+      if (st.size > MAX_FLOWS_BYTES) return { ok: false, code: "invalid_flows_file", message: `${FLOWS_FILENAME} is larger than ${MAX_FLOWS_BYTES} bytes` };
+      text = readFileSync(fd, "utf8");
+    } finally {
+      closeSync(fd);
+    }
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") {
       return { ok: false, code: "no_flows_file", message: `this app has no ${FLOWS_FILENAME} in its checkout` };
