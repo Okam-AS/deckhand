@@ -132,13 +132,6 @@ describe("ScreenBook refs that lost their element", () => {
     assert.throws(() => book.resolve(ref), /shared its name/);
   });
 
-  it("keeps a ref on an element whose label carries a running clock", () => {
-    const book = new ScreenBook();
-    const ref = [...book.record(screen(node("Button", "#102 · 6:05", at(10, 100)))).nodes].find(([, n]) => n.role === "Button")![0];
-    const later = book.record(screen(node("Button", "#102 · 6:16", at(10, 100))));
-    assert.equal([...later.nodes].find(([, n]) => n.role === "Button")![0], ref);
-  });
-
   it("keeps elements apart whose labels differ only by a time", () => {
     const book = new ScreenBook();
     const slots = (y: number) => screen(...["12:00", "12:15", "12:30"].map((t, i) => node("Button", t, at(10, y + i * 50))));
@@ -153,15 +146,13 @@ describe("ScreenBook refs that lost their element", () => {
     assert.notEqual(refOf(other, "12:45"), refOf(first, "12:00"), "a reading that was shared never carries a ref");
   });
 
-  it("never gives one ref to two elements, nor keeps a key per tick", () => {
+  it("never gives one ref to two elements", () => {
     const book = new ScreenBook();
     const slot = (t: string, y: number) => node("Button", t, at(10, y));
     book.record(screen(slot("12:00", 100)));
     book.record(screen(slot("12:15", 100)));
     const both = book.record(screen(slot("12:00", 100), slot("12:15", 200)));
     assert.equal([...both.nodes.values()].filter((n) => n.role === "Button").length, 2, "each element has its own ref");
-    for (let i = 0; i < 300; i++) book.record(screen(node("Button", `Bord 4 ${Math.floor(i / 60)}:${String(i % 60).padStart(2, "0")}`, at(10, 100))));
-    assert.ok((book as unknown as { byKey: Map<string, string> }).byKey.size < 10);
   });
 
   it("does not carry a ref to a different element that took the same reading's place elsewhere", () => {

@@ -180,8 +180,6 @@ export class ScreenBook {
   private shown: Map<string, string> | null = null;
   private readonly remembered = new Map<string, Remembered>();
   private readonly byKey = new Map<string, string>();
-  /** Masked key → the ref and place of the one element that last showed it. */
-  private readonly byClock = new Map<string, { ref: string; where: string }>();
   private readonly groups = new Map<string, { where: string; refs: string[] }>();
 
   /**
@@ -194,23 +192,9 @@ export class ScreenBook {
     const groups = new Map<string, ScreenNode[]>();
     for (const n of nodes) groups.set(keyOf(n), [...(groups.get(keyOf(n)) ?? []), n]);
     const refs = new Map<ScreenNode, string>();
-    const clockCount = new Map<string, number>();
-    for (const n of nodes) clockCount.set(clockKeyOf(n), (clockCount.get(clockKeyOf(n)) ?? 0) + 1);
-    for (const [ck, count] of clockCount) if (count > 1) this.byClock.delete(ck);
-    const taken = new Set<string>();
-    for (const [k, members] of groups) if (members.length === 1 && this.byKey.has(k)) taken.add(this.byKey.get(k)!);
     for (const [k, members] of groups) {
       if (members.length === 1) {
-        const ck = clockKeyOf(members[0]!);
-        // Only a reading that tells this element from no other may carry its ref across a tick.
-        // A tick leaves the element where it was; a different element in its place would not be told apart.
-        const prior = clockCount.get(ck) === 1 ? this.byClock.get(ck) : undefined;
-        const ticked = prior && prior.where === frameKey(members[0]!.frame) && !taken.has(prior.ref) ? prior.ref : undefined;
-        if (ticked && !this.byKey.has(k)) {
-          for (const [key, r] of this.byKey) if (r === ticked) this.byKey.delete(key);
-        }
-        const ref = this.byKey.get(k) ?? ticked ?? `e${++this.counter}`;
-        taken.add(ref);
+        const ref = this.byKey.get(k) ?? `e${++this.counter}`;
         this.byKey.set(k, ref);
         this.groups.delete(k);
         refs.set(members[0]!, ref);
@@ -222,7 +206,6 @@ export class ScreenBook {
       if (!group) {
         for (const old of [this.byKey.get(k), ...(held?.refs ?? [])]) if (old) this.markAmbiguous(old);
         this.byKey.delete(k);
-        this.byClock.delete(clockKeyOf(members[0]!));
         group = members.map(() => `e${++this.counter}`);
       }
       this.groups.set(k, { where, refs: group });
@@ -231,7 +214,6 @@ export class ScreenBook {
     const next = new Map<string, ScreenNode>();
     for (const n of nodes) {
       const ref = refs.get(n)!;
-      if (clockCount.get(clockKeyOf(n)) === 1 && groups.get(keyOf(n))!.length === 1) this.byClock.set(clockKeyOf(n), { ref, where: frameKey(n.frame) });
       next.set(ref, n);
       this.remember(ref, groups.get(keyOf(n))!.length === 1 ? n : { ...n, ambiguous: true });
     }
@@ -325,7 +307,6 @@ export class ScreenBook {
     this.remembered.delete(oldRef);
     const k = keyOf(oldNode);
     if (this.byKey.get(k) === oldRef) this.byKey.delete(k);
-    if (this.byClock.get(clockKeyOf(oldNode))?.ref === oldRef) this.byClock.delete(clockKeyOf(oldNode));
     if (this.groups.get(k)?.refs.includes(oldRef)) this.groups.delete(k);
   }
 }
@@ -347,11 +328,6 @@ function frameKey(f: Frame | undefined): string {
 
 function keyOf(n: ScreenNode): string {
   return `${n.role}\u0000${n.id ?? ""}\u0000${n.label ?? ""}`;
-}
-
-/** The key with clock readings masked: a ticket's running timer must not re-mint its ref. */
-function clockKeyOf(n: ScreenNode): string {
-  return keyOf(n).replace(CLOCK, "<time>");
 }
 
 function linesOf(s: Snapshot): Map<string, string> {
