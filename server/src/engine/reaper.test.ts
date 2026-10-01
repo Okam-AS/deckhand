@@ -351,10 +351,9 @@ describe("the default killer", () => {
 });
 
 describe("markedPidsIn", () => {
-  it("finds the server's marked processes and leaves a verify run's alone", () => {
+  it("finds the server's marked processes", () => {
     const ps = [
       "  101 node metro.js DECKHAND_METRO=1 HOME=/u",
-      "  102 node metro.js DECKHAND_METRO=1 DECKHAND_VERIFY=4242 HOME=/u",
       "  103 xcodebuild DECKHAND_BUILD=1",
       "  104 node expo start HOME=/u",
     ].join("\n");

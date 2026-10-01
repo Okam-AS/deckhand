@@ -65,11 +65,6 @@ PLAN describes the architecture. The invariants that bind every change:
   untouched. The viewer has ONE stage: `computeStage` in `viewer/src/panes.ts` decides
   grouping and visibility as a pure function, so keep new layout rules there and not in
   `App.tsx`, which has no tests of its own.
-- **`deckhand verify` is the headless path** (PLAN §10): a scenario file in, screenshots,
-  accessibility trees and `result.json` out, exit 0/1. It is a separate process with its own
-  `verify-…` simulators, so it must never lease from the server's `deckhand-pool-…` devices.
-  `--share public` borrows the server's stream for that simulator as a view-only link that
-  ends with the run (PLAN §9 "Live verify shares").
 - **`navigate` is a server-side drive loop that exists only once a TypeSafe key is set** (PLAN §2
   "Navigate", §11 item 5) — without one it is not even listed:
   deckhand's own `describe` → a closed action list → one TypeSafe Jev decision → `ui`, handing

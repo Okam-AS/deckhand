@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { deflateSync } from "node:zlib";
-import { decodePng, encodePng, rotateCcw, type Rgba } from "./png.ts";
+import { decodePng, encodePng, type Rgba } from "./png.ts";
 
 function image(w: number, h: number, px: (x: number, y: number) => [number, number, number, number]): Rgba {
   const data = Buffer.alloc(w * h * 4);
@@ -70,18 +70,5 @@ describe("png", () => {
 
   it("refuses what it cannot read rather than returning a wrong image", () => {
     assert.throws(() => decodePng(Buffer.from("not a png")), /not a PNG/);
-  });
-
-  it("rotates counter-clockwise by quarter turns", () => {
-    const img = image(3, 2, (x, y) => [x, y, 0, 255]);
-    const ccw = rotateCcw(img, 1);
-    assert.equal(ccw.width, 2);
-    assert.equal(ccw.height, 3);
-    const at = (r: Rgba, x: number, y: number) => [...r.data.subarray((y * r.width + x) * 4, (y * r.width + x) * 4 + 2)];
-    assert.deepEqual(at(ccw, 0, 0), [2, 0], "the top-right corner becomes the top-left");
-    assert.deepEqual(at(rotateCcw(img, 3), 0, 0), [0, 1], "the bottom-left corner becomes the top-left");
-    assert.deepEqual(at(rotateCcw(img, 2), 0, 0), [2, 1]);
-    assert.deepEqual(rotateCcw(rotateCcw(img, 1), 3), img);
-    assert.equal(rotateCcw(img, 4), img);
   });
 });

@@ -109,20 +109,3 @@ export function encodePng(img: Rgba): Buffer {
   for (let y = 0; y < img.height; y++) img.data.copy(raw, y * (stride + 1) + 1, y * stride, (y + 1) * stride);
   return Buffer.concat([SIGNATURE, chunk("IHDR", ihdr), chunk("IDAT", deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]);
 }
-
-/** Rotate by quarter turns counter-clockwise. */
-export function rotateCcw(img: Rgba, quarterTurns: number): Rgba {
-  const q = ((quarterTurns % 4) + 4) % 4;
-  if (q === 0) return img;
-  const { width: w, height: h, data } = img;
-  const ow = q === 2 ? w : h;
-  const oh = q === 2 ? h : w;
-  const out = Buffer.alloc(data.length);
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const [nx, ny] = q === 1 ? [y, w - 1 - x] : q === 2 ? [w - 1 - x, h - 1 - y] : [h - 1 - y, x];
-      data.copy(out, (ny * ow + nx) * 4, (y * w + x) * 4, (y * w + x) * 4 + 4);
-    }
-  }
-  return { width: ow, height: oh, data: out };
-}
