@@ -1329,6 +1329,8 @@ describe("agent-driven testing tools (describe/ui + test runs)", () => {
     assert.equal(at.filter(Boolean).length, 4);
     assert.equal(at.indexOf(true) + 3, at.lastIndexOf(true), "navigate did not act between the steps of a ui list");
     assert.ok(simdeckActions.length > 2, "navigate acted too");
+    const one = parse(await admin.callTool({ name: "ui", arguments: { previewId, deviceId, action: { type: "tap", x: 0.5, y: 0.5 } } }));
+    assert.ok("result" in one && !("results" in one), "a single action still answers with `result`");
     simdeckActions.length = 0;
     const agentDeviceRef = await admin.callTool({ name: "ui", arguments: { previewId, deviceId, action: { type: "tapElement", selector: { ref: "@e2" } } } });
     assert.equal(agentDeviceRef.isError, true, "an @e ref from another tool is refused, not resolved against deckhand's own");

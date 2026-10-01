@@ -63,13 +63,16 @@ describe("flattening a tree into listed elements", () => {
 });
 
 describe("ScreenBook refs", () => {
-  it("keeps an element's ref across captures, including after it left the screen and came back", () => {
+  it("keeps an element's ref across captures while it stays, and gives what comes back under its name a new one", () => {
     const book = new ScreenBook();
     const first = book.record(BOARD);
     const menuRef = [...first.nodes].find(([, n]) => n.label === "Meny")![0];
+    assert.equal([...book.record(BOARD).nodes].find(([, n]) => n.label === "Meny")![0], menuRef);
     book.record(MENU);
     const back = book.record(BOARD);
-    assert.equal([...back.nodes].find(([, n]) => n.label === "Meny")![0], menuRef);
+    const now = [...back.nodes].find(([, n]) => n.label === "Meny")![0];
+    assert.notEqual(now, menuRef, "the «Slett» of the next order is not the one the agent saw");
+    assert.throws(() => book.resolve(menuRef), new RegExp(`now on ${now}`));
   });
 
   it("keeps the ref of a field whose value changed, and reports it as changed", () => {

@@ -233,8 +233,9 @@ describe("drive", () => {
     const { deps, acted } = fakeDevice(() => tree("Slett", "Slett"));
     const ref = [...deps.book.record(tree("Slett")).nodes].find(([, n]) => n.label === "Slett")![0];
     // Between calls the viewer added a second «Slett»: the label is no longer unique.
-    await drive(deps, [{ type: "tapElement", selector: { ref } }], "none");
-    assert.ok(acted.every((a) => !("selector" in a && a.selector.label === "Slett")), "the ref did not go to SimDeck as a now-ambiguous label");
+    const r = await drive(deps, [{ type: "tapElement", selector: { ref } }], "none");
+    assert.ok(r.failure?.error instanceof RefError, "the ref is judged on the fresh screen, where its name is no longer its own");
+    assert.equal(acted.length, 0);
   });
 
   it("warns about every kind of touch on a turned iOS device, and only there", () => {

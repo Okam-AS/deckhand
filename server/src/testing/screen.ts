@@ -211,6 +211,10 @@ export class ScreenBook {
       this.groups.set(k, { where, refs: group });
       members.forEach((n, i) => refs.set(n, group[i]!));
     }
+    // A key gone from the screen gives up its ref: what shows up under it later may be another
+    // element of the same name (the «Slett» of the next order), so it gets a ref of its own.
+    for (const k of [...this.byKey.keys()]) if (!groups.has(k)) this.byKey.delete(k);
+    for (const k of [...this.groups.keys()]) if (!groups.has(k)) this.groups.delete(k);
     const next = new Map<string, ScreenNode>();
     for (const n of nodes) {
       const ref = refs.get(n)!;

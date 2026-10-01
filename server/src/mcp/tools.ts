@@ -151,6 +151,15 @@ function toFail(e: unknown): CallToolResult {
 
 const MAX_UI_ACTIONS = 25;
 
+/** A device call that never returns must not hold the device's queue. */
+function within<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} did not come back within ${ms / 1000}s`)), ms);
+  });
+  return Promise.race([p, late]).finally(() => clearTimeout(timer));
+}
+
 /** One `ui` or text `describe` at a time per device: they share the device's refs and the screen last shown. */
 const deviceQueues = new Map<string, Promise<unknown>>();
 function onDevice<T>(previewId: string, deviceId: string, run: () => Promise<T>): Promise<T> {
@@ -1228,7 +1237,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           {
             describe: () => engine.describe(args.previewId, args.deviceId, { source: "auto" }),
             act: (a) => engine.ui(args.previewId, args.deviceId, a),
-            frame: () => engine.screenshot(args.previewId, args.deviceId),
+            frame: () => within(engine.screenshot(args.previewId, args.deviceId), 30_000, "the screenshot"),
             jev: decider,
             onEgress: (e) => {
               if (!ctx.jev?.().ok) throw new Error("the TypeSafe key was removed while it ran");
