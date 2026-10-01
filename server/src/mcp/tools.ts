@@ -23,6 +23,9 @@ import type { AuditLog } from "../audit.ts";
 import { summarizeArgs } from "../audit.ts";
 import { SimDeckUnavailableError } from "../testing/simdeck.ts";
 import { SimDeckActionError, type UiAction } from "../testing/control.ts";
+import { drive, isMutating } from "../testing/drive.ts";
+import { FLOWS_FILENAME, readFlow } from "../engine/flows.ts";
+import { RefError as ScreenRefError } from "../testing/screen.ts";
 import type { JevProvider } from "../navigate/jev.ts";
 import { navigate } from "../navigate/loop.ts";
 import { EGRESS_HOST } from "../navigate/egress.ts";
@@ -146,9 +149,14 @@ function toFail(e: unknown): CallToolResult {
   return fail("internal_error", e instanceof Error ? e.message : String(e));
 }
 
-// Element selector for `ui`/`describe` — prefer id/text/label; the positional
-// @e# refs SimDeck prints are unstable across snapshots.
+const MAX_UI_ACTIONS = 25;
+
 const selectorSchema = z.object({
+  ref: z
+    .string()
+    .regex(/^@?e\d+$/)
+    .optional()
+    .describe("a ref from the screen `ui` or describe {format: \"text\"} returned, e.g. \"e12\"; when set, the other fields are ignored"),
   id: z.string().optional(),
   text: z.string().optional(),
   label: z.string().optional(),
@@ -1034,10 +1042,14 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Describe the screen (accessibility tree)",
       description:
-        "Read the on-screen UI as a structured accessibility tree — the agent's eyes for driving the app. Call it with just previewId/deviceId: that snapshot is already the compact, actionable one. Drive actions by #id/text/label selectors (the positional @e# refs are unstable across snapshots). Pair with `ui` to act and `screenshot` to eyeball. In a test loop, describe once to understand a new screen — then verify with `ui` waitFor/assert, not repeated full dumps. Needs the SimDeck testing backend on the deckhand machine.",
+        "Read the on-screen UI — the agent's eyes for driving the app. Prefer `format: \"text\"`: one line per element (`e12 Button \"Innstillinger\" #settings-row`), each with a ref that `ui` can target as {ref} and that names the same element for as long as it stays on screen; it is several times smaller than the default JSON tree. You rarely need this between steps: every `ui` action that can move the screen already returns the screen after it. Pair with `screenshot` to eyeball. Needs the SimDeck testing backend on the deckhand machine.",
       inputSchema: {
         previewId: z.string(),
         deviceId: z.string(),
+        format: z
+          .enum(["tree", "text"])
+          .optional()
+          .describe("tree (default): the accessibility tree as JSON. text: one line per element with refs for `ui` {ref}"),
         source: z
           .string()
           .optional()
@@ -1060,6 +1072,11 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         });
         // The dev menu is the one thing on screen that is not the app. An agent that
         // does not know that files the overlay's behaviour as an app bug — observed.
+        if (args.format === "text") {
+          const book = engine.screenBook(args.previewId, args.deviceId);
+          book.record(tree);
+          return ok({ screen: book.full(), ...devMenuHint(tree) });
+        }
         return ok({ describe: tree, ...devMenuHint(tree) });
       }),
   );
@@ -1069,45 +1086,83 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Drive the device UI",
       description:
-        "Perform ONE UI action to drive the app end-to-end: tap {x,y} (0..1 normalized), tapElement {selector}, type {text}, key {name: enter|backspace|tab|escape|up|down|left|right}, button {name}, home, back, dismissKeyboard, sleep {ms}, swipe, gesture {preset: scroll-up|scroll-down|scroll-left|scroll-right}, scrollUntilVisible {selector}, toggleAppearance, openUrl {url}, and the verifiers waitFor/waitForNot/assert/assertNot/query {selector}. Selector semantics differ and it costs a timeout to learn: `text` matches an element's LABEL for waitFor/assert, while text living in a field's value or placeholder matches only `query` — prefer `id` when there is one. Prefer tapElement + waitFor/assert over raw coordinates: a coordinate read off a screenshot is the single most common way an agent taps the wrong thing. To reach something off-screen use scrollUntilVisible rather than a scroll-and-screenshot loop; to go back use `back` rather than guessing an edge-swipe; if the keyboard or a text-selection callout is covering what you need, dismissKeyboard. Note: iOS can't HID-type non-US characters — non-ASCII text is pasted via the clipboard (focus the field first). Needs the SimDeck testing backend.",
+        "Drive the app: one `action`, or `actions` — a list run in order in ONE call, stopping at the first failure (use it for any sequence you already know: a sign-in, a menu path, a form) — or `flow`, a list saved by name in the app's checkout. After an action that can move the screen, deckhand waits until the screen is still and returns it as `screen`: the whole screen the first time, then only what changed. You do not need `describe` between steps. " +
+        "Target elements by `{ref}` from that listing (e.g. tapElement {selector: {ref: \"e12\"}}) — it cannot miss the way a guessed selector can; otherwise by `id`, then `label`. A ref that has left the screen is retried by its id or label. " +
+        "Actions: tap {x,y} (0..1 normalized), tapElement {selector}, type {text}, key {name: enter|backspace|tab|escape|up|down|left|right}, button {name}, home, back, dismissKeyboard, sleep {ms}, swipe, gesture {preset: scroll-up|scroll-down|scroll-left|scroll-right}, scrollUntilVisible {selector}, toggleAppearance, openUrl {url} (a deep link is the fastest way to a known screen), and the verifiers waitFor/waitForNot/assert/assertNot/query {selector}. " +
+        "Selector semantics differ and it costs a timeout to learn: `text` matches an element's LABEL for waitFor/assert, while text living in a field's value or placeholder matches only `query`. A coordinate read off a screenshot is the most common way an agent taps the wrong thing; to reach something off-screen use scrollUntilVisible; to go back use `back`; if the keyboard covers what you need, dismissKeyboard. iOS can't HID-type non-US characters — non-ASCII text is pasted via the clipboard (focus the field first). Needs the SimDeck testing backend.",
       inputSchema: {
         previewId: z.string(),
         deviceId: z.string(),
-        action: uiActionSchema,
+        action: uiActionSchema.optional(),
+        actions: z.array(uiActionSchema).min(1).max(MAX_UI_ACTIONS).optional().describe("several actions in order, in one call; pass this OR action OR flow"),
+        flow: z.string().min(1).optional().describe(`the name of a list of actions saved in the app checkout's ${FLOWS_FILENAME} (\`flows: {name: [actions]}\`), replayed with no model in the loop`),
+        observe: z
+          .enum(["auto", "full", "none"])
+          .optional()
+          .describe("the screen returned afterwards: auto (default after an action that can move the screen) = what changed since you last saw it, full = all of it, none = skip the look (verifiers and sleep default to none)"),
       },
     },
     (args) =>
       audited("ui", args, async () => {
         const denied = requireLivePreview(args.previewId);
         if (denied) return denied;
-        const action = args.action as UiAction;
-        // A failed verifier throws, and `audited` turns it into an error result — so the
-        // failure has to be noted HERE or the fact is lost before update_test_run can use it.
-        try {
-          const result = await engine.ui(args.previewId, args.deviceId, action);
-          if (VERIFIER_ACTIONS.has(action.type)) engine.noteVerification(args.previewId, true, action.type);
-          return ok({ result, ...testRunNudge(args.previewId, action.type) });
-        } catch (e) {
-          // Any action carrying a selector can miss for the same two reasons, so the
-          // diagnosis keys on the SELECTOR rather than on a list of action names. The list
-          // version shipped without scrollUntilVisible — the one action that scrolls a whole
-          // list before giving up, and therefore the one where the diagnosis is worth most.
-          if (!("selector" in action)) throw e;
-          const sel = "selector" in action ? JSON.stringify(action.selector) : undefined;
-          if (VERIFIER_ACTIONS.has(action.type)) engine.noteVerification(args.previewId, false, action.type, sel);
-          // "Not found" is the same answer for two situations that call for opposite next
-          // moves: not rendered YET, or on screen but absent from the tree. Deckhand holds the
-          // tree, so it can say which — and the miss has already cost the caller its timeout.
-          let hint: string | undefined;
+        if ([args.action, args.actions, args.flow].filter((x) => x != null).length !== 1) {
+          return fail("bad_request", "pass exactly one of `action`, `actions` or `flow`", "one step: action {type: …}; a known sequence: actions [{type: …}, …]; a saved one: flow \"name\"");
+        }
+        const single = args.action != null;
+        let list = (args.actions ?? [args.action]) as UiAction[];
+        if (args.flow != null) {
+          const found = readFlow(engine.sourceDirOf(args.previewId), args.flow, uiActionSchema);
+          if (!found.ok) return failWith(found.code, found.message, found.available ? { available: found.available } : {});
+          list = found.actions as UiAction[];
+        }
+        const observe = args.observe ?? (list.some(isMutating) ? "auto" : "none");
+        const run = await drive(
+          {
+            platform: engine.platformOf(args.previewId, args.deviceId),
+            book: engine.screenBook(args.previewId, args.deviceId),
+            act: (a) => engine.ui(args.previewId, args.deviceId, a),
+            probe: () => engine.probe(args.previewId, args.deviceId),
+            observe: () => engine.describe(args.previewId, args.deviceId, {}),
+          },
+          list,
+          observe,
+        );
+        // A failed verifier is noted HERE or the fact is lost before update_test_run can use it.
+        run.results.forEach((_, i) => {
+          const t = list[i]!.type;
+          if (VERIFIER_ACTIONS.has(t)) engine.noteVerification(args.previewId, true, t);
+        });
+        const look = run.screen ? { screen: run.screen } : {};
+        const devMenu = run.tree ? devMenuHint(run.tree) : {};
+        const nudgeType = list.find((a) => DRIVING_UI_ACTIONS.has(a.type))?.type ?? list[0]!.type;
+        const f = run.failure;
+        if (!f) {
+          return ok({ ...(single ? { result: run.results[0] } : { results: run.results }), ...look, ...devMenu, ...testRunNudge(args.previewId, nudgeType) });
+        }
+        const failed = f.action;
+        if (single && !("selector" in failed) && !(f.error instanceof ScreenRefError)) throw f.error;
+        const sel = "selector" in failed ? JSON.stringify(failed.selector) : undefined;
+        if (VERIFIER_ACTIONS.has(failed.type)) engine.noteVerification(args.previewId, false, failed.type, sel);
+        // "Not found" is the same answer for two situations that call for opposite next
+        // moves: not rendered YET, or on screen but absent from the tree. Deckhand holds the
+        // tree, so it can say which — and the miss has already cost the caller its timeout.
+        let hint: string | undefined;
+        if (f.error instanceof ScreenRefError) {
+          hint = `${f.error.message}. Target it from the current screen instead (describe {format: "text"} lists every ref).`;
+        } else if ("selector" in failed) {
           try {
-            const wanted = "selector" in action ? action.selector.text : undefined;
-            hint = selectorMissHint(await engine.describe(args.previewId, args.deviceId, {}), wanted);
+            hint = selectorMissHint(run.tree ?? (await engine.describe(args.previewId, args.deviceId, {})), failed.selector.text);
           } catch {
             /* the diagnosis must never replace the real error */
           }
-          const msg = e instanceof Error ? e.message : String(e);
-          return failWith("ui_error", msg, hint ? { screen: hint } : {});
         }
+        return failWith("ui_error", f.message, {
+          ...(hint ? { screen: hint } : {}),
+          ...(single ? {} : { failedStep: f.index, results: run.results }),
+          ...(run.screen ? { currentScreen: run.screen } : {}),
+          ...devMenu,
+        });
       }),
   );
 

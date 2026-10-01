@@ -1,0 +1,278 @@
+// ---------------------------------------------------------------------------
+// The screen as an agent reads it: one line per element, each with a ref (`e12`) that stays the
+// same for as long as that element is on screen, so a later screen can be sent as the lines that
+// changed and an action can name its target by ref instead of by a selector that may miss.
+// ---------------------------------------------------------------------------
+
+export interface Frame {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface ScreenNode {
+  role: string;
+  label?: string;
+  value?: string;
+  id?: string;
+  frame?: Frame;
+  offscreen?: boolean;
+}
+
+interface RawNode {
+  role?: unknown;
+  AXRole?: unknown;
+  type?: unknown;
+  label?: unknown;
+  AXLabel?: unknown;
+  value?: unknown;
+  AXValue?: unknown;
+  id?: unknown;
+  AXUniqueId?: unknown;
+  frame?: unknown;
+  children?: unknown;
+}
+
+function str(...vs: unknown[]): string | undefined {
+  for (const v of vs) if (typeof v === "string" && v.trim()) return v;
+  return undefined;
+}
+
+function frameOf(v: unknown): Frame | undefined {
+  if (!v || typeof v !== "object") return undefined;
+  const f = v as Record<string, unknown>;
+  const [x, y, width, height] = [f.x, f.y, f.width, f.height];
+  if ([x, y, width, height].every((n) => typeof n === "number" && Number.isFinite(n))) {
+    return { x: x as number, y: y as number, width: width as number, height: height as number };
+  }
+  return undefined;
+}
+
+function rootsOf(tree: unknown): unknown[] {
+  if (Array.isArray(tree)) return tree;
+  if (!tree || typeof tree !== "object") return [];
+  const t = tree as { roots?: unknown; snapshot?: { roots?: unknown } };
+  const r = t.roots ?? t.snapshot?.roots;
+  return Array.isArray(r) ? r : [];
+}
+
+/** The bounds of the first root with a non-empty frame: what "on screen" is measured against. */
+export function screenBounds(tree: unknown): Frame | undefined {
+  for (const r of rootsOf(tree)) {
+    const f = frameOf((r as RawNode)?.frame);
+    if (f && f.width > 0 && f.height > 0) return f;
+  }
+  return undefined;
+}
+
+/**
+ * Every element worth naming, in document order: anything with a label, a value or an id.
+ * Pure layout containers carry none of the three and would only cost tokens.
+ */
+export function flattenTree(tree: unknown): ScreenNode[] {
+  const bounds = screenBounds(tree);
+  const out: ScreenNode[] = [];
+  const walk = (n: unknown): void => {
+    if (!n || typeof n !== "object") return;
+    if (Array.isArray(n)) {
+      for (const c of n) walk(c);
+      return;
+    }
+    const raw = n as RawNode;
+    const label = str(raw.label, raw.AXLabel);
+    const value = str(raw.value, raw.AXValue);
+    const id = str(raw.id, raw.AXUniqueId);
+    if (label || value || id) {
+      const frame = frameOf(raw.frame);
+      const node: ScreenNode = { role: str(raw.role, raw.AXRole, raw.type) ?? "Element" };
+      if (label) node.label = label;
+      if (value && value !== label) node.value = value;
+      if (id) node.id = id;
+      if (frame) node.frame = frame;
+      if (bounds && frame && isOffscreen(frame, bounds)) node.offscreen = true;
+      out.push(node);
+    }
+    if (Array.isArray(raw.children)) walk(raw.children);
+  };
+  walk(rootsOf(tree));
+  return out;
+}
+
+function isOffscreen(f: Frame, b: Frame): boolean {
+  return f.x + f.width <= b.x || f.y + f.height <= b.y || f.x >= b.x + b.width || f.y >= b.y + b.height;
+}
+
+const clip = (s: string, n = 120): string => (s.length > n ? `${s.slice(0, n)}…` : s);
+
+export function renderNode(ref: string, n: ScreenNode): string {
+  let line = `${ref} ${n.role}`;
+  if (n.label) line += ` ${JSON.stringify(clip(n.label))}`;
+  if (n.id && n.id !== n.label) line += ` #${n.id}`;
+  if (n.value) line += ` value=${JSON.stringify(clip(n.value, 60))}`;
+  if (n.offscreen) line += " (offscreen)";
+  return line;
+}
+
+/**
+ * Two captures of the same screen are equal under this; a transition, a list still loading, or a
+ * value being typed is not. Frames are in it because an element sliding in keeps its label.
+ */
+export function shapeOf(tree: unknown): string {
+  return flattenTree(tree)
+    .map((n) => {
+      const f = n.frame;
+      return `${n.role}|${n.id ?? ""}|${n.label ?? ""}|${n.value ?? ""}|${f ? `${Math.round(f.x)},${Math.round(f.y)},${Math.round(f.width)},${Math.round(f.height)}` : ""}`;
+    })
+    .join("\n");
+}
+
+/** A diff past this many lines, or touching more than this share of the screen, goes out whole. */
+const MAX_DIFF_LINES = 40;
+const MAX_DIFF_SHARE = 0.5;
+/** Refs remembered after they leave the screen, so an old ref can still be retried by its id or label. */
+const MAX_REMEMBERED = 2000;
+
+export interface Snapshot {
+  revision: number;
+  bounds?: Frame;
+  /** ref → node, in document order. */
+  nodes: Map<string, ScreenNode>;
+}
+
+export type RefTarget =
+  | { kind: "selector"; selector: { id?: string; label?: string } }
+  | { kind: "point"; x: number; y: number };
+
+export class RefError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RefError";
+  }
+}
+
+/**
+ * One device's screen memory: the latest snapshot, the lines the agent was last SHOWN (the base a
+ * diff is taken against), and every ref ever minted, so a ref keeps naming one element across
+ * snapshots while the element exists.
+ */
+export class ScreenBook {
+  private counter = 0;
+  private revision = 0;
+  private latest: Snapshot | null = null;
+  private shown: Map<string, string> | null = null;
+  private readonly remembered = new Map<string, ScreenNode>();
+  private readonly byKey = new Map<string, string[]>();
+  /** True once an action may have moved the screen since `latest` was read. */
+  stale = true;
+
+  /** Record a capture: an element seen before, on this screen or an earlier one, keeps its ref. */
+  record(tree: unknown): Snapshot {
+    const taken = new Set<string>();
+    const next = new Map<string, ScreenNode>();
+    for (const n of flattenTree(tree)) {
+      const k = keyOf(n);
+      const known = this.byKey.get(k) ?? [];
+      let ref = known.find((r) => !taken.has(r));
+      if (!ref) {
+        ref = `e${++this.counter}`;
+        known.push(ref);
+        this.byKey.set(k, known);
+      }
+      taken.add(ref);
+      next.set(ref, n);
+      this.remember(ref, n);
+    }
+    this.latest = { revision: ++this.revision, bounds: screenBounds(tree), nodes: next };
+    this.stale = false;
+    return this.latest;
+  }
+
+  get snapshot(): Snapshot | null {
+    return this.latest;
+  }
+
+  /** The whole screen, and the new base for the next diff. */
+  full(): string {
+    const s = this.latest;
+    if (!s) return "No screen captured yet.";
+    this.shown = linesOf(s);
+    return `Screen r${s.revision} (${s.nodes.size} elements; target one with {ref} — a ref names the same element for as long as it stays on screen):\n${[...this.shown.values()].join("\n")}`;
+  }
+
+  /** What changed since the agent was last shown the screen, or the whole screen when most of it did. */
+  update(): string {
+    const s = this.latest;
+    if (!s) return "No screen captured yet.";
+    const before = this.shown;
+    if (!before) return this.full();
+    const now = linesOf(s);
+    const diff: string[] = [];
+    for (const [ref, line] of now) {
+      const was = before.get(ref);
+      if (was === undefined) diff.push(`+ ${line}`);
+      else if (was !== line) diff.push(`~ ${line} (was: ${was.slice(ref.length + 1)})`);
+    }
+    for (const [ref, line] of before) if (!now.has(ref)) diff.push(`- ${line}`);
+    if (diff.length === 0) return `Screen r${s.revision}: nothing listed changed; every ref you hold is still valid.`;
+    if (diff.length > MAX_DIFF_LINES || diff.length > MAX_DIFF_SHARE * Math.max(now.size, 1)) {
+      return `The screen changed substantially. ${this.full()}`;
+    }
+    this.shown = now;
+    return [
+      `Screen r${s.revision} (${now.size} elements), changes since you last saw it — "+" appeared, "~" changed, "-" is GONE (do not target it); every other ref you hold is unchanged:`,
+      ...diff,
+    ].join("\n");
+  }
+
+  /**
+   * How to hit a ref. A unique id or label is resolved by SimDeck at the moment of the tap, so it
+   * survives a screen that moved since the snapshot; the element's own centre is the last resort,
+   * and only from a snapshot no action has invalidated.
+   */
+  resolve(ref: string): RefTarget {
+    const r = ref.replace(/^@/, "");
+    const s = this.latest;
+    const node = s?.nodes.get(r);
+    if (s && node) {
+      const all = [...s.nodes.values()];
+      if (node.id && all.filter((n) => n.id === node.id).length === 1) return { kind: "selector", selector: { id: node.id } };
+      if (node.label && all.filter((n) => n.label === node.label).length === 1) return { kind: "selector", selector: { label: node.label } };
+      if (!this.stale && node.frame && s.bounds) {
+        if (node.offscreen) throw new RefError(`${r} is off screen — scroll it into view first (scrollUntilVisible, or a gesture), then use the ref from the new screen`);
+        return {
+          kind: "point",
+          x: (node.frame.x + node.frame.width / 2 - s.bounds.x) / s.bounds.width,
+          y: (node.frame.y + node.frame.height / 2 - s.bounds.y) / s.bounds.height,
+        };
+      }
+      throw new RefError(`${r} has no unique id or label and the screen may have moved since it was read`);
+    }
+    const old = this.remembered.get(r);
+    if (old?.id) return { kind: "selector", selector: { id: old.id } };
+    if (old?.label) return { kind: "selector", selector: { label: old.label } };
+    throw new RefError(old ? `${r} is no longer on screen and has no id or label to find it by` : `unknown ref ${r}`);
+  }
+
+  private remember(ref: string, n: ScreenNode): void {
+    this.remembered.delete(ref);
+    this.remembered.set(ref, n);
+    if (this.remembered.size <= MAX_REMEMBERED) return;
+    const [oldRef, oldNode] = this.remembered.entries().next().value!;
+    this.remembered.delete(oldRef);
+    const k = keyOf(oldNode);
+    const left = (this.byKey.get(k) ?? []).filter((r) => r !== oldRef);
+    if (left.length) this.byKey.set(k, left);
+    else this.byKey.delete(k);
+  }
+}
+
+function keyOf(n: ScreenNode): string {
+  return `${n.role}\u0000${n.id ?? ""}\u0000${n.label ?? ""}`;
+}
+
+function linesOf(s: Snapshot): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const [ref, n] of s.nodes) m.set(ref, renderNode(ref, n));
+  return m;
+}

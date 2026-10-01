@@ -108,6 +108,8 @@ function fakeEngine(): PreviewEngine {
         source: "native-ax",
         roots: [{ role: "Application", frame: { x: 0, y: 0, width: 400, height: 800 }, children: [{ role: "Button", label: "Continue", frame: { x: 0, y: 380, width: 400, height: 40 } }] }],
       }),
+      // Changes once per action, so a settle sees the screen move and then hold still.
+      probe: async () => ({ roots: [{ role: "Application", label: `after ${simdeckActions.length} actions` }] }),
       // A verifier that could never fail meant no test could reach the failure path at all.
       // SimDeck answers a selector it cannot match by throwing, so this does too.
       action: async (_t: unknown, a: { type?: string; selector?: { text?: string } }) => {
@@ -1249,6 +1251,57 @@ describe("agent-driven testing tools (describe/ui + test runs)", () => {
     assert.equal(parse(await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 1, status: "passed" } } })).ok, true);
     const fin = parse(await admin.callTool({ name: "finish_test_run", arguments: { previewId, status: "passed", summary: "all good" } }));
     assert.equal(fin.ok, true);
+    await admin.close();
+  });
+
+  it("runs a list of actions in one call, targets by ref, and returns the screen after", async () => {
+    const admin = await client(ADMIN);
+    const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
+    const previewId = started.previewId as string;
+    await waitReadyByApp(admin, "app-local");
+    const deviceId = "ios-0";
+
+    const neither = parse(await admin.callTool({ name: "ui", arguments: { previewId, deviceId } }));
+    assert.equal((neither.error as { code: string }).code, "bad_request");
+
+    const listed = parse(await admin.callTool({ name: "describe", arguments: { previewId, deviceId, format: "text" } }));
+    const ref = /(e\d+) Button "Continue"/.exec(String(listed.screen))?.[1];
+    assert.ok(ref, "the listing names the button by ref");
+
+    simdeckActions.length = 0;
+    const run = parse(
+      await admin.callTool({
+        name: "ui",
+        arguments: { previewId, deviceId, actions: [{ type: "tapElement", selector: { ref } }, { type: "type", text: "hi" }] },
+      }),
+    );
+    assert.equal(run.ok, true);
+    assert.equal((run.results as unknown[]).length, 2);
+    assert.deepEqual(simdeckActions[0], { type: "tapElement", selector: { label: "Continue" } }, "the ref reached SimDeck as the element's label");
+    assert.equal(typeof run.screen, "string", "the screen after the list rides the response");
+
+    const stopped = parse(
+      await admin.callTool({
+        name: "ui",
+        arguments: { previewId, deviceId, actions: [{ type: "tap", x: 0.5, y: 0.5 }, { type: "waitFor", selector: { text: "nope" } }, { type: "back" }] },
+      }),
+    );
+    writeFileSync(join(localDir, "deckhand.flows.yaml"), "flows:\n  open-settings:\n    - {type: openUrl, url: 'app://go/settings'}\n    - {type: back}\n");
+    simdeckActions.length = 0;
+    const replayed = parse(await admin.callTool({ name: "ui", arguments: { previewId, deviceId, flow: "open-settings" } }));
+    assert.equal(replayed.ok, true);
+    assert.deepEqual(simdeckActions, [{ type: "openUrl", url: "app://go/settings" }, { type: "back" }]);
+    const unknown = parse(await admin.callTool({ name: "ui", arguments: { previewId, deviceId, flow: "nope" } }));
+    assert.deepEqual((unknown.error as { available?: string[] }).available, ["open-settings"]);
+
+    const err = stopped.error as { code: string; failedStep: number; currentScreen?: string };
+    assert.equal(err.code, "ui_error");
+    assert.equal(err.failedStep, 1);
+    assert.equal(typeof err.currentScreen, "string");
+    // Re-arm the once-per-stretch run nudge that this untracked driving spent, for the tests after.
+    await admin.callTool({ name: "start_test_run", arguments: { previewId, title: "Re-arm", steps: ["x"] } });
+    await admin.callTool({ name: "update_test_run", arguments: { previewId, step: { n: 1, status: "passed" } } });
+    await admin.callTool({ name: "finish_test_run", arguments: { previewId, status: "passed" } });
     await admin.close();
   });
 

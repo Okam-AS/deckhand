@@ -27,8 +27,10 @@ export interface DescribeOptions {
   maxDepth?: number;
 }
 
-/** An element selector — prefer id/text/label (the positional @e# refs are unstable across snapshots). */
+/** An element selector. `ref` is deckhand's own; SimDeck's positional @e# refs are unstable across snapshots and never used. */
 export interface Selector {
+  /** A ref from deckhand's own screen listing (`e12`); resolved by deckhand, never sent to SimDeck. */
+  ref?: string;
   id?: string;
   text?: string;
   label?: string;
@@ -134,6 +136,19 @@ export class SimDeckControl {
   }
 
   /**
+   * The cheapest fresh look at a screen, for telling whether it has stopped moving: ~0.1s on iOS
+   * against ~0.8s for `describe`, without static text.
+   */
+  async probe(target: SimDeckTarget): Promise<unknown> {
+    const origin = await this.daemon.ensureRunning();
+    // Quirk: SimDeck answers a repeated identical tree query from a cache that outlives a screen change, so every probe asks a different maxDepth.
+    this.probes = (this.probes + 1) % 1000;
+    return this.fetchTree(origin, target, { interactiveOnly: true, maxDepth: 1000 + this.probes });
+  }
+
+  private probes = 0;
+
+  /**
    * The compact snapshot, unwrapped to the same `{roots}` shape the endpoint returns so
    * callers never have to know which backend answered. SimDeck nests it under `snapshot`
    * alongside its own `action`/`ok` echo, which is bookkeeping the agent has no use for.
@@ -163,6 +178,9 @@ export class SimDeckControl {
 
   /** Perform one UI action on a device. Returns SimDeck's result (e.g. query matches, assert verdict). */
   async action(target: SimDeckTarget, action: UiAction): Promise<unknown> {
+    if ("selector" in action && action.selector.ref != null) {
+      throw new SimDeckActionError(`ref ${action.selector.ref} reached SimDeck unresolved`, 400);
+    }
     const origin = await this.daemon.ensureRunning();
 
     // iOS HID typing is ASCII-only; route non-US text (æøå, …) through the
