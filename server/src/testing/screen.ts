@@ -282,13 +282,17 @@ export class ScreenBook {
     if (!old) throw new RefError(`unknown ref ${r}`);
     const shared = `${r} is no longer on screen, and it shared its name with other elements, so it cannot be found again by name`;
     if (old.ambiguous) throw new RefError(shared);
+    // Its name on the current screen belongs to another element: its own would still carry the ref.
+    const taken = `${r} is no longer on screen; what now carries its name is a different element — target that by its own ref`;
     const now = s ? [...s.nodes.values()] : [];
     if (old.id) {
-      if (now.filter((n) => n.id === old.id).length > 1) throw new RefError(shared);
+      // The same id on the same kind of element is the element itself with a new label (a timer, a count).
+      const holders = now.filter((n) => n.id === old.id);
+      if (holders.length > 1 || holders.some((n) => n.role !== old.role)) throw new RefError(taken);
       return { kind: "selector", selector: { id: old.id } };
     }
     if (old.label) {
-      if (now.filter((n) => n.label === old.label).length > 1) throw new RefError(shared);
+      if (now.some((n) => n.label === old.label)) throw new RefError(taken);
       return { kind: "selector", selector: { label: old.label } };
     }
     throw new RefError(`${r} is no longer on screen and has no id or label to find it by`);

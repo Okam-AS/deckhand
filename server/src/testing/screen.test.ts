@@ -129,7 +129,16 @@ describe("ScreenBook refs that lost their element", () => {
     const book = new ScreenBook();
     const ref = [...book.record(screen(node("Button", "Lagre", { id: "save", ...at(10, 100) }))).nodes].find(([, n]) => n.id === "save")![0];
     book.record(screen(node("Link", "Lagre", { id: "save", ...at(10, 100) }), node("Link", "Lagre", { id: "save", ...at(10, 300) })));
-    assert.throws(() => book.resolve(ref), /shared its name/);
+    assert.throws(() => book.resolve(ref), /different element/);
+    book.record(screen(node("Link", "Lagre", { id: "save", ...at(10, 300) })));
+    assert.throws(() => book.resolve(ref), /different element/, "nor by a name one other element holds");
+  });
+
+  it("still retries a gone ref by its id when the same kind of element holds it under a new label", () => {
+    const book = new ScreenBook();
+    const ref = [...book.record(screen(node("Button", "#102 · 6:05", { id: "ticket-1002", ...at(10, 100) }))).nodes].find(([, n]) => n.id === "ticket-1002")![0];
+    book.record(screen(node("Button", "#102 · 6:06", { id: "ticket-1002", ...at(10, 100) })));
+    assert.deepEqual(book.resolve(ref), { kind: "selector", selector: { id: "ticket-1002" } });
   });
 
   it("keeps elements apart whose labels differ only by a time", () => {
@@ -162,7 +171,7 @@ describe("ScreenBook refs that lost their element", () => {
     assert.notEqual([...other.nodes].find(([, n]) => n.role === "Button")![0], ref);
   });
 
-  it("does not let a ticking reading bring back a ref that became ambiguous", () => {
+  it("does not hand a ref to a twin that moved after its element went", () => {
     const book = new ScreenBook();
     const ref = [...book.record(screen(node("Button", "Slett", at(10, 100)))).nodes].find(([, n]) => n.label === "Slett")![0];
     book.record(screen(node("Button", "Slett", at(10, 100)), node("Button", "Slett", at(10, 200))));
