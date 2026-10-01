@@ -268,6 +268,13 @@ describe("SimDeckControl.action", () => {
     }
   });
 
+  it("never sends deckhand's own ref to SimDeck", async () => {
+    const { impl, calls } = fakeFetch();
+    const control = new SimDeckControl({ fetchImpl: impl, autostart: false });
+    await assert.rejects(() => control.action(iosTarget, { type: "tapElement", selector: { ref: "e3" } }), SimDeckActionError);
+    assert.ok(!calls.some((c) => c.url.endsWith("/action")));
+  });
+
   it("surfaces a SimDeck error as SimDeckActionError", async () => {
     const errFetch = (async (input: unknown) => {
       const url = String(input);
