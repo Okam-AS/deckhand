@@ -197,13 +197,33 @@ describe("drive", () => {
     assert.equal(acted.length, 1);
   });
 
-  it("refuses to tap a ref at its centre on a turned iOS device, where SimDeck would touch elsewhere", async () => {
+  it("taps a ref at its centre on a turned iOS device too: the control places the touch", async () => {
     const wide = { roots: [{ role: "Application", label: "App", frame: { x: 0, y: 0, width: 1376, height: 1032 }, children: [0, 1].map((i) => ({ role: "Button", label: "Mer", frame: { x: 0, y: i * 50, width: 100, height: 40 } })) }] };
     const { deps, acted } = fakeDevice(() => wide);
     const ref = [...deps.book.record(wide).nodes].filter(([, n]) => n.label === "Mer")[1]![0];
     const r = await drive(deps, [{ type: "tapElement", selector: { ref } }], "none");
-    assert.match(String((r.failure?.error as Error)?.message), /rotated/);
+    assert.equal(r.failure, undefined);
+    assert.deepEqual(acted, [{ type: "tap", x: 50 / 1376, y: 70 / 1032 }]);
+  });
+
+  it("refuses a centre tap on a SpringBoard element of a turned iOS device, whose points are not the app's (review #106 R2)", async () => {
+    const W = 1210;
+    const H = 834;
+    const screen = {
+      roots: [
+        { role: "Application", label: "Okam", frame: { x: 0, y: 0, width: W, height: H }, children: [{ role: "Button", label: "Avbryt", frame: { x: 900, y: 700, width: 120, height: 44 } }] },
+        { role: "Application", label: " ", frame: { x: 0, y: 0, width: W, height: H }, children: [{ role: "Button", label: "Avbryt", frame: { x: 366, y: 609, width: 48, height: 140 } }] },
+      ],
+    };
+    const { deps, acted } = fakeDevice(() => screen);
+    const refs = [...deps.book.record(screen).nodes].filter(([, n]) => n.label === "Avbryt").map(([r]) => r);
+    const sb = await drive(deps, [{ type: "tapElement", selector: { ref: refs[1]! } }], "none");
+    assert.ok(sb.failure?.error instanceof RefError);
+    assert.match(String(sb.failure?.message), /SpringBoard|cannot place/);
     assert.equal(acted.length, 0);
+    const app = await drive(deps, [{ type: "tapElement", selector: { ref: refs[0]! } }], "none");
+    assert.equal(app.failure, undefined);
+    assert.deepEqual(acted, [{ type: "tap", x: 960 / W, y: 722 / H }]);
   });
 
   it("takes no look when nothing moved and the failure is thrown to the caller as is", async () => {
@@ -238,15 +258,16 @@ describe("drive", () => {
     assert.equal(acted.length, 0);
   });
 
-  it("warns about every kind of touch on a turned iOS device, and only there", () => {
+  it("warns only about scrollUntilVisible on a turned iOS device, whose swipes SimDeck places", () => {
     const wide = { x: 0, y: 0, width: 1376, height: 1032 };
     const tall = { x: 0, y: 0, width: 1032, height: 1376 };
-    for (const a of [{ type: "tap", x: 0.5, y: 0.5 }, { type: "swipe", startX: 0.5, startY: 0.8, endX: 0.5, endY: 0.2 }, { type: "gesture", preset: "scroll-down" }] as UiAction[]) {
-      assert.ok(rotationWarning("ios", wide, [a]), `${a.type} on a turned iPad`);
+    const scroll: UiAction = { type: "scrollUntilVisible", selector: { id: "x" } };
+    assert.ok(rotationWarning("ios", wide, [scroll]));
+    for (const a of [{ type: "tap", x: 0.5, y: 0.5 }, { type: "swipe", startX: 0.5, startY: 0.8, endX: 0.5, endY: 0.2 }, { type: "gesture", preset: "scroll-down" }, { type: "tapElement", selector: { id: "x" } }] as UiAction[]) {
+      assert.equal(rotationWarning("ios", wide, [a]), undefined, `${a.type} is placed by deckhand`);
     }
-    assert.equal(rotationWarning("ios", tall, [{ type: "tap", x: 0.5, y: 0.5 }]), undefined);
-    assert.equal(rotationWarning("android", wide, [{ type: "tap", x: 0.5, y: 0.5 }]), undefined);
-    assert.equal(rotationWarning("ios", wide, [{ type: "waitFor", selector: { id: "x" } }]), undefined);
+    assert.equal(rotationWarning("ios", tall, [scroll]), undefined);
+    assert.equal(rotationWarning("android", wide, [scroll]), undefined);
   });
 
   it("passes waitForNot / assertNot on a ref whose element is already gone, without asking SimDeck", async () => {

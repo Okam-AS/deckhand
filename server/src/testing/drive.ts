@@ -67,12 +67,13 @@ const STEP_GAP_MS = 250;
 /** Inside a list, a later step's element may still be rendering when its turn comes. */
 const BATCH_TAP_WAIT_MS = 3000;
 
-const TOUCHES = new Set<UiAction["type"]>(["tap", "tapElement", "swipe", "gesture", "scrollUntilVisible"]);
-
-/** What a list that touches the screen of a turned iOS device must be told. Upside-down portrait looks unturned in the tree and is not caught. */
+/**
+ * What a list must be told on a turned iOS device. Every other touch is placed by deckhand there
+ * (testing/orientation.ts); scrollUntilVisible's own swipes are SimDeck's, in the unrotated axes.
+ */
 export function rotationWarning(platform: "ios" | "android", bounds: Frame | undefined, actions: UiAction[]): string | undefined {
-  if (!isRotatedIos(platform, bounds) || !actions.some((a) => TOUCHES.has(a.type))) return undefined;
-  return "This iOS device is turned to landscape, and SimDeck places touches as if it were not: taps, swipes and element taps can land somewhere else. Check the returned screen after every touch.";
+  if (!isRotatedIos(platform, bounds) || !actions.some((a) => a.type === "scrollUntilVisible")) return undefined;
+  return "This iOS device is turned to landscape, and scrollUntilVisible scrolls in SimDeck's unrotated axes: it may scroll sideways. Use gesture or swipe, which deckhand turns with the device.";
 }
 
 export function isMutating(a: UiAction): boolean {
@@ -131,8 +132,10 @@ async function resolveRefs(deps: DriveDeps, a: UiAction, freshAfter: number): Pr
   if ((deps.book.snapshot?.revision ?? 0) <= freshAfter) deps.book.record(await deps.observe(), { keepGone: true });
   if ((a.type === "waitForNot" || a.type === "assertNot") && deps.book.isGone(ref)) return null;
   const target = deps.book.resolve(ref, opts);
-  if (target.kind === "point" && isRotatedIos(deps.platform, deps.book.snapshot?.bounds)) {
-    throw new RefError(`${ref} has no unique id or label, and this iOS device is rotated: SimDeck touches the unrotated screen, so a tap at its centre would land elsewhere`);
+  if (target.kind === "point" && target.space && isRotatedIos(deps.platform, deps.book.snapshot?.bounds)) {
+    throw new RefError(
+      `${ref} has no unique id or label, and on this turned iOS device it sits on ${target.space === "native" ? "SpringBoard's layer, whose points are not the app's" : "a layer deckhand cannot place"}, so a tap at its centre would land elsewhere — target it by a unique label, or answer the prompt by its label`,
+    );
   }
   if (target.kind === "point") {
     if (a.type !== "tapElement") throw new RefError(`${ref} can only be tapped: it has no unique id or label for ${a.type} to match`);

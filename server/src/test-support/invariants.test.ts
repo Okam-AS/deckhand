@@ -174,6 +174,7 @@ describe("PLAN §2 — locked decisions", () => {
       "yaml",
       "ws",
       "serve-sim",
+      "simdeck",
       "patch-package",
       "react",
       "react-dom",

@@ -1,3 +1,4 @@
+import { rootSpace, type Space } from "./orientation.ts";
 // ---------------------------------------------------------------------------
 // The screen as an agent reads it: one line per element, each with a ref (`e12`) that stays the
 // same for as long as that element is on screen, so a later screen can be sent as the lines that
@@ -18,6 +19,8 @@ export interface ScreenNode {
   id?: string;
   frame?: Frame;
   offscreen?: boolean;
+  /** On a turned iOS device, a root whose points are not the UI's (orientation.ts rootSpace). */
+  space?: "native" | "unknown";
 }
 
 interface RawNode {
@@ -83,6 +86,7 @@ export function screenBounds(tree: unknown): Frame | undefined {
 export function flattenTree(tree: unknown): ScreenNode[] {
   const bounds = screenBounds(tree);
   const out: ScreenNode[] = [];
+  let space: Space = "ui";
   const walk = (n: unknown): void => {
     if (!n || typeof n !== "object") return;
     if (Array.isArray(n)) {
@@ -105,11 +109,15 @@ export function flattenTree(tree: unknown): ScreenNode[] {
       if (id) node.id = id;
       if (frame) node.frame = frame;
       if (bounds && frame && isOffscreen(frame, bounds)) node.offscreen = true;
+      if (space !== "ui") node.space = space;
       out.push(node);
     }
     if (Array.isArray(raw.children)) walk(raw.children);
   };
-  walk(rootsOf(tree));
+  for (const root of rootsOf(tree)) {
+    space = root && typeof root === "object" ? rootSpace(root as Record<string, unknown>) : "ui";
+    walk(root);
+  }
   return out;
 }
 
@@ -159,7 +167,7 @@ export interface Snapshot {
 
 export type RefTarget =
   | { kind: "selector"; selector: { id?: string; label?: string } }
-  | { kind: "point"; x: number; y: number };
+  | { kind: "point"; x: number; y: number; space?: "native" | "unknown" };
 
 export class RefError extends Error {
   constructor(message: string) {
@@ -291,12 +299,12 @@ export class ScreenBook {
     const node = s?.nodes.get(r);
     if (s && node) {
       const all = [...s.nodes.values()];
-      if (opts.preferPoint && node.frame && s.bounds && !node.offscreen) return centre(node.frame, s.bounds);
+      if (opts.preferPoint && node.frame && s.bounds && !node.offscreen) return centre(node.frame, s.bounds, node.space);
       if (node.id && all.filter((n) => n.id === node.id).length === 1) return { kind: "selector", selector: { id: node.id } };
       if (node.label && all.filter((n) => n.label === node.label).length === 1) return { kind: "selector", selector: { label: node.label } };
       if (node.frame && s.bounds) {
         if (node.offscreen) throw new RefError(`${r} is off screen — scroll it into view first (scrollUntilVisible, or a gesture), then use the ref from the new screen`);
-        return centre(node.frame, s.bounds);
+        return centre(node.frame, s.bounds, node.space);
       }
       throw new RefError(`${r} has no unique id or label, and no frame to tap`);
     }
@@ -327,8 +335,8 @@ export function isRotatedIos(platform: "ios" | "android", bounds: Frame | undefi
   return platform === "ios" && !!bounds && bounds.width > bounds.height;
 }
 
-function centre(f: Frame, b: Frame): RefTarget {
-  return { kind: "point", x: (f.x + f.width / 2 - b.x) / b.width, y: (f.y + f.height / 2 - b.y) / b.height };
+function centre(f: Frame, b: Frame, space?: "native" | "unknown"): RefTarget {
+  return { kind: "point", x: (f.x + f.width / 2 - b.x) / b.width, y: (f.y + f.height / 2 - b.y) / b.height, ...(space ? { space } : {}) };
 }
 
 function frameKey(f: Frame | undefined): string {

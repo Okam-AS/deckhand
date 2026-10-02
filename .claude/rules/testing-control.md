@@ -12,8 +12,9 @@ Hardest rules, each with the check that enforces it:
 - **REST only.** Never the `/input` or `/control` WebSocket, `/webrtc/offer`, or `/refresh` —
   those start the private CoreSimulator display and encoder session, which is the fragile path
   the video rejection was about. What deckhand calls today is `GET /api/health`, `GET
-  /accessibility-tree`, `POST /action`, `POST /pasteboard` (the non-US iOS typing path) and
-  `GET /screenshot.png`; adding a sixth REST call is fine, and none of the four above ever is.
+  /accessibility-tree`, `POST /action`, `POST /pasteboard` (the non-US iOS typing path),
+  `GET /screenshot.png`, and `GET /accessibility-point` (which way a turned iOS device faces, see
+  `orientation.ts`); adding another REST call is fine, and none of the four above ever is.
   → `control.test.ts` "names no /input, /control, /webrtc or /refresh endpoint" and
   `control.test.ts` "opens no WebSocket to SimDeck" — both source-text scans of every non-test
   `.ts` in this directory and everything under it — `control.test.ts:290` filters test files out,

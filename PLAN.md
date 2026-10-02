@@ -93,7 +93,8 @@ existed, and a path written inside a fenced block is invisible to the guardrail 
 PLAN's paths. Read the directories; git keeps them current for free.)*
 
 Node ≥ 22, TypeScript, ESM. Key deps: `@modelcontextprotocol/sdk`, `express`, `zod`,
-`yaml`, `ws` (proxy), `react`+`vite` (viewer only), `serve-sim` (pinned). **No database
+`yaml`, `ws` (proxy), `react`+`vite` (viewer only), `serve-sim` (pinned), `simdeck` (pinned, the
+`describe`/`ui` daemon). **No database
 driver.** Keep the dependency list ruthlessly short.
 
 ## 5. Configuration files (all under `~/.deckhand/`)
@@ -263,6 +264,17 @@ on the device it already booted (iOS by UDID, Android by `android:<avd>`). Two h
 `/webrtc/offer`, or `/refresh` (they spin up the fragile private display/encoder session);
 and auth via the **same-origin loopback** allowance, so deckhand holds **no SimDeck token**.
 iOS HID can't type non-US text — non-ASCII `type` routes through the clipboard + paste.
+**Amended (2026-10-02): SimDeck is pinned, and deckhand places touches on a turned iOS device.**
+`simdeck` is an exact-version server dependency and deckhand starts that copy, never a global
+install. SimDeck injects touches in the device's unrotated screen while an app's tree is in its
+turned UI, and its selector taps send the UI point unrotated, so on a turned iOS device every tap,
+selector tap, swipe, gesture and `back` is found and placed by deckhand (`testing/orientation.ts`),
+with the turn read by hit-testing one element through `GET /accessibility-point`. SpringBoard's
+alerts are in the unrotated screen's points: a root's owning process (by its pid) says which, and an
+element on a root deckhand cannot place is refused. A landscape device whose turn cannot be read
+refuses the touch; a portrait one is touched as if upright and the result says so
+(`orientationUnverified`). A SimDeck already on the port that is not the pinned version is refused,
+never driven. `scrollUntilVisible` still scrolls in SimDeck's unrotated axes, and `ui` says so.
 `logs` ships (see the tool table); its `metro` and `app` sources are the part that
 did not — they are accepted by the schema and reserved, and nothing appends to them.
 

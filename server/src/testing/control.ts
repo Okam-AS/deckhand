@@ -1,4 +1,10 @@
+import { execFile } from "node:child_process";
+import { basename } from "node:path";
 import { SimDeckDaemon, type SimDeckDaemonOptions } from "./simdeck.ts";
+import {
+  candidateTurns, frameOf, hitMatches, nativeProbePoint, presetSwipe, probeNodes, rootSpace, rootsOf, selectorTarget, toNative, uiBounds,
+  PRESET_DURATION_MS, type SpaceOf,
+} from "./orientation.ts";
 
 // ---------------------------------------------------------------------------
 // SimDeck control-only REST client. Backs deckhand's `describe` (accessibility
@@ -73,6 +79,24 @@ export class SimDeckActionError extends Error {
 }
 
 // Named-key → HID usage code (matches serve-sim/SimDeck HID usages, and deckhand's viewer input map).
+/** The actions that place a touch, which a turned iOS device needs placed by deckhand. */
+const TOUCHES = new Set<UiAction["type"]>(["tap", "tapElement", "swipe", "gesture", "back"]);
+
+function unverified(result: unknown): unknown {
+  return result && typeof result === "object" && !Array.isArray(result) ? { ...result, orientationUnverified: UNVERIFIED } : { result, orientationUnverified: UNVERIFIED };
+}
+
+/** A turn to place a touch with; landscape that could not be told apart refuses the touch. */
+function known(turns: number | null): number {
+  if (turns == null) {
+    throw new SimDeckActionError(
+      "this iOS device is turned to landscape and deckhand could not tell which way, so it will not place a touch that may land elsewhere",
+      409,
+    );
+  }
+  return turns;
+}
+
 const KEY_USAGE: Record<string, number> = {
   return: 40, enter: 40, escape: 41, backspace: 42, tab: 43, space: 44,
   delete: 76, right: 79, left: 80, down: 81, up: 82,
@@ -85,7 +109,22 @@ export interface SimDeckControlOptions extends SimDeckDaemonOptions {
   daemon?: SimDeckDaemon;
   /** How long one request may take beyond the wait the action itself asks for. */
   requestTimeoutMs?: number;
+  /** The name of the process with this pid (a simulator's processes are host processes), or null. */
+  processNameImpl?: (pid: number) => Promise<string | null>;
 }
+
+function defaultProcessName(pid: number): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile("ps", ["-o", "comm=", "-p", String(pid)], { timeout: 3000 }, (err, stdout) => {
+      const name = err ? "" : String(stdout).trim();
+      resolve(name ? basename(name) : null);
+    });
+  });
+}
+
+/** Said beside a touch placed as if upright on a device whose way up could not be read. */
+const UNVERIFIED =
+  "deckhand could not read which way up this iOS device is and placed the touch as if upright; if it is upside down, the touch landed mirrored. Check the returned screen.";
 
 /** The wait an action asks SimDeck for, which its request must be allowed on top of the base timeout. */
 function askedWaitMs(init: RequestInit | undefined): number {
@@ -103,6 +142,11 @@ export class SimDeckControl {
   private readonly daemon: SimDeckDaemon;
   private readonly fetchImpl: typeof fetch;
 
+  private readonly now: () => number;
+  private readonly lastTurns = new Map<string, number>();
+  private readonly processName: (pid: number) => Promise<string | null>;
+  private readonly processNames = new Map<number, string | null>();
+
   constructor(opts: SimDeckControlOptions = {}) {
     this.daemon = opts.daemon ?? new SimDeckDaemon(opts);
     const base = opts.fetchImpl ?? fetch;
@@ -116,6 +160,8 @@ export class SimDeckControl {
       });
       return Promise.race([base(input, { ...init, signal: init?.signal ?? AbortSignal.timeout(ms) }), late]).finally(() => clearTimeout(timer));
     }) as typeof fetch;
+    this.now = opts.now ?? (() => Date.now());
+    this.processName = opts.processNameImpl ?? defaultProcessName;
   }
 
   /**
@@ -199,7 +245,142 @@ export class SimDeckControl {
       await this.pasteboard(origin, target, action.text);
       return this.post(origin, target, { action: "key", keyCode: V_USAGE, modifiers: CMD_MOD });
     }
+    if (target.platform === "ios" && TOUCHES.has(action.type)) {
+      const tree = await this.touchTree(origin, target).catch(() => null);
+      const bounds = tree == null ? null : uiBounds(tree);
+      const turns = tree == null ? null : await this.quarterTurns(target, tree);
+      if (turns === 0) return this.post(origin, target, this.toStep(action));
+      // Unread, or portrait that cannot be told from upside down: placed as before, and said so.
+      if (turns === null && (!bounds || bounds.width <= bounds.height)) return unverified(await this.post(origin, target, this.toStep(action)));
+      return this.turnedAction(origin, target, action, turns, tree);
+    }
     return this.post(origin, target, this.toStep(action));
+  }
+
+  /**
+   * How far an iOS device is turned, in quarter turns (see orientation.ts), or null when no element
+   * on screen can tell — never a guess, portrait included. A screen with no tree reads as upright.
+   */
+  async quarterTurns(target: SimDeckTarget, current?: unknown): Promise<number | null> {
+    if (target.platform !== "ios") return 0;
+    const origin = await this.daemon.ensureRunning();
+    const tree = current ?? (await this.touchTree(origin, target));
+    const bounds = uiBounds(tree);
+    if (!bounds) return 0;
+    const pair = candidateTurns(bounds);
+    // Checked on every touch: the viewer's Rotate button turns the device under the agent. A wrong
+    // guess is the slow hit-test (up to seconds, against ~10ms), so the last answer goes first.
+    const last = this.lastTurns.get(target.udid);
+    const order = last != null && pair.includes(last) ? [last, pair.find((t) => t !== last)!] : pair;
+    const spaceOf = await this.spaces(tree);
+    for (const probe of probeNodes(tree, bounds, spaceOf)) {
+      for (const turns of order) {
+        if (!hitMatches(await this.hit(origin, target, nativeProbePoint(probe, bounds, turns)), probe, bounds)) continue;
+        this.lastTurns.set(target.udid, turns);
+        return turns;
+      }
+    }
+    return null;
+  }
+
+  /** Which points each root of `tree` is in, asking the OS which process owns it (orientation.ts rootSpace). */
+  private async spaces(tree: unknown): Promise<SpaceOf> {
+    const owners = new Map<unknown, string | null>();
+    for (const root of rootsOf(tree)) {
+      const pid = root.pid;
+      if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) continue;
+      if (!this.processNames.has(pid)) {
+        if (this.processNames.size > 64) this.processNames.clear();
+        this.processNames.set(pid, await this.processName(pid).catch(() => null));
+      }
+      owners.set(root, this.processNames.get(pid) ?? null);
+    }
+    return (root) => rootSpace(root, owners.get(root));
+  }
+
+  /** The screen a touch is placed on: the capture SimDeck's own selector tap reads. */
+  private async touchTree(origin: string, target: SimDeckTarget): Promise<unknown> {
+    const tree = await this.fetchTree(origin, target, { source: "auto", interactiveOnly: true });
+    return isEmptyTree(tree) ? this.fetchTree(origin, target, { source: "auto" }) : tree;
+  }
+
+  /** The element under a point in the unrotated screen's points, with its frame in the UI; null when nothing is there. */
+  private async hit(origin: string, target: SimDeckTarget, p: { x: number; y: number }): Promise<ReturnType<typeof frameOf>> {
+    const q = new URLSearchParams({ x: p.x.toFixed(1), y: p.y.toFixed(1) });
+    const res = await this.fetchImpl(`${origin}/api/simulators/${enc(target.udid)}/accessibility-point?${q.toString()}`);
+    if (!res.ok) return null;
+    return frameOf(rootsOf(await readJson(res))[0]);
+  }
+
+  /** A touch on a turned iOS device, placed by deckhand in the unrotated screen SimDeck injects into. */
+  private async turnedAction(origin: string, target: SimDeckTarget, a: UiAction, turns: number | null, tree: unknown): Promise<unknown> {
+    const swipe = (sx: number, sy: number, ex: number, ey: number, durationMs?: number) => {
+      const s = toNative(sx, sy, known(turns));
+      const e = toNative(ex, ey, known(turns));
+      return this.post(origin, target, {
+        action: "swipe", startX: s.x, startY: s.y, endX: e.x, endY: e.y, ...(durationMs != null ? { durationMs } : {}),
+      });
+    };
+    switch (a.type) {
+      case "tap": {
+        const p = toNative(a.x, a.y, known(turns));
+        return this.post(origin, target, { action: "tap", x: p.x, y: p.y, normalized: true });
+      }
+      case "swipe":
+        return swipe(a.startX, a.startY, a.endX, a.endY, a.durationMs);
+      case "gesture": {
+        const [sx, sy, ex, ey] = presetSwipe(a.preset);
+        await swipe(sx, sy, ex, ey, PRESET_DURATION_MS);
+        return { action: "gesture", preset: a.preset };
+      }
+      case "tapElement":
+        return this.turnedTapElement(origin, target, a.selector, a.waitTimeoutMs ?? 0, turns, tree);
+      case "back": {
+        for (const [selector, wait] of [[{ id: "BackButton" }, 2000], [{ label: "Back" }, 3000]] as const) {
+          try {
+            await this.turnedTapElement(origin, target, selector, wait, turns, tree);
+            return { action: "back", method: "id" in selector ? "backButtonId" : "backLabel" };
+          } catch (e) {
+            if (!(e instanceof SimDeckActionError) || e.status !== 404) throw e;
+          }
+        }
+        await swipe(0.02, 0.5, 0.85, 0.5, 350);
+        return { action: "back", method: "edgeSwipe" };
+      }
+      default:
+        return this.post(origin, target, this.toStep(a));
+    }
+  }
+
+  /** SimDeck's selector tap, with the element found and the point placed here (orientation.ts). */
+  private async turnedTapElement(
+    origin: string, target: SimDeckTarget, selector: Selector, waitMs: number, turns: number | null, first: unknown,
+  ): Promise<unknown> {
+    const deadline = this.now() + waitMs;
+    let tree = first;
+    for (let last = false; ; ) {
+      const found = selectorTarget(tree, selector, await this.spaces(tree));
+      if (found) {
+        if (found.space === "unknown") {
+          throw new SimDeckActionError(
+            "this iOS device is turned and deckhand cannot tell whether that element is SpringBoard's (unrotated points) or the app's, so it will not tap it",
+            409,
+          );
+        }
+        const p = found.space === "native" ? { x: found.u, y: found.v } : toNative(found.u, found.v, known(turns));
+        await this.post(origin, target, { action: "tap", x: p.x, y: p.y, normalized: true });
+        return { action: "tap" };
+      }
+      if (last) throw new SimDeckActionError("No accessibility element matched.", 404);
+      // Like SimDeck: poll the interactive capture until the wait runs out, then read the full tree once.
+      if (this.now() >= deadline) {
+        last = true;
+        tree = await this.fetchTree(origin, target, { source: "auto" });
+      } else {
+        await new Promise((r) => setTimeout(r, 150));
+        tree = await this.touchTree(origin, target);
+      }
+    }
   }
 
   /** PNG screenshot via SimDeck (uses public `simctl io`; streaming-free). */
