@@ -269,4 +269,17 @@ describe("drive", () => {
     assert.equal(r.failure, undefined);
     assert.ok([...deps.book.snapshot!.nodes.keys()].includes(sheet), "«Ark», missed by one mid-animation capture, kept its ref");
   });
+
+  it("does not pass waitForNot on a ref whose element is still there under another ref", async () => {
+    const spinner = (pct: number) => ({ roots: [{ role: "Application", label: "App", frame: { x: 0, y: 0, width: 400, height: 800 }, children: [{ role: "ProgressIndicator", id: "loading", label: `Laster ${pct}%`, frame: { x: 0, y: 0, width: 400, height: 40 } }] }] });
+    const { deps, acted } = fakeDevice(() => spinner(20));
+    const ref = [...deps.book.record(spinner(10)).nodes].find(([, n]) => n.id === "loading")![0];
+    const r = await drive(deps, [{ type: "waitForNot", selector: { ref } }], "none");
+    assert.ok(r.failure, "the spinner, renamed, is still on screen");
+    assert.equal(acted.length, 0);
+    const rows = fakeDevice(() => tree("Slett", "Slett"));
+    const row1 = [...rows.deps.book.record(tree("Slett", "Slett", "Slett")).nodes].filter(([, n]) => n.label === "Slett")[0]![0];
+    const r2 = await drive(rows.deps, [{ type: "assertNot", selector: { ref: row1 } }], "none");
+    assert.ok(r2.failure, "a row of a group that moved is not taken for gone");
+  });
 });

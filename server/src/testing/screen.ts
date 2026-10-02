@@ -227,9 +227,20 @@ export class ScreenBook {
     return this.latest;
   }
 
-  /** A ref this book has handed out, on screen or not. */
-  knows(ref: string): boolean {
-    return this.remembered.has(ref.replace(/^@/, ""));
+  /**
+   * Is a ref's element certainly not on the current screen: handed out, not listed, and nothing
+   * listed shares its id or label (which a renamed, moved or re-minted copy of it would).
+   */
+  isGone(ref: string): boolean {
+    const r = ref.replace(/^@/, "");
+    return this.remembered.has(r) && !this.latest?.nodes.has(r) && this.holdersOf(r).length === 0;
+  }
+
+  /** Refs on the current screen that share the id or label a ref had. */
+  private holdersOf(r: string): string[] {
+    const old = this.remembered.get(r);
+    if (!old || !this.latest) return [];
+    return [...this.latest.nodes.entries()].filter(([, n]) => (old.id && n.id === old.id) || (old.label && n.label === old.label)).map(([ref]) => ref);
   }
 
   get snapshot(): Snapshot | null {
@@ -293,8 +304,7 @@ export class ScreenBook {
     if (!old) throw new RefError(`unknown ref ${r}`);
     // A ref is never retried by its name: whatever answers to that name now may be another element
     // (the «Slett» of the next order once this one is deleted), and SimDeck would tap it.
-    const now = s ? [...s.nodes.entries()] : [];
-    const holders = now.filter(([, n]) => (old.id && n.id === old.id) || (old.label && n.label === old.label)).map(([ref]) => ref);
+    const holders = this.holdersOf(r);
     throw new RefError(`${r} is no longer on screen${holders.length ? `; its name is now on ${holders.join(", ")}, a different element` : ""} — target what you want by a ref from the current screen`);
   }
 
