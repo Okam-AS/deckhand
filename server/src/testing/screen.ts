@@ -228,12 +228,12 @@ export class ScreenBook {
   }
 
   /**
-   * Is a ref's element certainly not on the current screen: handed out, not listed, and nothing
-   * listed shares its id or label (which a renamed, moved or re-minted copy of it would).
+   * Is a ref's element certainly not on the current screen: it had an id (only an id survives a
+   * rename or a move), it is not listed, and nothing listed shares its id or label.
    */
   isGone(ref: string): boolean {
     const r = ref.replace(/^@/, "");
-    return this.remembered.has(r) && !this.latest?.nodes.has(r) && this.holdersOf(r).length === 0;
+    return !!this.remembered.get(r)?.id && !this.latest?.nodes.has(r) && this.holdersOf(r).length === 0;
   }
 
   /** Refs on the current screen that share the id or label a ref had. */

@@ -250,8 +250,9 @@ describe("drive", () => {
   });
 
   it("passes waitForNot / assertNot on a ref whose element is already gone, without asking SimDeck", async () => {
-    const { deps, acted } = fakeDevice(() => tree("Lukk"));
-    const ref = [...deps.book.record(tree("Lukk", "Ark")).nodes].find(([, n]) => n.label === "Ark")![0];
+    const sheet = (open: boolean) => ({ roots: [{ role: "Application", label: "App", frame: { x: 0, y: 0, width: 400, height: 800 }, children: [{ role: "Button", label: "Lukk", frame: { x: 0, y: 0, width: 400, height: 40 } }, ...(open ? [{ role: "Group", id: "sheet", label: "Ark", frame: { x: 0, y: 400, width: 400, height: 400 } }] : [])] }] });
+    const { deps, acted } = fakeDevice(() => sheet(false));
+    const ref = [...deps.book.record(sheet(true)).nodes].find(([, n]) => n.label === "Ark")![0];
     const r = await drive(deps, [{ type: "waitForNot", selector: { ref } }, { type: "assertNot", selector: { ref } }], "none");
     assert.equal(r.failure, undefined);
     assert.equal(acted.length, 0);
@@ -281,5 +282,18 @@ describe("drive", () => {
     const row1 = [...rows.deps.book.record(tree("Slett", "Slett", "Slett")).nodes].filter(([, n]) => n.label === "Slett")[0]![0];
     const r2 = await drive(rows.deps, [{ type: "assertNot", selector: { ref: row1 } }], "none");
     assert.ok(r2.failure, "a row of a group that moved is not taken for gone");
+  });
+
+  it("does not take an element without an id for gone: renamed or moved, nothing could tell", async () => {
+    const field = (y: number, label?: string) => ({ roots: [{ role: "Application", label: "App", frame: { x: 0, y: 0, width: 400, height: 800 }, children: [{ role: "TextField", value: "a", frame: { x: 0, y, width: 400, height: 40 } }, { role: "TextField", value: "b", frame: { x: 0, y: y + 50, width: 400, height: 40 } }, ...(label ? [{ role: "Button", label, frame: { x: 0, y: 600, width: 400, height: 40 } }] : [])] }] });
+    const { deps, acted } = fakeDevice(() => field(300, "Lagrer…"));
+    const s0 = deps.book.record(field(100, "Lagre"));
+    const first = [...s0.nodes].find(([, n]) => n.value === "a")![0];
+    const save = [...s0.nodes].find(([, n]) => n.label === "Lagre")![0];
+    const r = await drive(deps, [{ type: "assertNot", selector: { ref: first } }], "none");
+    assert.ok(r.failure, "a value-only field that moved is still there");
+    const r2 = await drive(deps, [{ type: "waitForNot", selector: { ref: save } }], "none");
+    assert.ok(r2.failure, "a button without an id that was renamed is still there");
+    assert.equal(acted.length, 0);
   });
 });
