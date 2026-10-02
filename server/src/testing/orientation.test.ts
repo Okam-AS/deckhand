@@ -105,6 +105,21 @@ describe("selectorTarget — SimDeck's pick", () => {
     assert.equal(t.v, 420 / 834);
   });
 
+  it("prefers a text over the group that carries the same label, like SimDeck's role rank", () => {
+    const grouped = {
+      roots: [
+        node({ AXLabel: "Okam", type: "Application" }, LANDSCAPE, [
+          node({ AXLabel: "Bord 12", type: "Group" }, { x: 100, y: 100, width: 600, height: 400 }, [
+            node({ AXLabel: "Bord 12", type: "StaticText" }, { x: 110, y: 110, width: 80, height: 20 }),
+          ]),
+        ]),
+      ],
+    };
+    const t = selectorTarget(grouped, { label: "Bord 12" })!;
+    assert.equal(t.u, 150 / 1210);
+    assert.equal(t.v, 120 / 834);
+  });
+
   it("takes the index-th match in document order", () => {
     const t = selectorTarget(tree, { label: "Slett", index: 0 })!;
     assert.equal(t.u, 50 / 1210);

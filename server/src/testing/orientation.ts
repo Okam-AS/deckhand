@@ -186,7 +186,7 @@ export function matchesSelector(n: Node, s: Selector): boolean {
 function roleRank(n: Node): number {
   const role = String(n.role ?? n.type ?? "").toLowerCase();
   if (["button", "cell", "checkbox", "link", "switch", "toggle", "slider", "textfield"].some((r) => role.includes(r))) return 2;
-  return role ? 1 : 0;
+  return ["application", "window", "group"].some((r) => role.includes(r)) ? 0 : 1;
 }
 
 function rank(n: Node, w: number, h: number): [number, number, number] {
