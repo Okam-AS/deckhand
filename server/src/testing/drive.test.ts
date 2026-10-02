@@ -310,6 +310,7 @@ describe("drive", () => {
     };
     const spinner = [...deps.book.snapshot!.nodes].find(([, n]) => n.id === "spinner")![0];
     const r = await drive(deps, [{ type: "assert", selector: { ref: spinner } }, { type: "waitFor", selector: { id: "spinner" } }, { type: "assertNot", selector: { ref } }], "none");
-    assert.ok(r.failure, "the banner that appeared during the wait is not taken for gone");
+    assert.ok(r.failure?.error instanceof RefError, "the banner that appeared during the wait is not taken for gone");
+    assert.match(String((r.failure!.error as Error).message), /its name is now on/);
   });
 });
