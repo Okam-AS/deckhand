@@ -617,3 +617,18 @@ describe("SimDeckControl on a turned iOS device", () => {
     assert.deepEqual(d.posts, [{ action: "tap", x: 0.1, y: 0.2, normalized: true }]);
   });
 });
+
+describe("SimDeckControl timeouts", () => {
+  it("gives up on a request SimDeck never answers, so the device is not held", async () => {
+    const { impl } = fakeFetch();
+    const hanging = (async (input: unknown, init?: RequestInit) => (String(input).endsWith("/action") ? new Promise<Response>(() => {}) : impl(input as string, init))) as unknown as typeof fetch;
+    const control = new SimDeckControl({ fetchImpl: hanging, autostart: false, requestTimeoutMs: 50 });
+    const t0 = Date.now();
+    await assert.rejects(control.action(iosTarget, { type: "tap", x: 0.5, y: 0.5 }), /did not answer .* may still have run on the device; read the screen before you retry/);
+    assert.ok(Date.now() - t0 < 2000);
+    const waiting = control.action(iosTarget, { type: "waitFor", selector: { id: "x" }, timeoutMs: 300 });
+    const early = await Promise.race([waiting.then(() => "done", () => "failed"), new Promise((r) => setTimeout(() => r("still waiting"), 200))]);
+    assert.equal(early, "still waiting", "an action's own wait is added to the timeout");
+    await assert.rejects(waiting);
+  });
+});

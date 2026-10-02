@@ -271,7 +271,7 @@ turned UI, and its selector taps send the UI point unrotated, so on a turned iOS
 selector tap, swipe, gesture and `back` is found and placed by deckhand (`testing/orientation.ts`),
 with the turn read by hit-testing one element through `GET /accessibility-point`. A landscape device
 whose turn cannot be read refuses the touch rather than guess. `scrollUntilVisible` still scrolls in
-SimDeck's unrotated axes.
+SimDeck's unrotated axes, and `ui` says so beside the screen.
 `logs` ships (see the tool table); its `metro` and `app` sources are the part that
 did not — they are accepted by the schema and reserved, and nothing appends to them.
 

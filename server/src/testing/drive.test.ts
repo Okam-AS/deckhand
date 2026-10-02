@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { UiAction } from "./control.ts";
-import { drive, settle, type DriveDeps } from "./drive.ts";
+import { drive, rotationWarning, settle, type DriveDeps } from "./drive.ts";
 import { RefError, ScreenBook, shapeOf } from "./screen.ts";
 
 const tree = (...labels: string[]) => ({
@@ -180,5 +180,138 @@ describe("drive", () => {
     const r = await drive(deps, [{ type: "tapElement", selector: { ref: "e42" } }], "none");
     assert.ok(r.failure?.error instanceof RefError);
     assert.equal(acted.length, 0);
+  });
+
+  it("re-reads the screen before resolving any ref after an earlier step of the same list", async () => {
+    let added = false;
+    const { deps, acted } = fakeDevice(() => (added ? tree("Legg til", "Slett", "Slett") : tree("Legg til", "Slett")));
+    const s = deps.book.record(tree("Legg til", "Slett"));
+    const ref = [...s.nodes].find(([, n]) => n.label === "Slett")![0];
+    const act = deps.act;
+    deps.act = async (a) => {
+      if (a.type === "tapElement" && "selector" in a && a.selector.label === "Legg til") added = true;
+      return act(a);
+    };
+    const r = await drive(deps, [{ type: "tapElement", selector: { label: "Legg til" } }, { type: "tapElement", selector: { ref } }], "none");
+    assert.ok(r.failure?.error instanceof RefError, "a name that is no longer unique is not sent to SimDeck");
+    assert.equal(acted.length, 1);
+  });
+
+  it("taps a ref at its centre on a turned iOS device too: the control places the touch", async () => {
+    const wide = { roots: [{ role: "Application", label: "App", frame: { x: 0, y: 0, width: 1376, height: 1032 }, children: [0, 1].map((i) => ({ role: "Button", label: "Mer", frame: { x: 0, y: i * 50, width: 100, height: 40 } })) }] };
+    const { deps, acted } = fakeDevice(() => wide);
+    const ref = [...deps.book.record(wide).nodes].filter(([, n]) => n.label === "Mer")[1]![0];
+    const r = await drive(deps, [{ type: "tapElement", selector: { ref } }], "none");
+    assert.equal(r.failure, undefined);
+    assert.deepEqual(acted, [{ type: "tap", x: 50 / 1376, y: 70 / 1032 }]);
+  });
+
+  it("takes no look when nothing moved and the failure is thrown to the caller as is", async () => {
+    const { deps, looks } = fakeDevice(() => tree("A"));
+    deps.act = async () => {
+      throw new Error("SimDeck is down");
+    };
+    const r = await drive(deps, [{ type: "openUrl", url: "app://x" }], "auto", true);
+    assert.equal(r.failure?.message, "SimDeck is down");
+    assert.equal(looks(), 0);
+    const listed = await drive(deps, [{ type: "openUrl", url: "app://x" }], "auto");
+    assert.equal(typeof listed.screen, "string", "a list still shows where it stopped");
+  });
+
+  it("judges a gone ref on a fresh capture, not on the one from before the call", async () => {
+    const { deps, acted } = fakeDevice(() => tree("Ny", "Slett"));
+    const ref = [...deps.book.record(tree("Slett")).nodes].find(([, n]) => n.label === "Slett")![0];
+    deps.book.record(tree("Avbryt"));
+    // Since that capture the viewer has moved on to a screen where another element says "Slett".
+    deps.observe = async () => ({ roots: [{ role: "Application", label: "App", frame: { x: 0, y: 0, width: 400, height: 800 }, children: [{ role: "Link", label: "Slett", frame: { x: 0, y: 0, width: 400, height: 40 } }] }] });
+    const r = await drive(deps, [{ type: "tapElement", selector: { ref } }], "none");
+    assert.ok(r.failure?.error instanceof RefError);
+    assert.equal(acted.length, 0);
+  });
+
+  it("checks a ref still on the book's screen against a fresh capture before the first step", async () => {
+    const { deps, acted } = fakeDevice(() => tree("Slett", "Slett"));
+    const ref = [...deps.book.record(tree("Slett")).nodes].find(([, n]) => n.label === "Slett")![0];
+    // Between calls the viewer added a second «Slett»: the label is no longer unique.
+    const r = await drive(deps, [{ type: "tapElement", selector: { ref } }], "none");
+    assert.ok(r.failure?.error instanceof RefError, "the ref is judged on the fresh screen, where its name is no longer its own");
+    assert.equal(acted.length, 0);
+  });
+
+  it("warns only about scrollUntilVisible on a turned iOS device, whose swipes SimDeck places", () => {
+    const wide = { x: 0, y: 0, width: 1376, height: 1032 };
+    const tall = { x: 0, y: 0, width: 1032, height: 1376 };
+    const scroll: UiAction = { type: "scrollUntilVisible", selector: { id: "x" } };
+    assert.ok(rotationWarning("ios", wide, [scroll]));
+    for (const a of [{ type: "tap", x: 0.5, y: 0.5 }, { type: "swipe", startX: 0.5, startY: 0.8, endX: 0.5, endY: 0.2 }, { type: "gesture", preset: "scroll-down" }, { type: "tapElement", selector: { id: "x" } }] as UiAction[]) {
+      assert.equal(rotationWarning("ios", wide, [a]), undefined, `${a.type} is placed by deckhand`);
+    }
+    assert.equal(rotationWarning("ios", tall, [scroll]), undefined);
+    assert.equal(rotationWarning("android", wide, [scroll]), undefined);
+  });
+
+  it("passes waitForNot / assertNot on a ref whose element is already gone, without asking SimDeck", async () => {
+    const sheet = (open: boolean) => ({ roots: [{ role: "Application", label: "App", frame: { x: 0, y: 0, width: 400, height: 800 }, children: [{ role: "Button", label: "Lukk", frame: { x: 0, y: 0, width: 400, height: 40 } }, ...(open ? [{ role: "Group", id: "sheet", label: "Ark", frame: { x: 0, y: 400, width: 400, height: 400 } }] : [])] }] });
+    const { deps, acted } = fakeDevice(() => sheet(false));
+    const ref = [...deps.book.record(sheet(true)).nodes].find(([, n]) => n.label === "Ark")![0];
+    const r = await drive(deps, [{ type: "waitForNot", selector: { ref } }, { type: "assertNot", selector: { ref } }], "none");
+    assert.equal(r.failure, undefined);
+    assert.equal(acted.length, 0);
+    assert.deepEqual(r.results, [{ action: "waitForNot", ok: true, gone: true }, { action: "assertNot", ok: true, gone: true }]);
+  });
+
+  it("does not let the capture taken to resolve a ref free the refs of elements it missed", async () => {
+    let looks = 0;
+    const { deps } = fakeDevice(() => (looks++ === 0 ? tree("Lagre") : tree("Lagre", "Ark")));
+    const s0 = deps.book.record(tree("Lagre", "Ark"));
+    deps.book.full();
+    const save = [...s0.nodes].find(([, n]) => n.label === "Lagre")![0];
+    const sheet = [...s0.nodes].find(([, n]) => n.label === "Ark")![0];
+    const r = await drive(deps, [{ type: "tapElement", selector: { ref: save } }], "auto");
+    assert.equal(r.failure, undefined);
+    assert.ok([...deps.book.snapshot!.nodes.keys()].includes(sheet), "«Ark», missed by one mid-animation capture, kept its ref");
+  });
+
+  it("does not pass waitForNot on a ref whose element is still there under another ref", async () => {
+    const spinner = (pct: number) => ({ roots: [{ role: "Application", label: "App", frame: { x: 0, y: 0, width: 400, height: 800 }, children: [{ role: "ProgressIndicator", id: "loading", label: `Laster ${pct}%`, frame: { x: 0, y: 0, width: 400, height: 40 } }] }] });
+    const { deps, acted } = fakeDevice(() => spinner(20));
+    const ref = [...deps.book.record(spinner(10)).nodes].find(([, n]) => n.id === "loading")![0];
+    const r = await drive(deps, [{ type: "waitForNot", selector: { ref } }], "none");
+    assert.ok(r.failure, "the spinner, renamed, is still on screen");
+    assert.equal(acted.length, 0);
+    const rows = fakeDevice(() => tree("Slett", "Slett"));
+    const row1 = [...rows.deps.book.record(tree("Slett", "Slett", "Slett")).nodes].filter(([, n]) => n.label === "Slett")[0]![0];
+    const r2 = await drive(rows.deps, [{ type: "assertNot", selector: { ref: row1 } }], "none");
+    assert.ok(r2.failure, "a row of a group that moved is not taken for gone");
+  });
+
+  it("does not take an element without an id for gone: renamed or moved, nothing could tell", async () => {
+    const field = (y: number, label?: string) => ({ roots: [{ role: "Application", label: "App", frame: { x: 0, y: 0, width: 400, height: 800 }, children: [{ role: "TextField", value: "a", frame: { x: 0, y, width: 400, height: 40 } }, { role: "TextField", value: "b", frame: { x: 0, y: y + 50, width: 400, height: 40 } }, ...(label ? [{ role: "Button", label, frame: { x: 0, y: 600, width: 400, height: 40 } }] : [])] }] });
+    const { deps, acted } = fakeDevice(() => field(300, "Lagrer…"));
+    const s0 = deps.book.record(field(100, "Lagre"));
+    const first = [...s0.nodes].find(([, n]) => n.value === "a")![0];
+    const save = [...s0.nodes].find(([, n]) => n.label === "Lagre")![0];
+    const r = await drive(deps, [{ type: "assertNot", selector: { ref: first } }], "none");
+    assert.ok(r.failure, "a value-only field that moved is still there");
+    const r2 = await drive(deps, [{ type: "waitForNot", selector: { ref: save } }], "none");
+    assert.ok(r2.failure, "a button without an id that was renamed is still there");
+    assert.equal(acted.length, 0);
+  });
+
+  it("judges a ref after a waiting verifier on a capture taken after the wait", async () => {
+    const banner = (shown: boolean) => ({ roots: [{ role: "Application", label: "App", frame: { x: 0, y: 0, width: 400, height: 800 }, children: [{ role: "Group", id: "spinner", label: "Laster", frame: { x: 0, y: 0, width: 40, height: 40 } }, ...(shown ? [{ role: "Alert", id: "error", label: "Feil", frame: { x: 0, y: 100, width: 400, height: 40 } }] : [])] }] });
+    let waited = false;
+    const { deps } = fakeDevice(() => banner(waited));
+    const ref = [...deps.book.record(banner(true)).nodes].find(([, n]) => n.id === "error")![0];
+    deps.book.record(banner(false));
+    const act = deps.act;
+    deps.act = async (a) => {
+      if (a.type === "waitFor") waited = true;
+      return act(a);
+    };
+    const spinner = [...deps.book.snapshot!.nodes].find(([, n]) => n.id === "spinner")![0];
+    const r = await drive(deps, [{ type: "assert", selector: { ref: spinner } }, { type: "waitFor", selector: { id: "spinner" } }, { type: "assertNot", selector: { ref } }], "none");
+    assert.ok(r.failure?.error instanceof RefError, "the banner that appeared during the wait is not taken for gone");
+    assert.match(String((r.failure!.error as Error).message), /its name is now on/);
   });
 });
