@@ -59,3 +59,17 @@ function redactValue(v: unknown): unknown {
   if (typeof v === "string" && v.length > 200) return v.slice(0, 200) + "…";
   return v;
 }
+
+/** An error can quote what a `type` action typed (SimDeck echoes it): take it out before it is logged. */
+export function scrubTyped(message: string, args: unknown): string {
+  const typed: string[] = [];
+  const walk = (v: unknown): void => {
+    if (Array.isArray(v)) return v.forEach(walk);
+    if (!v || typeof v !== "object") return;
+    const o = v as Record<string, unknown>;
+    if (o.type === "type" && typeof o.text === "string" && o.text) typed.push(o.text);
+    Object.values(o).forEach(walk);
+  };
+  walk(args);
+  return typed.sort((a, b) => b.length - a.length).reduce((m, t) => m.split(t).join("[redacted]"), message);
+}

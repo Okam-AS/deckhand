@@ -1,4 +1,4 @@
-import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { ZodType } from "zod";
@@ -34,7 +34,12 @@ export function readFlow<T>(sourceDir: string | undefined, name: string, actionS
       const st = fstatSync(fd);
       if (!st.isFile()) return { ok: false, code: "invalid_flows_file", message: `${FLOWS_FILENAME} must be a regular file, not a link` };
       if (st.size > MAX_FLOWS_BYTES) return { ok: false, code: "invalid_flows_file", message: `${FLOWS_FILENAME} is larger than ${MAX_FLOWS_BYTES} bytes` };
-      text = readFileSync(fd, "utf8");
+      // The size is checked again on what is read: the file can grow after fstat.
+      const buf = Buffer.alloc(MAX_FLOWS_BYTES + 1);
+      let got = 0;
+      for (let n; got < buf.length && (n = readSync(fd, buf, got, buf.length - got, null)) > 0; ) got += n;
+      if (got > MAX_FLOWS_BYTES) return { ok: false, code: "invalid_flows_file", message: `${FLOWS_FILENAME} is larger than ${MAX_FLOWS_BYTES} bytes` };
+      text = buf.subarray(0, got).toString("utf8");
     } finally {
       closeSync(fd);
     }

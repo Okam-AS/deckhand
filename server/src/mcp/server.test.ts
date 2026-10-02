@@ -1331,6 +1331,8 @@ describe("agent-driven testing tools (describe/ui + test runs)", () => {
     assert.ok(simdeckActions.length > 2, "navigate acted too");
     const one = parse(await admin.callTool({ name: "ui", arguments: { previewId, deviceId, action: { type: "tap", x: 0.5, y: 0.5 } } }));
     assert.ok("result" in one && !("results" in one), "a single action still answers with `result`");
+    const uiTool = (await admin.listTools()).tools.find((t) => t.name === "ui")!;
+    assert.doesNotMatch(uiTool.description ?? "", /retried by its id or label/, "the description says what the code does: a gone ref is refused");
     simdeckActions.length = 0;
     const agentDeviceRef = await admin.callTool({ name: "ui", arguments: { previewId, deviceId, action: { type: "tapElement", selector: { ref: "@e2" } } } });
     assert.equal(agentDeviceRef.isError, true, "an @e ref from another tool is refused, not resolved against deckhand's own");

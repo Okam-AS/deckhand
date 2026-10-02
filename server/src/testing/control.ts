@@ -112,7 +112,7 @@ export class SimDeckControl {
       const ms = baseMs + askedWaitMs(init);
       let timer: NodeJS.Timeout | undefined;
       const late = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new SimDeckActionError(`SimDeck did not answer within ${Math.round(ms / 1000)}s`, 504)), ms);
+        timer = setTimeout(() => reject(new SimDeckActionError(`SimDeck did not answer within ${Math.round(ms / 1000)} s — the action may still have run on the device; read the screen before you retry it`, 504)), ms);
       });
       return Promise.race([base(input, { ...init, signal: init?.signal ?? AbortSignal.timeout(ms) }), late]).finally(() => clearTimeout(timer));
     }) as typeof fetch;

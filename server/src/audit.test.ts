@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { summarizeArgs } from "./audit.ts";
+import { scrubTyped, summarizeArgs } from "./audit.ts";
 
 describe("summarizeArgs redaction", () => {
   it("redacts a top-level pin and other sensitive keys", () => {
@@ -40,5 +40,11 @@ describe("summarizeArgs redaction", () => {
     const out = summarizeArgs({ action: { type: "type", text: "123123" }, actions: [{ type: "type", text: "4321" }, { type: "tapElement", selector: { text: "Logg inn" } }] });
     assert.doesNotMatch(JSON.stringify(out), /123123|4321/);
     assert.match(JSON.stringify(out), /Logg inn/, "a selector's text is not what was typed");
+  });
+
+  it("takes what a type action typed out of an error before it is logged", () => {
+    const msg = scrubTyped('type "4321" failed: field rejected 4321', { actions: [{ type: "tapElement", selector: { id: "pin" } }, { type: "type", text: "4321" }] });
+    assert.doesNotMatch(msg, /4321/);
+    assert.equal(scrubTyped("No accessibility element matched.", { action: { type: "type", text: "x1" } }), "No accessibility element matched.");
   });
 });
