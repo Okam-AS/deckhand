@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { candidateTurns, hitMatches, nativeProbePoint, presetSwipe, probeNodes, selectorTarget, toNative, uiBounds } from "./orientation.ts";
+import { candidateTurns, hitMatches, nativeProbePoint, presetSwipe, probeNodes, rootSpace, selectorTarget, toNative, uiBounds } from "./orientation.ts";
 
 const LANDSCAPE = { x: 0, y: 0, width: 1210, height: 834 };
 
@@ -100,7 +100,7 @@ describe("selectorTarget — SimDeck's pick", () => {
 
   it("prefers a tappable role on screen, like SimDeck's rank", () => {
     const t = selectorTarget(tree, { label: "Slett" })!;
-    assert.equal(t.native, false);
+    assert.equal(t.space, "ui");
     assert.equal(t.u, 650 / 1210);
     assert.equal(t.v, 420 / 834);
   });
@@ -133,12 +133,43 @@ describe("selectorTarget — SimDeck's pick", () => {
     assert.equal(selectorTarget(tree, { id: "kitchen-menu", label: "Slett" }), null);
   });
 
-  it("reads a SpringBoard prompt in the portrait screen's points, under the turned root frame", () => {
+  it("reads a SpringBoard prompt in the portrait screen's points when its owner says SpringBoard", () => {
     const prompt = { roots: [node({ AXLabel: " " }, LANDSCAPE, [node({ AXLabel: "Åpne", type: "Button" }, { x: 366.5, y: 609, width: 48, height: 140 })])] };
-    const t = selectorTarget(prompt, { label: "Åpne" })!;
-    assert.equal(t.native, true);
+    const t = selectorTarget(prompt, { label: "Åpne" }, (r) => rootSpace(r, "SpringBoard"))!;
+    assert.equal(t.space, "native");
     assert.equal(t.u, (366.5 + 24) / 834);
     assert.equal(t.v, (609 + 70) / 1210);
+    assert.equal(selectorTarget(prompt, { label: "Åpne" })!.space, "unknown", "a blank root whose frames prove nothing is not guessed");
+  });
+
+  it("gives up on a root without a frame, as SimDeck does", () => {
+    const frameless = { roots: [{ AXLabel: "x", children: [] }, node({ AXLabel: "Okam" }, LANDSCAPE, [node({ AXLabel: "Slett", type: "Button" }, { x: 600, y: 400, width: 10, height: 10 })])] };
+    assert.equal(selectorTarget(frameless, { label: "Slett", index: 0 }), null);
+  });
+});
+
+describe("rootSpace", () => {
+  const app = (label: unknown, kids: { x: number; y: number; width: number; height: number }[]) =>
+    node(label === undefined ? {} : { AXLabel: label }, LANDSCAPE, kids.map((f) => node({ AXLabel: "e" }, f)));
+
+  it("believes the owning process over everything else", () => {
+    assert.equal(rootSpace(app("Okam", []), "SpringBoard"), "native");
+    assert.equal(rootSpace(app(" ", [{ x: 366, y: 609, width: 48, height: 140 }]), "OkamKDS"), "ui");
+  });
+
+  it("reads an unlabelled app root as the UI when an element sits right of the portrait width", () => {
+    assert.equal(rootSpace(app(undefined, [{ x: 1146, y: 40, width: 48, height: 48 }])), "ui");
+  });
+
+  it("does not read an element below the turned screen's height as proof: a scrolled list has those", () => {
+    assert.equal(rootSpace(app("Okam", [{ x: 1146, y: 40, width: 48, height: 48 }, { x: 600, y: 2000, width: 100, height: 40 }])), "ui");
+    assert.equal(rootSpace(app(" ", [{ x: 100, y: 1000, width: 200, height: 60 }])), "unknown");
+  });
+
+  it("falls back to the label, and calls a blank root that proves nothing unknown", () => {
+    assert.equal(rootSpace(app("Okam POS", [{ x: 10, y: 10, width: 50, height: 50 }])), "ui");
+    assert.equal(rootSpace(app(" ", [{ x: 10, y: 10, width: 50, height: 50 }])), "unknown");
+    assert.equal(rootSpace(app("SpringBoard", [])), "native");
   });
 });
 

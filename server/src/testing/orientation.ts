@@ -20,7 +20,7 @@ export interface Frame {
   height: number;
 }
 
-type Node = Record<string, unknown>;
+export type Node = Record<string, unknown>;
 
 /** Map a normalized point in the turned UI to the device's unrotated screen. */
 export function toNative(u: number, v: number, quarterTurns: number): { x: number; y: number } {
@@ -68,14 +68,36 @@ function children(n: Node): Node[] {
   return Array.isArray(n.children) ? (n.children.filter((c) => c && typeof c === "object") as Node[]) : [];
 }
 
+/** Which points a root's elements are in: the turned UI's, the unrotated screen's, or not known. */
+export type Space = "ui" | "native" | "unknown";
+export type SpaceOf = (root: Node) => Space;
+
 /**
  * On a turned device SpringBoard's own elements (the «Open in …?» prompt a dev build shows) are
- * reported in the unrotated screen's points, under a root that carries no label, though the root's
- * own frame is the turned screen's; an app's elements are reported in its turned UI.
+ * reported in the unrotated screen's points, though their root's frame is the turned screen's; an
+ * app's elements are reported in its turned UI. The process that owns the root says which, when the
+ * caller can name it (`owner`). Without it, an element right of the portrait width can only be in the
+ * UI (an element below the turned screen's height proves nothing: a scrolled list has those too), and
+ * otherwise the label decides: an app names its root, SpringBoard's is blank. A blank root with no
+ * such element is `unknown`, and nothing is placed on it.
  */
-export function isNativeRoot(root: Node): boolean {
+export function rootSpace(root: Node, owner?: string | null): Space {
+  const rf = frameOf(root);
+  if (!rf || rf.width <= rf.height) return "ui";
+  if (owner) return owner === "SpringBoard" ? "native" : "ui";
   const label = root.label ?? root.AXLabel;
-  return typeof label !== "string" || label.trim() === "" || label === "SpringBoard";
+  if (label === "SpringBoard") return "native";
+  let turned = false;
+  const walk = (n: Node) => {
+    for (const c of children(n)) {
+      const f = frameOf(c);
+      if (f && f.width > 0 && f.height > 0 && f.x + f.width > rf.x + rf.height + 1) turned = true;
+      if (!turned) walk(c);
+    }
+  };
+  walk(root);
+  if (turned) return "ui";
+  return typeof label === "string" && label.trim() !== "" ? "ui" : "unknown";
 }
 
 /** The screen in the UI's points: the largest root frame. */
@@ -94,15 +116,15 @@ export function candidateTurns(bounds: Frame): [number, number] {
 }
 
 /**
- * Elements to hit-test with: small, and away from the centre, where the two candidate turns map
- * to the same point. Farthest from the centre first.
+ * Elements to hit-test with: at most a quarter of the screen (what `hitMatches` accepts), and away
+ * from the centre, where the two candidate turns map to the same point. Farthest from the centre first.
  */
-export function probeNodes(tree: unknown, bounds: Frame, max = 3): Frame[] {
+export function probeNodes(tree: unknown, bounds: Frame, spaceOf: SpaceOf = (r) => rootSpace(r), max = 3): Frame[] {
   const out: { f: Frame; d: number }[] = [];
   const area = bounds.width * bounds.height;
   const walk = (n: Node, root: boolean) => {
     const f = frameOf(n);
-    if (!root && f && f.width >= 4 && f.height >= 4 && f.width * f.height <= area * 0.1) {
+    if (!root && f && f.width >= 4 && f.height >= 4 && f.width * f.height <= area * 0.25) {
       const cx = (f.x + f.width / 2 - bounds.x) / bounds.width;
       const cy = (f.y + f.height / 2 - bounds.y) / bounds.height;
       const d = Math.hypot(cx - 0.5, cy - 0.5);
@@ -110,8 +132,8 @@ export function probeNodes(tree: unknown, bounds: Frame, max = 3): Frame[] {
     }
     for (const c of children(n)) walk(c, false);
   };
-  // SpringBoard's elements are in the unrotated screen's points, so they are no evidence about the UI.
-  for (const r of rootsOf(tree)) if (!isNativeRoot(r)) walk(r, true);
+  // Only a root known to be in the UI's points is evidence about the UI.
+  for (const r of rootsOf(tree)) if (spaceOf(r) === "ui") walk(r, true);
   out.sort((a, b) => b.d - a.d);
   const picked: Frame[] = [];
   for (const { f } of out) {
@@ -215,13 +237,16 @@ function greater(a: [number, number, number], b: [number, number, number]): bool
  * `index`-th match in document order across roots, else the best-ranked match of the first root
  * that has one. Null when nothing matches.
  */
-export function selectorTarget(tree: unknown, s: Selector): { u: number; v: number; native: boolean } | null {
+export function selectorTarget(tree: unknown, s: Selector, spaceOf: SpaceOf = (r) => rootSpace(r)): { u: number; v: number; space: Space } | null {
   let seen = 0;
   for (const root of rootsOf(tree)) {
     const rf = frameOf(root);
-    if (!rf || rf.width <= 0 || rf.height <= 0) continue;
+    // SimDeck gives up on a root without a frame rather than looking past it.
+    if (!rf) return null;
+    if (rf.width <= 0 || rf.height <= 0) continue;
+    const space = spaceOf(root);
     // A native root's elements are in the portrait screen's points while the root reports the turned frame.
-    const native = isNativeRoot(root) && rf.width > rf.height;
+    const native = space === "native";
     const w = native ? rf.height : rf.width;
     const h = native ? rf.width : rf.height;
     const matches: Node[] = [];
@@ -248,7 +273,7 @@ export function selectorTarget(tree: unknown, s: Selector): { u: number; v: numb
     const f = frameOf(node);
     if (!f) return null;
     const clamp = (n: number) => Math.min(1, Math.max(0, n));
-    return { u: clamp((f.x + f.width / 2) / w), v: clamp((f.y + f.height / 2) / h), native };
+    return { u: clamp((f.x + f.width / 2) / w), v: clamp((f.y + f.height / 2) / h), space };
   }
   return null;
 }

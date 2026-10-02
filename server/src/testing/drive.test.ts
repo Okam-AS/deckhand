@@ -206,6 +206,26 @@ describe("drive", () => {
     assert.deepEqual(acted, [{ type: "tap", x: 50 / 1376, y: 70 / 1032 }]);
   });
 
+  it("refuses a centre tap on a SpringBoard element of a turned iOS device, whose points are not the app's (review #106 R2)", async () => {
+    const W = 1210;
+    const H = 834;
+    const screen = {
+      roots: [
+        { role: "Application", label: "Okam", frame: { x: 0, y: 0, width: W, height: H }, children: [{ role: "Button", label: "Avbryt", frame: { x: 900, y: 700, width: 120, height: 44 } }] },
+        { role: "Application", label: " ", frame: { x: 0, y: 0, width: W, height: H }, children: [{ role: "Button", label: "Avbryt", frame: { x: 366, y: 609, width: 48, height: 140 } }] },
+      ],
+    };
+    const { deps, acted } = fakeDevice(() => screen);
+    const refs = [...deps.book.record(screen).nodes].filter(([, n]) => n.label === "Avbryt").map(([r]) => r);
+    const sb = await drive(deps, [{ type: "tapElement", selector: { ref: refs[1]! } }], "none");
+    assert.ok(sb.failure?.error instanceof RefError);
+    assert.match(String(sb.failure?.message), /SpringBoard|cannot place/);
+    assert.equal(acted.length, 0);
+    const app = await drive(deps, [{ type: "tapElement", selector: { ref: refs[0]! } }], "none");
+    assert.equal(app.failure, undefined);
+    assert.deepEqual(acted, [{ type: "tap", x: 960 / W, y: 722 / H }]);
+  });
+
   it("takes no look when nothing moved and the failure is thrown to the caller as is", async () => {
     const { deps, looks } = fakeDevice(() => tree("A"));
     deps.act = async () => {

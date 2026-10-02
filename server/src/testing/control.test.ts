@@ -1,9 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SimDeckControl, SimDeckActionError, type UiAction } from "./control.ts";
-import { SimDeckDaemon, SimDeckUnavailableError } from "./simdeck.ts";
+import { SimDeckDaemon, SimDeckUnavailableError, vendoredSimDeckBin } from "./simdeck.ts";
 
 interface Recorded {
   url: string;
@@ -422,6 +423,24 @@ describe("SimDeckDaemon", () => {
     assert.equal(started, 1);
   });
 
+  it("refuses a SimDeck on the port that is not the pinned version, and accepts the pinned one", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "simdeck-old-"));
+    mkdirSync(join(dir, "build"));
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "simdeck", version: "0.1.33" }));
+    const healthy = (async () => new Response("{}", { status: 200 })) as unknown as typeof fetch;
+    const old = new SimDeckDaemon({ fetchImpl: healthy, autostart: false, listenerImpl: async () => join(dir, "build", "simdeck-bin") });
+    await assert.rejects(
+      () => old.ensureRunning(),
+      (e: unknown) => e instanceof SimDeckUnavailableError && /version 0\.1\.33, not deckhand's pinned/.test(e.message) && /simdeck kill/.test(e.hint ?? ""),
+    );
+    const stranger = new SimDeckDaemon({ fetchImpl: healthy, autostart: false, listenerImpl: async () => null });
+    await assert.rejects(() => stranger.ensureRunning(), (e: unknown) => e instanceof SimDeckUnavailableError && /cannot identify/.test(e.message));
+    const pinnedBin = vendoredSimDeckBin().replace(join("packages", "cli", "bin", "simdeck.mjs"), join("build", "simdeck-bin-darwin-arm64"));
+    const ours = new SimDeckDaemon({ fetchImpl: healthy, autostart: false, listenerImpl: async () => pinnedBin });
+    assert.equal(await ours.ensureRunning(), "http://127.0.0.1:4310");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("throws an actionable SimDeckUnavailableError when down and autostart is off", async () => {
     const downFetch = (async () => new Response("no", { status: 503 })) as unknown as typeof fetch;
     const daemon = new SimDeckDaemon({ fetchImpl: downFetch, autostart: false });
@@ -440,11 +459,14 @@ describe("SimDeckDaemon", () => {
 
 type F = { x: number; y: number; width: number; height: number };
 
-function turnedDevice(turns: number, opts: { landscape?: boolean; springboard?: boolean; appearAfter?: number; fullOnly?: string } = {}) {
+function turnedDevice(
+  turns: number,
+  opts: { landscape?: boolean; springboard?: boolean; appearAfter?: number; fullOnly?: string; owners?: boolean; appLabel?: string | null; els?: { label: string; id?: string; type: string; frame: F }[] } = {},
+) {
   const landscape = opts.landscape ?? true;
   const W = landscape ? 1210 : 834;
   const H = landscape ? 834 : 1210;
-  const elements: { label: string; id?: string; type: string; frame: F }[] = [
+  const elements: { label: string; id?: string; type: string; frame: F }[] = opts.els ?? [
     { label: "Meny", id: "kitchen-menu", type: "Button", frame: { x: W - 64, y: 40, width: 48, height: 48 } },
     { label: "Start", type: "Button", frame: { x: 20, y: H - 60, width: 300, height: 44 } },
     { label: "Back", type: "Button", frame: { x: 16, y: 20, width: 60, height: 40 } },
@@ -455,10 +477,10 @@ function turnedDevice(turns: number, opts: { landscape?: boolean; springboard?: 
     let visible = opts.appearAfter != null && reads <= opts.appearAfter ? elements.slice(1) : elements;
     if (interactiveOnly && opts.fullOnly) visible = visible.filter((e) => e.label !== opts.fullOnly);
     const roots: unknown[] = [
-      { AXLabel: "Okam KDS", type: "Application", frame: { x: 0, y: 0, width: W, height: H }, children: visible.map((e) => ({ AXLabel: e.label, AXUniqueId: e.id ?? null, type: e.type, frame: e.frame })) },
+      { ...(opts.appLabel === null ? {} : { AXLabel: opts.appLabel ?? "Okam KDS" }), pid: 100, type: "Application", frame: { x: 0, y: 0, width: W, height: H }, children: visible.map((e) => ({ AXLabel: e.label, AXUniqueId: e.id ?? null, type: e.type, frame: e.frame })) },
     ];
     if (opts.springboard) {
-      roots.push({ AXLabel: " ", type: "Application", frame: { x: 0, y: 0, width: W, height: H }, children: [{ AXLabel: "Åpne", type: "Button", frame: { x: 366, y: 609, width: 48, height: 140 } }] });
+      roots.push({ AXLabel: " ", pid: 50, type: "Application", frame: { x: 0, y: 0, width: W, height: H }, children: [{ AXLabel: "Åpne", type: "Button", frame: { x: 366, y: 609, width: 48, height: 140 } }] });
     }
     return { roots };
   };
@@ -499,7 +521,12 @@ function turnedDevice(turns: number, opts: { landscape?: boolean; springboard?: 
     }
     return new Response("not found", { status: 404 });
   }) as unknown as typeof fetch;
-  const control = new SimDeckControl({ fetchImpl: impl, autostart: false });
+  const owners: Record<number, string> = { 50: "SpringBoard", 100: "OkamKDS" };
+  const control = new SimDeckControl({
+    fetchImpl: impl,
+    autostart: false,
+    processNameImpl: async (pid) => (opts.owners === false ? null : (owners[pid] ?? null)),
+  });
   const centre = (label: string) => {
     const f = elements.find((e) => e.label === label)!.frame;
     return { x: (f.x + f.width / 2) / W, y: (f.y + f.height / 2) / H };
@@ -579,6 +606,39 @@ describe("SimDeckControl on a turned iOS device", () => {
     assert.deepEqual(d.tapped, []);
   });
 
+  it("refuses to tap an element on a blank root whose owner it cannot name, rather than guess its points", async () => {
+    const d = turnedDevice(1, { springboard: true, owners: false });
+    await assert.rejects(
+      () => d.control.action(iosTarget, { type: "tapElement", selector: { label: "Åpne" } }),
+      (e: unknown) => e instanceof SimDeckActionError && e.status === 409,
+    );
+    assert.deepEqual(d.posts, []);
+  });
+
+  it("lands on the app's element when the app root carries no label (review #106 R1)", async () => {
+    const d = turnedDevice(1, { appLabel: null, owners: false });
+    assert.equal(await d.control.quarterTurns(iosTarget), 1);
+    await d.control.action(iosTarget, { type: "tapElement", selector: { id: "kitchen-menu" } });
+    assert.deepEqual(d.tapped, ["Meny"]);
+  });
+
+  it("reads upside-down portrait from a header and footer, the only off-centre elements (review #106 R3)", async () => {
+    const els = [
+      { label: "Header", type: "Other", frame: { x: 0, y: 0, width: 834, height: 200 } },
+      { label: "OK", type: "Button", frame: { x: 367, y: 580, width: 100, height: 50 } },
+      { label: "Footer", type: "Other", frame: { x: 0, y: 1010, width: 834, height: 200 } },
+    ];
+    const d = turnedDevice(2, { landscape: false, els });
+    await d.control.action(iosTarget, { type: "tap", x: 0.5, y: 0.1 });
+    assert.deepEqual(d.tapped, ["Header"]);
+  });
+
+  it("says so beside the result when nothing on a portrait screen can tell upright from upside down", async () => {
+    const d = turnedDevice(2, { landscape: false, els: [{ label: "OK", type: "Button", frame: { x: 367, y: 580, width: 100, height: 50 } }] });
+    const r = (await d.control.action(iosTarget, { type: "tap", x: 0.5, y: 0.5 })) as Record<string, unknown>;
+    assert.match(String(r.orientationUnverified), /could not read which way up/);
+  });
+
   it("taps a SpringBoard prompt in its own unrotated points", async () => {
     const d = turnedDevice(1, { springboard: true });
     await d.control.action(iosTarget, { type: "tapElement", selector: { label: "Åpne" } });
@@ -595,7 +655,7 @@ describe("SimDeckControl on a turned iOS device", () => {
       const url = new URL(String(input));
       if (url.pathname === "/api/health") return new Response("{}", { status: 200 });
       if (url.pathname.endsWith("/accessibility-tree")) {
-        return new Response(JSON.stringify({ roots: [{ AXLabel: " ", frame: { x: 0, y: 0, width: W, height: H }, children: [{ AXLabel: "Åpne", type: "Button", frame: { x: 366, y: 609, width: 48, height: 140 } }] }] }), { status: 200 });
+        return new Response(JSON.stringify({ roots: [{ AXLabel: " ", pid: 50, frame: { x: 0, y: 0, width: W, height: H }, children: [{ AXLabel: "Åpne", type: "Button", frame: { x: 366, y: 609, width: 48, height: 140 } }] }] }), { status: 200 });
       }
       if (url.pathname.endsWith("/action")) {
         posts.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
@@ -603,7 +663,7 @@ describe("SimDeckControl on a turned iOS device", () => {
       }
       return new Response("{}", { status: 200 });
     }) as unknown as typeof fetch;
-    const control = new SimDeckControl({ fetchImpl: impl, autostart: false });
+    const control = new SimDeckControl({ fetchImpl: impl, autostart: false, processNameImpl: async () => "SpringBoard" });
     assert.equal(await control.quarterTurns(iosTarget), null);
     await assert.rejects(() => control.action(iosTarget, { type: "tap", x: 0.5, y: 0.5 }), (e: unknown) => e instanceof SimDeckActionError && e.status === 409);
     assert.equal(posts.length, 0);

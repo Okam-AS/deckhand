@@ -132,6 +132,11 @@ async function resolveRefs(deps: DriveDeps, a: UiAction, freshAfter: number): Pr
   if ((deps.book.snapshot?.revision ?? 0) <= freshAfter) deps.book.record(await deps.observe(), { keepGone: true });
   if ((a.type === "waitForNot" || a.type === "assertNot") && deps.book.isGone(ref)) return null;
   const target = deps.book.resolve(ref, opts);
+  if (target.kind === "point" && target.space && isRotatedIos(deps.platform, deps.book.snapshot?.bounds)) {
+    throw new RefError(
+      `${ref} has no unique id or label, and on this turned iOS device it sits on ${target.space === "native" ? "SpringBoard's layer, whose points are not the app's" : "a layer deckhand cannot place"}, so a tap at its centre would land elsewhere — target it by a unique label, or answer the prompt by its label`,
+    );
+  }
   if (target.kind === "point") {
     if (a.type !== "tapElement") throw new RefError(`${ref} can only be tapped: it has no unique id or label for ${a.type} to match`);
     return { type: "tap", x: target.x, y: target.y };
