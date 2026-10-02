@@ -1,5 +1,5 @@
 import type { Selector, UiAction } from "./control.ts";
-import { RefError, shapeOf, type ScreenBook } from "./screen.ts";
+import { isRotatedIos, RefError, shapeOf, type Frame, type ScreenBook } from "./screen.ts";
 
 // ---------------------------------------------------------------------------
 // Running `ui` actions so that one call is one step for the agent: resolve refs, act, wait for
@@ -67,6 +67,14 @@ const STEP_GAP_MS = 250;
 /** Inside a list, a later step's element may still be rendering when its turn comes. */
 const BATCH_TAP_WAIT_MS = 3000;
 
+const TOUCHES = new Set<UiAction["type"]>(["tap", "tapElement", "swipe", "gesture", "scrollUntilVisible"]);
+
+/** What a list that touches the screen of a turned iOS device must be told. Upside-down portrait looks unturned in the tree and is not caught. */
+export function rotationWarning(platform: "ios" | "android", bounds: Frame | undefined, actions: UiAction[]): string | undefined {
+  if (!isRotatedIos(platform, bounds) || !actions.some((a) => TOUCHES.has(a.type))) return undefined;
+  return "This iOS device is turned to landscape, and SimDeck places touches as if it were not: taps, swipes and element taps can land somewhere else. Check the returned screen after every touch.";
+}
+
 export function isMutating(a: UiAction): boolean {
   return CHANGE_WAIT_MS[a.type] !== undefined;
 }
@@ -109,18 +117,22 @@ function withSelector(a: UiAction, selector: Selector): UiAction {
 }
 
 /**
- * Turn a `{ref}` selector into what SimDeck understands. A point is only taken from a capture made
- * after the last action — the viewer's own taps move the screen too, so an older one is re-read.
+ * Turn a `{ref}` selector into what SimDeck understands, judged on a capture made after the last
+ * action — the viewer's own taps move the screen too, so an older one is re-read.
  */
-async function resolveRefs(deps: DriveDeps, a: UiAction, freshAfter: number): Promise<UiAction> {
+/** `null`: the action asked for an element to be absent, and the ref's element is already gone. */
+async function resolveRefs(deps: DriveDeps, a: UiAction, freshAfter: number): Promise<UiAction | null> {
   if (!("selector" in a) || !a.selector.ref) return a;
   const ref = a.selector.ref;
   // Decided: on Android a ref is tapped at its element's centre, never matched by name — how SimDeck's selectors match uiautomator fields is unverified.
   const opts = { preferPoint: deps.platform === "android" && a.type === "tapElement" };
-  let target = deps.book.resolve(ref, opts);
-  if (target.kind === "point" && (deps.book.snapshot?.revision ?? 0) <= freshAfter) {
-    deps.book.record(await deps.observe());
-    target = deps.book.resolve(ref, opts);
+  // A ref is only as good as the screen it is resolved on, and the screen moves between calls
+  // (the viewer's own taps, a call with observe "none"): resolve it on a capture newer than the last action.
+  if ((deps.book.snapshot?.revision ?? 0) <= freshAfter) deps.book.record(await deps.observe(), { keepGone: true });
+  if ((a.type === "waitForNot" || a.type === "assertNot") && deps.book.isGone(ref)) return null;
+  const target = deps.book.resolve(ref, opts);
+  if (target.kind === "point" && isRotatedIos(deps.platform, deps.book.snapshot?.bounds)) {
+    throw new RefError(`${ref} has no unique id or label, and this iOS device is rotated: SimDeck touches the unrotated screen, so a tap at its centre would land elsewhere`);
   }
   if (target.kind === "point") {
     if (a.type !== "tapElement") throw new RefError(`${ref} can only be tapped: it has no unique id or label for ${a.type} to match`);
@@ -129,7 +141,8 @@ async function resolveRefs(deps: DriveDeps, a: UiAction, freshAfter: number): Pr
   return withSelector(a, target.selector);
 }
 
-export async function drive(deps: DriveDeps, actions: UiAction[], observe: ObserveMode): Promise<DriveResult> {
+/** `single`: the caller passed one `action`, whose non-selector failure is thrown to it as is. */
+export async function drive(deps: DriveDeps, actions: UiAction[], observe: ObserveMode, single = false): Promise<DriveResult> {
   const results: unknown[] = [];
   const sleep = deps.sleep ?? defaultSleep;
   let failure: DriveFailure | undefined;
@@ -138,7 +151,12 @@ export async function drive(deps: DriveDeps, actions: UiAction[], observe: Obser
   for (let i = 0; i < actions.length; i++) {
     let a = actions[i]!;
     try {
-      a = await resolveRefs(deps, a, freshAfter);
+      const resolved = await resolveRefs(deps, a, freshAfter);
+      if (resolved === null) {
+        results.push({ action: a.type, ok: true, gone: true });
+        continue;
+      }
+      a = resolved;
       if (i > 0 && a.type === "tapElement" && a.waitTimeoutMs == null) a = { ...a, waitTimeoutMs: BATCH_TAP_WAIT_MS };
       results.push(await deps.act(a));
     } catch (e) {
@@ -153,12 +171,15 @@ export async function drive(deps: DriveDeps, actions: UiAction[], observe: Obser
       };
       break;
     }
+    // Any step takes time the screen can move in (a verifier waits): a ref after it is judged on a new capture.
+    freshAfter = deps.book.snapshot?.revision ?? 0;
     if (!isMutating(a)) continue;
     lastMove = a;
-    freshAfter = deps.book.snapshot?.revision ?? 0;
     if (i < actions.length - 1) await sleep(STEP_GAP_MS);
   }
   if (observe === "none" && !(failure && lastMove)) return { results, failure, settleMs: 0 };
+  // Nothing moved and the failure is thrown to the caller as is: a look would advance what it was shown.
+  if (single && failure && !("selector" in failure.action)) return { results, failure, settleMs: 0 };
   // The action already happened: a look that fails must not turn it into a failure.
   let tree: unknown;
   let settleMs = 0;

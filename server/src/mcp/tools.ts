@@ -20,10 +20,10 @@ import { isAuthProblem } from "../github/credentials.ts";
 import type { SetupStore } from "../setup/setupStore.ts";
 import { paths } from "../paths.ts";
 import type { AuditLog } from "../audit.ts";
-import { summarizeArgs } from "../audit.ts";
+import { scrubTyped, summarizeArgs } from "../audit.ts";
 import { SimDeckUnavailableError } from "../testing/simdeck.ts";
 import { SimDeckActionError, type UiAction } from "../testing/control.ts";
-import { drive, isMutating } from "../testing/drive.ts";
+import { drive, isMutating, rotationWarning } from "../testing/drive.ts";
 import { FLOWS_FILENAME, readFlow } from "../engine/flows.ts";
 import { RefError as ScreenRefError } from "../testing/screen.ts";
 import type { JevProvider } from "../navigate/jev.ts";
@@ -151,10 +151,32 @@ function toFail(e: unknown): CallToolResult {
 
 const MAX_UI_ACTIONS = 25;
 
+/** A device call that never returns must not hold the device's queue. */
+function within<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} did not come back within ${ms / 1000}s`)), ms);
+  });
+  return Promise.race([p, late]).finally(() => clearTimeout(timer));
+}
+
+/** One `ui` or text `describe` at a time per device: they share the device's refs and the screen last shown. */
+const deviceQueues = new Map<string, Promise<unknown>>();
+function onDevice<T>(previewId: string, deviceId: string, run: () => Promise<T>): Promise<T> {
+  const key = `${previewId}/${deviceId}`;
+  const next = (deviceQueues.get(key) ?? Promise.resolve()).catch(() => {}).then(run);
+  const tail = next.catch(() => {});
+  deviceQueues.set(key, tail);
+  void tail.then(() => {
+    if (deviceQueues.get(key) === tail) deviceQueues.delete(key);
+  });
+  return next;
+}
+
 const selectorSchema = z.object({
   ref: z
     .string()
-    .regex(/^@?e\d+$/)
+    .regex(/^e\d+$/)
     .optional()
     .describe("a ref from the screen `ui` or describe {format: \"text\"} returned, e.g. \"e12\"; when set, the other fields are ignored"),
   id: z.string().optional(),
@@ -235,7 +257,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         return r;
       })
       .catch((e) => {
-        record("error", e instanceof Error ? e.message : String(e));
+        record("error", scrubTyped(e instanceof Error ? e.message : String(e), args));
         return toFail(e);
       });
   };
@@ -272,7 +294,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             "Start with `list_apps`. When you can run commands on the deckhand host, prefer its existing checkout: register it with `deckhand app add <id> --path <dir>`; otherwise use `add_app` for a GitHub source. Never ask for or relay a credential or app secret in chat; relay the one-time setup link if `add_app` returns one.",
             "Before `start_preview`, ask the user to choose public access or a PIN. A public link is open to anyone with its URL; web previews require a PIN. Pass a user-chosen 4–6 digit PIN without repeating it in chat.",
             "Give the `start_preview` URL to the user immediately, then poll `preview_status` until the target is ready before driving it. Reuse an equivalent live preview; use `restart_preview` for a local native/dependency change or after pushing new git commits, not for ordinary hot reloads.",
-            "For visible, end-to-end work, start a test run, then use `describe` to orient, `ui` to act, and `describe` or `screenshot` to verify. Update each test step as it runs and finish the run with an evidence-based verdict.",
+            "For visible, end-to-end work, start a test run, then use `describe` to orient and `ui` to act — `ui` returns the screen after it, and takes a list of `actions` for a known sequence — and `screenshot` to verify. Update each test step as it runs and finish the run with an evidence-based verdict.",
             "When build or launch fails, read `logs` with its default build source. When a ready viewer has no video, read `logs` with source `stream`. Stop previews you no longer need with `stop_preview`.",
             "If any JSON tool response includes `deckhandUpdate`, ask the operator before pulling or restarting. Never update or restart automatically: a restart tears down booted simulators and emulators.",
           ],
@@ -1065,18 +1087,23 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       audited("describe", args, async () => {
         const denied = requireLivePreview(args.previewId);
         if (denied) return denied;
-        const tree = await engine.describe(args.previewId, args.deviceId, {
-          source: args.source,
-          interactiveOnly: args.interactiveOnly,
-          maxDepth: args.maxDepth,
-        });
+        const capture = () =>
+          engine.describe(args.previewId, args.deviceId, {
+            source: args.source,
+            interactiveOnly: args.interactiveOnly,
+            maxDepth: args.maxDepth,
+          });
         // The dev menu is the one thing on screen that is not the app. An agent that
         // does not know that files the overlay's behaviour as an app bug — observed.
         if (args.format === "text") {
-          const book = engine.screenBook(args.previewId, args.deviceId);
-          book.record(tree);
-          return ok({ screen: book.full(), ...devMenuHint(tree) });
+          return onDevice(args.previewId, args.deviceId, async () => {
+            const tree = await capture();
+            const book = engine.screenBook(args.previewId, args.deviceId);
+            book.record(tree);
+            return ok({ screen: book.full(), ...devMenuHint(tree) });
+          });
         }
+        const tree = await capture();
         return ok({ describe: tree, ...devMenuHint(tree) });
       }),
   );
@@ -1087,7 +1114,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       title: "Drive the device UI",
       description:
         "Drive the app: one `action`, or `actions` — a list run in order in ONE call, stopping at the first failure (use it for any sequence you already know: a sign-in, a menu path, a form) — or `flow`, a list saved by name in the app's checkout. After an action that can move the screen, deckhand waits until the screen is still and returns it as `screen`: the whole screen the first time, then only what changed. You do not need `describe` between steps. " +
-        "Target elements by `{ref}` from that listing (e.g. tapElement {selector: {ref: \"e12\"}}) — it cannot miss the way a guessed selector can; otherwise by `id`, then `label`. A ref that has left the screen is retried by its id or label. " +
+        "Target elements by `{ref}` from that listing (e.g. tapElement {selector: {ref: \"e12\"}}) — it cannot miss the way a guessed selector can; otherwise by `id`, then `label`. A ref names one element while it is on screen; once that element has left the screen the ref is refused, never retried by name — take a fresh ref from the screen you were given. " +
         "Actions: tap {x,y} (0..1 normalized), tapElement {selector}, type {text}, key {name: enter|backspace|tab|escape|up|down|left|right}, button {name}, home, back, dismissKeyboard, sleep {ms}, swipe, gesture {preset: scroll-up|scroll-down|scroll-left|scroll-right}, scrollUntilVisible {selector}, toggleAppearance, openUrl {url} (a deep link is the fastest way to a known screen), and the verifiers waitFor/waitForNot/assert/assertNot/query {selector}. " +
         "Selector semantics differ and it costs a timeout to learn: `text` matches an element's LABEL for waitFor/assert, while text living in a field's value or placeholder matches only `query`. A coordinate read off a screenshot is the most common way an agent taps the wrong thing; to reach something off-screen use scrollUntilVisible; to go back use `back`; if the keyboard covers what you need, dismissKeyboard. iOS can't HID-type non-US characters — non-ASCII text is pasted via the clipboard (focus the field first). Needs the SimDeck testing backend.",
       inputSchema: {
@@ -1112,21 +1139,26 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         const single = args.action != null;
         let list = (args.actions ?? [args.action]) as UiAction[];
         if (args.flow != null) {
-          const found = readFlow(engine.sourceDirOf(args.previewId), args.flow, uiActionSchema);
+          const found = readFlow(engine.sourceDirOf(args.previewId), args.flow, uiActionSchema, MAX_UI_ACTIONS);
           if (!found.ok) return failWith(found.code, found.message, found.available ? { available: found.available } : {});
           list = found.actions as UiAction[];
         }
         const observe = args.observe ?? (list.some(isMutating) ? "auto" : "none");
-        const run = await drive(
+        const platform = engine.platformOf(args.previewId, args.deviceId);
+        const book = engine.screenBook(args.previewId, args.deviceId);
+        const run = await onDevice(args.previewId, args.deviceId, () => drive(
           {
-            platform: engine.platformOf(args.previewId, args.deviceId),
-            book: engine.screenBook(args.previewId, args.deviceId),
+            platform,
+            book,
             act: (a) => engine.ui(args.previewId, args.deviceId, a),
             observe: () => engine.describe(args.previewId, args.deviceId, {}),
           },
           list,
           observe,
-        );
+          single,
+        ));
+        const warning = rotationWarning(platform, book.snapshot?.bounds, list);
+        const rotated = warning ? { rotated: warning } : {};
         // A failed verifier is noted HERE or the fact is lost before update_test_run can use it.
         run.results.forEach((_, i) => {
           const t = list[i]!.type;
@@ -1137,7 +1169,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         const nudgeType = list.find((a) => DRIVING_UI_ACTIONS.has(a.type))?.type ?? list[0]!.type;
         const f = run.failure;
         if (!f) {
-          return ok({ ...(single ? { result: run.results[0] } : { results: run.results }), ...look, ...devMenu, ...testRunNudge(args.previewId, nudgeType) });
+          return ok({ ...(single ? { result: run.results[0] } : { results: run.results }), ...look, ...devMenu, ...rotated, ...testRunNudge(args.previewId, nudgeType) });
         }
         const failed = f.action;
         if (single && !("selector" in failed) && !(f.error instanceof ScreenRefError)) throw f.error;
@@ -1162,6 +1194,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           ...(run.screen ? { currentScreen: run.screen } : {}),
           ...(run.screenError ? { screenUnavailable: run.screenError } : {}),
           ...devMenu,
+          ...rotated,
         });
       }),
   );
@@ -1199,12 +1232,12 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         if (denied) return denied;
         const appId = engine.appIdFor(args.previewId);
         const locale = args.uiLanguage ?? (await engine.uiLanguage(args.previewId, args.deviceId));
-        const result = await navigate(
+        const result = await onDevice(args.previewId, args.deviceId, () => navigate(
           { goal: args.goal, maxSteps: args.maxSteps ?? 10, minConfidence: args.minConfidence, text: args.text ?? {}, locale },
           {
             describe: () => engine.describe(args.previewId, args.deviceId, { source: "auto" }),
             act: (a) => engine.ui(args.previewId, args.deviceId, a),
-            frame: () => engine.screenshot(args.previewId, args.deviceId),
+            frame: () => within(engine.screenshot(args.previewId, args.deviceId), 30_000, "the screenshot"),
             jev: decider,
             onEgress: (e) => {
               if (!ctx.jev?.().ok) throw new Error("the TypeSafe key was removed while it ran");
@@ -1216,7 +1249,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
               });
             },
           },
-        );
+        ));
         const nextStep =
           result.outcome === "done"
             ? "The decision model judged the goal reached. Confirm it with one `ui` assert or waitFor on what the goal promised before you report it."

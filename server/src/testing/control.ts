@@ -83,6 +83,20 @@ const CMD_MOD = 0x08;
 
 export interface SimDeckControlOptions extends SimDeckDaemonOptions {
   daemon?: SimDeckDaemon;
+  /** How long one request may take beyond the wait the action itself asks for. */
+  requestTimeoutMs?: number;
+}
+
+/** The wait an action asks SimDeck for, which its request must be allowed on top of the base timeout. */
+function askedWaitMs(init: RequestInit | undefined): number {
+  if (typeof init?.body !== "string") return 0;
+  try {
+    const b = JSON.parse(init.body) as Record<string, unknown>;
+    const n = (k: string) => (typeof b[k] === "number" && Number.isFinite(b[k]) ? (b[k] as number) : 0);
+    return n("timeoutMs") + n("waitTimeoutMs") + n("ms") + n("durationMs") + (b.action === "scrollUntilVisible" ? 30_000 : 0);
+  } catch {
+    return 0;
+  }
 }
 
 export class SimDeckControl {
@@ -91,7 +105,17 @@ export class SimDeckControl {
 
   constructor(opts: SimDeckControlOptions = {}) {
     this.daemon = opts.daemon ?? new SimDeckDaemon(opts);
-    this.fetchImpl = opts.fetchImpl ?? fetch;
+    const base = opts.fetchImpl ?? fetch;
+    const baseMs = opts.requestTimeoutMs ?? 30_000;
+    // A request SimDeck never answers would hold the device's queue until the OS gave up (~5 min).
+    this.fetchImpl = ((input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const ms = baseMs + askedWaitMs(init);
+      let timer: NodeJS.Timeout | undefined;
+      const late = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new SimDeckActionError(`SimDeck did not answer within ${Math.round(ms / 1000)} s — the action may still have run on the device; read the screen before you retry it`, 504)), ms);
+      });
+      return Promise.race([base(input, { ...init, signal: init?.signal ?? AbortSignal.timeout(ms) }), late]).finally(() => clearTimeout(timer));
+    }) as typeof fetch;
   }
 
   /**

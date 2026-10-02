@@ -46,16 +46,30 @@ export function summarizeArgs(args: unknown): Record<string, unknown> | undefine
 
 function redactObject(obj: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(obj)) {
-    if (SENSITIVE_KEY.test(k)) {
-      out[k] = "[redacted]";
-    } else if (v != null && typeof v === "object" && !Array.isArray(v)) {
-      out[k] = redactObject(v as Record<string, unknown>);
-    } else if (typeof v === "string" && v.length > 200) {
-      out[k] = v.slice(0, 200) + "…";
-    } else {
-      out[k] = v;
-    }
-  }
+  // What a `type` action types is what the operator keys in: a PIN, a code, a password.
+  const typed = obj.type === "type";
+  for (const [k, v] of Object.entries(obj)) out[k] = SENSITIVE_KEY.test(k) || (typed && k === "text") ? "[redacted]" : redactValue(v);
   return out;
+}
+
+/** Lists too: `ui` takes its actions as one. */
+function redactValue(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(redactValue);
+  if (v != null && typeof v === "object") return redactObject(v as Record<string, unknown>);
+  if (typeof v === "string" && v.length > 200) return v.slice(0, 200) + "…";
+  return v;
+}
+
+/** An error can quote what a `type` action typed (SimDeck echoes it): take it out before it is logged. */
+export function scrubTyped(message: string, args: unknown): string {
+  const typed: string[] = [];
+  const walk = (v: unknown): void => {
+    if (Array.isArray(v)) return v.forEach(walk);
+    if (!v || typeof v !== "object") return;
+    const o = v as Record<string, unknown>;
+    if (o.type === "type" && typeof o.text === "string" && o.text) typed.push(o.text);
+    Object.values(o).forEach(walk);
+  };
+  walk(args);
+  return typed.sort((a, b) => b.length - a.length).reduce((m, t) => m.split(t).join("[redacted]"), message);
 }

@@ -92,8 +92,10 @@ export function flattenTree(tree: unknown): ScreenNode[] {
     const raw = n as RawNode;
     const role = str(raw.role, raw.AXRole, raw.type, raw.className) ?? "Element";
     const input = TEXT_INPUT.test(role);
-    const label = input ? str(raw.label, raw.AXLabel, raw.hint, raw.contentDescription) : str(raw.label, raw.AXLabel, raw.text, raw.contentDescription, raw.title);
+    const named = input ? str(raw.label, raw.AXLabel, raw.hint, raw.contentDescription) : str(raw.label, raw.AXLabel, raw.text, raw.contentDescription, raw.title);
     const value = str(raw.value, raw.AXValue, input ? raw.text : undefined);
+    // SimDeck's compact Android tree copies an EditText's text into its label: typing would rename the field.
+    const label = /edittext/i.test(role) && named === value ? undefined : named;
     const id = str(raw.id, raw.AXUniqueId, raw.AXIdentifier, raw.resourceId);
     if (label || value || id) {
       const frame = frameOf(raw.frame);
@@ -185,7 +187,7 @@ export class ScreenBook {
    * Elements that share role, id and label cannot be told apart once one of them moves or goes,
    * so a group of them keeps its refs only while every one of them is exactly where it was.
    */
-  record(tree: unknown): Snapshot {
+  record(tree: unknown, opts: { keepGone?: boolean } = {}): Snapshot {
     const nodes = flattenTree(tree);
     const groups = new Map<string, ScreenNode[]>();
     for (const n of nodes) groups.set(keyOf(n), [...(groups.get(keyOf(n)) ?? []), n]);
@@ -194,23 +196,51 @@ export class ScreenBook {
       if (members.length === 1) {
         const ref = this.byKey.get(k) ?? `e${++this.counter}`;
         this.byKey.set(k, ref);
+        this.groups.delete(k);
         refs.set(members[0]!, ref);
         continue;
       }
       const where = members.map((n) => frameKey(n.frame)).join(";");
       const held = this.groups.get(k);
-      const group = held?.where === where ? held.refs : members.map(() => `e${++this.counter}`);
+      let group = held?.where === where ? held.refs : undefined;
+      if (!group) {
+        this.byKey.delete(k);
+        group = members.map(() => `e${++this.counter}`);
+      }
       this.groups.set(k, { where, refs: group });
       members.forEach((n, i) => refs.set(n, group[i]!));
+    }
+    // A key gone from the screen gives up its ref: what shows up under it later may be another
+    // element of the same name (the «Slett» of the next order), so it gets a ref of its own.
+    // A capture taken mid-animation (before resolving a ref) may miss an element that is still there.
+    if (!opts.keepGone) {
+      for (const k of [...this.byKey.keys()]) if (!groups.has(k)) this.byKey.delete(k);
+      for (const k of [...this.groups.keys()]) if (!groups.has(k)) this.groups.delete(k);
     }
     const next = new Map<string, ScreenNode>();
     for (const n of nodes) {
       const ref = refs.get(n)!;
       next.set(ref, n);
-      this.remember(ref, groups.get(keyOf(n))!.length === 1 ? n : { ...n, ambiguous: true });
+      this.remember(ref, n);
     }
     this.latest = { revision: ++this.revision, shape: shapeOf(tree), bounds: screenBounds(tree), nodes: next };
     return this.latest;
+  }
+
+  /**
+   * Is a ref's element certainly not on the current screen: it had an id (only an id survives a
+   * rename or a move), it is not listed, and nothing listed shares its id or label.
+   */
+  isGone(ref: string): boolean {
+    const r = ref.replace(/^@/, "");
+    return !!this.remembered.get(r)?.id && !this.latest?.nodes.has(r) && this.holdersOf(r).length === 0;
+  }
+
+  /** Refs on the current screen that share the id or label a ref had. */
+  private holdersOf(r: string): string[] {
+    const old = this.remembered.get(r);
+    if (!old || !this.latest) return [];
+    return [...this.latest.nodes.entries()].filter(([, n]) => (old.id && n.id === old.id) || (old.label && n.label === old.label)).map(([ref]) => ref);
   }
 
   get snapshot(): Snapshot | null {
@@ -272,10 +302,10 @@ export class ScreenBook {
     }
     const old = this.remembered.get(r);
     if (!old) throw new RefError(`unknown ref ${r}`);
-    if (old.ambiguous) throw new RefError(`${r} is no longer on screen, and it shared its name with other elements, so it cannot be found again by name`);
-    if (old.id) return { kind: "selector", selector: { id: old.id } };
-    if (old.label) return { kind: "selector", selector: { label: old.label } };
-    throw new RefError(`${r} is no longer on screen and has no id or label to find it by`);
+    // A ref is never retried by its name: whatever answers to that name now may be another element
+    // (the «Slett» of the next order once this one is deleted), and SimDeck would tap it.
+    const holders = this.holdersOf(r);
+    throw new RefError(`${r} is no longer on screen${holders.length ? `; its name is now on ${holders.join(", ")}, a different element` : ""} — target what you want by a ref from the current screen`);
   }
 
   private remember(ref: string, n: Remembered): void {
@@ -290,7 +320,12 @@ export class ScreenBook {
   }
 }
 
-type Remembered = ScreenNode & { ambiguous?: boolean };
+type Remembered = ScreenNode;
+
+/** iOS screens are portrait in hardware; a wider app root means the device is turned. */
+export function isRotatedIos(platform: "ios" | "android", bounds: Frame | undefined): boolean {
+  return platform === "ios" && !!bounds && bounds.width > bounds.height;
+}
 
 function centre(f: Frame, b: Frame): RefTarget {
   return { kind: "point", x: (f.x + f.width / 2 - b.x) / b.width, y: (f.y + f.height / 2 - b.y) / b.height };
