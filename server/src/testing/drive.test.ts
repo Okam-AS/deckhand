@@ -296,4 +296,20 @@ describe("drive", () => {
     assert.ok(r2.failure, "a button without an id that was renamed is still there");
     assert.equal(acted.length, 0);
   });
+
+  it("judges a ref after a waiting verifier on a capture taken after the wait", async () => {
+    const banner = (shown: boolean) => ({ roots: [{ role: "Application", label: "App", frame: { x: 0, y: 0, width: 400, height: 800 }, children: [{ role: "Group", id: "spinner", label: "Laster", frame: { x: 0, y: 0, width: 40, height: 40 } }, ...(shown ? [{ role: "Alert", id: "error", label: "Feil", frame: { x: 0, y: 100, width: 400, height: 40 } }] : [])] }] });
+    let waited = false;
+    const { deps } = fakeDevice(() => banner(waited));
+    const ref = [...deps.book.record(banner(true)).nodes].find(([, n]) => n.id === "error")![0];
+    deps.book.record(banner(false));
+    const act = deps.act;
+    deps.act = async (a) => {
+      if (a.type === "waitFor") waited = true;
+      return act(a);
+    };
+    const spinner = [...deps.book.snapshot!.nodes].find(([, n]) => n.id === "spinner")![0];
+    const r = await drive(deps, [{ type: "assert", selector: { ref: spinner } }, { type: "waitFor", selector: { id: "spinner" } }, { type: "assertNot", selector: { ref } }], "none");
+    assert.ok(r.failure, "the banner that appeared during the wait is not taken for gone");
+  });
 });

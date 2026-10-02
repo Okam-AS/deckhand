@@ -171,9 +171,10 @@ export async function drive(deps: DriveDeps, actions: UiAction[], observe: Obser
       };
       break;
     }
+    // Any step takes time the screen can move in (a verifier waits): a ref after it is judged on a new capture.
+    freshAfter = deps.book.snapshot?.revision ?? 0;
     if (!isMutating(a)) continue;
     lastMove = a;
-    freshAfter = deps.book.snapshot?.revision ?? 0;
     if (i < actions.length - 1) await sleep(STEP_GAP_MS);
   }
   if (observe === "none" && !(failure && lastMove)) return { results, failure, settleMs: 0 };
