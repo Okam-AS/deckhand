@@ -66,7 +66,8 @@ export const configSchema = z.object({
   // describe/ui, so a non-testing install pays nothing.
   simdeck: z
     .object({
-      bin: z.string().min(1).default("simdeck"),
+      // Omit to run the pinned copy in node_modules (testing/simdeck.ts vendoredSimDeckBin).
+      bin: z.string().min(1).optional(),
       port: z.number().int().min(1).max(65535).default(4310),
       // Best-effort start the local SimDeck service if it isn't already up. On
       // failure, describe/ui return an actionable "install/start SimDeck" error.

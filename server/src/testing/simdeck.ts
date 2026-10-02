@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 
 // ---------------------------------------------------------------------------
 // SimDeck daemon lifecycle (control-only). deckhand talks to a local SimDeck
@@ -21,6 +23,18 @@ import { execFile } from "node:child_process";
 // in control.ts. Mirrors the injectable-impl shape of streaming/serveSim.ts so
 // it's deterministically testable.
 // ---------------------------------------------------------------------------
+
+/**
+ * Absolute path to the PINNED SimDeck launcher — `simdeck` is an exact-version dependency of the
+ * server, so the daemon deckhand starts is the one its tests and `ui` geometry were checked
+ * against, not whatever a global install happens to be. The package exports only `./test`, so
+ * resolve that and walk to the package root: `packages/simdeck-test/dist/index.js` → root.
+ */
+export function vendoredSimDeckBin(): string {
+  const require = createRequire(import.meta.url);
+  const pkgRoot = dirname(dirname(dirname(dirname(require.resolve("simdeck/test")))));
+  return join(pkgRoot, "packages", "cli", "bin", "simdeck.mjs");
+}
 
 export interface SimDeckDaemonOptions {
   bin?: string;
@@ -68,7 +82,7 @@ export class SimDeckDaemon {
   private starting: Promise<string> | null = null;
 
   constructor(opts: SimDeckDaemonOptions = {}) {
-    this.bin = opts.bin ?? "simdeck";
+    this.bin = opts.bin ?? vendoredSimDeckBin();
     this.port = opts.port ?? 4310;
     this.autostart = opts.autostart ?? true;
     this.fetchImpl = opts.fetchImpl ?? fetch;
@@ -124,8 +138,9 @@ export class SimDeckDaemon {
   private unavailable(): SimDeckUnavailableError {
     return new SimDeckUnavailableError(
       `SimDeck isn't reachable on 127.0.0.1:${this.port}`,
-      `Agent-driven testing needs SimDeck on the deckhand machine. Install it (\`npm i -g simdeck\`) ` +
-        `and/or start it (run \`simdeck\`), then retry. deckhand keeps its own video stream — SimDeck is control-only.`,
+      `Agent-driven testing needs SimDeck, pinned in deckhand's own dependencies: run \`npm ci\` in the deckhand ` +
+        `checkout, then retry. SimDeck runs one service per Mac user, so one started on another port stands in the way. ` +
+        `deckhand keeps its own video stream — SimDeck is control-only.`,
     );
   }
 

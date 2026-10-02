@@ -325,7 +325,7 @@ describe("the SimDeck client's source", () => {
       assert.doesNotMatch(
         src,
         /(?<![.\w])\/(input|control|webrtc|refresh)\b/,
-        `${file} names a forbidden SimDeck endpoint — REST only (accessibility-tree, action, pasteboard, screenshot.png, health).`,
+        `${file} names a forbidden SimDeck endpoint — REST only (accessibility-tree, accessibility-point, action, pasteboard, screenshot.png, health).`,
       );
     }
   });
@@ -429,5 +429,191 @@ describe("SimDeckDaemon", () => {
       () => daemon.ensureRunning(),
       (e: unknown) => e instanceof SimDeckUnavailableError && Boolean((e as SimDeckUnavailableError).hint),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A turned iOS device, simulated the way SimDeck behaves on one: the tree is in the turned UI,
+// `accessibility-point` hit-tests in the unrotated screen's points and answers with the UI frame,
+// and a normalized `tap` lands in the unrotated screen. A tap only "hits" when deckhand rotated it.
+// ---------------------------------------------------------------------------
+
+type F = { x: number; y: number; width: number; height: number };
+
+function turnedDevice(turns: number, opts: { landscape?: boolean; springboard?: boolean; appearAfter?: number; fullOnly?: string } = {}) {
+  const landscape = opts.landscape ?? true;
+  const W = landscape ? 1210 : 834;
+  const H = landscape ? 834 : 1210;
+  const elements: { label: string; id?: string; type: string; frame: F }[] = [
+    { label: "Meny", id: "kitchen-menu", type: "Button", frame: { x: W - 64, y: 40, width: 48, height: 48 } },
+    { label: "Start", type: "Button", frame: { x: 20, y: H - 60, width: 300, height: 44 } },
+    { label: "Back", type: "Button", frame: { x: 16, y: 20, width: 60, height: 40 } },
+  ];
+  let reads = 0;
+  const tree = (interactiveOnly: boolean) => {
+    reads++;
+    let visible = opts.appearAfter != null && reads <= opts.appearAfter ? elements.slice(1) : elements;
+    if (interactiveOnly && opts.fullOnly) visible = visible.filter((e) => e.label !== opts.fullOnly);
+    const roots: unknown[] = [
+      { AXLabel: "Okam KDS", type: "Application", frame: { x: 0, y: 0, width: W, height: H }, children: visible.map((e) => ({ AXLabel: e.label, AXUniqueId: e.id ?? null, type: e.type, frame: e.frame })) },
+    ];
+    if (opts.springboard) {
+      roots.push({ AXLabel: " ", type: "Application", frame: { x: 0, y: 0, width: W, height: H }, children: [{ AXLabel: "Åpne", type: "Button", frame: { x: 366, y: 609, width: 48, height: 140 } }] });
+    }
+    return { roots };
+  };
+  // The unrotated screen's normalized point → the UI's, the inverse of toNative.
+  const toUi = (x: number, y: number) => {
+    switch (turns) {
+      case 1: return { u: y, v: 1 - x };
+      case 2: return { u: 1 - x, v: 1 - y };
+      case 3: return { u: 1 - y, v: x };
+      default: return { u: x, v: y };
+    }
+  };
+  const nativeW = Math.min(W, H);
+  const nativeH = Math.max(W, H);
+  const at = (u: number, v: number) => elements.find((e) => u * W >= e.frame.x && u * W <= e.frame.x + e.frame.width && v * H >= e.frame.y && v * H <= e.frame.y + e.frame.height);
+  const tapped: string[] = [];
+  const posts: Record<string, unknown>[] = [];
+  const impl = (async (input: unknown, init?: RequestInit) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/api/health") return new Response("{}", { status: 200 });
+    if (url.pathname.endsWith("/accessibility-tree")) {
+      return new Response(JSON.stringify(tree(url.searchParams.get("interactiveOnly") === "true")), { status: 200 });
+    }
+    if (url.pathname.endsWith("/accessibility-point")) {
+      const { u, v } = toUi(Number(url.searchParams.get("x")) / nativeW, Number(url.searchParams.get("y")) / nativeH);
+      const e = at(u, v);
+      const root = { x: 0, y: 0, width: nativeW, height: nativeH };
+      return new Response(JSON.stringify({ roots: [e ? { AXLabel: e.label, frame: e.frame } : { frame: root }] }), { status: 200 });
+    }
+    if (url.pathname.endsWith("/action")) {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      posts.push(body);
+      if (body.action === "tap" && typeof body.x === "number") {
+        const { u, v } = toUi(body.x as number, body.y as number);
+        tapped.push(at(u, v)?.label ?? "nothing");
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("not found", { status: 404 });
+  }) as unknown as typeof fetch;
+  const control = new SimDeckControl({ fetchImpl: impl, autostart: false });
+  const centre = (label: string) => {
+    const f = elements.find((e) => e.label === label)!.frame;
+    return { x: (f.x + f.width / 2) / W, y: (f.y + f.height / 2) / H };
+  };
+  return { control, tapped, posts, centre, toUi };
+}
+
+describe("SimDeckControl on a turned iOS device", () => {
+  for (const turns of [1, 3, 2]) {
+    const shape = turns === 2 ? "upside-down portrait" : `landscape, ${turns} quarter turn${turns === 1 ? "" : "s"}`;
+    it(`reads the turn and lands tapElement on its element (${shape})`, async () => {
+      const d = turnedDevice(turns, { landscape: turns !== 2 });
+      assert.equal(await d.control.quarterTurns(iosTarget), turns);
+      await d.control.action(iosTarget, { type: "tapElement", selector: { id: "kitchen-menu" } });
+      await d.control.action(iosTarget, { type: "tapElement", selector: { label: "Start" } });
+      assert.deepEqual(d.tapped, ["Meny", "Start"]);
+      assert.ok(!d.posts.some((p) => p.selector), "no selector reaches SimDeck on a turned device");
+    });
+
+    it(`lands a raw tap given in the UI's coordinates (${shape})`, async () => {
+      const d = turnedDevice(turns, { landscape: turns !== 2 });
+      const p = d.centre("Meny");
+      await d.control.action(iosTarget, { type: "tap", x: p.x, y: p.y });
+      assert.deepEqual(d.tapped, ["Meny"]);
+    });
+
+    it(`rotates a swipe and a gesture preset with the device (${shape})`, async () => {
+      const d = turnedDevice(turns, { landscape: turns !== 2 });
+      await d.control.action(iosTarget, { type: "swipe", startX: 0.5, startY: 0.8, endX: 0.5, endY: 0.2, durationMs: 300 });
+      await d.control.action(iosTarget, { type: "gesture", preset: "scroll-down" });
+      const swipes = d.posts.filter((p) => p.action === "swipe");
+      assert.equal(swipes.length, 2);
+      for (const s of swipes) {
+        const from = d.toUi(s.startX as number, s.startY as number);
+        const to = d.toUi(s.endX as number, s.endY as number);
+        assert.ok(Math.abs(from.u - to.u) < 1e-9 && from.v > to.v, `an upward finger in the UI, got ${JSON.stringify({ from, to })}`);
+      }
+      assert.ok(!d.posts.some((p) => p.action === "gesture"), "the preset is sent as the swipe it is");
+    });
+  }
+
+  it("passes every action through untouched on an upright device", async () => {
+    const d = turnedDevice(0, { landscape: false });
+    await d.control.action(iosTarget, { type: "tapElement", selector: { id: "kitchen-menu" } });
+    await d.control.action(iosTarget, { type: "gesture", preset: "scroll-down" });
+    assert.deepEqual(d.posts, [
+      { action: "tap", selector: { id: "kitchen-menu" } },
+      { action: "gesture", preset: "scroll-down" },
+    ]);
+  });
+
+  it("taps `back` by the back button's label on a turned device", async () => {
+    const d = turnedDevice(3);
+    const r = await d.control.action(iosTarget, { type: "back" });
+    assert.deepEqual(r, { action: "back", method: "backLabel" });
+    assert.deepEqual(d.tapped, ["Back"]);
+  });
+
+  it("waits for an element that renders late, as SimDeck's waitTimeoutMs does", async () => {
+    const d = turnedDevice(1, { appearAfter: 3 });
+    await d.control.action(iosTarget, { type: "tapElement", selector: { id: "kitchen-menu" }, waitTimeoutMs: 3000 });
+    assert.deepEqual(d.tapped, ["Meny"]);
+  });
+
+  it("reads the full tree once before giving up, as SimDeck's slow fallback does", async () => {
+    const d = turnedDevice(1, { fullOnly: "Start" });
+    await d.control.action(iosTarget, { type: "tapElement", selector: { label: "Start" } });
+    assert.deepEqual(d.tapped, ["Start"]);
+  });
+
+  it("answers a missing element with SimDeck's 404, not a guess", async () => {
+    const d = turnedDevice(1);
+    await assert.rejects(
+      () => d.control.action(iosTarget, { type: "tapElement", selector: { label: "Finnes ikke" } }),
+      (e: unknown) => e instanceof SimDeckActionError && e.status === 404,
+    );
+    assert.deepEqual(d.tapped, []);
+  });
+
+  it("taps a SpringBoard prompt in its own unrotated points", async () => {
+    const d = turnedDevice(1, { springboard: true });
+    await d.control.action(iosTarget, { type: "tapElement", selector: { label: "Åpne" } });
+    const tap = d.posts.find((p) => p.action === "tap")!;
+    assert.equal(tap.x, (366 + 24) / 834);
+    assert.equal(tap.y, (609 + 70) / 1210);
+  });
+
+  it("refuses a raw tap on a landscape device whose turn it cannot read, and still taps a SpringBoard prompt", async () => {
+    const W = 1210;
+    const H = 834;
+    const posts: Record<string, unknown>[] = [];
+    const impl = (async (input: unknown, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/health") return new Response("{}", { status: 200 });
+      if (url.pathname.endsWith("/accessibility-tree")) {
+        return new Response(JSON.stringify({ roots: [{ AXLabel: " ", frame: { x: 0, y: 0, width: W, height: H }, children: [{ AXLabel: "Åpne", type: "Button", frame: { x: 366, y: 609, width: 48, height: 140 } }] }] }), { status: 200 });
+      }
+      if (url.pathname.endsWith("/action")) {
+        posts.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return new Response("{}", { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    const control = new SimDeckControl({ fetchImpl: impl, autostart: false });
+    assert.equal(await control.quarterTurns(iosTarget), null);
+    await assert.rejects(() => control.action(iosTarget, { type: "tap", x: 0.5, y: 0.5 }), (e: unknown) => e instanceof SimDeckActionError && e.status === 409);
+    assert.equal(posts.length, 0);
+    await control.action(iosTarget, { type: "tapElement", selector: { label: "Åpne" } });
+    assert.equal(posts.length, 1);
+  });
+
+  it("leaves Android alone", async () => {
+    const d = turnedDevice(1);
+    await d.control.action({ platform: "android", udid: "android:pixel" }, { type: "tap", x: 0.1, y: 0.2 });
+    assert.deepEqual(d.posts, [{ action: "tap", x: 0.1, y: 0.2, normalized: true }]);
   });
 });
