@@ -55,6 +55,8 @@ export const configSchema = z.object({
   // read-only guarantee is behavioral, not capability-bounded.
   githubAmbient: z.boolean().default(true),
   allowPublicRepos: z.boolean().default(false),
+  // Simulators whose name starts with this may be live-shared, view-only (PLAN §9). Omit to refuse every live share.
+  liveShareSimPrefix: z.string().min(1).optional(),
   // HMAC key for signing share unlock cookies (PIN gate). Omit and deckhand
   // auto-generates + persists one under ~/.deckhand/share-secret on first boot.
   shareSecret: z.string().min(1).optional(),

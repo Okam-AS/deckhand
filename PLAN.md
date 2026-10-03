@@ -785,6 +785,18 @@ does not cover. Mechanics: `docs/web-wildcard-hosting-plan.md`.
   the option for zero PIN exposure.
 - Share dies with the preview (`stop_preview`) → viewer shows a calm
   "this preview has ended" state.
+- **Live shares of a simulator Deckhand does not drive.** Another tool on the machine boots and
+  drives its own simulator (e.g. with agent-device) and asks over loopback
+  `POST /admin/live-shares` `{udid, pid}` → 201 `{shareId, deviceId: "ios-0"}`, and
+  `DELETE /admin/live-shares/:shareId` → 204. No credential and no PIN; anything that is not
+  loopback, or carries `cf-connecting-ip`/`cf-ray` (cloudflared also connects from loopback), gets
+  404. Only a booted simulator whose name starts with config `liveShareSimPrefix` (else 403; unset
+  refuses every share) owned by a live pid (else 400); one share
+  per udid. Deckhand only attaches the serve-sim stream. The share is **view-only**: the proxy
+  forwards only `stream.avcc`/`stream.mjpeg`, refuses `ax`, `web`, `restart`, `clientlog` and the
+  input socket, and `shareState` carries `viewOnly`. It is revoked on `DELETE`, when the pid is gone
+  (checked every 5 s and on each lookup) or at 12 h; a revoked id answers 410 until the server
+  restarts. Registry and admin route: `server/src/share/liveShares.ts`.
 
 ### Stream client (ours, in `viewer/`)
 
@@ -979,7 +991,7 @@ change eases in/out — nothing snaps.
 6. **Shares**: 144-bit IDs, scrypt-hashed PINs, HMAC-signed unlock cookies, the
    `deck_unlock` cookie stripped before proxying so the HMAC never reaches the app,
    shares die with their preview. Of the helper, the proxy forwards only video, `ax` and input
-   for the share's own devices — serve-sim's other endpoints (camera, devtools, exec) are never
+   for the share's own devices (a live share, §9, only video) — serve-sim's other endpoints (camera, devtools, exec) are never
    forwarded. It serves two routes of its own behind the same PIN gate, and they are part of the
    surface even though neither reaches the helper: `POST …/restart`, the viewer's Rebuild button
    for a local share (throttled), and `POST …/dev/:deviceId/clientlog`, which takes the browser's

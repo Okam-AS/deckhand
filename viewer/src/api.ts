@@ -72,6 +72,8 @@ export interface ShareState {
   panes: SharePane[];
   /** The parity checklist, when the agent is keeping one. */
   ledger?: { screens: ShareLedgerScreen[] };
+  /** A `deckhand verify --share` run: watch only, the server refuses input. */
+  viewOnly?: boolean;
 }
 
 /** "github.com/acme/store-app" → "acme/store-app" (host + .git stripped). */

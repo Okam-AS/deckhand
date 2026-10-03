@@ -147,6 +147,7 @@ before(async () => {
       if (shareId === "git-share") throw new PreviewError("only local (dev-mode) previews can be restarted from the viewer");
       throw new PreviewError(`no active preview for share "${shareId}"`);
     },
+    liveShareRevoked: () => false,
     shareState: (shareId: string) => (shareId === "share1" || shareId === "web-share" ? { ready: true, devices: [] } : null),
     pinInfoForShare: fakePinInfo,
     pinRecordForShare: fakePinRecord,

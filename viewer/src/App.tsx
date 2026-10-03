@@ -283,6 +283,7 @@ export function App() {
                     onSelect={undefined}
                     hidden={!visible.has(p.key)}
                     registerControls={registerControls}
+                    viewOnly={state.viewOnly}
                     onRotationChange={handleRotation}
                     // With several sources side by side each column shows one
                     // device, so the switch belongs in that column's control row
@@ -325,6 +326,7 @@ export function App() {
           repo={focusedGroup?.repo ?? state.repo}
           refName={focusedGroup?.ref ?? state.ref}
           source={state.source}
+          viewOnly={state.viewOnly}
         />
       ) : (
         <>

@@ -33,6 +33,8 @@ interface Props {
   repo: string;
   refName: string;
   source?: "git" | "local";
+  /** Watch-only share: no device controls. */
+  viewOnly?: boolean;
 }
 
 /**
@@ -112,21 +114,25 @@ export function MobileChrome(props: Props) {
               </div>
             </div>
           )}
-          <button type="button" className="dock-btn" onClick={onHome} title="Home" aria-label="Press the device home button">
-            <HomeIcon size={19} />
-          </button>
-          <button type="button" className="dock-btn" onClick={onRotate} title="Rotate" aria-label="Rotate the device 90 degrees">
-            <RotateIcon size={19} />
-          </button>
-          <button
-            type="button"
-            className="dock-btn"
-            onClick={() => setTyping(true)}
-            title="Keyboard"
-            aria-label="Type with your keyboard"
-          >
-            <KeyboardIcon size={19} />
-          </button>
+          {!props.viewOnly && (
+            <>
+              <button type="button" className="dock-btn" onClick={onHome} title="Home" aria-label="Press the device home button">
+                <HomeIcon size={19} />
+              </button>
+              <button type="button" className="dock-btn" onClick={onRotate} title="Rotate" aria-label="Rotate the device 90 degrees">
+                <RotateIcon size={19} />
+              </button>
+              <button
+                type="button"
+                className="dock-btn"
+                onClick={() => setTyping(true)}
+                title="Keyboard"
+                aria-label="Type with your keyboard"
+              >
+                <KeyboardIcon size={19} />
+              </button>
+            </>
+          )}
           <div className="minfo" ref={infoRef}>
             <button
               type="button"
