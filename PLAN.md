@@ -789,10 +789,11 @@ does not cover. Mechanics: `docs/web-wildcard-hosting-plan.md`.
   drives its own simulator (e.g. with agent-device) and asks over loopback
   `POST /admin/live-shares` `{udid, pid}` → 201 `{shareId, deviceId: "ios-0"}`, and
   `DELETE /admin/live-shares/:shareId` → 204. No credential and no PIN; anything that is not
-  loopback, or carries `cf-connecting-ip`/`cf-ray` (cloudflared also connects from loopback), gets
-  404. Only a booted simulator whose name starts with config `liveShareSimPrefix` (else 403; unset
-  refuses every share) owned by a live pid (else 400); one share
-  per udid. Deckhand only attaches the serve-sim stream. The share is **view-only**: the proxy
+  loopback, has a `Host` other than `127.0.0.1`/`localhost`/`[::1]` (DNS rebinding), or carries
+  `cf-connecting-ip`/`cf-ray` (cloudflared also connects from loopback), gets 404. Only a booted simulator whose name starts with config `liveShareSimPrefix` (else 403; unset
+  refuses every share; a prefix overlapping `deckhand-` is refused at config load) — a live share
+  must never attach to, or detach, a preview's helper owned by a live pid (else 400); one share
+  per udid, created and revoked one at a time per udid. Deckhand only attaches the serve-sim stream. The share is **view-only**: the proxy
   forwards only `stream.avcc`/`stream.mjpeg`, refuses `ax`, `web`, `restart`, `clientlog` and the
   input socket, and `shareState` carries `viewOnly`. It is revoked on `DELETE`, when the pid is gone
   (checked every 5 s and on each lookup) or at 12 h; a revoked id answers 410 until the server

@@ -25,6 +25,11 @@ export const SIM_PREFIX = "deckhand-";
 export const POOL_SIM_PREFIX = "deckhand-pool-";
 export const POOL_AVD_PREFIX = "deckhand_pool_";
 
+/** A prefix that could match one of deckhand's own simulators would let a live share kill a preview's helper. */
+export function liveSharePrefixAllowed(prefix: string | undefined): prefix is string {
+  return !!prefix && prefix.trim() !== "" && !prefix.startsWith(SIM_PREFIX) && !SIM_PREFIX.startsWith(prefix);
+}
+
 export function isPooled(name: string): boolean {
   return name.startsWith(POOL_SIM_PREFIX) || name.startsWith(POOL_AVD_PREFIX);
 }

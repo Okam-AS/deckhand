@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import express from "express";
 import type { AttachedStream, StreamDeviceRef } from "../streaming/backend.ts";
 import type { SimDevice } from "../devices/ios.ts";
+import { liveSharePrefixAllowed } from "../engine/reaper.ts";
 
 export const LIVE_DEVICE_ID = "ios-0";
 const FIRST_FRAME_MS = 30_000;
@@ -53,21 +54,36 @@ export class LiveShareRegistry {
   private readonly now: () => number;
   private readonly pidAlive: (pid: number) => boolean;
   private timer?: ReturnType<typeof setInterval>;
+  private readonly udidLocks = new Map<string, Promise<unknown>>();
 
   constructor(private readonly d: LiveShareDeps) {
     this.now = d.now ?? Date.now;
     this.pidAlive = d.pidAlive ?? defaultPidAlive;
   }
 
-  async create(req: { udid: string; pid: number }): Promise<LiveShare> {
+  private withUdid<T>(udid: string, fn: () => Promise<T>): Promise<T> {
+    const run = (this.udidLocks.get(udid) ?? Promise.resolve()).then(fn, fn);
+    const tail = run.catch(() => {});
+    this.udidLocks.set(udid, tail);
+    void tail.then(() => {
+      if (this.udidLocks.get(udid) === tail) this.udidLocks.delete(udid);
+    });
+    return run;
+  }
+
+  create(req: { udid: string; pid: number }): Promise<LiveShare> {
+    return this.withUdid(req.udid, () => this.createLocked(req));
+  }
+
+  private async createLocked(req: { udid: string; pid: number }): Promise<LiveShare> {
     const prefix = this.d.simPrefix;
-    if (!prefix) throw new LiveShareError(403, "live shares are off: set liveShareSimPrefix in config.yaml");
+    if (!liveSharePrefixAllowed(prefix)) throw new LiveShareError(403, "live shares are off: set liveShareSimPrefix in config.yaml to a prefix outside deckhand-");
     const dev = (await this.d.listDevices()).find((x) => x.udid === req.udid);
     if (!dev || !dev.name.startsWith(prefix) || dev.state !== "Booted") {
       throw new LiveShareError(403, `${req.udid} is not a booted ${prefix}… simulator`);
     }
     if (!this.pidAlive(req.pid)) throw new LiveShareError(400, `pid ${req.pid} is not running`);
-    for (const s of this.shares.values()) if (s.udid === req.udid) await this.revoke(s.shareId);
+    for (const s of [...this.shares.values()]) if (s.udid === req.udid) await this.drop(s.shareId);
     const stream = await this.d.attach({ platform: "ios", udid: req.udid });
     if (!(await stream.waitForFirstFrame(this.d.firstFrameMs ?? FIRST_FRAME_MS))) {
       await stream.detach().catch(() => {});
@@ -87,12 +103,23 @@ export class LiveShareRegistry {
 
   async revoke(shareId: string): Promise<boolean> {
     const s = this.shares.get(shareId);
+    return s ? this.withUdid(s.udid, () => this.drop(shareId)) : false;
+  }
+
+  private async drop(shareId: string): Promise<boolean> {
+    const s = this.forget(shareId);
     if (!s) return false;
+    await s.stream.detach().catch(() => {});
+    return true;
+  }
+
+  private forget(shareId: string): LiveShare | undefined {
+    const s = this.shares.get(shareId);
+    if (!s) return undefined;
     this.shares.delete(shareId);
     this.revoked.add(shareId);
     if (this.revoked.size > MAX_REVOKED) this.revoked.delete(this.revoked.values().next().value!);
-    await s.stream.detach().catch(() => {});
-    return true;
+    return s;
   }
 
   /** A live share, or null; an owner that died or a share past its age cap reads as revoked. */
@@ -100,7 +127,8 @@ export class LiveShareRegistry {
     const s = this.shares.get(shareId);
     if (!s) return null;
     if (this.expired(s)) {
-      void this.revoke(shareId);
+      this.forget(shareId);
+      void this.withUdid(s.udid, () => s.stream.detach().catch(() => {}));
       return null;
     }
     return s;
@@ -127,6 +155,8 @@ export class LiveShareRegistry {
   }
 }
 
+const LOOPBACK_HOST = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i;
+
 function isLoopback(ip: string | undefined): boolean {
   return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
 }
@@ -136,7 +166,7 @@ export function createLiveShareRouter(deps: { registry: LiveShareRegistry }): ex
   const router = express.Router();
   router.use((req, res, next) => {
     // cloudflared connects from loopback too: its headers are the only sign a request came through the tunnel.
-    if (!isLoopback(req.ip) || req.headers["cf-connecting-ip"] != null || req.headers["cf-ray"] != null) {
+    if (!isLoopback(req.ip) || !LOOPBACK_HOST.test(req.headers.host ?? "") || req.headers["cf-connecting-ip"] != null || req.headers["cf-ray"] != null) {
       res.status(404).end();
       return;
     }

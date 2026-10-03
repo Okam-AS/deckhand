@@ -12,6 +12,7 @@ import { createShareRouter, createPinGate, handleShareUpgrade } from "./proxy.ts
 import type { AttachedStream } from "../streaming/backend.ts";
 import type { SimDevice } from "../devices/ios.ts";
 import type { PreviewEngine } from "../engine/preview.ts";
+import { configSchema } from "../config.ts";
 
 function fakeStream(origin = "http://127.0.0.1:1", firstFrame = true) {
   const s = { detached: 0 };
@@ -65,6 +66,41 @@ describe("LiveShareRegistry", () => {
     await assert.rejects(off.create({ udid: "U1", pid: process.pid }), (e: LiveShareError) => e.status === 403);
   });
 
+  it("refuses a prefix that is empty or overlaps deckhand's own simulators", async () => {
+    for (const simPrefix of [" ", "deck", "deckhand-", "deckhand-pool-"]) {
+      const reg = new LiveShareRegistry({
+        attach: async () => fakeStream().stream,
+        listDevices: async () => [{ udid: "P1", name: "deckhand-pool-1", state: "Booted" }],
+        pidAlive: () => true,
+        simPrefix,
+      });
+      await assert.rejects(reg.create({ udid: "P1", pid: 42 }), (e: LiveShareError) => e.status === 403, JSON.stringify(simPrefix));
+      const parsed = configSchema.safeParse({ hostname: "h.example.com", streaming: { serveSim: { version: "1" } }, liveShareSimPrefix: simPrefix });
+      assert.equal(parsed.success, false, JSON.stringify(simPrefix));
+    }
+    assert.equal(configSchema.safeParse({ hostname: "h.example.com", streaming: { serveSim: { version: "1" } }, liveShareSimPrefix: "acme-" }).success, true);
+  });
+
+  it("serializes creates per simulator, so a replaced share never kills the helper its successor uses", async () => {
+    const helpers = new Map<string, { dead: boolean }>();
+    const reg = new LiveShareRegistry({
+      attach: async (d) => {
+        await new Promise((r) => setTimeout(r, 5));
+        let h = helpers.get(d.udid!);
+        if (!h || h.dead) helpers.set(d.udid!, (h = { dead: false }));
+        const held = h;
+        return { origin: "http://127.0.0.1:1", helperBasePath: "/h", waitForFirstFrame: async () => true, describe: async () => "", detach: async () => void (held.dead = true) };
+      },
+      listDevices: async () => [{ udid: "U1", name: "okam-factory-1", state: "Booted" }],
+      pidAlive: () => true,
+      simPrefix: "okam-factory-",
+    });
+    const [a, b] = await Promise.all([reg.create({ udid: "U1", pid: 42 }), reg.create({ udid: "U1", pid: 42 })]);
+    assert.equal(reg.find(a.shareId), null);
+    assert.ok(reg.find(b.shareId));
+    assert.equal(helpers.get("U1")!.dead, false);
+  });
+
   it("keeps one share per simulator: a new one revokes the old", async () => {
     const { reg, made } = registry();
     const a = await reg.create({ udid: "U1", pid: 42 });
@@ -99,6 +135,7 @@ describe("LiveShareRegistry", () => {
     alive.delete(42);
     assert.equal(reg.find(s.shareId), null);
     assert.equal(reg.wasRevoked(s.shareId), true);
+    await new Promise((r) => setImmediate(r));
     assert.equal(made[0]!.s.detached, 1);
   });
 
@@ -139,6 +176,19 @@ describe("/admin/live-shares", () => {
       assert.equal(d.status, 404, h);
     }
     assert.equal(reg.find("share1"), null);
+  });
+
+  it("refuses a Host that is not loopback, so a rebound DNS name cannot reach it", async () => {
+    const port = new URL(base).port;
+    const status = (host: string) =>
+      new Promise<number>((r) => {
+        const q = httpRequest(`${base}/admin/live-shares`, { method: "POST", headers: { ...hdr, host } }, (res) => (res.resume(), r(res.statusCode ?? 0)));
+        q.end("{}");
+      });
+    for (const host of [`evil.example:${port}`, "evil.example", `127.0.0.1.evil.example:${port}`, "localhost.evil.example"]) {
+      assert.equal(await status(host), 404, host);
+    }
+    for (const host of [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`, "localhost"]) assert.equal(await status(host), 400, host);
   });
 
   it("refuses a body that is not {udid, pid}", async () => {
