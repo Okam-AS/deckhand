@@ -127,8 +127,7 @@ export class LiveShareRegistry {
     const s = this.shares.get(shareId);
     if (!s) return null;
     if (this.expired(s)) {
-      this.forget(shareId);
-      void this.withUdid(s.udid, () => s.stream.detach().catch(() => {}));
+      void this.revoke(shareId);
       return null;
     }
     return s;
@@ -136,7 +135,8 @@ export class LiveShareRegistry {
 
   /** A share this process revoked, so its link answers 410 rather than an ordinary viewer shell. */
   wasRevoked(shareId: string): boolean {
-    if (this.shares.has(shareId)) this.find(shareId);
+    const s = this.shares.get(shareId);
+    if (s && this.expired(s)) return true;
     return this.revoked.has(shareId);
   }
 

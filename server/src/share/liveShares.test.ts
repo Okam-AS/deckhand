@@ -101,6 +101,38 @@ describe("LiveShareRegistry", () => {
     assert.equal(helpers.get("U1")!.dead, false);
   });
 
+  it("lets no stale share's detach land after a successor attached to the same helper", async () => {
+    const helpers = new Map<string, { dead: boolean }>();
+    const alive = new Set([1, 2]);
+    let release!: () => void;
+    let calls = 0;
+    const reg = new LiveShareRegistry({
+      attach: async (d) => {
+        let h = helpers.get(d.udid!);
+        if (!h || h.dead) helpers.set(d.udid!, (h = { dead: false }));
+        const held = h;
+        return { origin: "http://127.0.0.1:1", helperBasePath: "/h", waitForFirstFrame: async () => true, describe: async () => "", detach: async () => void (held.dead = true) };
+      },
+      listDevices: async () => {
+        if (++calls === 2) await new Promise<void>((r) => (release = r));
+        return [{ udid: "U1", name: "okam-factory-1", state: "Booted" }];
+      },
+      pidAlive: (pid) => alive.has(pid),
+      simPrefix: "okam-factory-",
+    });
+    const first = await reg.create({ udid: "U1", pid: 1 });
+    const second = reg.create({ udid: "U1", pid: 2 });
+    await new Promise((r) => setImmediate(r));
+    alive.delete(1);
+    assert.equal(reg.find(first.shareId), null);
+    assert.equal(reg.wasRevoked(first.shareId), true);
+    release();
+    const s2 = await second;
+    await new Promise((r) => setImmediate(r));
+    assert.ok(reg.find(s2.shareId));
+    assert.equal(helpers.get("U1")!.dead, false);
+  });
+
   it("keeps one share per simulator: a new one revokes the old", async () => {
     const { reg, made } = registry();
     const a = await reg.create({ udid: "U1", pid: 42 });
