@@ -120,7 +120,7 @@ export async function verifyPin(shareId: string, pin: string): Promise<UnlockRes
 export async function fetchShareState(shareId: string): Promise<ShareState | "gone" | null> {
   try {
     const res = await fetch(`/s/${encodeURIComponent(shareId)}/state`, { headers: { accept: "application/json" } });
-    if (res.status === 404) return "gone";
+    if (res.status === 404 || res.status === 410) return "gone";
     if (!res.ok) return null;
     return (await res.json()) as ShareState;
   } catch {
