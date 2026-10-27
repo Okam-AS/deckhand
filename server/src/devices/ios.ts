@@ -38,6 +38,8 @@ export interface Runtime {
   name: string; // "iOS 26.0"
   version: string; // "26.0"
   isAvailable: boolean;
+  /** Device type identifiers this runtime can create; undefined when simctl does not report them (older Xcode). */
+  supportedDeviceTypes?: string[];
 }
 
 export interface DeviceType {
@@ -65,7 +67,13 @@ export function parseRuntimes(json: unknown): Runtime[] {
     if (!/iOS/i.test(name) && !/iOS/i.test(identifier)) continue;
     const version = String(rt.version ?? name.replace(/^iOS\s*/i, ""));
     const isAvailable = rt.isAvailable === true || rt.availability === "(available)";
-    out.push({ identifier, name, version, isAvailable });
+    const runtime: Runtime = { identifier, name, version, isAvailable };
+    if (Array.isArray(rt.supportedDeviceTypes)) {
+      runtime.supportedDeviceTypes = rt.supportedDeviceTypes
+        .map((d) => String((d as Record<string, unknown>)?.identifier ?? ""))
+        .filter(Boolean);
+    }
+    out.push(runtime);
   }
   return out;
 }
@@ -121,18 +129,22 @@ function cmpVersion(a: string, b: string): number {
  * version prefix. With no request, the newest available runtime wins.
  */
 export function selectRuntime(runtimes: Runtime[], requested?: string): Runtime {
+  return runtimeCandidates(runtimes, requested)[0]!;
+}
+
+/** Runtimes matching `requested` (or all available), newest first; throws when there are none. */
+function runtimeCandidates(runtimes: Runtime[], requested?: string): Runtime[] {
   const available = runtimes.filter((r) => r.isAvailable);
   if (available.length === 0) throw new SimctlError("no available iOS simulator runtimes installed");
-  if (requested) {
-    const want = requested.replace(/^iOS\s*/i, "").trim();
-    const matches = available.filter((r) => r.version === want || r.version.startsWith(want + ".") || r.version.startsWith(want));
-    if (matches.length === 0) {
-      const have = available.map((r) => r.version).join(", ");
-      throw new SimctlError(`no installed iOS runtime matches "${requested}" (have: ${have})`);
-    }
-    return matches.sort((a, b) => cmpVersion(b.version, a.version))[0]!;
+  const newestFirst = (rs: Runtime[]) => [...rs].sort((a, b) => cmpVersion(b.version, a.version));
+  if (!requested) return newestFirst(available);
+  const want = requested.replace(/^iOS\s*/i, "").trim();
+  const matches = available.filter((r) => r.version === want || r.version.startsWith(want + ".") || r.version.startsWith(want));
+  if (matches.length === 0) {
+    const have = available.map((r) => r.version).join(", ");
+    throw new SimctlError(`no installed iOS runtime matches "${requested}" (have: ${have})`);
   }
-  return available.sort((a, b) => cmpVersion(b.version, a.version))[0]!;
+  return newestFirst(matches);
 }
 
 /** Pick a device type. `requested` matched case-insensitively by name substring; default a modern iPhone. */
@@ -151,7 +163,57 @@ export function selectDeviceType(deviceTypes: DeviceType[], requested?: string):
   // Default: prefer a "Pro" iPhone, else the newest iPhone, else the last entry.
   const iphones = deviceTypes.filter((d) => /iPhone/i.test(d.name));
   const pool = iphones.length ? iphones : deviceTypes;
-  return pool.find((d) => /iPhone\s*\d+\s*Pro$/i.test(d.name)) ?? pool[pool.length - 1]!;
+  return pool.find(isProIPhone) ?? pool[pool.length - 1]!;
+}
+
+const isProIPhone = (d: DeviceType) => /iPhone\s*\d+\s*Pro$/i.test(d.name);
+
+/** The device types `runtime` can create; all of them when simctl did not say. */
+export function supportedBy(runtime: Runtime, deviceTypes: DeviceType[]): DeviceType[] {
+  if (!runtime.supportedDeviceTypes) return deviceTypes;
+  const ids = new Set(runtime.supportedDeviceTypes);
+  return deviceTypes.filter((d) => ids.has(d.identifier));
+}
+
+/**
+ * Pick a runtime and a device type that runtime can create. Without a requested
+ * runtime, the newest one that supports the requested model (or, with no model,
+ * a Pro iPhone, then any iPhone, then anything) wins.
+ */
+export function selectSimulator(
+  runtimes: Runtime[],
+  deviceTypes: DeviceType[],
+  requested: { runtime?: string; model?: string } = {},
+): { runtime: Runtime; deviceType: DeviceType } {
+  const candidates = runtimeCandidates(runtimes, requested.runtime);
+  const anyMatch = selectDeviceType(deviceTypes, requested.model);
+  if (!requested.model) {
+    const tiers: ((d: DeviceType) => boolean)[] = [isProIPhone, (d) => /iPhone/i.test(d.name), () => true];
+    for (const tier of tiers) {
+      for (const runtime of candidates) {
+        const pool = supportedBy(runtime, deviceTypes);
+        if (pool.some(tier)) return { runtime, deviceType: selectDeviceType(pool.filter(tier)) };
+      }
+    }
+  } else {
+    const runtime = candidates.find((r) => supportedBy(r, deviceTypes).some((d) => d.identifier === anyMatch.identifier));
+    if (runtime) return { runtime, deviceType: anyMatch };
+  }
+  const supporting = runtimeCandidates(runtimes)
+    .filter((r) => supportedBy(r, deviceTypes).some((d) => d.identifier === anyMatch.identifier))
+    .map((r) => r.version);
+  if (requested.runtime && candidates.length === 1) {
+    const models = supportedBy(candidates[0]!, deviceTypes).map((d) => d.name);
+    throw new SimctlError(
+      `${candidates[0]!.name} cannot run "${anyMatch.name}"; it supports: ${models.join(", ") || "no installed device types"}. ` +
+        (supporting.length ? `Pick one of those models, or a runtime that has it: ${supporting.join(", ")}.` : "Pick one of those models."),
+    );
+  }
+  const which = requested.runtime ? `matching "${requested.runtime}" ` : "";
+  throw new SimctlError(
+    `no installed iOS runtime ${which}supports "${anyMatch.name}"` +
+      (supporting.length ? `; runtimes that do: ${supporting.join(", ")}.` : "; pick another model (list_devices shows each runtime's models)."),
+  );
 }
 
 export function deviceLabel(deviceType: DeviceType, runtime: Runtime): string {

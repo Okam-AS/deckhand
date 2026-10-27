@@ -2724,6 +2724,29 @@ describe("listDevices", () => {
     // start_preview could never build to, which reads to an agent as an offer.
     assert.deepEqual(Object.keys(out).sort(), ["android", "capacity", "ios"]);
   });
+
+  it("lists every runtime's models, so a model only a beta runtime supports is still offered", async () => {
+    const duo = { identifier: "dt.duo", name: "iPhone Duo" };
+    const pro = { identifier: "dt.18pro", name: "iPhone 18 Pro" };
+    const h = makeEngine({
+      simctl: fakeSimctl({
+        listRuntimes: async () => [
+          { identifier: "rt.27.0", name: "iOS 27.0", version: "27.0", isAvailable: true, supportedDeviceTypes: [pro.identifier] },
+          { identifier: "rt.27.1", name: "iOS 27.1", version: "27.1", isAvailable: true, supportedDeviceTypes: [duo.identifier] },
+        ],
+        listDeviceTypes: async () => [pro, duo],
+      }),
+    });
+    const out = await h.engine.listDevices();
+    assert.deepEqual(out.ios.models, ["iPhone 18 Pro", "iPhone Duo"]);
+    assert.deepEqual(
+      out.ios.runtimes.map((r) => [r.name, r.models]),
+      [
+        ["iOS 27.0", ["iPhone 18 Pro"]],
+        ["iOS 27.1", ["iPhone Duo"]],
+      ],
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
