@@ -137,12 +137,72 @@ describe("WorktreeManager.prepareRef", () => {
     assert.equal(calls.some((a) => a[0] === "fetch"), false);
   });
 
-  it("rejects a SHA that is not present locally (SHAs cannot be fetched by refspec)", async () => {
+  it("fetches a full SHA the clone has not seen yet, by itself", async () => {
+    const sha = "1012083bc2b196144b266a6f99d2737381896eed";
+    let fetched = false;
+    const calls: string[][] = [];
+    const runner: GitRunner = async (args) => {
+      calls.push(args);
+      if (args[0] === "fetch") fetched = true;
+      return { stdout: args[0] === "rev-parse" && fetched ? `${sha}\n` : "", stderr: "", code: args[0] === "rev-parse" && !fetched ? 1 : 0 };
+    };
+    const mgr = new WorktreeManager({ tokenResolver: async () => "tok", git: runner });
+    const res = await mgr.prepareRef(app, parseRefSpec({ ref: sha }));
+    assert.deepEqual(res, { localRef: sha, usedToken: true });
+    const fetches = calls.filter((a) => a[0] === "fetch");
+    assert.deepEqual(fetches, [["fetch", "--no-tags", "origin", sha]], "one fetch of just that commit");
+  });
+
+  it("fetches every branch for an abbreviated SHA, then resolves it", async () => {
+    let fetched = false;
+    const calls: string[][] = [];
+    const runner: GitRunner = async (args) => {
+      calls.push(args);
+      if (args[0] === "fetch") fetched = true;
+      return { stdout: fetched ? "deadbeef\n" : "", stderr: "", code: args[0] === "rev-parse" && !fetched ? 1 : 0 };
+    };
+    const mgr = new WorktreeManager({ tokenResolver: async () => "tok", git: runner });
+    const res = await mgr.prepareRef(app, parseRefSpec({ ref: "1012083b" }));
+    assert.deepEqual(res, { localRef: "1012083b", usedToken: true });
+    const fetches = calls.filter((a) => a[0] === "fetch");
+    assert.equal(fetches.length, 1);
+    assert.ok(fetches[0]!.includes("+refs/heads/*:refs/remotes/origin/*"));
+  });
+
+  it("falls back to every branch when the full-SHA fetch is refused", async () => {
+    const sha = "1012083bc2b196144b266a6f99d2737381896eed";
+    let branchesFetched = false;
+    const calls: string[][] = [];
+    const runner: GitRunner = async (args) => {
+      calls.push(args);
+      if (args[0] === "fetch" && args.includes(sha)) return { stdout: "", stderr: "not our ref", code: 128 };
+      if (args[0] === "fetch") branchesFetched = true;
+      return { stdout: branchesFetched ? `${sha}\n` : "", stderr: "", code: args[0] === "rev-parse" && !branchesFetched ? 1 : 0 };
+    };
+    const mgr = new WorktreeManager({ tokenResolver: async () => "tok", git: runner });
+    const res = await mgr.prepareRef(app, parseRefSpec({ ref: sha }));
+    assert.equal(res.usedToken, true);
+    assert.equal(calls.filter((a) => a[0] === "fetch").length, 2);
+  });
+
+  it("rejects a SHA that is on no branch even after fetching", async () => {
     const { runner } = fakeGit([{ match: (a) => a[0] === "rev-parse", result: { code: 1 } }]);
     const mgr = new WorktreeManager({ tokenResolver: async () => "tok", git: runner });
     await assert.rejects(
       () => mgr.prepareRef(app, parseRefSpec({ ref: "deadbeefdeadbeefdead" })),
-      (e) => e instanceof RefError && /not present/.test((e as Error).message),
+      (e) => e instanceof RefError && /not on any branch/.test((e as Error).message),
+    );
+  });
+
+  it("reports a failed fetch while looking for a SHA", async () => {
+    const { runner } = fakeGit([
+      { match: (a) => a[0] === "rev-parse", result: { code: 1 } },
+      { match: (a) => a[0] === "fetch", result: { code: 128, stderr: "fatal: could not read from remote" } },
+    ]);
+    const mgr = new WorktreeManager({ tokenResolver: async () => "tok", git: runner });
+    await assert.rejects(
+      () => mgr.prepareRef(app, parseRefSpec({ ref: "deadbeefdeadbeefdead" })),
+      (e) => e instanceof RefError && /could not fetch .* to find commit/.test((e as Error).message),
     );
   });
 
