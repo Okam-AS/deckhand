@@ -14,7 +14,9 @@ import { CredentialsMissingError } from "../github/credentials.ts";
 // detached per-preview worktree. Named branches/PRs ALWAYS fetch so a repeat
 // preview builds the latest push (amended 2026-07-15 — the old local-first
 // shortcut served stale commits); only commit SHAs resolve local-first, since
-// a SHA is immutable and can't be fetched by refspec anyway.
+// a SHA is immutable. A SHA the base clone has not seen yet is fetched (see
+// prepareRef), so a caller that previews an exact build commit never needs
+// someone to `git fetch` on the host first.
 // ---------------------------------------------------------------------------
 
 export type RefSpec = { kind: "branch"; branch: string } | { kind: "pr"; number: number };
@@ -357,10 +359,26 @@ export class WorktreeManager {
   async prepareRef(app: App, spec: RefSpec): Promise<{ localRef: string; usedToken: boolean }> {
     const base = await this.ensureBaseClone(app);
     if (spec.kind === "branch" && isCommitSha(spec.branch)) {
-      if (await this.resolvesLocally(base, spec.branch)) return { localRef: spec.branch, usedToken: false };
-      throw new RefError(
-        `commit ${spec.branch} is not present in the local clone of ${app.repo} — preview the branch that contains it instead`,
-      );
+      const sha = spec.branch;
+      if (await this.resolvesLocally(base, sha)) return { localRef: sha, usedToken: false };
+      // Pushed after the clone was last fetched. A full SHA can be fetched by
+      // itself (GitHub serves any reachable commit); an abbreviated one cannot,
+      // so fall back to fetching every branch and resolving it again.
+      const full = /^[0-9a-f]{40}$/i.test(sha)
+        && (await this.runNetwork(app, ["fetch", "--no-tags", "origin", sha], base)).code === 0
+        && (await this.resolvesLocally(base, sha));
+      if (!full) {
+        const res = await this.runNetwork(app, ["fetch", "--force", "--no-tags", "origin", "+refs/heads/*:refs/remotes/origin/*"], base);
+        if (res.code !== 0) {
+          throw new RefError(`could not fetch ${app.repo} to find commit ${sha}: ${res.stderr.trim().slice(0, 300)}`);
+        }
+        if (!(await this.resolvesLocally(base, sha))) {
+          throw new RefError(
+            `commit ${sha} is not on any branch of ${app.repo} — check the SHA, or preview the branch or PR that contains it`,
+          );
+        }
+      }
+      return { localRef: sha, usedToken: true };
     }
     const { refspec, localRef } = fetchRefspec(spec);
     const res = await this.runNetwork(app, ["fetch", "--force", "--prune", "origin", refspec], base);
