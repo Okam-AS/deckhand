@@ -190,7 +190,8 @@ describe("buildPlan — android", () => {
     // Looks the AVD name up rather than handing expo the serial, which it
     // cannot match against a device name.
     assert.match(script, /adb -s 'emulator-5554' emu avd name/);
-    // An unusable `emu avd name` answer still falls back to the serial.
+    // A silent emulator console falls back to the guest property, then the serial.
+    assert.match(script, /adb -s 'emulator-5554' shell getprop ro\.boot\.qemu\.avd_name/);
     assert.match(script, /_avd='emulator-5554'/);
     assert.match(script, /npx expo run:android --device "\$_avd" --no-bundler/);
   });
