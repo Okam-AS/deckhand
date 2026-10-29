@@ -39,20 +39,26 @@ export function sdkPathDirs(androidHome: string): string[] {
   ];
 }
 
-function resolveJavaHome(exists: (p: string) => boolean = existsSync): string | undefined {
-  if (process.env.JAVA_HOME && exists(process.env.JAVA_HOME)) return process.env.JAVA_HOME;
-  // macOS: java_home locator. Prefer a modern LTS; reject a broken symlink.
+/** `/usr/libexec/java_home -F -v <major>`: without -F a version with no match silently
+ * answers the default JDK (e.g. 26, which breaks AGP's jlink), so "-v 21" is not a check. */
+export function locateJdk(major: string): string | undefined {
   try {
-    const out = execFileSync("/usr/libexec/java_home", ["-v", "21"], { encoding: "utf8" }).trim();
-    if (out && exists(out)) return out;
+    return execFileSync("/usr/libexec/java_home", ["-F", "-v", major], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || undefined;
   } catch {
-    /* fall through */
+    return undefined;
   }
-  try {
-    const out = execFileSync("/usr/libexec/java_home", ["-v", "17"], { encoding: "utf8" }).trim();
+}
+
+export function resolveJavaHome(
+  env: NodeJS.ProcessEnv = process.env,
+  exists: (p: string) => boolean = existsSync,
+  locate: (major: string) => string | undefined = locateJdk,
+): string | undefined {
+  if (env.JAVA_HOME && exists(env.JAVA_HOME)) return env.JAVA_HOME;
+  // macOS: java_home locator. Prefer a modern LTS; reject a broken symlink.
+  for (const major of ["21", "17"]) {
+    const out = locate(major);
     if (out && exists(out)) return out;
-  } catch {
-    /* fall through */
   }
   return undefined;
 }
