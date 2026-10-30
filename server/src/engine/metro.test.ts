@@ -178,6 +178,9 @@ describe("MetroManager port allocation", () => {
     assert.equal(spawned[1]!.cwd, "/wt/app-a-feature");
     assert.notEqual(second.manifestUrl, first.manifestUrl);
     assert.deepEqual(signals, [], "the first preview's Metro must survive");
+    // The janitor re-points each Android device at its own checkout's server, not the app's first one.
+    assert.equal(mgr.portForApp("app-a", "/wt/app-a-feature"), portOf(second.manifestUrl));
+    assert.equal(mgr.portForApp("app-a", "/wt/app-a-gone"), null);
     await mgr.stop();
     assert.equal(signals.length > 0, true, "stop() reaps both");
   });
