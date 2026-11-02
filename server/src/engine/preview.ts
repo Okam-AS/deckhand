@@ -3358,7 +3358,7 @@ export class PreviewEngine {
   private async reassertAndroidReverse(): Promise<void> {
     for (const p of this.previews.values()) {
       if (p.record.phase !== "ready" || !usesMetroDeepLink(p.app.type)) continue;
-      const port = this.d.metro.portForApp(p.app.id);
+      const port = this.d.metro.portForApp(p.app.id, p.sourceDir ?? p.record.worktreePath);
       if (!port) continue;
       for (const dev of p.devices.values()) {
         if (dev.record.platform !== "android" || !dev.androidPort) continue;

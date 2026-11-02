@@ -235,10 +235,14 @@ export class MetroManager {
 
   /**
    * The port of a Metro already running for this app, or null. Read-only — it
-   * never starts one, so a periodic caller can ask cheaply.
+   * never starts one, so a periodic caller can ask cheaply. With a checkout,
+   * only that checkout's Metro counts: two commits of one app each have their
+   * own, and the other one serves the wrong JS.
    */
-  portForApp(appId: string): number | null {
-    for (const cur of this.running.values()) if (cur.appId === appId) return cur.port;
+  portForApp(appId: string, worktreePath?: string): number | null {
+    for (const cur of this.running.values()) {
+      if (cur.appId === appId && (worktreePath === undefined || cur.worktreePath === worktreePath)) return cur.port;
+    }
     return null;
   }
 
