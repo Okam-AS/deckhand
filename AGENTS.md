@@ -42,6 +42,8 @@ PLAN describes the architecture. The invariants that bind every change:
   session (`githubAmbient`) → anonymous git for public repos (gated on `allowPublicRepos`)
   → one-time PAT setup URL. Onboarding responses (`list_apps` empty state,
   `github_auth_missing`) steer a co-located agent to register a local checkout first.
+  The ladder is github.com's: a `githubEnterprise` host gets only its own PAT file, and
+  github.com never gets that PAT.
 - **Streaming is decided** (PLAN §2/§8), all behind the `StreamingBackend` seam. iOS via
   serve-sim, whose `stream.avcc` rides a long-lived **chunked HTTP** response decoded with
   WebCodecs, NOT a WebSocket — the WebSocket carries no video, and whether avcc works is a

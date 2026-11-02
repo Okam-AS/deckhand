@@ -9,7 +9,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createApp } from "../server.ts";
 import { createPinGate } from "../share/proxy.ts";
-import { publicBaseUrl } from "../config.ts";
+import { allowEnterpriseHosts, enterprisePatPath, publicBaseUrl } from "../config.ts";
 import { PreviewEngine, type PreviewEngineDeps } from "../engine/preview.ts";
 import { TokenAuthenticator } from "../auth.ts";
 import { StateStore } from "../state.ts";
@@ -28,6 +28,7 @@ const config: Config = {
   port: 0,
   streaming: { serveSim: { version: "0.1.34", codec: "auto", helperPortRange: [3100, 3199] } },
   githubApp: { appId: 1, privateKeyPath: "k.pem" },
+  githubEnterprise: [{ host: "ghe.example", patPath: "github-pat-ghe" }],
   githubAmbient: true,
   allowPublicRepos: false,
   limits: { maxDevicesPerPreview: 4, maxTotalDevices: 6, idleMinutes: 45, failedGraceMinutes: 15, stuckMinutes: 90, reuseDevices: false, disk: { watch: 50, pressure: 35, critical: 20 } },
@@ -842,6 +843,20 @@ describe("MCP onboarding contract (add_app / empty state / setup URL)", () => {
     assert.match(String(res.error?.hint), /deckhand app add needs-cred-app --path/);
     assert.ok(res.error?.host?.hostname);
     await admin.close();
+  });
+
+  it("add_app on a private enterprise repo names that host's PAT file, never the github.com setup URL or App", async () => {
+    allowEnterpriseHosts(config);
+    const admin = await oclient(ADMIN);
+    const res = parse(
+      await admin.callTool({ name: "add_app", arguments: { repo: "https://ghe.example/okam-as/needs-cred-app.git" } }),
+    ) as { ok: boolean; error?: { code: string; setupUrl?: string; hint?: string } };
+    await admin.close();
+    assert.equal(res.error?.code, "github_auth_missing");
+    assert.equal(res.error?.setupUrl, undefined, "the setup page writes the github.com PAT, not this host's");
+    assert.ok(String(res.error?.hint).includes(enterprisePatPath(config, "ghe.example")!), String(res.error?.hint));
+    assert.match(String(res.error?.hint), /ghe\.example/);
+    assert.doesNotMatch(String(res.error?.hint), /GitHub App/);
   });
 
   it("the setup URL serves a form, rejects junk, and accepts a plausible PAT (out-of-band)", async () => {

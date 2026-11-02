@@ -414,6 +414,7 @@ async function cmdAppAdd(id: string | undefined, repo: string | undefined, flags
           .toString()
           .trim();
         if (remote) {
+          loadConfig(); // allows the githubEnterprise hosts, so an enterprise remote parses
           const { host, owner, name } = parseRepo(remote);
           repo = host === "github.com" ? `${owner}/${name}` : `${host}/${owner}/${name}`;
         }
