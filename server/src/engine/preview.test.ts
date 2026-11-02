@@ -20,6 +20,7 @@ const config: Config = {
   port: 4300,
   streaming: { serveSim: { version: "0.1.34", codec: "auto", helperPortRange: [3100, 3199] } },
   githubApp: { appId: 1, privateKeyPath: "k.pem" },
+  githubEnterprise: [],
   githubAmbient: true,
   allowPublicRepos: false,
   limits: {

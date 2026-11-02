@@ -6,7 +6,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { App, AppType, Config } from "../config.ts";
-import { appSchema, ConfigError, parseRepo, publicBaseUrl } from "../config.ts";
+import { appSchema, ConfigError, enterprisePatPath, parseRepo, publicBaseUrl } from "../config.ts";
 import { versionStatus, type UpdateStatus } from "../version.ts";
 import { DEV_MENU_PREFLIGHT, devMenuHint } from "../testing/devMenu.ts";
 import { selectorMissHint } from "../testing/tree.ts";
@@ -1662,9 +1662,9 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Register an app",
       description:
-        "Register a GitHub repo for GIT-MODE previews: deckhand fetches a pushed branch/PR from GitHub and builds it — the repo need NOT be checked out on the machine. This is NOT the default. Prefer a LOCAL preview when the project is on this machine: register it there with `deckhand app add <id> --path <dir>` (livesync, no push, no GitHub access) — that's done on the machine, not over MCP. Use add_app only when the user explicitly wants a pushed ref/PR, or the project isn't checked out locally. Detects the app type/bundle id from the repo. If the repo is private and deckhand has no credential, returns a one-time setup link for the user to grant read access — relay that link, never ask for the token in chat.",
+        "Register a GitHub repo for GIT-MODE previews: deckhand fetches a pushed branch/PR from GitHub and builds it — the repo need NOT be checked out on the machine. This is NOT the default. Prefer a LOCAL preview when the project is on this machine: register it there with `deckhand app add <id> --path <dir>` (livesync, no push, no GitHub access) — that's done on the machine, not over MCP. Use add_app only when the user explicitly wants a pushed ref/PR, or the project isn't checked out locally. Detects the app type/bundle id from the repo. If the repo is private and deckhand has no credential, returns a one-time setup link for the user to grant read access — relay that link, never ask for the token in chat. A repo on a GitHub Enterprise host gets no link: the error says where that host's PAT file goes on the machine.",
       inputSchema: {
-        repo: z.string().describe("owner/name, or a github.com URL"),
+        repo: z.string().describe("owner/name, a github.com URL, or a URL on a GitHub Enterprise host the machine's config.yaml lists under githubEnterprise"),
         id: z.string().optional().describe("app id (kebab-case); defaults from the repo name"),
         type: z
           .enum(["expo", "react-native", "nativescript"])
@@ -1723,14 +1723,17 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           detected = await engine.inspectAppRepo(probeFor(branch), { kind: "branch", branch });
         } catch (e) {
           if (isAuthProblem(e)) {
-            // The setup page writes the github.com PAT file; an enterprise host reads its own.
+            // The setup page writes the github.com PAT file; an enterprise host reads only its own.
+            const enterprisePat = repoHost.toLowerCase() === "github.com" ? null : enterprisePatPath(config, repoHost);
             const url = ctx.setup && repoHost.toLowerCase() === "github.com"
               ? `${publicBaseUrl(config)}/setup/${ctx.setup.mint("github-pat", owner)}`
               : undefined;
             const host = deckhandHost();
             const patStep = url
               ? `give the user this link and ask them to open it and paste a GitHub fine-grained PAT (Contents: Read-only for "${owner}"): ${url} — it's single-use and expires in 15 minutes. When they confirm, call add_app again. Never ask for the token in chat.`
-              : `grant deckhand read access to "${owner}" (a fine-grained PAT with Contents: Read-only, or install the GitHub App), then call add_app again.`;
+              : enterprisePat
+                ? `${repoHost} is a GitHub Enterprise host, which only ever gets its own PAT: ask the user to create a fine-grained PAT on ${repoHost} (Contents: Read-only for "${owner}") and save it on the deckhand machine (host "${host.hostname}") to ${enterprisePat}, mode 0600. There is no setup link for it. When they confirm, call add_app again. Never ask for the token in chat.`
+                : `grant deckhand read access to "${owner}" (a fine-grained PAT with Contents: Read-only, or install the GitHub App), then call add_app again.`;
             return failWith(
               "github_auth_missing",
               `deckhand can't read ${args.repo} with any available credential — it's private (or the current credential lacks access).`,
