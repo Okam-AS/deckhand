@@ -6,6 +6,7 @@ import {
   parseAppleLanguages,
   selectRuntime,
   selectDeviceType,
+  selectSimulator,
   deviceLabel,
   SimctlError,
   Simctl,
@@ -86,6 +87,74 @@ describe("selectDeviceType", () => {
 
   it("errors on an unmatched model", () => {
     assert.throws(() => selectDeviceType(dts, "Pixel 9"), (e) => e instanceof SimctlError);
+  });
+});
+
+describe("selectSimulator", () => {
+  const dt = (name: string) => ({ identifier: `com.apple.CoreSimulator.SimDeviceType.${name.replace(/ /g, "-")}`, name });
+  const iphones = ["iPhone 18 Pro", "iPhone 18 Pro Max", "iPhone 17", "iPhone Duo"].map(dt);
+  const rt = (version: string, supported?: string[]) => ({
+    identifier: `com.apple.CoreSimulator.SimRuntime.iOS-${version.replace(".", "-")}`,
+    name: `iOS ${version}`,
+    version,
+    isAvailable: true,
+    ...(supported ? { supportedDeviceTypes: supported.map((n) => ({ identifier: dt(n).identifier, name: n })) } : {}),
+  });
+  const runtimes = parseRuntimes({
+    runtimes: [
+      rt("26.5", ["iPhone 17"]),
+      rt("27.0", ["iPhone 18 Pro", "iPhone 18 Pro Max", "iPhone 17"]),
+      rt("27.1", ["iPhone Duo"]),
+    ],
+  });
+
+  it("parses supportedDeviceTypes as identifiers", () => {
+    assert.deepEqual(runtimes.find((r) => r.version === "27.1")!.supportedDeviceTypes, ["com.apple.CoreSimulator.SimDeviceType.iPhone-Duo"]);
+  });
+
+  it("skips a newest runtime that cannot run the default iPhone Pro", () => {
+    const { runtime, deviceType } = selectSimulator(runtimes, iphones);
+    assert.equal(runtime.version, "27.0");
+    assert.equal(deviceType.name, "iPhone 18 Pro");
+  });
+
+  it("takes the newest runtime that supports a requested model", () => {
+    assert.equal(selectSimulator(runtimes, iphones, { model: "iPhone 17" }).runtime.version, "27.0");
+  });
+
+  it("resolves the iPhone Duo, with no runtime requested, to the only runtime that has it", () => {
+    const { runtime, deviceType } = selectSimulator(runtimes, iphones, { model: "iPhone Duo" });
+    assert.equal(runtime.version, "27.1");
+    assert.equal(deviceType.name, "iPhone Duo");
+  });
+
+  it("pairs an explicit iPhone Duo with an explicit 27.1", () => {
+    const { runtime, deviceType } = selectSimulator(runtimes, iphones, { runtime: "27.1", model: "iPhone Duo" });
+    assert.equal(runtime.version, "27.1");
+    assert.equal(deviceType.identifier, "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo");
+  });
+
+  it("gives 27.1 with no model the one device it can create", () => {
+    assert.equal(selectSimulator(runtimes, iphones, { runtime: "27.1" }).deviceType.name, "iPhone Duo");
+  });
+
+  it("names the supported models when an explicit runtime and model are incompatible", () => {
+    assert.throws(
+      () => selectSimulator(runtimes, iphones, { runtime: "27.1", model: "iPhone 18 Pro" }),
+      (e) => e instanceof SimctlError && /iOS 27\.1 cannot run "iPhone 18 Pro"; it supports: iPhone Duo\./.test(e.message) && /27\.0/.test(e.message),
+    );
+  });
+
+  it("keeps the unknown-model error for a model no device type matches", () => {
+    assert.throws(() => selectSimulator(runtimes, iphones, { model: "Pixel 9" }), (e) => e instanceof SimctlError && /no simulator device type matches/.test(e.message));
+  });
+
+  it("falls back to newest runtime + default model when simctl omits supportedDeviceTypes", () => {
+    const old = parseRuntimes({ runtimes: [rt("26.5"), rt("27.1")] });
+    assert.equal(old[0]!.supportedDeviceTypes, undefined);
+    const { runtime, deviceType } = selectSimulator(old, iphones);
+    assert.equal(runtime.version, "27.1");
+    assert.equal(deviceType.name, "iPhone 18 Pro");
   });
 });
 
