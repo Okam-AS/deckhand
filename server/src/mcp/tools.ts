@@ -1207,9 +1207,9 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Navigate toward a goal (server-side loop)",
       description:
-        "Reach a screen or state in ONE call instead of one describe→ui round trip per step: deckhand reads the accessibility tree, a fast decision model (TypeSafe Jev, text-only) picks the next action from a closed list (tap an element on screen, back, scroll, type a value YOU supplied, done, stuck), deckhand performs it once the screen has stopped moving, and repeats — all on the deckhand machine. " +
-        "Use it for plain navigation (\"open Settings → About\", \"get to the checkout screen\"), not for judging whether the app is right: it never writes text of its own, it cannot see pixels, and it stops and hands back on low confidence, a repeated move, a failed action or maxSteps. " +
-        "`text` maps a name to a value to type (e.g. {\"email\": \"a@b.no\"}); only the NAMES reach the decision model. Element roles and masked labels leave the machine for TypeSafe's API. " +
+        "Reach a screen or state in ONE call instead of one describe→ui round trip per step: deckhand reads the accessibility tree, a fast decision model (TypeSafe Jev) picks the next action from a closed list (tap an element on screen, back, scroll, type a value YOU supplied, done, stuck), deckhand performs it once the screen has stopped moving, and repeats — all on the deckhand machine. " +
+        "Use it for plain navigation (\"open Settings → About\", \"get to the checkout screen\"), not for judging whether the app is right: it never writes text of its own, it picks only from the listed actions, and it stops and hands back on low confidence, a repeated move, a failed action or maxSteps. " +
+        "`text` maps a name to a value to type (e.g. {\"email\": \"a@b.no\"}); only the NAMES go in the request, but a value already typed shows in later screenshots. Element roles, masked labels and the screenshot (unmasked) leave the machine for TypeSafe's API. " +
         "Always read `outcome`: `done` is the model's judgement, so confirm it with one `ui` assert/waitFor before you report it; `escalated`/`limit` means continue yourself from `finalScreen` with describe + ui.",
       inputSchema: {
         previewId: z.string(),
@@ -1222,7 +1222,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           .max(1)
           .optional()
           .describe("one confidence floor for every action; by default each kind has its own, a tap needing less than `done`"),
-        text: z.record(z.string(), z.string()).optional().describe("named values the loop may type into a text field; the values are never sent to the model"),
+        text: z.record(z.string(), z.string()).optional().describe("named values the loop may type into a text field; only the names are in the request, but a typed value is visible in later screenshots"),
         uiLanguage: z.string().min(2).max(35).optional().describe("the app's UI language, e.g. nb-NO, when it differs from the device's; read from the device otherwise"),
       },
     },
@@ -1244,7 +1244,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
               audit.record({
                 actor: principal.name,
                 tool: "navigate:egress",
-                args: { app: appId, previewId: args.previewId, deviceId: args.deviceId, to: EGRESS_HOST, candidates: e.candidates, bytes: e.bytes },
+                args: { app: appId, previewId: args.previewId, deviceId: args.deviceId, to: EGRESS_HOST, candidates: e.candidates, bytes: e.bytes, images: e.images },
                 result: "ok",
               });
             },

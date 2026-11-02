@@ -332,7 +332,7 @@ function checkWebHost(config: Config, apps: App[]): Check {
 export function checkNavigateEgress(key: KeyLookup): Check | null {
   if (key.state === "missing") return null;
   if (key.state === "error") return { name: "navigate egress", ok: true, warn: true, detail: `navigate is off: ${key.message}` };
-  return { name: "navigate egress", ok: true, warn: true, detail: `navigate sends screen labels from every app it drives to ${EGRESS_HOST} (a third party) — test data and test accounts only. Off: \`deckhand secret rm typesafe\`` };
+  return { name: "navigate egress", ok: true, warn: true, detail: `navigate sends screen labels and screenshots from every app it drives to ${EGRESS_HOST} (a third party) — test data and test accounts only. Off: \`deckhand secret rm typesafe\`` };
 }
 
 /**

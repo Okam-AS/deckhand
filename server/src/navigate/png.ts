@@ -98,6 +98,28 @@ function chunk(type: string, body: Buffer): Buffer {
   return Buffer.concat([head, body, crc]);
 }
 
+/** Shrinks so neither side exceeds `maxSide`, averaging each source box. Never enlarges. */
+export function scaleToFit(img: Rgba, maxSide: number): Rgba {
+  const f = Math.min(1, maxSide / Math.max(img.width, img.height));
+  if (f === 1) return img;
+  const width = Math.max(1, Math.round(img.width * f));
+  const height = Math.max(1, Math.round(img.height * f));
+  const data = Buffer.alloc(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    const y0 = Math.floor((y * img.height) / height);
+    const y1 = Math.max(y0 + 1, Math.floor(((y + 1) * img.height) / height));
+    for (let x = 0; x < width; x++) {
+      const x0 = Math.floor((x * img.width) / width);
+      const x1 = Math.max(x0 + 1, Math.floor(((x + 1) * img.width) / width));
+      const sum = [0, 0, 0, 0];
+      for (let sy = y0; sy < y1; sy++) for (let sx = x0; sx < x1; sx++) for (let c = 0; c < 4; c++) sum[c]! += img.data[(sy * img.width + sx) * 4 + c]!;
+      const n = (y1 - y0) * (x1 - x0);
+      for (let c = 0; c < 4; c++) data[(y * width + x) * 4 + c] = Math.round(sum[c]! / n);
+    }
+  }
+  return { width, height, data };
+}
+
 export function encodePng(img: Rgba): Buffer {
   const ihdr = Buffer.alloc(13);
   ihdr.writeUInt32BE(img.width, 0);

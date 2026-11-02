@@ -1,8 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import type { JevChooser, JevQuestion, JevResult } from "./jev.ts";
+import { JevError, type JevChooser, type JevQuestion, type JevResult } from "./jev.ts";
 import { encodePng } from "./png.ts";
-import { DEFAULT_THRESHOLDS, TOKEN_BUDGET, estimateTokens, navigate, type LoopAction, type NavigateRequest } from "./loop.ts";
+import { DEFAULT_THRESHOLDS, TOKEN_BUDGET, estimateTokens, navigate, screenshotAsset, treeIsWeak, type LoopAction, type NavigateRequest } from "./loop.ts";
+import { readScreen } from "./screen.ts";
+import { decodePng } from "./png.ts";
 
 const VP = { x: 0, y: 0, width: 400, height: 800 };
 /** A screen whose rows sit one per 80pt, so row i's centre is at y = (i * 80 + 140) / 800. */
@@ -316,5 +318,70 @@ describe("navigate waits for a still screen", () => {
       now: clock(),
     });
     assert.equal(r.reason, "stale_tree", r.message);
+  });
+});
+
+describe("navigate: the screenshot", () => {
+  // A phone-sized PNG: taller than TypeSafe's 1568 px limit.
+  const phone = encodePng({ width: 603, height: 1311 * 2, data: Buffer.alloc(603 * 1311 * 2 * 4, 200) });
+
+  it("goes with each decision as an image asset, shrunk to TypeSafe's limits and named in state", async () => {
+    const jev = scriptedJev([{ pick: "done" }]);
+    const seen: Array<Record<string, { data_base64: string }> | undefined> = [];
+    const ask = jev.ask.bind(jev);
+    jev.ask = async (state, questions, assets) => { seen.push(assets); return ask(state, questions, assets); };
+    const egress: Array<{ images: number; bytes: number }> = [];
+    await navigate(req(), { describe: async () => about, act: async () => {}, jev, frame: async () => phone, onEgress: (e) => egress.push(e) });
+    const assets = seen[0]!;
+    const [ref] = Object.keys(assets);
+    assert.equal((jev.asked[0]!.state as { screenshot?: string }).screenshot, ref);
+    const img = decodePng(Buffer.from(assets[ref!]!.data_base64, "base64"));
+    assert.ok(img.height <= 1568 && img.width >= 280, `${img.width}x${img.height}`);
+    assert.equal(egress[0]!.images, 1);
+    assert.ok(egress[0]!.bytes > assets[ref!]!.data_base64.length);
+  });
+
+  it("is dropped and the step asked again as text when TypeSafe refuses the image", async () => {
+    const jev = scriptedJev([{ pick: "done" }]);
+    const ask = jev.ask.bind(jev);
+    let refused = 0;
+    jev.ask = async (state, questions, assets) => {
+      if (assets) { refused++; throw new JevError("TypeSafe API 503: Image processing is unavailable.", 503); }
+      return ask(state, questions);
+    };
+    const egress: number[] = [];
+    const r = await navigate(req(), { describe: async () => about, act: async () => {}, jev, frame: async () => phone, onEgress: (e) => egress.push(e.images) });
+    assert.equal(refused, 1);
+    assert.deepEqual(egress, [1, 0], "both requests are audited");
+    assert.equal(r.outcome, "done");
+    assert.equal("screenshot" in jev.asked[0]!.state, false);
+  });
+
+  it("is sent only where the tree says little: a web view, few or unlabelled things to tap", () => {
+    const rich = screen("Settings", ["General", "Privacy", "Display", "Sounds"]);
+    assert.equal(treeIsWeak(rich, readScreen(rich, null)), false);
+    assert.equal(treeIsWeak(about, readScreen(about, null)), true, "nothing to tap");
+    const icons = screen("Home", ["Settings", { role: "Button" }, { role: "Button" }, "Profile"]);
+    assert.equal(treeIsWeak(icons, readScreen(icons, null)), true, "half the buttons have no label");
+    const web = { roots: [{ ...rich.roots[0]!, children: [...rich.roots[0]!.children, { role: "WebView", frame: VP }] }] };
+    assert.equal(treeIsWeak(web, readScreen(web, null)), true, "a web view");
+  });
+
+  it("stays out on a well-labelled screen", async () => {
+    const rich = screen("Settings", ["General", "Privacy", "Display", "Sounds"]);
+    const jev = scriptedJev([{ pick: "done" }]);
+    const seen: unknown[] = [];
+    const ask = jev.ask.bind(jev);
+    jev.ask = async (state, questions, assets) => { seen.push(assets); return ask(state, questions, assets); };
+    const r = await navigate(req(), { describe: async () => rich, act: async () => {}, jev, frame: async () => phone });
+    assert.deepEqual(seen, [undefined]);
+    assert.equal(r.steps[0]!.image, false);
+  });
+
+  it("is left out when there is no readable frame, and the request is as before", async () => {
+    const jev = scriptedJev([{ pick: "done" }]);
+    await navigate(req(), { describe: async () => about, act: async () => {}, jev });
+    assert.equal("screenshot" in jev.asked[0]!.state, false);
+    assert.equal(screenshotAsset(Buffer.from("not a png")), null);
   });
 });

@@ -89,4 +89,18 @@ describe("TypeSafe key lookup", () => {
     assert.ok(!access.ok && access.code === "navigate_key_unreadable");
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it("sends images as assets with TypeSafe's opt-in header, and neither without them", async () => {
+    const { calls, fetchImpl } = recorder([{ status: 200, body: answer }]);
+    const client = new JevClient({ apiKey: KEY, fetchImpl });
+    const q = { next: { type: "choice" as const, instructions: "i", criteria: { a: null } } };
+    await client.ask({ goal: "g" }, q);
+    await client.ask({ goal: "g", screenshot: "ref-1" }, q, { "ref-1": { type: "image", format: "png", data_base64: "AAAA" } });
+    const [plain, withImage] = calls.map((c) => ({ headers: c.init.headers as Record<string, string>, body: JSON.parse(String(c.init.body)) }));
+    assert.equal(plain!.headers["TypeSafe-Danger-Zone-Images"], undefined);
+    assert.equal("assets" in plain!.body, false);
+    assert.equal(withImage!.headers["TypeSafe-Danger-Zone-Images"], "true");
+    assert.deepEqual(withImage!.body.assets, { "ref-1": { type: "image", format: "png", data_base64: "AAAA" } });
+  });
 });
+
