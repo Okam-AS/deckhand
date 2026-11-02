@@ -345,7 +345,7 @@ describe("navigate: the screenshot", () => {
     const ask = jev.ask.bind(jev);
     let refused = 0;
     jev.ask = async (state, questions, assets) => {
-      if (assets) { refused++; throw new JevError("TypeSafe API 400: image rejected", 400); }
+      if (assets) { refused++; throw new JevError("TypeSafe API 503: Image processing is unavailable.", 503); }
       return ask(state, questions);
     };
     const egress: number[] = [];

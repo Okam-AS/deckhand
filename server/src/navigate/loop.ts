@@ -110,10 +110,11 @@ const STILL_MS = 300;
 const IMAGE_MAX_SIDE = 1568;
 const IMAGE_MIN_SIDE = 280;
 /**
- * Context the screenshot is assumed to take, kept off the text budget. TypeSafe publishes no estimate yet
- * ("coming soon"); check it against the billed input_tokens of a live run with and without the image.
+ * Context the screenshot takes, kept off the text budget. TypeSafe publishes no estimate; measured live on
+ * jev-1.13.0 (2026-11-02): an iPhone 17 Pro screen shrunk to 721×1568 billed 2,935 tokens more than the same
+ * request without it. Reserved with a margin.
  */
-export const IMAGE_TOKEN_RESERVE = 3_000;
+export const IMAGE_TOKEN_RESERVE = 4_000;
 
 export function estimateTokens(v: unknown): number {
   return Math.ceil(JSON.stringify(v).length / CHARS_PER_TOKEN);
@@ -208,9 +209,9 @@ export async function navigate(req: NavigateRequest, deps: NavigateDeps): Promis
       try {
         res = await deps.jev.ask(state, questions, image?.assets);
       } catch (e) {
-        // Images are TypeSafe's opt-in preview: a request it refuses for the picture (400, or 413 for size) is
-        // asked again as text, the way every step was before images.
-        if (!image || !(e instanceof JevError) || (e.status !== 400 && e.status !== 413)) throw e;
+        // Images are TypeSafe's opt-in preview: a request it refuses for the picture (400, 413 for size, or 503
+        // "Image processing is unavailable", seen live) is asked again as text, the way every step was before images.
+        if (!image || !(e instanceof JevError) || (e.status !== 400 && e.status !== 413 && e.status !== 503)) throw e;
         // The same screen lines and options, so the answer names one of `candidates`.
         const plain = build(goal, req.locale ?? null, history, state.screen, candidates, null);
         // A second request leaves the machine: audited, and refused if the key went, like the first.
