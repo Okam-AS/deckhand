@@ -1,8 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import type { JevChooser, JevQuestion, JevResult } from "./jev.ts";
+import { JevError, type JevChooser, type JevQuestion, type JevResult } from "./jev.ts";
 import { encodePng } from "./png.ts";
-import { DEFAULT_THRESHOLDS, TOKEN_BUDGET, estimateTokens, navigate, type LoopAction, type NavigateRequest } from "./loop.ts";
+import { DEFAULT_THRESHOLDS, TOKEN_BUDGET, estimateTokens, navigate, screenshotAsset, type LoopAction, type NavigateRequest } from "./loop.ts";
+import { decodePng } from "./png.ts";
 
 const VP = { x: 0, y: 0, width: 400, height: 800 };
 /** A screen whose rows sit one per 80pt, so row i's centre is at y = (i * 80 + 140) / 800. */
@@ -316,5 +317,47 @@ describe("navigate waits for a still screen", () => {
       now: clock(),
     });
     assert.equal(r.reason, "stale_tree", r.message);
+  });
+});
+
+describe("navigate: the screenshot", () => {
+  // A phone-sized PNG: taller than TypeSafe's 1568 px limit.
+  const phone = encodePng({ width: 603, height: 1311 * 2, data: Buffer.alloc(603 * 1311 * 2 * 4, 200) });
+
+  it("goes with each decision as an image asset, shrunk to TypeSafe's limits and named in state", async () => {
+    const jev = scriptedJev([{ pick: "done" }]);
+    const seen: Array<Record<string, { data_base64: string }> | undefined> = [];
+    const ask = jev.ask.bind(jev);
+    jev.ask = async (state, questions, assets) => { seen.push(assets); return ask(state, questions, assets); };
+    const egress: Array<{ images: number; bytes: number }> = [];
+    await navigate(req(), { describe: async () => about, act: async () => {}, jev, frame: async () => phone, onEgress: (e) => egress.push(e) });
+    const assets = seen[0]!;
+    const [ref] = Object.keys(assets);
+    assert.equal((jev.asked[0]!.state as { screenshot?: string }).screenshot, ref);
+    const img = decodePng(Buffer.from(assets[ref!]!.data_base64, "base64"));
+    assert.ok(img.height <= 1568 && img.width >= 280, `${img.width}x${img.height}`);
+    assert.equal(egress[0]!.images, 1);
+    assert.ok(egress[0]!.bytes > assets[ref!]!.data_base64.length);
+  });
+
+  it("is dropped and the step asked again as text when TypeSafe refuses the image", async () => {
+    const jev = scriptedJev([{ pick: "done" }]);
+    const ask = jev.ask.bind(jev);
+    let refused = 0;
+    jev.ask = async (state, questions, assets) => {
+      if (assets) { refused++; throw new JevError("TypeSafe API 400: image rejected", 400); }
+      return ask(state, questions);
+    };
+    const r = await navigate(req(), { describe: async () => about, act: async () => {}, jev, frame: async () => phone });
+    assert.equal(refused, 1);
+    assert.equal(r.outcome, "done");
+    assert.equal("screenshot" in jev.asked[0]!.state, false);
+  });
+
+  it("is left out when there is no readable frame, and the request is as before", async () => {
+    const jev = scriptedJev([{ pick: "done" }]);
+    await navigate(req(), { describe: async () => about, act: async () => {}, jev });
+    assert.equal("screenshot" in jev.asked[0]!.state, false);
+    assert.equal(screenshotAsset(Buffer.from("not a png")), null);
   });
 });

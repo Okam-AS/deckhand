@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { deflateSync } from "node:zlib";
-import { decodePng, encodePng, type Rgba } from "./png.ts";
+import { decodePng, encodePng, scaleToFit, type Rgba } from "./png.ts";
 
 function image(w: number, h: number, px: (x: number, y: number) => [number, number, number, number]): Rgba {
   const data = Buffer.alloc(w * h * 4);
@@ -70,5 +70,20 @@ describe("png", () => {
 
   it("refuses what it cannot read rather than returning a wrong image", () => {
     assert.throws(() => decodePng(Buffer.from("not a png")), /not a PNG/);
+  });
+});
+
+describe("scaleToFit", () => {
+  it("shrinks the long side to the limit, keeps the aspect, and averages the pixels it merges", () => {
+    // Columns alternate black and white: halving the width must give mid grey, not one of them.
+    const src = image(400, 200, (x) => (x % 2 ? [255, 255, 255, 255] : [0, 0, 0, 255]));
+    const out = scaleToFit(src, 200);
+    assert.deepEqual([out.width, out.height], [200, 100]);
+    assert.deepEqual([...out.data.subarray(0, 4)], [128, 128, 128, 255]);
+  });
+
+  it("never enlarges", () => {
+    const src = image(10, 20, () => [1, 2, 3, 255]);
+    assert.equal(scaleToFit(src, 1568), src);
   });
 });

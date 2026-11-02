@@ -1784,7 +1784,7 @@ describe("navigate (server-side drive loop)", () => {
     assert.equal(egress.length, seen.length, "one audit line per request sent");
     assert.ok(egress.length > 0);
     for (const e of egress) {
-      assert.deepEqual(Object.keys(e.args ?? {}).sort(), ["app", "bytes", "candidates", "deviceId", "previewId", "to"]);
+      assert.deepEqual(Object.keys(e.args ?? {}).sort(), ["app", "bytes", "candidates", "deviceId", "images", "previewId", "to"]);
       assert.equal(e.args?.app, "app-local");
       assert.equal(e.args?.to, "api.typesafe.ai");
       assert.ok(Number(e.args?.bytes) > 0 && Number(e.args?.candidates) > 0);

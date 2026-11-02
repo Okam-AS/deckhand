@@ -1,6 +1,7 @@
 import { diffImages } from "./compare.ts";
-import { decodePng, type Rgba } from "./png.ts";
-import { JevError, type ChoiceAnswer, type JevChooser, type JevQuestion, type NoulAnswer } from "./jev.ts";
+import { randomUUID } from "node:crypto";
+import { decodePng, encodePng, scaleToFit, type Rgba } from "./png.ts";
+import { JevError, type ChoiceAnswer, type JevChooser, type JevImage, type JevQuestion, type NoulAnswer } from "./jev.ts";
 import { candidatesFor, mask, pngSize, readScreen, type ActionKind, type Candidate, type NavigateAction, type Rect } from "./screen.ts";
 
 export type LoopAction = NavigateAction | { type: "type"; text: string };
@@ -19,6 +20,8 @@ export interface NavigateRequest {
 export interface Egress {
   candidates: number;
   bytes: number;
+  /** Screenshots in the request (0 or 1). */
+  images: number;
 }
 
 export interface NavigateDeps {
@@ -103,6 +106,14 @@ const STILL_RATIO = 0.002;
 /** Of the tapped element's region: a list that shifted by a row changes most of it, a blinking caret almost none. */
 const MOVED_RATIO = 0.05;
 const STILL_MS = 300;
+/** TypeSafe takes 280–1568 px per side and does not resize: a phone screenshot (1206×2622) is shrunk to fit. */
+const IMAGE_MAX_SIDE = 1568;
+const IMAGE_MIN_SIDE = 280;
+/**
+ * Context the screenshot is assumed to take, kept off the text budget. TypeSafe publishes no estimate yet
+ * ("coming soon"); check it against the billed input_tokens of a live run with and without the image.
+ */
+export const IMAGE_TOKEN_RESERVE = 3_000;
 
 export function estimateTokens(v: unknown): number {
   return Math.ceil(JSON.stringify(v).length / CHARS_PER_TOKEN);
@@ -118,6 +129,7 @@ const NEXT_INSTRUCTIONS = {
     "`actions_taken` lists what was already done, oldest first; do not repeat one that did not help.",
   ],
 };
+const IMAGE_RULE = "`screenshot` is the same screen as an image: use it to read what `screen` describes poorly (icons, images, web pages), but pick only from the options.";
 const REACHED_INSTRUCTIONS = "Does `screen` show that `goal` has already been achieved?";
 
 export async function navigate(req: NavigateRequest, deps: NavigateDeps): Promise<NavigateResult> {
@@ -177,7 +189,8 @@ export async function navigate(req: NavigateRequest, deps: NavigateDeps): Promis
 
     const set = candidatesFor(screen, textKeys);
     dropped = Math.max(dropped, set.dropped);
-    const fitted = fit(goal, req.locale ?? null, history, screen.lines, set.candidates);
+    const image = settle.shot ? screenshotAsset(settle.shot) : null;
+    const fitted = fit(goal, req.locale ?? null, history, screen.lines, set.candidates, image?.ref ?? null);
     truncated ||= fitted.cut;
     const { state, questions, candidates } = fitted;
 
@@ -186,12 +199,22 @@ export async function navigate(req: NavigateRequest, deps: NavigateDeps): Promis
     let reached: number | null;
     let usage: number | null = null;
     try {
-      deps.onEgress?.({ candidates: candidates.length, bytes: Buffer.byteLength(JSON.stringify({ state, questions })) });
+      deps.onEgress?.({ candidates: candidates.length, bytes: Buffer.byteLength(JSON.stringify({ state, questions, assets: image?.assets })), images: image ? 1 : 0 });
     } catch (e) {
       return finish("escalated", `nothing was sent: ${errMsg(e)}`, "egress_refused");
     }
     try {
-      const res = await deps.jev.ask(state, questions);
+      let res;
+      try {
+        res = await deps.jev.ask(state, questions, image?.assets);
+      } catch (e) {
+        // Images are TypeSafe's opt-in preview: a request it refuses for the picture (400, or 413 for size) is
+        // asked again as text, the way every step was before images.
+        if (!image || !(e instanceof JevError) || (e.status !== 400 && e.status !== 413)) throw e;
+        // The same screen lines and options, so the answer names one of `candidates`.
+        const plain = build(goal, req.locale ?? null, history, state.screen, candidates, null);
+        res = await deps.jev.ask(plain.state, plain.questions);
+      }
       model = res.model;
       usage = res.usage?.input_tokens ?? null;
       inputTokens += usage ?? 0;
@@ -277,25 +300,26 @@ export async function navigate(req: NavigateRequest, deps: NavigateDeps): Promis
 }
 
 interface Fitted {
-  state: { goal: string; ui_language?: string; actions_taken: string[]; screen: string[] };
+  state: { goal: string; ui_language?: string; actions_taken: string[]; screen: string[]; screenshot?: string };
   questions: Record<string, JevQuestion>;
   candidates: Candidate[];
   tokens: number;
   cut: boolean;
 }
 
-function build(goal: string, locale: string | null, history: string[], lines: string[], candidates: Candidate[]): Omit<Fitted, "cut"> {
-  const state = { goal, ...(locale ? { ui_language: locale } : {}), actions_taken: [...history], screen: lines };
+function build(goal: string, locale: string | null, history: string[], lines: string[], candidates: Candidate[], image: string | null): Omit<Fitted, "cut"> {
+  const state = { goal, ...(locale ? { ui_language: locale } : {}), actions_taken: [...history], screen: lines, ...(image ? { screenshot: image } : {}) };
+  const instructions = image ? { ...NEXT_INSTRUCTIONS, rules: [...NEXT_INSTRUCTIONS.rules, IMAGE_RULE] } : NEXT_INSTRUCTIONS;
   const questions: Record<string, JevQuestion> = {
-    next: { type: "choice", instructions: NEXT_INSTRUCTIONS, criteria: Object.fromEntries(candidates.map((c) => [c.key, null])) },
+    next: { type: "choice", instructions, criteria: Object.fromEntries(candidates.map((c) => [c.key, null])) },
     reached: { type: "noul", instructions: REACHED_INSTRUCTIONS },
   };
-  return { state, questions, candidates, tokens: estimateTokens(state) + estimateTokens(questions.next) };
+  return { state, questions, candidates, tokens: estimateTokens(state) + estimateTokens(questions.next) + (image ? IMAGE_TOKEN_RESERVE : 0) };
 }
 
 /** Keep `state` plus the Choice under Jev's limit: drop screen lines from the bottom, then the options they named. */
-function fit(goal: string, locale: string | null, history: string[], lines: string[], candidates: Candidate[]): Fitted {
-  let b = build(goal, locale, history, lines, candidates);
+function fit(goal: string, locale: string | null, history: string[], lines: string[], candidates: Candidate[], image: string | null): Fitted {
+  let b = build(goal, locale, history, lines, candidates, image);
   if (b.tokens <= TOKEN_BUDGET) return { ...b, cut: false };
   let kept = lines.length;
   while (kept > 1 && b.tokens > TOKEN_BUDGET) {
@@ -303,7 +327,7 @@ function fit(goal: string, locale: string | null, history: string[], lines: stri
     const shown = lines.slice(0, kept);
     const refs = new Set(shown.map((l) => l.split(" ", 1)[0]));
     const opts = candidates.filter((c) => c.kind !== "tap" && c.kind !== "fill" && c.kind !== "reveal" ? true : refs.has(refOf(c.key)));
-    b = build(goal, locale, history, shown, opts);
+    b = build(goal, locale, history, shown, opts, image);
   }
   return { ...b, cut: true };
 }
@@ -380,6 +404,21 @@ async function waitSettled(frame: NavigateDeps["frame"], now: () => number): Pro
     last = shot;
   }
   return { settled: false, shot: last };
+}
+
+/**
+ * The settled screenshot as a TypeSafe image asset, shrunk to its size limits. null when it cannot be read or
+ * would fall under the minimum: the step then goes without it, as it did before images.
+ */
+export function screenshotAsset(shot: Buffer): { ref: string; assets: Record<string, JevImage> } | null {
+  try {
+    const img = scaleToFit(decodePng(shot), IMAGE_MAX_SIDE);
+    if (Math.min(img.width, img.height) < IMAGE_MIN_SIDE) return null;
+    const ref = randomUUID();
+    return { ref, assets: { [ref]: { type: "image", format: "png", data_base64: encodePng(img).toString("base64") } } };
+  } catch {
+    return null;
+  }
 }
 
 async function runCandidate(c: Candidate, text: Record<string, string>, act: NavigateDeps["act"]): Promise<void> {

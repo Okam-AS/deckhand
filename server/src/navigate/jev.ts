@@ -14,6 +14,13 @@ export interface NoulQuestion {
 }
 export type JevQuestion = ChoiceQuestion | NoulQuestion;
 
+/** An image the request refers to by its key, written as a string inside `state` (TypeSafe "assets"). */
+export interface JevImage {
+  type: "image";
+  format: "png" | "jpg";
+  data_base64: string;
+}
+
 export interface ChoiceAnswer {
   type: "choice";
   choice: string;
@@ -34,7 +41,7 @@ export interface JevResult {
 
 /** The one method the navigate loop needs — what a test fakes. */
 export interface JevChooser {
-  ask(state: unknown, questions: Record<string, JevQuestion>): Promise<JevResult>;
+  ask(state: unknown, questions: Record<string, JevQuestion>, assets?: Record<string, JevImage>): Promise<JevResult>;
 }
 
 export class JevError extends Error {
@@ -85,14 +92,17 @@ export class JevClient implements JevChooser {
     this.#sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   }
 
-  async ask(state: unknown, questions: Record<string, JevQuestion>): Promise<JevResult> {
-    const body = JSON.stringify({ model: this.#model, state, questions });
+  async ask(state: unknown, questions: Record<string, JevQuestion>, assets?: Record<string, JevImage>): Promise<JevResult> {
+    const images = assets && Object.keys(assets).length > 0;
+    const body = JSON.stringify({ model: this.#model, state, questions, ...(images ? { assets } : {}) });
+    // Images are in TypeSafe's opt-in "danger zone": without this header a request carrying one is a 400.
+    const headers: Record<string, string> = { authorization: `Bearer ${this.#apiKey}`, "content-type": "application/json", ...(images ? { "TypeSafe-Danger-Zone-Images": "true" } : {}) };
     for (let attempt = 0; ; attempt++) {
       let res: Response;
       try {
         res = await this.#fetch(this.#endpoint, {
           method: "POST",
-          headers: { authorization: `Bearer ${this.#apiKey}`, "content-type": "application/json" },
+          headers,
           body,
           signal: AbortSignal.timeout(this.#timeoutMs),
         });
