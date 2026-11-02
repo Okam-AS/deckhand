@@ -337,12 +337,14 @@ function nativescriptIosPlan(i: BuildPlanInput): CommandStep[] {
  * that name is its AVD name — not the adb serial (see @expo/cli
  * AndroidDeviceManager.resolveFromNameAsync). Passing `emulator-5554` fails with
  * "Could not find device with name". Resolve the AVD name over adb and pass
- * that; fall back to the serial when `emu avd name` answers with nothing usable.
+ * that. The emulator console can answer `emu avd name` with nothing, so the
+ * guest's `ro.boot.qemu.avd_name` is asked next; the serial is the last resort.
  * `--no-bundler`: same reason as iOS — deckhand owns Metro.
  */
 const expoAndroidRun = (serial: string): string =>
   [
     `_avd=$(adb -s '${serial}' emu avd name 2>/dev/null | tr -d '\\r' | head -1)`,
+    `case "$_avd" in ""|OK|*error*) _avd=$(adb -s '${serial}' shell getprop ro.boot.qemu.avd_name 2>/dev/null | tr -d '\\r');; esac`,
     `case "$_avd" in ""|OK|*error*) _avd='${serial}';; esac`,
     `npx expo run:android --device "$_avd" --no-bundler`,
   ].join("\n");

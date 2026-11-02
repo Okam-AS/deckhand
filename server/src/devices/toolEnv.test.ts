@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { firstExisting, androidHomeCandidates, sdkPathDirs } from "./toolEnv.ts";
+import { firstExisting, androidHomeCandidates, sdkPathDirs, resolveJavaHome } from "./toolEnv.ts";
 
 describe("firstExisting", () => {
   it("returns the first candidate that exists", () => {
@@ -34,5 +34,21 @@ describe("sdkPathDirs", () => {
       "/sdk/cmdline-tools/latest/bin",
       "/sdk/tools/bin",
     ]);
+  });
+});
+
+describe("resolveJavaHome", () => {
+  const exists = () => true;
+  it("takes an existing JAVA_HOME as is", () => {
+    assert.equal(resolveJavaHome({ JAVA_HOME: "/jdk" }, exists, () => "/other"), "/jdk");
+  });
+
+  it("falls back from 21 to 17 when the locator has no exact match", () => {
+    const locate = (m: string) => (m === "17" ? "/jdk17" : undefined);
+    assert.equal(resolveJavaHome({}, exists, locate), "/jdk17");
+  });
+
+  it("answers undefined rather than a non-LTS default JDK", () => {
+    assert.equal(resolveJavaHome({}, exists, () => undefined), undefined);
   });
 });
