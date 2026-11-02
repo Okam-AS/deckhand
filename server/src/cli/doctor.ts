@@ -6,7 +6,7 @@ import { paths } from "../paths.ts";
 import { loadConfig, loadApps, loadTokens, githubPatPath, githubPrivateKeyPath, publicBaseUrl, type App, type Config } from "../config.ts";
 import { GitHubAppAuth } from "../github/appAuth.ts";
 import { ghCliToken } from "../github/credentials.ts";
-import { Simctl, selectRuntime, selectDeviceType } from "../devices/ios.ts";
+import { Simctl, selectSimulator } from "../devices/ios.ts";
 import { ServeSimBackend, vendoredServeSimBin } from "../streaming/serveSim.ts";
 import { AndroidAdbBackend } from "../streaming/androidAdb.ts";
 import { AndroidManager, AVD_PREFIX, selectSystemImage, serialForPort } from "../devices/android.ts";
@@ -358,8 +358,7 @@ async function smokeIos(config: Config): Promise<Check[]> {
   let udid: string | undefined;
   const checks: Check[] = [];
   try {
-    const runtime = selectRuntime(await simctl.listRuntimes());
-    const deviceType = selectDeviceType(await simctl.listDeviceTypes());
+    const { runtime, deviceType } = selectSimulator(await simctl.listRuntimes(), await simctl.listDeviceTypes());
     udid = await simctl.create(DOCTOR_SIM_NAME, deviceType.identifier, runtime.identifier);
     await simctl.bootAndWait(udid);
     checks.push({ name: label("boot"), ok: true, gate: true, smoke: "ios", detail: `${deviceType.name}, ${runtime.name}` });

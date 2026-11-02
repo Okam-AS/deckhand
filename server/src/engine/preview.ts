@@ -15,7 +15,7 @@ import {
 import { hashPassword, verifyPassword } from "../share/shares.ts";
 import { WorktreeManager, worktreeKey, type RefSpec, refDescription } from "./worktree.ts";
 import { pruneDerivedData } from "./derivedData.ts";
-import { Simctl, selectRuntime, selectDeviceType, deviceLabel, type SimDevice } from "../devices/ios.ts";
+import { Simctl, selectSimulator, supportedBy, deviceLabel, type SimDevice } from "../devices/ios.ts";
 import { AndroidManager, AVD_PREFIX, selectSystemImage, portForSerial, serialForPort } from "../devices/android.ts";
 import { resolveAndroidEnv } from "../devices/toolEnv.ts";
 import { Reaper, POOL_SIM_PREFIX, POOL_AVD_PREFIX } from "./reaper.ts";
@@ -1697,9 +1697,8 @@ export class PreviewEngine {
 
   private async bootIos(p: LivePreview, dev: LiveDevice): Promise<string> {
     const runtimes = await this.d.simctl.listRuntimes();
-    const runtime = selectRuntime(runtimes, dev.record.runtime);
     const deviceTypes = await this.d.simctl.listDeviceTypes();
-    const deviceType = selectDeviceType(deviceTypes, dev.record.model);
+    const { runtime, deviceType } = selectSimulator(runtimes, deviceTypes, { runtime: dev.record.runtime, model: dev.record.model });
     dev.record.label = deviceLabel(deviceType, runtime);
     dev.record.runtime = runtime.name;
     dev.record.model = deviceType.name;
@@ -2767,7 +2766,7 @@ export class PreviewEngine {
    * physical devices").
    */
   async listDevices(): Promise<{
-    ios: { runtimes: { version: string; name: string }[]; models: string[] };
+    ios: { runtimes: { version: string; name: string; models?: string[] }[]; models: string[] };
     android: { apiLevels: number[] };
     capacity: { inUse: number; max: number };
   }> {
@@ -2781,7 +2780,13 @@ export class PreviewEngine {
     const inUse = this.devicesInUse();
     return {
       ios: {
-        runtimes: runtimes.filter((r) => r.isAvailable).map((r) => ({ version: r.version, name: r.name })),
+        runtimes: runtimes
+          .filter((r) => r.isAvailable)
+          .map((r) => ({
+            version: r.version,
+            name: r.name,
+            ...(r.supportedDeviceTypes ? { models: supportedBy(r, deviceTypes).map((d) => d.name) } : {}),
+          })),
         models: deviceTypes.map((d) => d.name),
       },
       android: { apiLevels },
