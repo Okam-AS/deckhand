@@ -10,7 +10,6 @@ import {
   ConfigError,
   parseRepo,
   repoOwner,
-  allowEnterpriseHosts,
   configSchema,
   githubPrivateKeyPath,
   loadAppsForBoot,
@@ -291,21 +290,28 @@ describe("parseRepo / repoOwner", () => {
     assert.equal(parseRepo("https://GITHUB.COM/acme/app").owner, "acme");
   });
 
-  it("accepts a githubEnterprise host once the config allows it", () => {
+  it("accepts a githubEnterprise host once loadConfig has read it", () => {
     const repo = "https://ghe-allowed.example/acme/app.git";
     assert.throws(() => parseRepo(repo), (e) => e instanceof ConfigError);
-    allowEnterpriseHosts(
-      configSchema.parse({
-        hostname: "mate.example.com",
-        streaming: { serveSim: { version: "0.1.34" } },
-        githubEnterprise: [{ host: "ghe-allowed.example", patPath: "github-pat-ghe" }],
-      }),
+    loadConfig(
+      write(
+        "config-ghe.yaml",
+        [
+          "hostname: mate.example.com",
+          "streaming:",
+          "  serveSim:",
+          '    version: "0.1.34"',
+          "githubEnterprise:",
+          "  - host: ghe-allowed.example",
+          "    patPath: github-pat-ghe",
+        ].join("\n"),
+      ),
     );
     assert.deepEqual(parseRepo(repo), { host: "ghe-allowed.example", owner: "acme", name: "app" });
   });
 
   it("refuses github.com or a non-hostname as an enterprise host", () => {
-    for (const host of ["github.com", "GHE.example", "https://ghe.example", "ghe"]) {
+    for (const host of ["github.com", "GHE.example", "https://ghe.example", "ghe", "ghe.example.", "ghe.example:8443", "x@ghe.example"]) {
       const r = configSchema.safeParse({
         hostname: "mate.example.com",
         streaming: { serveSim: { version: "0.1.34" } },

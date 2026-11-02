@@ -49,10 +49,7 @@ export const configSchema = z.object({
     .object({ path: z.string().min(1).default("github-pat") })
     .strict()
     .optional(),
-  // GitHub Enterprise hosts deckhand may clone from, each with its OWN PAT file. A
-  // host listed here is added to the repo-host allow-list, and its repos are read
-  // with that file only — never the github.com PAT, App, or gh session, and its PAT
-  // is never offered to github.com.
+  // Each host joins the repo-host allow-list and gets only its own PAT, never a github.com credential.
   githubEnterprise: z
     .array(
       z
@@ -369,11 +366,7 @@ export function enterprisePatPath(config: Config, host: string): string | null {
  */
 const ALLOWED_REPO_HOSTS = new Set(["github.com"]);
 
-/**
- * Add the config's `githubEnterprise` hosts to the allow-list. `loadConfig` calls it, so
- * every process that has loaded its config parses those hosts. Each one only ever receives
- * its own PAT (`github/credentials.ts`).
- */
+/** Widens the allow-list for `parseRepo`; `loadConfig` calls it. */
 export function allowEnterpriseHosts(config: Config): void {
   for (const e of config.githubEnterprise) ALLOWED_REPO_HOSTS.add(e.host);
 }
