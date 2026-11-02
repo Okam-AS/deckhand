@@ -1683,10 +1683,11 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     },
     (args) =>
       audited("add_app", args, async () => {
+        let repoHost: string;
         let owner: string;
         let name: string;
         try {
-          ({ owner, name } = parseRepo(args.repo));
+          ({ host: repoHost, owner, name } = parseRepo(args.repo));
         } catch (e) {
           return fail("bad_request", e instanceof ConfigError ? e.message : `invalid repo "${args.repo}"`);
         }
@@ -1722,7 +1723,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           detected = await engine.inspectAppRepo(probeFor(branch), { kind: "branch", branch });
         } catch (e) {
           if (isAuthProblem(e)) {
-            const url = ctx.setup
+            // The setup page writes the github.com PAT file; an enterprise host reads its own.
+            const url = ctx.setup && repoHost.toLowerCase() === "github.com"
               ? `${publicBaseUrl(config)}/setup/${ctx.setup.mint("github-pat", owner)}`
               : undefined;
             const host = deckhandHost();

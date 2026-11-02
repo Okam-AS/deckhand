@@ -103,7 +103,7 @@ const defaultRunner: GitRunner = (args, opts) =>
 
 export interface WorktreeManagerOptions {
   /** `(owner, repoName) => Promise<installation token>`; only called for network fetches. */
-  tokenResolver: (owner: string, repoName?: string, extraRepos?: string[]) => Promise<string>;
+  tokenResolver: (owner: string, repoName?: string, extraRepos?: string[], host?: string) => Promise<string>;
   /**
    * When no credential is configured at all, retry network ops unauthenticated
    * (public repos). Wired from config `allowPublicRepos` so operators who bound
@@ -240,7 +240,7 @@ export class WorktreeManager {
     let token: string;
     try {
       try {
-        token = await this.opts.tokenResolver(repo.owner, repo.name, extraRepos);
+        token = await this.opts.tokenResolver(repo.owner, repo.name, extraRepos, repo.host);
       } catch (e) {
         // A widened token names sibling submodule repos, and GitHub rejects the
         // WHOLE request (422) if even one of them is outside the installation —
@@ -250,7 +250,7 @@ export class WorktreeManager {
         // genuinely private one still fails later with the actionable
         // `submodule checkout failed …` message instead of a raw auth error.
         if (!extraRepos?.length || e instanceof CredentialsMissingError) throw e;
-        token = await this.opts.tokenResolver(repo.owner, repo.name);
+        token = await this.opts.tokenResolver(repo.owner, repo.name, undefined, repo.host);
       }
     } catch (e) {
       if (this.opts.allowAnonymous && e instanceof CredentialsMissingError) {

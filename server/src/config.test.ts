@@ -10,6 +10,8 @@ import {
   ConfigError,
   parseRepo,
   repoOwner,
+  allowEnterpriseHosts,
+  configSchema,
   githubPrivateKeyPath,
   loadAppsForBoot,
 } from "./config.ts";
@@ -269,9 +271,9 @@ describe("parseRepo / repoOwner", () => {
   it("refuses a host that is not on the allow-list — that host would RECEIVE the credential", () => {
     // `alongside: [{repo, ref}]` takes a repo string straight from an MCP argument, i.e. from
     // the model, i.e. potentially from attacker-authored content the agent just read. The
-    // host in that string is what GIT_ASKPASS gets pinned to (engine/worktree.ts), while the
-    // credential resolver keys on the OWNER alone and never sees a host — so an unlisted host
-    // means answering its 401 with deckhand's PAT or gh session in Basic auth. No build, no
+    // host in that string is what GIT_ASKPASS gets pinned to (engine/worktree.ts), and the
+    // credential resolver hands any non-enterprise host the github.com credential — so an
+    // unlisted host means answering its 401 with deckhand's PAT or gh session in Basic auth. No build, no
     // simulator, nothing on screen. The parse is the chokepoint every path shares.
     for (const evil of [
       "evil.example/acme/app",
@@ -287,6 +289,30 @@ describe("parseRepo / repoOwner", () => {
   it("accepts the allow-listed host in any case", () => {
     assert.equal(parseRepo("GitHub.com/acme/app").host, "GitHub.com", "host is preserved verbatim");
     assert.equal(parseRepo("https://GITHUB.COM/acme/app").owner, "acme");
+  });
+
+  it("accepts a githubEnterprise host once the config allows it", () => {
+    const repo = "https://ghe-allowed.example/acme/app.git";
+    assert.throws(() => parseRepo(repo), (e) => e instanceof ConfigError);
+    allowEnterpriseHosts(
+      configSchema.parse({
+        hostname: "mate.example.com",
+        streaming: { serveSim: { version: "0.1.34" } },
+        githubEnterprise: [{ host: "ghe-allowed.example", patPath: "github-pat-ghe" }],
+      }),
+    );
+    assert.deepEqual(parseRepo(repo), { host: "ghe-allowed.example", owner: "acme", name: "app" });
+  });
+
+  it("refuses github.com or a non-hostname as an enterprise host", () => {
+    for (const host of ["github.com", "GHE.example", "https://ghe.example", "ghe"]) {
+      const r = configSchema.safeParse({
+        hostname: "mate.example.com",
+        streaming: { serveSim: { version: "0.1.34" } },
+        githubEnterprise: [{ host, patPath: "p" }],
+      });
+      assert.equal(r.success, false, `must reject ${host}`);
+    }
   });
 });
 

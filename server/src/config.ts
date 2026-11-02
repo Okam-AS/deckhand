@@ -49,6 +49,23 @@ export const configSchema = z.object({
     .object({ path: z.string().min(1).default("github-pat") })
     .strict()
     .optional(),
+  // GitHub Enterprise hosts deckhand may clone from, each with its OWN PAT file. A
+  // host listed here is added to the repo-host allow-list, and its repos are read
+  // with that file only — never the github.com PAT, App, or gh session, and its PAT
+  // is never offered to github.com.
+  githubEnterprise: z
+    .array(
+      z
+        .object({
+          host: z
+            .string()
+            .regex(/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/, "host must be a lowercase hostname")
+            .refine((h) => h !== "github.com", "github.com is not an enterprise host"),
+          patPath: z.string().min(1),
+        })
+        .strict(),
+    )
+    .default([]),
   // Fall back to the deckhand user's `gh` CLI session when neither a PAT nor a
   // GitHub App is configured — makes a dev-Mac install (deckhand on the machine
   // you code on) work with zero credential setup. Tradeoff in PLAN §11 item 4: a gh
@@ -277,7 +294,9 @@ function parseWith<S extends z.ZodTypeAny>(schema: S, file: string, raw: unknown
 }
 
 export function loadConfig(file = paths.config()): Config {
-  return parseWith(configSchema, file, readYaml(file));
+  const config = parseWith(configSchema, file, readYaml(file));
+  allowEnterpriseHosts(config);
+  return config;
 }
 
 export function loadApps(file = paths.apps()): App[] {
@@ -328,20 +347,36 @@ export function githubPatPath(config: Config): string {
   return resolveUnderHome(config.githubPat?.path ?? "github-pat");
 }
 
+/** The absolute path to an enterprise host's PAT file, or null when the host is not configured. */
+export function enterprisePatPath(config: Config, host: string): string | null {
+  const entry = config.githubEnterprise.find((e) => e.host === host.toLowerCase());
+  return entry ? resolveUnderHome(entry.patPath) : null;
+}
+
 /**
  * Hosts a repo string may name.
  *
  * This is a CREDENTIAL boundary, not a convenience. The host in a repo string is what
  * `GIT_ASKPASS` gets pinned to (`engine/worktree.ts`), while the credential resolver keys on the
- * repo OWNER alone and never sees a host (`github/credentials.ts`) — so whatever host reaches
- * here is the host that receives deckhand's PAT or `gh` session when its 401 comes back. And the
+ * repo host (`github/credentials.ts`) — so whatever host reaches here is the host that
+ * receives a credential when its 401 comes back: deckhand's PAT or `gh` session for
+ * github.com, or a configured enterprise host's own PAT. And the
  * string is not always the operator's: `start_preview`'s `alongside: [{repo, ref}]` takes one
  * straight from an MCP argument, chosen by a model that may have just read attacker-authored
  * repo content.
  *
- * Widen it deliberately (an enterprise GitHub host belongs here) — nothing downstream will.
+ * Widen it deliberately, through `githubEnterprise` in config.yaml — nothing downstream will.
  */
 const ALLOWED_REPO_HOSTS = new Set(["github.com"]);
+
+/**
+ * Add the config's `githubEnterprise` hosts to the allow-list. `loadConfig` calls it, so
+ * every process that has loaded its config parses those hosts. Each one only ever receives
+ * its own PAT (`github/credentials.ts`).
+ */
+export function allowEnterpriseHosts(config: Config): void {
+  for (const e of config.githubEnterprise) ALLOWED_REPO_HOSTS.add(e.host);
+}
 
 /**
  * The repo owner (org/user) and name from an app's `repo` string. Handles
