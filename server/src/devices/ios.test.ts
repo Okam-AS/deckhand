@@ -100,7 +100,6 @@ describe("selectSimulator", () => {
     isAvailable: true,
     ...(supported ? { supportedDeviceTypes: supported.map((n) => ({ identifier: dt(n).identifier, name: n })) } : {}),
   });
-  // The machine that failed: a beta 27.1 that can create ONLY the iPhone Duo.
   const runtimes = parseRuntimes({
     runtimes: [
       rt("26.5", ["iPhone 17"]),

@@ -320,6 +320,31 @@ describe("PreviewEngine.startPreview", () => {
     assert.equal(st.devices[0]!.label, "iPhone 16 Pro · iOS 26.0");
   });
 
+  it("boots a default iOS device on a runtime that can create it, not on the newest runtime", async () => {
+    const created: string[] = [];
+    const h = makeEngine({
+      simctl: fakeSimctl({
+        listRuntimes: async () => [
+          { identifier: "rt.27.0", name: "iOS 27.0", version: "27.0", isAvailable: true, supportedDeviceTypes: ["dt.18pro"] },
+          { identifier: "rt.27.1", name: "iOS 27.1", version: "27.1", isAvailable: true, supportedDeviceTypes: ["dt.duo"] },
+        ],
+        listDeviceTypes: async () => [
+          { identifier: "dt.18pro", name: "iPhone 18 Pro" },
+          { identifier: "dt.duo", name: "iPhone Duo" },
+        ],
+        create: async (name: string, deviceType: string, runtime: string) => {
+          created.push(`${deviceType} ${runtime}`);
+          return `UDID-${name}`;
+        },
+        appContainer: async () => "/path/to/App.app",
+      }),
+    });
+    h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+    assert.deepEqual(created, ["dt.18pro rt.27.0"]);
+    assert.equal(h.engine.getStatus("pv1")!.devices[0]!.label, "iPhone 18 Pro · iOS 27.0");
+  });
+
   it("merges app env and secrets into the build step", async () => {
     const h = makeEngine();
     h.engine.startPreview({
