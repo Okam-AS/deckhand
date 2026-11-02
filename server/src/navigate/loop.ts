@@ -2,7 +2,7 @@ import { diffImages } from "./compare.ts";
 import { randomUUID } from "node:crypto";
 import { decodePng, encodePng, scaleToFit, type Rgba } from "./png.ts";
 import { JevError, type ChoiceAnswer, type JevChooser, type JevImage, type JevQuestion, type NoulAnswer } from "./jev.ts";
-import { candidatesFor, mask, pngSize, readScreen, type ActionKind, type Candidate, type NavigateAction, type Rect } from "./screen.ts";
+import { candidatesFor, mask, pngSize, readScreen, type ActionKind, type Candidate, type NavigateAction, type Rect, type Screen } from "./screen.ts";
 
 export type LoopAction = NavigateAction | { type: "type"; text: string };
 
@@ -54,6 +54,8 @@ export interface NavigateStep {
   actMs: number;
   estimatedTokens: number;
   inputTokens: number | null;
+  /** The screenshot went with this decision: the tree described the screen poorly. */
+  image: boolean;
 }
 
 export type NavigateReason =
@@ -190,7 +192,7 @@ export async function navigate(req: NavigateRequest, deps: NavigateDeps): Promis
 
     const set = candidatesFor(screen, textKeys);
     dropped = Math.max(dropped, set.dropped);
-    const image = settle.shot ? screenshotAsset(settle.shot) : null;
+    const image = settle.shot && treeIsWeak(tree, screen) ? screenshotAsset(settle.shot) : null;
     const fitted = fit(goal, req.locale ?? null, history, screen.lines, set.candidates, image?.ref ?? null);
     truncated ||= fitted.cut;
     const { state, questions, candidates } = fitted;
@@ -249,6 +251,7 @@ export async function navigate(req: NavigateRequest, deps: NavigateDeps): Promis
       actMs: 0,
       estimatedTokens: fitted.tokens,
       inputTokens: usage,
+      image: image !== null,
     };
     steps.push(step);
 
@@ -407,6 +410,22 @@ async function waitSettled(frame: NavigateDeps["frame"], now: () => number): Pro
     last = shot;
   }
   return { settled: false, shot: last };
+}
+
+const WEB_VIEW = /"(?:type|role|AXRole|className)"\s*:\s*"[^"]*(?:WebView|WebArea|webkit)/i;
+/** Share of tappable elements without a label (icon-only buttons) at which the tree stops naming the screen. */
+const UNLABELLED_SHARE = 0.3;
+
+/**
+ * Whether the tree describes the screen too poorly to choose from on its own, so the screenshot is worth sending:
+ * a web view (sign-in pages expose little), two or fewer things to tap, or many unlabelled ones. On a well-labelled
+ * native screen the picture changed nothing in the eval and cost ~5k tokens a run, so it is left out there.
+ */
+export function treeIsWeak(tree: unknown, screen: Screen): boolean {
+  const tappable = screen.elements.filter((e) => e.interactive);
+  if (tappable.length <= 2) return true;
+  if (tappable.filter((e) => !e.label).length / tappable.length >= UNLABELLED_SHARE) return true;
+  return WEB_VIEW.test(JSON.stringify(tree ?? null));
 }
 
 /**

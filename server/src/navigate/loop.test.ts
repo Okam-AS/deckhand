@@ -2,7 +2,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { JevError, type JevChooser, type JevQuestion, type JevResult } from "./jev.ts";
 import { encodePng } from "./png.ts";
-import { DEFAULT_THRESHOLDS, TOKEN_BUDGET, estimateTokens, navigate, screenshotAsset, type LoopAction, type NavigateRequest } from "./loop.ts";
+import { DEFAULT_THRESHOLDS, TOKEN_BUDGET, estimateTokens, navigate, screenshotAsset, treeIsWeak, type LoopAction, type NavigateRequest } from "./loop.ts";
+import { readScreen } from "./screen.ts";
 import { decodePng } from "./png.ts";
 
 const VP = { x: 0, y: 0, width: 400, height: 800 };
@@ -354,6 +355,27 @@ describe("navigate: the screenshot", () => {
     assert.deepEqual(egress, [1, 0], "both requests are audited");
     assert.equal(r.outcome, "done");
     assert.equal("screenshot" in jev.asked[0]!.state, false);
+  });
+
+  it("is sent only where the tree says little: a web view, few or unlabelled things to tap", () => {
+    const rich = screen("Settings", ["General", "Privacy", "Display", "Sounds"]);
+    assert.equal(treeIsWeak(rich, readScreen(rich, null)), false);
+    assert.equal(treeIsWeak(about, readScreen(about, null)), true, "nothing to tap");
+    const icons = screen("Home", ["Settings", { role: "Button" }, { role: "Button" }, "Profile"]);
+    assert.equal(treeIsWeak(icons, readScreen(icons, null)), true, "half the buttons have no label");
+    const web = { roots: [{ ...rich.roots[0]!, children: [...rich.roots[0]!.children, { role: "WebView", frame: VP }] }] };
+    assert.equal(treeIsWeak(web, readScreen(web, null)), true, "a web view");
+  });
+
+  it("stays out on a well-labelled screen", async () => {
+    const rich = screen("Settings", ["General", "Privacy", "Display", "Sounds"]);
+    const jev = scriptedJev([{ pick: "done" }]);
+    const seen: unknown[] = [];
+    const ask = jev.ask.bind(jev);
+    jev.ask = async (state, questions, assets) => { seen.push(assets); return ask(state, questions, assets); };
+    const r = await navigate(req(), { describe: async () => rich, act: async () => {}, jev, frame: async () => phone });
+    assert.deepEqual(seen, [undefined]);
+    assert.equal(r.steps[0]!.image, false);
   });
 
   it("is left out when there is no readable frame, and the request is as before", async () => {
