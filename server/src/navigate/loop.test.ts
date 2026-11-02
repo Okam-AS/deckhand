@@ -348,8 +348,10 @@ describe("navigate: the screenshot", () => {
       if (assets) { refused++; throw new JevError("TypeSafe API 400: image rejected", 400); }
       return ask(state, questions);
     };
-    const r = await navigate(req(), { describe: async () => about, act: async () => {}, jev, frame: async () => phone });
+    const egress: number[] = [];
+    const r = await navigate(req(), { describe: async () => about, act: async () => {}, jev, frame: async () => phone, onEgress: (e) => egress.push(e.images) });
     assert.equal(refused, 1);
+    assert.deepEqual(egress, [1, 0], "both requests are audited");
     assert.equal(r.outcome, "done");
     assert.equal("screenshot" in jev.asked[0]!.state, false);
   });

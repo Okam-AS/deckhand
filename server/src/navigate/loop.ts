@@ -213,6 +213,8 @@ export async function navigate(req: NavigateRequest, deps: NavigateDeps): Promis
         if (!image || !(e instanceof JevError) || (e.status !== 400 && e.status !== 413)) throw e;
         // The same screen lines and options, so the answer names one of `candidates`.
         const plain = build(goal, req.locale ?? null, history, state.screen, candidates, null);
+        // A second request leaves the machine: audited, and refused if the key went, like the first.
+        deps.onEgress?.({ candidates: candidates.length, bytes: Buffer.byteLength(JSON.stringify({ state: plain.state, questions: plain.questions })), images: 0 });
         res = await deps.jev.ask(plain.state, plain.questions);
       }
       model = res.model;
