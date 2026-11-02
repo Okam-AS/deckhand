@@ -70,4 +70,40 @@ describe("buildTokenResolver", () => {
       (e) => e instanceof CredentialsMissingError && /no gh CLI session/.test((e as Error).message),
     );
   });
+
+  describe("an enterprise host", () => {
+    const ghe = () => baseConfig({ githubEnterprise: [{ host: "ghe.example", patPath: "github-pat-ghe" }] });
+    const noGh = { ghToken: async () => "gho_ambient" };
+
+    it("gets its own PAT, not the github.com one", async () => {
+      writeFileSync(join(home, "github-pat"), "github_pat_dotcom\n");
+      writeFileSync(join(home, "github-pat-ghe"), "github_pat_ghe\n");
+      try {
+        const resolve = buildTokenResolver(ghe(), noGh);
+        assert.equal(await resolve("uxmn", "app", undefined, "ghe.example"), "github_pat_ghe");
+        assert.equal(await resolve("okam-as"), "github_pat_dotcom", "github.com keeps its own PAT");
+      } finally {
+        rmSync(join(home, "github-pat"), { force: true });
+        rmSync(join(home, "github-pat-ghe"), { force: true });
+      }
+    });
+
+    it("never falls back to the github.com PAT or gh session when its PAT is missing", async () => {
+      writeFileSync(join(home, "github-pat"), "github_pat_dotcom\n");
+      try {
+        const resolve = buildTokenResolver(ghe(), noGh);
+        await assert.rejects(
+          () => resolve("uxmn", "app", undefined, "ghe.example"),
+          (e) => e instanceof CredentialsMissingError && /github-pat-ghe/.test((e as Error).message),
+        );
+      } finally {
+        rmSync(join(home, "github-pat"), { force: true });
+      }
+    });
+
+    it("refuses a host that is not configured", async () => {
+      const resolve = buildTokenResolver(ghe(), noGh);
+      await assert.rejects(() => resolve("acme", "app", undefined, "other.example"), CredentialsMissingError);
+    });
+  });
 });

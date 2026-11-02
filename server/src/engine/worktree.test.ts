@@ -1,6 +1,6 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -16,8 +16,8 @@ import {
   type GitResult,
 } from "./worktree.ts";
 import { paths } from "../paths.ts";
-import { CredentialsMissingError } from "../github/credentials.ts";
-import type { App } from "../config.ts";
+import { buildTokenResolver, CredentialsMissingError } from "../github/credentials.ts";
+import { allowEnterpriseHosts, configSchema, type App } from "../config.ts";
 
 const app: App = {
   id: "my-app",
@@ -384,5 +384,61 @@ describe("WorktreeManager.prepareRef", () => {
     const mgr = new WorktreeManager({ tokenResolver: async () => "tok", git: async () => ({ stdout: "", stderr: "", code: 0 }) });
     await mgr.removeWorktree(app, "preview-one");
     assert.equal(existsSync(paths.worktree(key)), true);
+  });
+});
+
+describe("WorktreeManager credentials on a githubEnterprise host", () => {
+  const gheApp: App = { id: "ghe-app", repo: "ghe.example/uxmn/app", type: "expo", defaultBranch: "main", env: {} };
+  const gheConfig = () =>
+    configSchema.parse({
+      hostname: "mate.example.com",
+      streaming: { serveSim: { version: "0.1.34" } },
+      githubEnterprise: [{ host: "ghe.example", patPath: "github-pat-ghe" }],
+    });
+  let home: string;
+  before(() => {
+    home = mkdtempSync(join(tmpdir(), "deckhand-wt-ghe-"));
+    process.env.DECKHAND_HOME = home;
+    mkdirSync(join(paths.repo(gheApp.id), ".git"), { recursive: true });
+    writeFileSync(join(home, "github-pat"), "github_pat_dotcom\n");
+    writeFileSync(join(home, "github-pat-ghe"), "github_pat_ghe\n");
+    allowEnterpriseHosts(gheConfig());
+  });
+  after(() => {
+    delete process.env.DECKHAND_HOME;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("hands the fetch the enterprise PAT pinned to the enterprise host, never the github.com PAT", async () => {
+    const scripts: string[] = [];
+    const runner: GitRunner = async (args, opts) => {
+      if (args[0] === "fetch" && opts?.env?.GIT_ASKPASS) scripts.push(readFileSync(opts.env.GIT_ASKPASS, "utf8"));
+      return { stdout: "", stderr: "", code: 0 };
+    };
+    const resolver = buildTokenResolver(gheConfig(), { ghToken: async () => "gho_ambient" });
+    const mgr = new WorktreeManager({ tokenResolver: resolver, git: runner });
+    await mgr.prepareRef(gheApp, parseRefSpec({ ref: "main" }));
+    assert.equal(scripts.length, 1);
+    assert.match(scripts[0]!, /github_pat_ghe/);
+    assert.doesNotMatch(scripts[0]!, /github_pat_dotcom|gho_ambient/);
+    assert.match(scripts[0]!, /= 'ghe\.example' \]/);
+  });
+
+  it("keeps the repo host when the widened token is retried repo-only", async () => {
+    const wt = paths.worktree(worktreeKey(gheApp.id, parseRefSpec({ ref: "main" })));
+    mkdirSync(wt, { recursive: true });
+    writeFileSync(join(wt, ".gitmodules"), `[submodule "rel"]\n\turl = ../shared.git\n`);
+    const hosts: (string | undefined)[] = [];
+    const mgr = new WorktreeManager({
+      tokenResolver: async (_o, _r, extra, host) => {
+        hosts.push(host);
+        if (extra?.length) throw new Error("422 repositories outside the installation");
+        return "tok";
+      },
+      git: async () => ({ stdout: "", stderr: "", code: 0 }),
+    });
+    await mgr.updateWorktree(gheApp, "pv-ghe", parseRefSpec({ ref: "main" }));
+    assert.ok(hosts.length >= 2, "the repo-only retry must have run");
+    assert.deepEqual(new Set(hosts), new Set(["ghe.example"]));
   });
 });

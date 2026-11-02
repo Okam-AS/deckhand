@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { createPrivateKey } from "node:crypto";
-import { githubPatPath, githubPrivateKeyPath, type Config } from "../config.ts";
+import { enterprisePatPath, githubPatPath, githubPrivateKeyPath, type Config } from "../config.ts";
 import { GitHubAppAuth } from "./appAuth.ts";
 
 // ---------------------------------------------------------------------------
@@ -28,9 +28,9 @@ export class CredentialsMissingError extends Error {
   }
 }
 
-function readPat(config: Config): string | null {
+function readPat(path: string): string | null {
   try {
-    const pat = readFileSync(githubPatPath(config), "utf8").trim();
+    const pat = readFileSync(path, "utf8").trim();
     return pat.length > 0 ? pat : null;
   } catch {
     return null;
@@ -57,11 +57,14 @@ export interface TokenResolverDeps {
  * a PAT (checked fresh each call), else a GitHub App installation token, else
  * the ambient gh CLI session (unless `githubAmbient: false`), else throws
  * CredentialsMissingError. The App auth object is cached across owners.
+ *
+ * A `githubEnterprise` host skips the ladder: its own PAT file or a
+ * CredentialsMissingError, so no github.com credential is ever sent there.
  */
 export function buildTokenResolver(
   config: Config,
   deps: TokenResolverDeps = {},
-): (owner: string, repoName?: string, extraRepos?: string[]) => Promise<string> {
+): (owner: string, repoName?: string, extraRepos?: string[], host?: string) => Promise<string> {
   let appAuth: GitHubAppAuth | null | undefined; // undefined = not yet attempted
 
   const getAppAuth = (): GitHubAppAuth | null => {
@@ -78,8 +81,15 @@ export function buildTokenResolver(
 
   const ambient = deps.ghToken ?? ghCliToken;
 
-  return async (owner: string, repoName?: string, extraRepos?: string[]): Promise<string> => {
-    const pat = readPat(config);
+  return async (owner: string, repoName?: string, extraRepos?: string[], host = "github.com"): Promise<string> => {
+    if (host.toLowerCase() !== "github.com") {
+      const path = enterprisePatPath(config, host);
+      if (!path) throw new CredentialsMissingError(owner, `${host} is not a configured githubEnterprise host`);
+      const pat = readPat(path);
+      if (pat) return pat;
+      throw new CredentialsMissingError(owner, `no PAT for ${host} — write a fine-grained PAT to ${path}`);
+    }
+    const pat = readPat(githubPatPath(config));
     if (pat) return pat;
     const auth = getAppAuth();
     // repoName narrows the installation token to that one repo, widened by
