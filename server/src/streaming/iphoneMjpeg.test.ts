@@ -1,0 +1,132 @@
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import { createServer, type Server } from "node:http";
+import { WebSocket } from "ws";
+import { IphoneMjpegBackend, keyAction } from "./iphoneMjpeg.ts";
+import type { UiAction } from "../testing/control.ts";
+
+const UDID = "00008120-000000000000001E";
+const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 0xff, 0xd9]);
+
+/** WDA's MJPEG server as it frames a stream: multipart with Content-Length, one frame then idle. */
+async function fakeWdaMjpeg(frames: Buffer[] = [JPEG]): Promise<{ url: string; server: Server }> {
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "multipart/x-mixed-replace; boundary=--BoundaryString" });
+    for (const f of frames) res.write(Buffer.concat([Buffer.from(`--BoundaryString\r\nContent-type: image/jpg\r\nContent-Length: ${f.length}\r\n\r\n`), f, Buffer.from("\r\n\r\n")]));
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const port = (server.address() as { port: number }).port;
+  return { url: `http://127.0.0.1:${port}/`, server };
+}
+
+function backend(url: string, acted: UiAction[] = []) {
+  return new IphoneMjpegBackend({
+    portRange: [0, 0],
+    mjpegUrl: async () => url,
+    act: async (_udid, a) => void acted.push(a),
+    describe: async () => "e1 Button \"Start\"",
+  });
+}
+
+/** Port 0 cannot be allocated as a range, so tests pick a free one first. */
+async function freePort(): Promise<number> {
+  const s = createServer();
+  await new Promise<void>((r) => s.listen(0, "127.0.0.1", () => r()));
+  const port = (s.address() as { port: number }).port;
+  await new Promise<void>((r) => s.close(() => r()));
+  return port;
+}
+
+async function backendOnFreePort(url: string, acted: UiAction[] = []) {
+  const port = await freePort();
+  return new IphoneMjpegBackend({ portRange: [port, port], mjpegUrl: async () => url, act: async (_u, a) => void acted.push(a), describe: async () => "screen" });
+}
+
+describe("the iPhone MJPEG helper", () => {
+  it("serves WDA's MJPEG on loopback under the viewer's paths, and 404s avcc so the viewer plays MJPEG", async () => {
+    const wda = await fakeWdaMjpeg();
+    const b = await backendOnFreePort(wda.url);
+    try {
+      const s = await b.attach({ platform: "ios", udid: UDID });
+      assert.match(s.origin, /^http:\/\/127\.0\.0\.1:\d+$/);
+      assert.equal(s.helperBasePath, `/helper/${UDID}`);
+      assert.equal((await fetch(`${s.origin}${s.helperBasePath}/stream.avcc`)).status, 404);
+      const ac = new AbortController();
+      try {
+        const res = await fetch(`${s.origin}${s.helperBasePath}/stream.mjpeg`, { signal: ac.signal });
+        assert.equal(res.headers.get("content-type"), "application/octet-stream");
+        const reader = res.body!.getReader();
+        let got = Buffer.alloc(0);
+        while (!got.includes(Buffer.from([0xff, 0xd9]))) got = Buffer.concat([got, Buffer.from((await reader.read()).value!)]);
+        assert.ok(got.includes(Buffer.from("Content-Length: 9")));
+      } finally {
+        ac.abort();
+      }
+      assert.equal(await s.waitForFirstFrame(2000), true);
+      assert.equal(await s.describe(), "screen");
+    } finally {
+      await b.reapOrphans();
+      wda.server.closeAllConnections();
+      wda.server.close();
+    }
+  });
+
+  it("reports no first frame when WDA sends none", async () => {
+    const wda = await fakeWdaMjpeg([]);
+    const b = await backendOnFreePort(wda.url);
+    try {
+      const s = await b.attach({ platform: "ios", udid: UDID });
+      assert.equal(await s.waitForFirstFrame(700), false);
+      await s.detach();
+    } finally {
+      wda.server.closeAllConnections();
+      wda.server.close();
+    }
+  });
+
+  it("turns viewer touches and keys into ui actions, and drops hardware buttons", async () => {
+    const acted: UiAction[] = [];
+    const b = await backendOnFreePort("http://127.0.0.1:1/", acted);
+    const s = await b.attach({ platform: "ios", udid: UDID });
+    const ws = new WebSocket(`ws://127.0.0.1:${new URL(s.origin).port}${s.helperBasePath}/ws`);
+    try {
+      await new Promise((r, j) => ws.once("open", r).once("error", j));
+      const frame = (tag: number, o: object) => ws.send(Buffer.concat([Buffer.from([tag]), Buffer.from(JSON.stringify(o))]));
+      frame(0x03, { type: "begin", x: 0.5, y: 0.5 });
+      frame(0x03, { type: "end", x: 0.501, y: 0.5 });
+      frame(0x03, { type: "begin", x: 0.5, y: 0.8 });
+      frame(0x03, { type: "end", x: 0.5, y: 0.2 });
+      frame(0x04, { button: "home" });
+      frame(0x07, { orientation: "landscape_left" });
+      frame(0x06, { type: "down", usage: 4, char: "æ" });
+      frame(0x06, { type: "up", usage: 4, char: "æ" });
+      frame(0x06, { type: "down", usage: 40 });
+      for (let i = 0; i < 50 && acted.length < 4; i++) await new Promise((r) => setTimeout(r, 20));
+      assert.deepEqual(acted.map((a) => a.type), ["tap", "swipe", "type", "key"]);
+      assert.deepEqual(acted[0], { type: "tap", x: 0.501, y: 0.5 });
+      assert.deepEqual(acted[2], { type: "type", text: "æ" });
+      assert.deepEqual(acted[3], { type: "key", name: "enter" });
+    } finally {
+      ws.close();
+      await s.detach();
+    }
+  });
+
+  it("refuses a device that is not an iPhone", async () => {
+    await assert.rejects(() => backend("http://127.0.0.1:1/").attach({ platform: "android", udid: "x", serial: "R5C" }), /iOS device/);
+  });
+
+  it("closes helpers outside the keep-set, and spares those in it", async () => {
+    const b = await backendOnFreePort("http://127.0.0.1:1/");
+    const s = await b.attach({ platform: "ios", udid: UDID });
+    await b.reapOrphans(new Set([UDID]));
+    assert.equal((await fetch(`${s.origin}${s.helperBasePath}/health`)).status, 200);
+    await b.reapOrphans(new Set());
+    await assert.rejects(() => fetch(`${s.origin}${s.helperBasePath}/health`));
+  });
+
+  it("maps the typing bar's keys", () => {
+    assert.deepEqual(keyAction({ usage: 42 }), { type: "key", name: "backspace" });
+    assert.equal(keyAction({ usage: 225 }), null);
+  });
+});

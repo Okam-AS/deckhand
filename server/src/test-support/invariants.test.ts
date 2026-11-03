@@ -271,7 +271,7 @@ describe("PLAN §8 — the streaming seam", () => {
     // `import\(?` rather than `import\(`, and both quote characters: a side-effect import
     // (`import "../streaming/serveSim.ts";`) has no `from` and no paren, and passed the whole
     // check — verified by mutation. The specifier may be `.ts` or `.js` for the same reason.
-    const backends = /(?:from|import\(?)\s*["'](?:\.\.?\/)+(?:streaming\/)?(?:serveSim|androidAdb|androidH264|web)\.[tj]s["']/;
+    const backends = /(?:from|import\(?)\s*["'](?:\.\.?\/)+(?:streaming\/)?(?:serveSim|androidAdb|androidH264|iphoneMjpeg|web)\.[tj]s["']/;
     for (const file of sourceFiles()) {
       if (rel(file).startsWith("server/src/streaming/") || roots.has(rel(file))) continue;
       assert.doesNotMatch(
