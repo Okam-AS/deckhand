@@ -3,7 +3,7 @@ paths:
   - "server/src/streaming/**/*.ts"
 ---
 
-The swappable streaming seam (PLAN §8). iOS = serve-sim, Android = adb, web = a proxy to the dev server.
+The swappable streaming seam (PLAN §8). iOS simulators = serve-sim, Android = adb, web = a proxy to the dev server, a physical iPhone = WDA's own MJPEG re-served by `iphoneMjpeg.ts` (the router sends `physical: true` iOS there, never to serve-sim).
 
 Hardest rules, each with the check that enforces it:
 
@@ -21,6 +21,7 @@ What the tests cannot tell you, and cost real debugging:
 - **The host H.264 encoder is single-instance across emulators.** Whichever process holds `screenrecord` wins; the others produce zero bytes, silently. Not a bug you will find by reading. Worse, it is indistinguishable from "this image cannot encode" from inside `androidH264.ts`, so one orphan quietly drops the whole machine to MJPEG.
 - **A device-side recorder has NO env marker, so the sweep proves ownership four other ways.** `sweepDeviceRecorders` kills a `screenrecord` only when all four hold: the serial is an emulator (phones are streamed now, but nothing on a phone can prove a recorder is ours — there is no AVD name to ask — so the sweep leaves phones alone; deckhand's own recorder is stopped by the pid it printed, `androidH264.ts`), `adb emu avd name` answers with a `deckhand_` prefix, neither the serial nor its AVD name is in `keep` **and no helper of ours holds the serial** — that second half is not a re-reading of `keep`, it is what catches an attach landing DURING the sweep, later than the keep-set snapshot was taken — and no host-side `adb -s <serial> exec-out screenrecord` is alive. That last gate is not belt-and-braces: `cli/doctor.ts` calls `reapOrphans()` from a SECOND process with an empty keep-set — and not at boot, but from a `finally` after its emulator teardown, minutes in, while the real server's previews are live. Without a cross-process owner signal that sweep would kill the running server's video. Every failure path kills nothing — a failed `adb devices` means "no orphans", a failed `ps` abandons the pass as "unknown owners".
 - **Kill a recorder by its pid, never by name.** The recorder runs as `echo $$; exec screenrecord …`, one `exec-out` argument (adb quotes each of several, which printed `$$` literally and started nothing — found on the first phone run), and `stop()` kills that pid. A `pkill screenrecord` on a phone kills someone else's capture. → `androidH264.test.ts` "stops exactly the recorder it started, by the pid the device printed — never every screenrecord by name"
+- **An iPhone's input is the engine's, not the helper's.** The MJPEG helper turns viewer frames into `ui` actions and hands them to the engine, so the registered-app-in-front check applies to a viewer tap exactly as to an agent's; buttons and rotation from the viewer are dropped. The helper is an in-process server on 127.0.0.1, so nothing of it outlives the server.
 - **A phone's settings are not ours.** The viewer's Rotate writes `user_rotation`, so it is ignored for a phone. → `androidAdbBackend.test.ts` "never writes a setting on a phone"
 - **A first-frame probe is the readiness signal, not `/health`.** Health lies.
 

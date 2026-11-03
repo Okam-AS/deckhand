@@ -1,13 +1,13 @@
 # Physical devices and prebuilt EAS builds
 
-**Status (2026-11-03): items 2 and 3 of the landing order — physical Android and the EAS
-source — are built** (see "Landing order" below for what each settled and where it differs from
-this plan). Items 4–5, everything iPhone, are proposed, not built.
+**Status (2026-11-03): every item of the landing order is built** — physical Android, the EAS
+source, and physical iPhones (control and streaming landed together). "Landing order" below says
+what each settled, where it differs from this plan, and what was verified on hardware.
 
 This document asks to reverse two locked decisions in PLAN §2,
 "NO physical devices, either platform" and "Build strategy: … No CI artifacts", and lays out
 how deckhand would then drive phones plugged into the Mac by cable and install builds that
-EAS already made. Nothing here exists yet. Tool parameters, config keys and file names
+EAS already made. Built since (see the status above); the design text below is the proposal as written. Tool parameters, config keys and file names
 below are proposals; PLAN and AGENTS change only in the PR that ships each piece.
 
 It assumes `check` and `navigate`'s `see` (the screenshot-to-Jev work) have landed on `main`.
@@ -249,6 +249,8 @@ is the caller's job (it can read `logs`).
   - no passcode, Auto-Lock set to Never
   - not under someone else's MDM
   - registered with EAS on every team whose builds it should run, so their profiles list it
+  - the Automation Mode prompt approved once, at the phone, with Face ID or the passcode (the
+    first WDA start waits on it; PLAN §10 "Preparing an iPhone" is the runbook)
 - `sudo xcodebuild -runFirstLaunch` once on the Mac.
 
 ## Verification
@@ -303,10 +305,33 @@ One PR at a time, each landed before the next is opened (AGENTS.md):
      `EasPreviews.latestUpdate` are the dev-client update lookup it needs.
    - The phone column's input check no longer swipes the notification shade (it acted outside any
      test app): it injects KEYCODE_UNKNOWN and reads `dumpsys power`'s last user activity.
-4. **Physical iPhone control:** WDA placement, loopback launcher and `iproxy`, `doctor`
-   checks, the WDA control backend, `devicectl` install and launch from an EAS `.ipa`,
-   syslog.
-5. **Physical iPhone streaming:** the MJPEG backend and viewer input.
+4. **Physical iPhone control — built**, and 5. **physical iPhone streaming — built**, together.
+   WDA placement and the loopback `.xctestrun` copy, `iproxy -s 127.0.0.1`, the WDA control
+   backend, `devicectl` install and launch of an EAS `.ipa` through the registered-bundle guard,
+   syslog as the `app` log, the MJPEG backend in the router, the viewer pane, and the `doctor`
+   checks. Verified on an iPhone 15 (iOS 27.0.1): `list_devices`, a real EAS build resolved,
+   downloaded, vetted against the phone's UDID and installed over a newer version of the same
+   app, launched, streamed (first MJPEG frame; `stream.avcc` 404), described, one tap inside the
+   app, `home` refused, screenshot, the app log with the environment marker matched, stop; and the
+   doctor iPhone column (attach, stream, describe, input) plus a Wi-Fi probe that WDA's ports
+   refuse. Where it differs from the text above:
+   - **D4** is reversed for the registered app here too: a signer/team/version conflict
+     uninstalls the preview's own bundle and installs again, logged and audited; a downgrade of
+     it is allowed. `freshApp` on an iPhone is always a reinstall (iOS cannot clear in place).
+   - **WDA is the server's, not the preview's.** One runner and forward per phone, kept across
+     previews (a cold start is about 30 s), restarted at most three times in ten minutes,
+     reaped by `IPHONE_MARKER_ENV` at the next boot. Teardown stops only the app and its syslog.
+   - **The Automation Mode prompt** is a human step the plan did not foresee: the first WDA start
+     on a phone waits for it. Listing never starts WDA, so `list_devices` names it only after a
+     start has failed on it; `doctor --smoke` and a `start_preview` both surface it with the fix.
+   - **Dev clients** load their update through `devicectl … --payload-url` addressed to the
+     registered app, never an `openUrl` another app could answer.
+   - **The doctor input proof** is a pause-only W3C pointer action, which goes through XCUITest's
+     input path and touches nothing, rather than a tap: a tap acts on whatever app is in front.
+   - **iOS simulators** still capture no `app` log, so an environment marker is checked on
+     physical iPhones and Android only; a simulator's stays unverified, and says so.
+   - Found on hardware: a forward left by a process that exited still holds the phone's port, and
+     a new forward refuses rather than reuse it until the boot reap removes it.
 
 PLAN §2, §6 (`list_devices`, `start_preview`, `stop_device`, `screenshot`, `describe`,
 `logs`), §7 (Devices, Device lifecycle), §8, §10 and §11, AGENTS ("Physical devices are OUT")

@@ -81,12 +81,21 @@ PLAN describes the architecture. The invariants that bind every change:
   statement plus four health questions. It returns probabilities and pass/fail/unsure,
   never a finding — the caller confirms with a screenshot. Keep health questions narrow:
   one broad "looks broken?" read a normal list as broken.
-- **Android phones are IN, iPhones are not yet** (PLAN §2). A phone plugged in by cable is
-  borrowed hardware: waited for, never booted, wiped, killed or reaped, never a setting changed,
-  one live preview at a time (`device_busy`), and deckhand touches only the preview's registered
-  app on it — every install, uninstall, `pm clear` and force-stop goes through `RegisteredApp`
-  (`devices/androidPhone.ts`), whose guard refuses any other package. `describe`/`ui` on a phone
-  go over adb (`testing/adbControl.ts`): SimDeck addresses Android only by AVD name. **Never start
+- **Physical devices: Android phones and iPhones are IN** (PLAN §2). A phone plugged in by cable
+  is borrowed hardware: waited for, never booted, wiped, killed or reaped, never a setting changed,
+  one live preview at a time (`device_busy`), PIN-protected by default, outside `maxTotalDevices`,
+  and deckhand touches only the preview's registered app on it — install, update, downgrade,
+  uninstall, clear and stop go through `RegisteredApp` (`devices/androidPhone.ts`) on Android and
+  `IphoneApps` (`devices/iphoneApps.ts`) on an iPhone, each refusing every other app before a
+  command runs. `describe`/`ui` on an Android phone go over adb (`testing/adbControl.ts`): SimDeck
+  addresses Android only by AVD name. On an iPhone they go over WebDriverAgent
+  (`testing/iphoneControl.ts`), which refuses every touch while another app is in front and never
+  presses home. An iPhone runs only an EAS internal `.ipa` whose profile lists it — deckhand holds
+  no Apple credentials and builds nothing for a phone. WDA is signed elsewhere and placed under the
+  deckhand home; the server keeps one WDA runner and one loopback-only `iproxy` per phone
+  (`devices/iphones.ts`), reaped by marker on boot, and a cold WDA start costs about 30 s. The
+  first start on a phone waits for a person to approve its Automation Mode prompt.
+  `list_devices` names that, like every other blocker, with the fix to relay. **Never start
   a second `deckhand serve` to try a phone, even under a scratch `DECKHAND_HOME`:** its boot reap
   treats every `deckhand-*` simulator and `deckhand_*` AVD on the Mac as an orphan and deletes the
   live server's devices. Drive a `PreviewEngine` from a script, or `deckhand doctor --device-only`.
@@ -326,6 +335,7 @@ several minutes. Three capabilities on **both** platforms, as six independent ch
 | **ios** | `simctl create` + boot | serve-sim first frame | accessibility tree |
 | **android** | AVD create + emulator boot | adb helper first frame | `uiautomator dump` |
 | **android phone** | free phone awake + unlocked | first frame, and its codec | `uiautomator dump` over adb |
+| **iphone** | free cabled iPhone, WDA up | WDA's MJPEG first frame | WDA's tree |
 
 Separate on purpose: "it booted" must never stand in for "it streamed" — a device that
 comes up and never produces a frame is the most common failure here, and it was invisible
@@ -339,7 +349,9 @@ injection** on simulators and emulators: `describe` proves the control path can 
 more. The phone column has a fourth check, **input**, because a phone is where input fails silently:
 it injects a key that does nothing (KEYCODE_UNKNOWN) and reads the power manager's last-activity
 clock, so nothing outside a test app is acted on — a phone is shared hardware. With no free phone
-all four print `?`, and so does input on a phone whose `dumpsys power` has no such clock.
+all four print `?`, and so does input on a phone whose `dumpsys power` has no such clock. The
+iPhone column's input is a pause-only pointer action through XCUITest: it proves the input path
+and touches nothing.
 
 ## Waiting for a preview to build
 
