@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { computeStage, stagePicker, stillUnlocked, paneKey, pollDecision, RECONNECT_AFTER_FAILURES, sourceLabel, shortDeviceName, MIN_PANE_WIDTH } from "./panes.ts";
+import { computeStage, stagePicker, stillUnlocked, paneKey, pollDecision, RECONNECT_AFTER_FAILURES, sourceLabel, shortDeviceName, MIN_PANE_WIDTH, deviceChrome } from "./panes.ts";
 import type { SharePane } from "./api.ts";
 
 const dev = (deviceId: string, platform: string, label = deviceId) => ({ deviceId, platform, label, phase: "ready" });
@@ -433,5 +433,13 @@ describe("what the info panel says a preview is built from", () => {
     // this asserted rather than implied: if a qualifier comes back it has to be one that
     // VARIES — a dirty-tree marker, say — and that will fail here and be looked at.
     assert.deepEqual(sourceLabel("git", "feature/review"), sourceLabel("local", "feature/review"));
+  });
+});
+
+describe("deviceChrome", () => {
+  it("offers a physical iPhone MJPEG only, with no home or rotate, labelled as a physical device", () => {
+    assert.deepEqual(deviceChrome({ platform: "ios", physical: true }), { home: false, rotate: false, mjpegOnly: true, physicalNote: "Physical device — slower frame rate than a simulator" });
+    assert.deepEqual(deviceChrome({ platform: "ios" }), { home: true, rotate: true, mjpegOnly: false, physicalNote: null });
+    assert.equal(deviceChrome({ platform: "android", physical: true }).physicalNote, "Physical device");
   });
 });

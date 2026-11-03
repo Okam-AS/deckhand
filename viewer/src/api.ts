@@ -7,6 +7,8 @@ export interface ShareDevice {
   detail?: string;
   /** The build sub-step ("Compiling react-native-svg") shown under the headline. */
   step?: string;
+  /** A phone cabled to the deckhand Mac, not a simulator or emulator. */
+  physical?: boolean;
 }
 
 export type TestStepStatus = "pending" | "running" | "passed" | "failed";

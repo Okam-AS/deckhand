@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { SpecialKey } from "./stream/input.ts";
-import { sourceLabel } from "./panes.ts";
+import { deviceChrome, sourceLabel } from "./panes.ts";
 import { CheckIcon, HomeIcon, InfoIcon, KeyboardIcon, RotateIcon, SwitchDeviceIcon } from "./icons.tsx";
 import { TypeBar } from "./TypeBar.tsx";
 import { BranchIcon, PlatformGlyph, RepoGlyph } from "./icons.tsx";
@@ -11,6 +11,8 @@ export interface DockEntry {
   label: string;
   /** Drives the platform glyph in the info popover; absent for web panes. */
   platform?: string;
+  /** A phone cabled to the deckhand Mac. */
+  physical?: boolean;
   /**
    * Which source it belongs to. Set only when the page shows several, because a
    * list of four rows all reading "iPhone 16 Pro" is unusable without it.
@@ -52,6 +54,7 @@ export function MobileChrome(props: Props) {
   const pickerRef = useRef<HTMLDivElement>(null);
   const infoRef = useRef<HTMLDivElement>(null);
   const current = entries.find((e) => e.key === focusKey);
+  const chrome = deviceChrome(current ?? {});
 
   useEffect(() => {
     if (!pickerOpen && !infoOpen) return;
@@ -116,12 +119,16 @@ export function MobileChrome(props: Props) {
           )}
           {!props.viewOnly && (
             <>
-              <button type="button" className="dock-btn" onClick={onHome} title="Home" aria-label="Press the device home button">
-                <HomeIcon size={19} />
-              </button>
-              <button type="button" className="dock-btn" onClick={onRotate} title="Rotate" aria-label="Rotate the device 90 degrees">
-                <RotateIcon size={19} />
-              </button>
+              {chrome.home && (
+                <button type="button" className="dock-btn" onClick={onHome} title="Home" aria-label="Press the device home button">
+                  <HomeIcon size={19} />
+                </button>
+              )}
+              {chrome.rotate && (
+                <button type="button" className="dock-btn" onClick={onRotate} title="Rotate" aria-label="Rotate the device 90 degrees">
+                  <RotateIcon size={19} />
+                </button>
+              )}
               <button
                 type="button"
                 className="dock-btn"

@@ -245,6 +245,7 @@ export function App() {
     key: p.key,
     label: p.device.label,
     platform: p.device.platform,
+    ...(p.device.physical ? { physical: true } : {}),
     ...(multiSource ? { group: groups.find((g) => g.shareId === p.shareId)?.label } : {}),
   }));
   const focusedGroup = groups.find((g) => g.panes.some((p) => p.key === mobileFocus));
