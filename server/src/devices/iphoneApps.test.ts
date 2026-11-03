@@ -178,7 +178,7 @@ describe("launching and stopping", () => {
   });
 
   it("refuses launch arguments that are not plain keys and values", () => {
-    for (const bad of [{ "-x": "1" }, { KEY: "a b" }, { KEY: "$(rm)" }, { "": "x" }]) {
+    for (const bad of [{ "-x": "1" }, { KEY: "a b" }, { KEY: "$(rm)" }, { "": "x" }] as Record<string, string>[]) {
       assert.throws(() => launchArgs(bad), (e: unknown) => e instanceof IphoneAppError && e.code === "bad_launch_arg", JSON.stringify(bad));
     }
   });

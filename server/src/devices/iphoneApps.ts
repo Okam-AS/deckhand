@@ -212,13 +212,8 @@ export class IphoneApps {
     const out = join(dir, "out.json");
     try {
       const res = await this.exec("xcrun", ["devicectl", ...args, "--json-output", out, ...(trailing.length ? ["--", ...trailing] : [])], { timeoutMs });
-      let json: { info?: { outcome?: string }; error?: unknown; result?: unknown } | null = null;
-      try {
-        json = JSON.parse(readFileSync(out, "utf8")) as typeof json;
-      } catch {
-        json = null;
-      }
-      if (res.code !== 0 || json?.info?.outcome !== "success") {
+      const json = readJson(out) as { info?: { outcome?: string }; error?: unknown; result?: unknown } | null;
+      if (res.code !== 0 || !json || json.info?.outcome !== "success") {
         const why = devicectlError(json?.error) ?? res.stderr.trim().split("\n").filter(Boolean).pop() ?? `exit ${res.code}`;
         throw new IphoneAppError(`devicectl ${args.slice(0, 3).join(" ")}: ${why}`.slice(0, 800), "devicectl_failed");
       }
@@ -226,6 +221,14 @@ export class IphoneApps {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  }
+}
+
+function readJson(file: string): unknown {
+  try {
+    return JSON.parse(readFileSync(file, "utf8")) as unknown;
+  } catch {
+    return null;
   }
 }
 
