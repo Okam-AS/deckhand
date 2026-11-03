@@ -328,8 +328,10 @@ pasting this output.** Not "tests pass" — that is `npm run ci`, which never to
 device. If you cannot run it, say which of the six is unverified and who has to run it.
 `?` is an honest answer; a tick you did not earn is not. It does NOT cover **input
 injection** on simulators and emulators: `describe` proves the control path can READ, nothing
-more. The phone column has a fourth check, **input** (a swipe opens the notification shade, back
-closes it), because a phone is where input fails silently; with no free phone all four print `?`.
+more. The phone column has a fourth check, **input**, because a phone is where input fails silently:
+it injects a key that does nothing (KEYCODE_UNKNOWN) and reads the power manager's last-activity
+clock, so nothing outside a test app is acted on — a phone is shared hardware. With no free phone
+all four print `?`, and so does input on a phone whose `dumpsys power` has no such clock.
 
 ## Waiting for a preview to build
 

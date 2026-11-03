@@ -510,6 +510,24 @@ export function pickSmokePhone(phones: PhoneInfo[], holds: PhoneHolds, busy: Rec
   };
 }
 
+/** The power manager's clock of the last user activity, which every injected input event moves. */
+export function lastUserActivity(dumpsysPower: string): number | null {
+  const m = /^\s*m?[lL]astUserActivityTime=(\d+)/m.exec(dumpsysPower);
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * The phone is shared hardware, so the proof acts on nothing: `input keyevent 0` (KEYCODE_UNKNOWN)
+ * maps to no action in any app or in the system, yet it goes through the same injection path as a
+ * tap and the power manager records it as user activity.
+ */
+export function inputProof(before: number | null, after: number | null): { ok: boolean | null; detail: string } {
+  if (before === null || after === null) return { ok: null, detail: "this phone's dumpsys power reports no lastUserActivityTime, so a no-op key cannot be observed — not proven either way" };
+  return after > before
+    ? { ok: true, detail: "an injected no-op key (KEYCODE_UNKNOWN) reached the input pipeline: the power manager recorded it as user activity" }
+    : { ok: false, detail: "an injected no-op key (KEYCODE_UNKNOWN) left no trace — input injection is not reaching this phone" };
+}
+
 /** `?` for every capability: nothing was run, so nothing is claimed. */
 export function unknownPhoneChecks(why: string): Check[] {
   return PHONE_CAPS.map((cap) => ({ name: `smoke android phone: ${cap}`, ok: false, skipped: true, unknown: true as const, detail: why }));
@@ -517,9 +535,8 @@ export function unknownPhoneChecks(why: string): Check[] {
 
 /**
  * The physical-phone column: attach (usable), stream (first frame, and whether it is H.264),
- * describe (uiautomator over adb) and input — the one place input injection fails silently. The
- * input proof opens the notification shade with a swipe and closes it with back, so no app on the
- * phone is touched and no setting changes. With no free phone every check is `?`, not a tick.
+ * describe (uiautomator over adb) and input — the one place input injection fails silently. With no
+ * free phone every check is `?`, not a tick.
  */
 async function smokePhone(): Promise<Check[]> {
   const label = (cap: string) => `smoke android phone: ${cap}`;
@@ -584,25 +601,16 @@ async function smokePhone(): Promise<Check[]> {
     walk(tree.roots[0]!);
     done("describe", n > 0, `${n} elements`);
 
-    const focus = async () => {
-      const r = await new Promise<string>((resolve) =>
-        execFile("adb", ["-s", serial, "shell", "dumpsys", "window"], { timeout: 10_000, maxBuffer: 16 * 1024 * 1024 }, (_e, out) => resolve(String(out ?? ""))),
+    const power = () =>
+      new Promise<string>((resolve) =>
+        execFile("adb", ["-s", serial, "shell", "dumpsys", "power"], { timeout: 10_000, maxBuffer: 16 * 1024 * 1024 }, (_e, out) => resolve(String(out ?? ""))),
       );
-      return /mCurrentFocus=Window\{\S+ \S+ ([^}]+)\}/.exec(r)?.[1] ?? "";
-    };
-    const before = await focus();
-    if (/NotificationShade/.test(before)) {
-      checks.push({ name: label("input"), ok: false, skipped: true, unknown: true, detail: "the notification shade was already open, so a swipe could not prove anything — close it and re-run" });
-    } else {
-      const target = { platform: "android" as const, udid: serial };
-      await control.action(target, { type: "swipe", startX: 0.5, startY: 0.002, endX: 0.5, endY: 0.6, durationMs: 300 });
-      await new Promise((r) => setTimeout(r, 1500));
-      const opened = /NotificationShade/.test(await focus());
-      await control.action(target, { type: "back" });
-      await new Promise((r) => setTimeout(r, 1500));
-      const after = await focus();
-      done("input", opened && after === before, opened ? (after === before ? "swipe opened the notification shade, back closed it" : `shade opened, but back left focus on ${after}`) : "a swipe from the top edge did not open the notification shade");
-    }
+    const before = lastUserActivity(await power());
+    await new Promise<void>((resolve) => execFile("adb", ["-s", serial, "shell", "input", "keyevent", "0"], { timeout: 10_000 }, () => resolve()));
+    await new Promise((r) => setTimeout(r, 500));
+    const proof = inputProof(before, lastUserActivity(await power()));
+    if (proof.ok === null) checks.push({ name: label("input"), ok: false, skipped: true, unknown: true, detail: proof.detail });
+    else done("input", proof.ok, proof.detail);
   } catch (e) {
     const have = new Set(checks.map((c) => c.name));
     for (const cap of PHONE_CAPS) if (!have.has(label(cap))) done(cap, false, (e as Error).message.slice(0, 160));

@@ -14,6 +14,8 @@ import {
   freshnessVerdict,
   pickSmokePhone,
   unknownPhoneChecks,
+  lastUserActivity,
+  inputProof,
   readTokens,
   releaseSmokeAvd,
   type Check,
@@ -445,5 +447,22 @@ describe("the physical phone column", () => {
     const none = pickSmokePhone([phone("B"), phone("C")], { B: { who: "dana", since: "t" } }, { C: "pv1 (app x)" });
     assert.equal(none.phone, null);
     assert.equal(none.why, "B: held by dana; C: in preview pv1 (app x)");
+  });
+});
+
+describe("the phone input proof", () => {
+  const power = (t: string) => `  mLastUserActivityTime(excludingAttention)=1\n  lastUserActivityTime=${t} (12 ms ago)\n  lastUserActivityTimeNoChangeLights=385529 (9 ms ago)\n`;
+
+  it("reads the power manager's last user activity, not the no-change-lights or excluding-attention fields", () => {
+    assert.equal(lastUserActivity(power("964940013")), 964940013);
+    assert.equal(lastUserActivity("  mLastUserActivityTime=77\n"), 77);
+    assert.equal(lastUserActivity("mWakefulness=Awake\n"), null);
+  });
+
+  it("passes only when the injected no-op key moved the activity clock, and is ? when the field is missing", () => {
+    assert.deepEqual(inputProof(10, 20).ok, true);
+    assert.deepEqual(inputProof(10, 10).ok, false);
+    assert.equal(inputProof(null, 20).ok, null);
+    assert.match(inputProof(null, null).detail, /dumpsys power/);
   });
 });

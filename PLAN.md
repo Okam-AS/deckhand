@@ -911,8 +911,9 @@ change eases in/out — nothing snaps.
   `--smoke` adds the hardware pass: it creates a simulator and an emulator and checks boot,
   **first frame** and describe on each — six independent checks, no fixture app and no build —
   plus a physical Android column on the first free phone (attach, stream with its codec,
-  describe, and input: a swipe opens the notification shade and back closes it). With no free
-  phone those four print `?` and do not fail the gate.
+  describe, and input: a no-op key, KEYCODE_UNKNOWN, must move `dumpsys power`'s last user
+  activity — nothing on the phone is acted on). With no free phone those four print `?` and do
+  not fail the gate.
   `--device-only` runs the same set as `--smoke` — every paperwork check still runs and is
   still printed — but its exit code covers only the device checks, so a code gate cannot go
   red on an install problem its author cannot fix.
