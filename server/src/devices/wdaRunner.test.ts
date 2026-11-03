@@ -202,7 +202,7 @@ describe("WdaRunner", () => {
       },
     });
     try {
-      await assert.rejects(() => f.runner.ensureRunning(), (e: unknown) => e instanceof WdaStartError && /Enable UI Automation/.test(e.hint ?? ""));
+      await assert.rejects(() => f.runner.ensureRunning(), (e: unknown) => e instanceof WdaStartError && /Automation Mode prompt/.test(e.hint ?? ""));
       await new Promise((r) => setTimeout(r, 300));
       assert.equal(f.spawned.length, 1, "a runner that never came up was restarted behind the caller's back");
     } finally {
@@ -294,7 +294,8 @@ describe("WDA log reading", () => {
   });
 
   it("names the operator's fix for the failures a phone produces", () => {
-    assert.match(startFailureHint("Timed out while enabling automation mode.")!, /Enable UI Automation/);
+    assert.match(startFailureHint("Timed out while enabling automation mode.")!, /approve the Automation Mode prompt/);
+    assert.match(startFailureHint("UI Automation is not enabled")!, /Enable UI Automation/);
     assert.match(startFailureHint("Developer Mode disabled")!, /Developer Mode/);
     assert.match(startFailureHint("The device is locked.")!, /unlock/);
     assert.equal(startFailureHint("something new"), undefined);

@@ -40,6 +40,10 @@ export function parseServerUrl(log: string): string | null {
 
 /** What a failed WDA start's log says the operator must do. */
 export function startFailureHint(log: string): string | undefined {
+  // Measured on iOS 27: the phone raises an AutomationModeUI prompt that waits for a person, then this times out.
+  if (/Timed out while enabling automation mode/i.test(log)) {
+    return "someone at the phone must approve the Automation Mode prompt it shows (unlock it, and allow it); if no prompt appears, turn on Settings → Developer → Enable UI Automation";
+  }
   if (/UI Automation|automation mode|Automation is (not enabled|disabled)/i.test(log)) return "turn on Settings → Developer → Enable UI Automation on the phone";
   if (/Developer Mode/i.test(log)) return "turn on Developer Mode on the phone (Settings → Privacy & Security → Developer Mode)";
   if (/not (been )?explicitly trusted|untrusted developer|invalid code signature|could not be verified/i.test(log)) {
