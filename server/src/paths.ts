@@ -61,4 +61,6 @@ export const paths = {
   // builds identically, so it can share one warm directory.
   worktree: (key: string) => join(deckhandHome(), "worktrees", `dh-${key}`),
   logsDir: () => join(deckhandHome(), "logs"),
+  /** A WebDriverAgent built and signed elsewhere, copied here by the operator; deckhand never builds or signs it. */
+  wdaProducts: () => join(deckhandHome(), "wda", "Products"),
 } as const;
