@@ -98,6 +98,14 @@ export class EasClient {
     return data.meActor.__typename;
   }
 
+  /** The project's slug; a dev client's own URL scheme is `exp+<slug>`. */
+  async projectSlug(projectId: string): Promise<string> {
+    const data = await this.query<{ app: { byId: { slug: string } } }>("query($id: String!) { app { byId(appId: $id) { slug } } }", { id: projectId });
+    const slug = data.app.byId.slug;
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(slug)) throw new EasError(`the EAS project's slug ${JSON.stringify(slug)} is not usable in a URL scheme`);
+    return slug;
+  }
+
   /** Newest first. EAS applies `filter`, so `limit` counts matching builds. */
   async builds(projectId: string, opts: { limit?: number; platform?: EasPlatform; profile?: string; status?: "FINISHED" } = {}): Promise<EasBuild[]> {
     const filter: Record<string, string> = {};

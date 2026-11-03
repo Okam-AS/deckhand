@@ -277,6 +277,37 @@ export class RegisteredApp {
     await this.adb(["shell", "am", "force-stop", pkg]);
   }
 
+  /** A cold start of the app's launcher activity, with `-e K V` string extras. */
+  async launch(pkg: string, extras: string[] = []): Promise<void> {
+    this.guard(pkg, "launch");
+    const resolved = await this.adb(["shell", "cmd", "package", "resolve-activity", "--brief", pkg]);
+    const activity = resolved.stdout
+      .toString()
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => l.startsWith(`${pkg}/`));
+    if (!activity) throw new AndroidError(`${pkg} has no launcher activity on ${this.serial}`);
+    const res = await this.adb(["shell", "am", "start", "-S", "-W", "-n", shellQuote(activity), ...extras.map(shellQuote)], 60_000);
+    const said = `${res.stdout.toString()}\n${res.stderr}`;
+    if (res.code !== 0 || /^error/im.test(said)) throw new AndroidError(`am start ${activity} failed: ${said.trim().slice(0, 200)}`);
+  }
+
+  /** sha256 of the installed base APK, or null when it is not installed or the phone cannot hash. */
+  async installedApkSha256(pkg: string): Promise<string | null> {
+    this.guard(pkg, "inspect");
+    const path = await this.adb(["shell", "pm", "path", pkg]);
+    const base = path.stdout
+      .toString()
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => l.startsWith("package:") && l.endsWith("/base.apk"))
+      ?.slice("package:".length);
+    if (path.code !== 0 || !base) return null;
+    const res = await this.adb(["shell", "sha256sum", shellQuote(base)], 120_000);
+    const hash = /^([0-9a-f]{64})\b/.exec(res.stdout.toString().trim())?.[1];
+    return res.code === 0 && hash ? hash : null;
+  }
+
   /** Pids of the app's processes now; empty when it is not running. */
   async pids(pkg: string): Promise<number[]> {
     this.guard(pkg, "look up");
@@ -289,10 +320,10 @@ export class RegisteredApp {
       .filter((n) => Number.isInteger(n) && n > 0);
   }
 
-  /** A VIEW intent addressed to this app only, so no other app on the phone can answer it. */
-  async openUrl(pkg: string, url: string): Promise<void> {
+  /** A VIEW intent addressed to this app only, so no other app on the phone can answer it. `extras` are `-e K V` pairs. */
+  async openUrl(pkg: string, url: string, extras: string[] = []): Promise<void> {
     this.guard(pkg, "open a link in");
-    const res = await this.adb(["shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", shellQuote(url), pkg]);
+    const res = await this.adb(["shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", shellQuote(url), ...extras.map(shellQuote), pkg]);
     const said = `${res.stdout.toString()}\n${res.stderr}`;
     if (res.code !== 0 || /^error/im.test(said)) throw new AndroidError(`am start VIEW failed: ${said.trim().slice(0, 200)}`);
   }

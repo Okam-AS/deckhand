@@ -49,6 +49,8 @@ import { serverInfo } from "./meta.ts";
 import { LiveShareRegistry, createLiveShareRouter } from "./share/liveShares.ts";
 import { typesafeProvider } from "./navigate/secrets.ts";
 import type { JevProvider } from "./navigate/jev.ts";
+import { EasPreviews } from "./eas/source.ts";
+import { expoTokenSource } from "./eas/secrets.ts";
 
 export interface AppDeps {
   engine: PreviewEngine;
@@ -214,6 +216,7 @@ export function createServer(): DeckhandServer {
     metro: new MetroManager(),
     store: new StateStore(),
     audit: new AuditLog(),
+    eas: new EasPreviews(expoTokenSource()),
   });
 
   const pinGate = createPinGate(engine, resolveShareSecret(config));

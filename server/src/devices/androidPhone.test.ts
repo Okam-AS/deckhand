@@ -120,6 +120,8 @@ describe("the registered app guard", () => {
     await assert.rejects(app.installed(other), AppPolicyError);
     await assert.rejects(app.pids(other), AppPolicyError);
     await assert.rejects(app.log(other, 0, 0), AppPolicyError);
+    await assert.rejects(app.launch(other, ["-e", "APP_ENV", "test"]), AppPolicyError);
+    await assert.rejects(app.installedApkSha256(other), AppPolicyError);
     assert.deepEqual(calls, [], "a refused call must not reach adb");
   });
 
@@ -138,6 +140,21 @@ describe("the registered app guard", () => {
       "-s RF8 install -r /b/app-debug.apk",
       `-s RF8 shell am start -a android.intent.action.VIEW -d 'exp+x://expo-development-client/?url=a&b=c' ${PKG}`,
     ]);
+  });
+
+  it("cold-starts the launcher activity with the launch arguments as quoted string extras", async () => {
+    const { exec, calls } = fakeExec((args) => ({ stdout: buf(args.includes("resolve-activity") ? `priority=0\n${PKG}/.MainActivity\n` : "Status: ok") }));
+    await new RegisteredApp(exec, "RF8", PKG).launch(PKG, ["-e", "APP_ENV", "test"]);
+    assert.equal(calls.at(-1), `-s RF8 shell am start -S -W -n '${PKG}/.MainActivity' '-e' 'APP_ENV' 'test'`);
+  });
+
+  it("hashes the installed base APK, and answers null when it is not installed", async () => {
+    const hash = "a".repeat(64);
+    const { exec, calls } = fakeExec((args) => ({ stdout: buf(args.includes("path") ? "package:/data/app/~~x==/no.example.app-y==/base.apk\n" : `${hash}  /data/app/~~x==/no.example.app-y==/base.apk`) }));
+    assert.equal(await new RegisteredApp(exec, "RF8", PKG).installedApkSha256(PKG), hash);
+    assert.equal(calls.at(-1), "-s RF8 shell sha256sum '/data/app/~~x==/no.example.app-y==/base.apk'");
+    const none = fakeExec(() => ({ code: 1, stdout: buf("") }));
+    assert.equal(await new RegisteredApp(none.exec, "RF8", PKG).installedApkSha256(PKG), null);
   });
 
   it("refuses to be built for something that is not a package name", () => {

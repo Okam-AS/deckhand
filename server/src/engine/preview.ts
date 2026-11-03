@@ -46,6 +46,22 @@ import { LIVE_DEVICE_ID, type LiveShareRegistry } from "../share/liveShares.ts";
 import { SimDeckControl, type ControlBackend, type SimDeckTarget, type DescribeOptions, type UiAction } from "../testing/control.ts";
 import { AdbControl } from "../testing/adbControl.ts";
 import { ScreenBook } from "../testing/screen.ts";
+import { createHash as hashOf } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { easProjectIdFromDir } from "./detect.ts";
+import { EasError, devClientUpdateUrl } from "../eas/client.ts";
+import type { EasPreviews, EasSelection, EasTarget, PreparedBuild } from "../eas/source.ts";
+import {
+  EnvironmentError,
+  androidExtras,
+  combineReports,
+  iosLaunchArgs,
+  markerSeen,
+  resolveEnvironment,
+  type EnvironmentReport,
+  type EnvironmentSource,
+  type ResolvedEnvironment,
+} from "./environment.ts";
 
 // ---------------------------------------------------------------------------
 // Preview engine: the orchestrator. Holds live previews in memory, persists to
@@ -79,6 +95,18 @@ const WEB_READY_TIMEOUT_MS = 180_000;
  * attempt made a transient failure permanent for the life of the preview.
  */
 const FIRST_FRAME_ATTEMPTS = 3;
+/** How long after launch the app log is watched for an environment's marker. */
+const ENV_MARKER_WAIT_MS = 90_000;
+
+function sha256File(path: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const h = hashOf("sha256");
+    createReadStream(path)
+      .on("data", (c) => h.update(c))
+      .on("end", () => resolve(h.digest("hex")))
+      .on("error", reject);
+  });
+}
 /** Loopback port range for web dev servers (Vite defaults to 5173). */
 const WEB_PORT_RANGE: [number, number] = [5170, 5199];
 
@@ -187,6 +215,10 @@ interface LiveDevice {
   reversed?: Set<number>;
   /** `freshApp` has been applied to this device (a restart does not wipe the app again). */
   freshApplied?: boolean;
+  /** How the environment reached the app at its last launch, and whether its log proved it. */
+  env?: { source: EnvironmentSource; verified: boolean; note?: string };
+  /** What a dev-client EAS build was told to load, or why it shows the dev launcher. */
+  devClient?: string;
 }
 
 interface LivePreview {
@@ -204,6 +236,11 @@ interface LivePreview {
   nextDeviceIndex: number;
   /** Consumed by the first build: a restart rebuilds without wiping the app again. */
   freshApp?: FreshApp;
+  /** The app environment, or null when the app declares none (then it is unknown, never invented). */
+  environment: ResolvedEnvironment | null;
+  /** eas source: which build, and each artifact kind's fetched-and-vetted build, memoised per preview run. */
+  eas?: EasSelection;
+  easPrepared?: Map<EasTarget, Promise<PreparedBuild>>;
   prep?: Promise<string>; // memoized source dir (shared across devices)
   sourceDir?: string;
   attached: Map<string, AttachedStream>;
@@ -371,6 +408,10 @@ export interface StartPreviewRequest {
   reference?: boolean;
   /** Start the registered app fresh on Android devices: wipe its data, or uninstall it first. */
   freshApp?: FreshApp;
+  /** eas source: a build id (or unique prefix), or a profile whose newest finished build is taken. */
+  eas?: EasSelection;
+  /** An environment the app declares; omitted, its default. Ignored by nothing: an unknown name throws. */
+  environment?: string;
 }
 
 export interface StartPreviewResult {
@@ -380,6 +421,8 @@ export interface StartPreviewResult {
   source: PreviewSource;
   /** True when an equivalent preview was already live and was returned as-is. */
   alreadyRunning: boolean;
+  /** The environment the preview runs against; null when the app declares none. */
+  environment: { name: string; explicit: boolean } | null;
   /**
    * Platforms the request asked for that the returned preview does not have.
    * Present only when they differ — a silent mismatch is a confidently wrong answer.
@@ -396,6 +439,8 @@ export interface PreviewStatus {
   ready: boolean;
   url: string | null;
   source: PreviewSource;
+  /** Which backend the app talks to; `name: null` when the app declares no environments. */
+  environment: EnvironmentReport | null;
   devices: {
     deviceId: string;
     label: string;
@@ -403,6 +448,8 @@ export interface PreviewStatus {
     detail?: string;
     error?: string;
     logTail?: string;
+    environment?: EnvironmentReport;
+    devClient?: string;
   }[];
 }
 
@@ -426,6 +473,8 @@ export interface PreviewEngineDeps {
   phoneControl?: ControlBackend;
   /** Who holds which phone (`deckhand phone hold`); read on every claim. */
   phoneHolds?: () => PhoneHolds;
+  /** Builds EAS already made (start_preview's `eas` source). Absent: that source is refused. */
+  eas?: EasPreviews;
   runStep?: (step: CommandStep, opts?: { onLog?: (l: string, s: "stdout" | "stderr") => void; signal?: AbortSignal }) => Promise<RunResult>;
   secretsEnv?: (appId: string) => Record<string, string>;
   now?: () => number;
@@ -502,6 +551,13 @@ export function redactForShare(text: string): string {
         `${lead}…${rest ?? ""}`,
       )
   );
+}
+
+/** The ref an eas preview is shown and reused under. */
+function easRef(sel: EasSelection | undefined, env: ResolvedEnvironment | null): string {
+  if (sel?.buildId) return `eas build ${sel.buildId.slice(0, 8)}`;
+  if (sel?.profile) return `eas profile ${sel.profile}`;
+  return `eas ${env ? `${env.name} profile` : "build"}`;
 }
 
 /** One dev process per app+platform. */
@@ -1309,6 +1365,17 @@ export class PreviewEngine {
         "ask the user for a 4–6 digit PIN and pass share: { access: \"pin\", pin: \"<code>\" }",
       );
     }
+    let environment: ResolvedEnvironment | null;
+    try {
+      environment = resolveEnvironment(req.app, req.environment);
+    } catch (e) {
+      if (e instanceof EnvironmentError) throw new PreviewError(e.message, e.hint, e.code);
+      throw e;
+    }
+    if (environment && req.app.type === "web") {
+      throw new PreviewError(`web app "${req.app.id}" declares environments, which only mobile previews can apply`, "remove environments from this web app in apps.yaml; a web preview runs its dev server as configured", "bad_request");
+    }
+    if (req.source === "eas") this.checkEasRequest(req);
     if (req.source === "local") {
       const seen = new Set<Platform>();
       for (const d of req.devices) {
@@ -1325,7 +1392,7 @@ export class PreviewEngine {
     // The daily loop: an equivalent live preview is THE preview — return it
     // (same shareId, same URL) instead of minting a second simulator.
     const stillReleasing = this.reapTerminalForApp(req.app.id);
-    const existing = this.findReusable(req);
+    const existing = this.findReusable(req, environment?.name ?? null);
     if (existing) {
       // Asking for a platform this preview does not have is a DIFFERENT request, and it used
       // to come back as `alreadyRunning` with the extra device silently dropped. Now it is
@@ -1381,8 +1448,10 @@ export class PreviewEngine {
       previewId,
       shareId,
       appId: req.app.id,
-      ref: req.source === "local" ? "local" : refDescription(req.spec!),
+      ref: req.source === "local" ? "local" : req.source === "eas" ? easRef(req.eas, environment) : refDescription(req.spec!),
       source: req.source,
+      ...(environment ? { environment: environment.name } : {}),
+      ...(req.source === "eas" ? { eas: { ...req.eas } } : {}),
       phase: "pending",
       devices: devices.map((d) => d.record),
       createdAt: now,
@@ -1398,6 +1467,8 @@ export class PreviewEngine {
       devices,
       nextDeviceIndex: devices.length,
       ...(req.freshApp ? { freshApp: req.freshApp } : {}),
+      environment,
+      ...(req.source === "eas" ? { eas: { ...req.eas } } : {}),
       attached: new Map(),
       lastActivityAt: this.d.now!(),
       lastProgressAt: this.d.now!(),
@@ -1631,6 +1702,7 @@ export class PreviewEngine {
       url: this.previewUrl(p),
       source: p.record.source,
       alreadyRunning,
+      environment: p.environment ? { name: p.environment.name, explicit: p.environment.explicit } : null,
       devices: p.devices.map((d) => ({ deviceId: d.record.deviceId, label: d.record.label, phase: d.record.phase })),
       ...(missing.length
         ? {
@@ -1644,16 +1716,38 @@ export class PreviewEngine {
     };
   }
 
-  /** An equivalent live preview (same app + source, and same ref for git). */
-  private findReusable(req: StartPreviewRequest): LivePreview | null {
+  /** An equivalent live preview: same app, source and environment, and the same ref or EAS build choice. */
+  private findReusable(req: StartPreviewRequest, environment: string | null): LivePreview | null {
     for (const p of this.previews.values()) {
       const ph = p.record.phase;
       if (ph === "stopped" || ph === "failed" || ph === "stopping") continue;
       if (p.record.appId !== req.app.id || p.record.source !== req.source) continue;
+      if ((p.record.environment ?? null) !== environment) continue;
       if (req.source === "git" && p.record.ref !== refDescription(req.spec!)) continue;
+      if (req.source === "eas" && (p.record.eas?.buildId !== req.eas?.buildId || p.record.eas?.profile !== req.eas?.profile)) continue;
       return p;
     }
     return null;
+  }
+
+  /** The EAS project an app's builds come from: registered, else read from a local checkout's app config. */
+  private easProjectFor(app: App): string | null {
+    return app.easProjectId ?? (app.path ? easProjectIdFromDir(app.path) : null);
+  }
+
+  private checkEasRequest(req: StartPreviewRequest): void {
+    if (!this.d.eas) throw new PreviewError("this deckhand cannot preview EAS builds", "it was started without the EAS source", "eas_unavailable");
+    if (req.app.type === "web") throw new PreviewError("a web app has no EAS builds", "omit eas", "bad_request");
+    if (req.eas?.buildId && req.eas.profile) throw new PreviewError("pass eas.buildId or eas.profile, not both", "a build id already names one build", "bad_request");
+    if (!this.easProjectFor(req.app)) {
+      throw new PreviewError(
+        `app "${req.app.id}" has no EAS project id`,
+        `register it on the deckhand machine: \`deckhand app add\` with --eas-project <uuid> (or add easProjectId to the app in apps.yaml); it is extra.eas.projectId in the app config`,
+        "no_eas_project",
+      );
+    }
+    const ready = this.d.eas.ready();
+    if (!ready.ok) throw new PreviewError(ready.message, ready.hint, "eas_token_missing");
   }
 
   /**
@@ -1735,7 +1829,7 @@ export class PreviewEngine {
         }
         await this.teardownDevices(p, releaseOne);
         this.stopMetroIfUnused(p.app.id);
-        if (p.record.source !== "local") {
+        if (p.record.source === "git") {
           await this.d.worktrees.removeWorktree(p.app, p.record.previewId).catch(() => {});
         }
       } finally {
@@ -2072,7 +2166,7 @@ export class PreviewEngine {
   private resolveBundleId(app: App, worktreePath: string, platform: Platform): string {
     const label = platform === "android" ? "package" : "bundle id";
     // Only reached for iOS/Android builds; web has no bundle id.
-    const value = app.bundleId ?? detectBundleIdFromDir(worktreePath, app.type, platform === "android" ? "android" : "ios");
+    const value = app.bundleId ?? (worktreePath ? detectBundleIdFromDir(worktreePath, app.type, platform === "android" ? "android" : "ios") : null);
     if (!value) {
       throw new PreviewError(
         `could not determine the ${platform} ${label} for ${app.id}`,
@@ -2194,6 +2288,10 @@ export class PreviewEngine {
       await this.orchestrateWebGroup(p, group[0]!);
       return;
     }
+    if (p.record.source === "eas") {
+      await this.easGroup(p, group, (dev) => this.bootDevice(p, dev));
+      return;
+    }
     for (const dev of group) this.setPhase(p, dev, "preparing", "checking out and booting");
 
     // Start source prep (shared across all groups) and every device's boot.
@@ -2266,6 +2364,13 @@ export class PreviewEngine {
       if (platform === "android" && usesMetroDeepLink(p.app.type)) slug = await this.resolveExpoSlug(sourceDir, appEnv);
 
       if (local && p.app.type === "nativescript") {
+        if (Object.keys(this.launchArgs(p)).length) {
+          throw new PreviewError(
+            `environment "${p.environment!.name}" needs launch arguments, and a NativeScript livesync preview launches the app itself without them`,
+            "preview this app from git (ref) instead, or from an EAS build",
+            "environment_unsupported",
+          );
+        }
         // Livesync builds, installs, launches, then keeps watching for saves.
         this.setPhase(p, builder, "building", "first livesync build");
         this.startDevProcess(p, builder, platform, builderHandle, sourceDir, appEnv);
@@ -2323,6 +2428,194 @@ export class PreviewEngine {
         }
       }),
     );
+  }
+
+  // --- eas source (a build EAS already made: no checkout, no build) ------------------
+
+  private easTarget(dev: LiveDevice): EasTarget {
+    if (dev.record.platform === "android") return "android";
+    return "ios-simulator";
+  }
+
+  /** Resolve, download and vet one artifact kind once per preview run; every device of that kind shares it. */
+  private easPrepare(p: LivePreview, target: EasTarget, bundleId: string, log: (line: string) => void): Promise<PreparedBuild> {
+    p.easPrepared ??= new Map();
+    let prep = p.easPrepared.get(target);
+    if (!prep) {
+      const eas = this.d.eas!;
+      const projectId = this.easProjectFor(p.app)!;
+      const profileFor = p.environment?.env.easProfile?.[target === "android" ? "android" : "iosSimulator"];
+      prep = (async () => {
+        const build = await eas.resolve(projectId, target, { buildId: p.eas?.buildId, profile: p.eas?.buildId ? undefined : (p.eas?.profile ?? profileFor) });
+        return eas.prepare(projectId, target, build, bundleId, log);
+      })();
+      p.easPrepared.set(target, prep);
+      prep.catch(() => p.easPrepared?.delete(target));
+    }
+    return prep;
+  }
+
+  /**
+   * An eas group: the artifact is fetched and vetted before a phone is touched (an emulator or
+   * simulator boots meanwhile — those are deckhand's own), then each device gets the same
+   * install → verify → launch → attach as a built one, with no checkout and no build.
+   */
+  private async easGroup(p: LivePreview, group: LiveDevice[], boot: (dev: LiveDevice) => Promise<string>): Promise<void> {
+    const platform = group[0]!.record.platform;
+    const target = this.easTarget(group[0]!);
+    let bundleId: string;
+    try {
+      bundleId = this.resolveBundleId(p.app, p.app.path ?? "", platform);
+    } catch (e) {
+      for (const dev of group) this.failDevice(p, dev, e);
+      return;
+    }
+    for (const dev of group) {
+      if (platform === "android") dev.appPackage = bundleId;
+      this.setPhase(p, dev, "preparing", "fetching the EAS build");
+    }
+    const prepP = this.easPrepare(p, target, bundleId, (line) => {
+      for (const dev of group) this.appendLog(dev, "build", `[eas] ${line}`);
+      this.noteProgress(p);
+    });
+    await Promise.all(
+      group.map(async (dev) => {
+        try {
+          const handleP = dev.record.physical ? prepP.then(() => boot(dev)) : boot(dev);
+          const [prep, handle] = await Promise.all([prepP, handleP]);
+          await this.easInstallAndLaunch(p, dev, handle, prep);
+        } catch (e) {
+          this.failDevice(p, dev, e instanceof EasError ? new PreviewError(`${e.message}${e.hint ? `. ${e.hint}` : ""}`, e.hint, e.code) : e);
+        }
+      }),
+    );
+  }
+
+  private async easInstallAndLaunch(p: LivePreview, dev: LiveDevice, handle: string, prep: PreparedBuild): Promise<void> {
+    const platform = dev.record.platform;
+    this.setPhase(p, dev, "installing-app", `installing EAS build ${prep.build.id.slice(0, 8)}`);
+    await this.freshBeforeInstall(p, dev, handle);
+    if (platform === "android") await this.installEasApk(p, dev, handle, prep);
+    else await this.installProduct(platform, handle, prep.installPath);
+    await this.verifyInstalled(platform, handle, prep.bundleId);
+    await this.silenceDevOverlays(platform, handle, prep.bundleId);
+    await this.freshAfterInstall(p, dev, handle);
+    this.setPhase(p, dev, "launching", "launching app");
+    await this.launchEas(p, dev, handle, prep);
+    await this.attachAndReady(p, dev, platform, handle);
+  }
+
+  /**
+   * Skip the install when the phone already has this very artifact: same version, then the same
+   * bytes (an e2e APK can declare one versionCode for every build). A signature or downgrade
+   * conflict replaces the registered app, and the log says what went.
+   */
+  private async installEasApk(p: LivePreview, dev: LiveDevice, serial: string, prep: PreparedBuild): Promise<void> {
+    const app = this.registeredApp(dev, serial);
+    const before = await app.installed(app.pkg);
+    if (before && before.versionCode === prep.versionCode && before.versionName === prep.versionName) {
+      const [theirs, ours] = await Promise.all([app.installedApkSha256(app.pkg), sha256File(prep.installPath)]);
+      if (theirs && theirs === ours) {
+        this.appendLog(dev, "build", `deckhand: ${app.pkg} ${prep.versionName ?? "?"} (${prep.versionCode ?? "?"}) from EAS build ${prep.build.id} is already installed — not reinstalling`);
+        return;
+      }
+    }
+    this.appendLog(dev, "build", `deckhand: installing ${app.pkg} ${prep.versionName ?? "?"} (${prep.versionCode ?? "?"}) from EAS build ${prep.build.id}${before ? ` over ${before.versionName ?? "?"} (${before.versionCode ?? "?"})` : ""}`);
+    try {
+      await app.install(app.pkg, prep.installPath);
+    } catch (e) {
+      if (!(e instanceof InstallConflictError)) throw e;
+      this.appendLog(
+        dev,
+        "build",
+        `deckhand: ${e.message} — uninstalling ${app.pkg} ${before?.versionName ?? "?"} (versionCode ${before?.versionCode ?? "?"}, installer ${before?.installer ?? "?"}, first installed ${before?.firstInstallTime ?? "?"}) and installing EAS build ${prep.build.id}. No other app on the device is touched.`,
+      );
+      this.setPhase(p, dev, "installing-app", `reinstalling ${app.pkg} (${e.kind === "signature" ? "signed with another key" : "newer version on the device"})`);
+      await app.uninstall(app.pkg);
+      await app.install(app.pkg, prep.installPath);
+      this.d.audit.record({ actor: "engine", tool: "phone_reinstall", args: { preview: p.record.previewId, device: dev.record.deviceId, package: app.pkg, reason: e.kind, build: prep.build.id }, result: "ok" });
+    }
+  }
+
+  /** Launch with the environment's arguments; a dev-client build is pointed at its channel's newest update. */
+  private async launchEas(p: LivePreview, dev: LiveDevice, handle: string, prep: PreparedBuild): Promise<void> {
+    const args = this.launchArgs(p);
+    const hasArgs = Object.keys(args).length > 0;
+    const mapped = p.environment?.env.easProfile?.[prep.target === "android" ? "android" : "iosSimulator"];
+    const note = p.environment && mapped && prep.build.buildProfile !== mapped ? `the build is EAS profile "${prep.build.buildProfile ?? "?"}", not "${mapped}", the profile environment "${p.environment.name}" maps` : undefined;
+    dev.env = { source: hasArgs ? "launch-args" : mapped && prep.build.buildProfile === mapped ? "eas-profile" : "build-default", verified: false, ...(note ? { note } : {}) };
+    const link = prep.build.developmentClient ? await this.devClientLink(prep) : null;
+    dev.devClient = link?.note;
+    if (link?.note) this.appendLog(dev, "build", `deckhand: ${link.note}`);
+    dev.launchedAt = this.d.now!();
+    if (dev.record.platform === "android") {
+      const app = this.registeredApp(dev, handle);
+      if (link?.url) {
+        await app.forceStop(app.pkg);
+        await app.openUrl(app.pkg, link.url, androidExtras(args));
+      } else {
+        await app.launch(app.pkg, androidExtras(args));
+      }
+      return;
+    }
+    const launchArgs = iosLaunchArgs(args);
+    await this.d.simctl.launch(handle, prep.bundleId, { args: launchArgs, terminateRunning: launchArgs.length > 0 });
+    if (link?.url) await this.d.simctl.openUrl(handle, link.url);
+  }
+
+  /** The newest update on the build's own channel, as a dev-client link — or why there is none. */
+  private async devClientLink(prep: PreparedBuild): Promise<{ url: string | null; note: string }> {
+    const b = prep.build;
+    const launcher = "it opens the Expo dev launcher instead of the app — deckhand's packaging, not an app bug";
+    if (!b.updateChannel) return { url: null, note: `dev launcher: this dev-client build has no EAS Update channel, so ${launcher}. Preview a build with a channel, or a non-dev-client profile.` };
+    const eas = this.d.eas!;
+    const update = await eas.latestUpdate(prep.projectId, b);
+    if (!update) return { url: null, note: `dev launcher: no EAS Update for runtime ${b.runtime?.version ?? "?"} on channel "${b.updateChannel.name}", so ${launcher}. Publish one with eas update.` };
+    const scheme = prep.schemes.find((x) => x.startsWith("exp+")) ?? `exp+${await eas.projectSlug(prep.projectId)}`;
+    return {
+      url: devClientUpdateUrl(scheme, prep.projectId, update.group),
+      note: `dev client: loading EAS Update ${update.group} (branch ${update.branchName}, ${update.createdAt}) from channel "${b.updateChannel.name}"`,
+    };
+  }
+
+  // --- environment ------------------------------------------------------------------
+
+  private envReport(p: LivePreview, dev: LiveDevice): EnvironmentReport {
+    if (!p.environment) return { name: null, source: "unknown", verified: false, note: "this app declares no environments, so which backend it talks to is unknown" };
+    const marker = p.environment.env.logMarker;
+    const planned: EnvironmentSource = Object.keys(this.launchArgs(p)).length ? "launch-args" : p.record.source === "eas" && p.environment.env.easProfile ? "eas-profile" : "build-default";
+    const notes = [dev.env?.note, marker && dev.record.platform === "ios" ? "the iOS app log is not captured yet, so the marker cannot be checked" : undefined].filter(Boolean);
+    return {
+      name: p.environment.name,
+      source: dev.env?.source ?? planned,
+      verified: marker ? (dev.env?.verified ?? false) : "no-marker",
+      ...(notes.length ? { note: notes.join("; ") } : {}),
+    };
+  }
+
+  /** Watch the app log for the environment's marker for a while after launch (Android; iOS logs are not captured). */
+  private watchEnvironment(p: LivePreview, dev: LiveDevice): void {
+    const marker = p.environment?.env.logMarker;
+    if (!marker || dev.record.platform !== "android" || !dev.env || dev.env.verified) return;
+    const until = this.d.now!() + ENV_MARKER_WAIT_MS;
+    void (async () => {
+      while (this.d.now!() < until && dev.record.phase === "ready" && !dev.abort.signal.aborted) {
+        if (await this.checkMarker(p, dev).catch(() => false)) return;
+        await new Promise((r) => setTimeout(r, 3_000).unref());
+      }
+    })().catch(() => {});
+  }
+
+  private async checkMarker(p: LivePreview, dev: LiveDevice, lines?: readonly string[]): Promise<boolean> {
+    const marker = p.environment?.env.logMarker;
+    if (!marker || !dev.env) return false;
+    if (dev.env.verified) return true;
+    const seen = markerSeen(marker, lines ?? (await this.appLogLines(p, dev)).lines);
+    if (seen) {
+      dev.env.verified = true;
+      this.appendLog(dev, "build", `deckhand: environment "${p.environment!.name}" verified — the app log matched ${marker}`);
+    }
+    return seen;
   }
 
   private startDevProcess(
@@ -2592,6 +2885,7 @@ export class PreviewEngine {
       const alive = await kept.waitForFirstFrame(4000).catch(() => false);
       if (alive) {
         this.setPhase(p, dev, "ready", undefined);
+        this.watchEnvironment(p, dev);
         return;
       }
       this.streamLog(dev, `kept helper at ${kept.origin}${kept.helperBasePath} is not answering — re-attaching`);
@@ -2625,6 +2919,7 @@ export class PreviewEngine {
       );
       if (framed) {
         this.setPhase(p, dev, "ready", undefined);
+        this.watchEnvironment(p, dev);
         return;
       }
       // Discard the helper before retrying: `attach` is idempotent per device,
@@ -2691,17 +2986,20 @@ export class PreviewEngine {
     /** Pre-resolved Expo slug (once per build); required for metro-deep-link apps on Android. */
     slug: string | null,
   ): Promise<void> {
+    const args = this.launchArgs(p);
+    const hasArgs = Object.keys(args).length > 0;
+    dev.env = { source: hasArgs ? "launch-args" : "build-default", verified: false };
     if (dev.record.platform === "android") {
       dev.launchedAt = this.d.now!();
       if (usesMetroDeepLink(p.app.type)) {
         if (!slug) throw new PreviewError("could not resolve the Expo slug from app.json or app.config.*");
         const metro = await this.d.metro.ensure(p.app.id, worktreePath, appEnv);
         await this.reverseMetroPorts(dev, handle, metro.port);
-        if (dev.record.physical) {
+        if (dev.record.physical || hasArgs) {
           // Addressed to the registered app, so no other dev client on the phone can answer the link.
           const app = this.registeredApp(dev, handle);
           await app.forceStop(app.pkg);
-          await app.openUrl(app.pkg, expoDevClientUrl(slug, `http://localhost:${metro.port}`));
+          await app.openUrl(app.pkg, expoDevClientUrl(slug, `http://localhost:${metro.port}`), androidExtras(args));
           return;
         }
         // Cold start, then name the server explicitly. Both halves are needed:
@@ -2712,6 +3010,11 @@ export class PreviewEngine {
         // under the right app icon.
         await this.android().forceStop(handle, bundleId);
         await this.android().openUrl(handle, expoDevClientUrl(slug, `http://localhost:${metro.port}`));
+        return;
+      }
+      if (hasArgs) {
+        const app = this.registeredApp(dev, handle);
+        await app.launch(app.pkg, androidExtras(args));
         return;
       }
       // The build already launched the builder; (re)launch is idempotent and
@@ -2728,10 +3031,15 @@ export class PreviewEngine {
       // `expo run:ios` already started on its own LAN-IP URL, whose failed first load and dev menu
       // stayed on screen. Restarting the process reads the dev-menu preferences written just
       // before (silenceDevOverlays) and leaves nothing of that first load behind.
-      await this.d.simctl.launch(handle, bundleId, { terminateRunning: true, args: ["--initialUrl", metro.manifestUrl] });
+      await this.d.simctl.launch(handle, bundleId, { terminateRunning: true, args: [...iosLaunchArgs(args), "--initialUrl", metro.manifestUrl] });
     } else {
-      await this.d.simctl.launch(handle, bundleId);
+      await this.d.simctl.launch(handle, bundleId, { args: iosLaunchArgs(args), terminateRunning: hasArgs });
     }
+  }
+
+  /** The launch arguments of the preview's environment; none when it declares none. */
+  private launchArgs(p: LivePreview): Record<string, string> {
+    return p.environment?.env.launchArgs ?? {};
   }
 
   // --- restart (same devices, same shareId, fresh code) -----------------------
@@ -2776,6 +3084,25 @@ export class PreviewEngine {
   }
 
   private async orchestrateRestart(p: LivePreview): Promise<void> {
+    if (p.record.source === "eas") {
+      // A profile's newest build is looked up again: a restart is how a new EAS build reaches the device.
+      p.easPrepared = new Map();
+      await Promise.all(
+        [...this.platformGroups(p).values()].map((group) => {
+          for (const dev of group) {
+            dev.record.error = undefined;
+            dev.record.phase = "pending";
+            dev.env = undefined;
+          }
+          return this.easGroup(p, group, async (dev) => {
+            const h = this.handle(dev);
+            if (!h) throw new PreviewError("device was never booted", "stop this preview and start a new one to boot fresh devices");
+            return h;
+          });
+        }),
+      );
+      return;
+    }
     let sourceDir = p.sourceDir;
     if (p.record.source === "git") {
       try {
@@ -2836,6 +3163,7 @@ export class PreviewEngine {
       ready,
       url: ready ? this.previewUrl(p) : null,
       source: p.record.source,
+      environment: p.record.devices.some((d) => d.platform === "web") ? null : combineReports(p.devices.map((dv) => this.envReport(p, dv))),
       devices: p.devices.map((dv) => ({
         deviceId: dv.record.deviceId,
         label: dv.record.label,
@@ -2844,6 +3172,8 @@ export class PreviewEngine {
         step: dv.record.step,
         error: dv.record.error,
         logTail: dv.record.phase === "failed" ? dv.logs.build.slice(-20).join("\n") : undefined,
+        ...(dv.record.platform === "web" ? {} : { environment: this.envReport(p, dv) }),
+        ...(dv.devClient ? { devClient: dv.devClient } : {}),
       })),
     };
   }
@@ -2869,13 +3199,19 @@ export class PreviewEngine {
     if (dev.record.platform !== "android") {
       throw new PreviewError("the `app` log is captured on Android devices only", "on iOS read source `build` or `stream`; the iOS app log is not captured yet");
     }
+    const { lines, pids, pkg } = await this.appLogLines(p, dev);
+    await this.checkMarker(p, dev, lines).catch(() => false);
+    const fact = pids.length ? `process ${pkg}: running (pid ${pids.join(", ")})` : `process ${pkg}: NOT running`;
+    return [fact, ...lines.slice(-tailLines)].join("\n");
+  }
+
+  private async appLogLines(p: LivePreview, dev: LiveDevice): Promise<{ lines: string[]; pids: number[]; pkg: string }> {
     const serial = dev.record.serial;
     if (!serial || !dev.appPackage) throw new PreviewError("the app is not on this device yet, so it has no log", "wait for preview_status to report the device ready");
     const offset = (await this.phones().clockOffsetMs(serial).catch(() => null)) ?? dev.clockOffsetMs ?? 0;
     const app = this.phones().registeredApp(serial, dev.appPackage);
     const { lines, pids } = await app.log(app.pkg, dev.launchedAt ?? Date.parse(p.record.createdAt), offset);
-    const fact = pids.length ? `process ${app.pkg}: running (pid ${pids.join(", ")})` : `process ${app.pkg}: NOT running`;
-    return [fact, ...lines.slice(-tailLines)].join("\n");
+    return { lines, pids, pkg: app.pkg };
   }
 
   /** The simulator UDID for a device (for the screenshot/ui tools). */
@@ -3234,6 +3570,11 @@ export class PreviewEngine {
   describe(previewId: string, deviceId: string, opts: DescribeOptions = {}): Promise<unknown> {
     const target = this.simdeckTarget(previewId, deviceId);
     return this.controlFor(previewId, deviceId).describe(target, opts);
+  }
+
+  /** What a dev-client EAS build on this device was told to load, or why it shows the dev launcher. */
+  devClientNote(previewId: string, deviceId: string): string | null {
+    return this.previews.get(previewId)?.devices.find((d) => d.record.deviceId === deviceId)?.devClient ?? null;
   }
 
   /** Drive one UI action on a device — the agent's "hands". */
@@ -4003,7 +4344,7 @@ export class PreviewEngine {
     }
 
     await this.teardownDevices(p);
-    if (p.record.source !== "local") {
+    if (p.record.source === "git") {
       await this.d.worktrees.removeWorktree(p.app, previewId).catch(() => {});
     }
 

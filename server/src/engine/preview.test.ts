@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fakeMetro, fakeDevProcs, fakeSimctl, fakeAndroid, fakeWorktrees, fakeReaper, fakePhones } from "../test-support/fakes.ts";
+import { fakeMetro, fakeDevProcs, fakeSimctl, fakeAndroid, fakeWorktrees, fakeReaper, fakePhones, fakeEas, easBuild } from "../test-support/fakes.ts";
+import { appSchema } from "../config.ts";
+import { createHash } from "node:crypto";
+import type { ExecResult } from "../devices/android.ts";
 import { PreviewEngine, PreviewError, buildStepDetail, redactForShare, type PreviewEngineDeps, type StartPreviewRequest, type DeviceRequest } from "./preview.ts";
 import type { SimDeckControl } from "../testing/control.ts";
 import type { App, Config } from "../config.ts";
@@ -3311,5 +3314,221 @@ describe("physical Android phones", () => {
     await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
     const log = await h.engine.appLog("pv1", "android-0");
     assert.equal(log, `process com.example.myapp: running (pid 77)\n${new Date(1_700_000_001_000).toISOString()} 77 I ReactNativeJS: hi`);
+  });
+});
+
+describe("EAS builds and environments", () => {
+  const PHONE = "RF8N30YRFKY";
+  const easApp: App = appSchema.parse({
+    id: "eas-app",
+    repo: "github.com/acme/eas-app",
+    type: "expo",
+    bundleId: "com.example.eas",
+    easProjectId: "6ff82c98-0000-4000-8000-000000000001",
+    environments: {
+      default: "uat",
+      uat: { easProfile: { android: "e2e", iosSimulator: "sim" }, launchArgs: { APP_ENV: "test" }, logMarker: "Launching \\*\\* test" },
+      prod: { easProfile: { android: "production" } },
+    },
+  });
+  const phoneAdb = (over: (args: string[]) => Partial<ExecResult> | null = () => null) => (args: string[]): Partial<ExecResult> => {
+    const o = over(args);
+    if (o) return o;
+    if (args.includes("resolve-activity")) return { stdout: Buffer.from(`priority=0\n${args.at(-1)}/.MainActivity\n`) };
+    if (args.includes("pm") && args.includes("path")) return { code: 1, stdout: Buffer.from("") };
+    return { stdout: Buffer.from("Success") };
+  };
+  const startEas = (h: Harness, extra: Partial<StartPreviewRequest> = {}) =>
+    h.engine.startPreview({ app: easApp, source: "eas", devices: [{ platform: "android", serial: PHONE }], access: "password", ...extra });
+
+  it("installs the default environment's EAS build on a phone with its launch arguments, building nothing", async () => {
+    const phoneLog: string[] = [];
+    const easLog: string[] = [];
+    const order: string[] = [];
+    const steps: string[] = [];
+    const h = makeEngine(
+      {
+        phones: fakePhones({ waitUsable: async (serial: string) => (order.push("phone touched"), { id: serial, state: "device", model: "SM-G980F", awake: true, locked: false }) }, phoneLog, phoneAdb()),
+        eas: fakeEas({}, easLog),
+      },
+      (step) => (steps.push(step.name), { code: 0, timedOut: false, aborted: false }),
+    );
+    const res = startEas(h);
+    assert.deepEqual(res.environment, { name: "uat", explicit: false });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready", JSON.stringify(h.engine.getStatus("pv1")));
+    assert.deepEqual(easLog, ["eas resolve android profile:e2e", `eas prepare android ${easBuild().id}`]);
+    assert.deepEqual(steps, [], "no checkout, no install-deps, no build");
+    assert.ok(phoneLog.includes(`adb -s ${PHONE} install -r /cache/eas/app.apk`), phoneLog.join("\n"));
+    assert.ok(phoneLog.includes(`adb -s ${PHONE} shell am start -S -W -n '${easApp.bundleId}/.MainActivity' '-e' 'APP_ENV' 'test'`), phoneLog.join("\n"));
+    const st = h.engine.getStatus("pv1")!;
+    assert.deepEqual(st.environment, { name: "uat", source: "launch-args", verified: false });
+    assert.equal(st.source, "eas");
+    await h.engine.stopPreview("pv1");
+  });
+
+  it("vets the build before the phone is touched: a refused build leaves the phone alone", async () => {
+    const phoneLog: string[] = [];
+    let touched = false;
+    const h = makeEngine({
+      phones: fakePhones({ waitUsable: async () => ((touched = true), { id: PHONE, state: "device" }) }, phoneLog, phoneAdb()),
+      eas: fakeEas({
+        prepare: async () => {
+          const { EasError } = await import("../eas/client.ts");
+          throw new EasError("EAS build x is a store .aab, which cannot be installed on a device", "build an internal APK", "eas_wrong_artifact");
+        },
+      }),
+    });
+    startEas(h);
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "failed");
+    assert.match(h.engine.getStatus("pv1")!.devices[0]!.error ?? "", /\.aab.*build an internal APK/);
+    assert.equal(touched, false, "the phone was woken for a build that could never go on it");
+    assert.deepEqual(phoneLog, []);
+  });
+
+  it("skips the install when the phone already has these very bytes, and installs when only the version matches", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "deckhand-eas-apk-"));
+    try {
+      const apk = join(dir, "app.apk");
+      writeFileSync(apk, "the-apk");
+      const sha = createHash("sha256").update("the-apk").digest("hex");
+      const run = async (phoneSha: string) => {
+        const phoneLog: string[] = [];
+        const h = makeEngine({
+          phones: fakePhones({}, phoneLog, phoneAdb((args) => {
+            if (args.includes("pm") && args.includes("path")) return { stdout: Buffer.from("package:/data/app/x/base.apk\n") };
+            if (args.includes("dumpsys")) return { stdout: Buffer.from("versionName=3.61.0\nversionCode=1 minSdk=29\n") };
+            if (args.includes("sha256sum")) return { stdout: Buffer.from(`${phoneSha}  /data/app/x/base.apk`) };
+            return null;
+          })),
+          eas: fakeEas({ prepare: async (projectId, target, build, bundleId) => ({ build, target, projectId, installPath: apk, cached: true, bundleId, versionName: "3.61.0", versionCode: "1", schemes: [] }) }),
+        });
+        startEas(h);
+        assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready", JSON.stringify(h.engine.getStatus("pv1")));
+        await h.engine.stopPreview("pv1");
+        return phoneLog.filter((c) => / install /.test(c));
+      };
+      assert.deepEqual(await run(sha), []);
+      assert.deepEqual(await run("f".repeat(64)), [`adb -s ${PHONE} install -r ${apk}`]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("on a signature conflict replaces only the registered app, and logs what it removed", async () => {
+    const phoneLog: string[] = [];
+    let installs = 0;
+    const h = makeEngine({
+      phones: fakePhones({}, phoneLog, phoneAdb((args) => {
+        if (args[2] === "install") return ++installs === 1 ? { code: 1, stdout: Buffer.from("Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: signatures do not match]") } : null;
+        if (args.includes("pm") && args.includes("path")) return { stdout: Buffer.from("package:/data/app/x/base.apk\n") };
+        if (args.includes("dumpsys")) return { stdout: Buffer.from("versionName=9.0\nversionCode=99\n") };
+        return null;
+      })),
+      eas: fakeEas(),
+    });
+    startEas(h);
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready", JSON.stringify(h.engine.getStatus("pv1")));
+    assert.deepEqual(phoneLog.filter((c) => /uninstall| install /.test(c)), [
+      `adb -s ${PHONE} install -r /cache/eas/app.apk`,
+      `adb -s ${PHONE} uninstall ${easApp.bundleId}`,
+      `adb -s ${PHONE} install -r /cache/eas/app.apk`,
+    ]);
+    assert.match(h.engine.logs("pv1", "android-0", "build")!, /signature mismatch.*uninstalling com\.example\.eas 9\.0.*No other app/);
+    await h.engine.stopPreview("pv1");
+  });
+
+  it("verifies the environment once the app log shows its marker", async () => {
+    const h = makeEngine({
+      phones: fakePhones({}, [], phoneAdb((args) => (args.includes("logcat") ? { stdout: Buffer.from("  1700000000.000  77  77 I ReactNativeJS: ** Launching ** test\n") } : args.includes("pidof") ? { stdout: Buffer.from("77\n") } : null))),
+      eas: fakeEas(),
+    });
+    startEas(h);
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+    for (let i = 0; i < 100 && h.engine.getStatus("pv1")!.environment?.verified !== true; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(h.engine.getStatus("pv1")!.environment?.verified, true, "watched after launch, without anyone reading the log");
+    assert.match(h.engine.logs("pv1", "android-0", "build")!, /environment "uat" verified/);
+    await h.engine.stopPreview("pv1");
+  });
+
+  it("runs another environment only when named, refuses an unknown one, and reuses no preview across environments", async () => {
+    const easLog: string[] = [];
+    const h = makeEngine({ phones: fakePhones({}, [], phoneAdb()), eas: fakeEas({}, easLog) });
+    assert.throws(() => startEas(h, { environment: "staging" }), (e: unknown) => e instanceof PreviewError && e.code === "unknown_environment" && /uat, prod/.test(e.hint ?? ""));
+    const res = startEas(h, { environment: "prod" });
+    assert.deepEqual(res.environment, { name: "prod", explicit: true });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+    assert.deepEqual(easLog[0], "eas resolve android profile:production");
+    assert.deepEqual(h.engine.getStatus("pv1")!.environment, { name: "prod", source: "eas-profile", verified: "no-marker" });
+    assert.throws(() => startEas(h), (e: unknown) => e instanceof PreviewError && e.code === "device_busy", "the default environment is a different preview, so the phone is busy");
+    await h.engine.stopPreview("pv1");
+  });
+
+  it("reports an app with no environments as unknown, and refuses to pick one for it", async () => {
+    const h = makeEngine();
+    assert.throws(() => h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public", environment: "uat" }), (e: unknown) => e instanceof PreviewError && e.code === "no_environments");
+    h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+    const env = h.engine.getStatus("pv1")!.environment!;
+    assert.deepEqual([env.name, env.source, env.verified], [null, "unknown", false]);
+    await h.engine.stopPreview("pv1");
+  });
+
+  it("refuses an EAS preview with no project id or no token, naming the fix", () => {
+    const noProject = { ...easApp, easProjectId: undefined };
+    assert.throws(() => makeEngine({ eas: fakeEas() }).engine.startPreview({ app: noProject, source: "eas", devices: [{ platform: "android" }], access: "public" }), (e: unknown) => e instanceof PreviewError && e.code === "no_eas_project" && /--eas-project/.test(e.hint ?? ""));
+    const noToken = fakeEas({ ready: () => ({ ok: false, message: "no Expo token is configured", hint: "deckhand secret set expo" }) });
+    assert.throws(() => makeEngine({ eas: noToken }).engine.startPreview({ app: easApp, source: "eas", devices: [{ platform: "android" }], access: "public" }), (e: unknown) => e instanceof PreviewError && e.code === "eas_token_missing");
+  });
+
+  it("points a dev-client build at its channel's newest update, and says 'dev launcher' when it has no channel", async () => {
+    const mapping = JSON.stringify({ data: [{ branchId: "b1" }] });
+    const withChannel = easBuild({ developmentClient: true, runtime: { version: "1.0" }, updateChannel: { name: "uat", branchMapping: mapping } });
+    const phoneLog: string[] = [];
+    const h = makeEngine({
+      phones: fakePhones({}, phoneLog, phoneAdb()),
+      eas: fakeEas({ latestUpdate: async () => ({ id: "u", group: "0f6c1d2e-0000-4000-8000-000000000003", branchId: "b1", branchName: "uat", platform: "android", runtimeVersion: "1.0", createdAt: "2026-11-02", message: null }) }, [], { android: withChannel }),
+    });
+    startEas(h);
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready", JSON.stringify(h.engine.getStatus("pv1")));
+    const open = phoneLog.find((c) => c.includes("android.intent.action.VIEW"))!;
+    assert.match(open, /'exp\+demo:\/\/expo-development-client\/\?url=https%3A%2F%2Fu\.expo\.dev%2F6ff82c98-0000-4000-8000-000000000001%2Fgroup%2F0f6c1d2e-0000-4000-8000-000000000003' '-e' 'APP_ENV' 'test' com\.example\.eas$/);
+    assert.match(h.engine.getStatus("pv1")!.devices[0]!.devClient ?? "", /loading EAS Update 0f6c1d2e/);
+    await h.engine.stopPreview("pv1");
+
+    const bare = makeEngine({ phones: fakePhones({}, [], phoneAdb()), eas: fakeEas({}, [], { android: easBuild({ developmentClient: true }) }) });
+    startEas(bare);
+    assert.equal(await waitForPhase(bare.engine, "pv1", ["ready", "failed"]), "ready");
+    assert.match(bare.engine.devClientNote("pv1", "android-0") ?? "", /^dev launcher: .*packaging, not an app bug/);
+    await bare.engine.stopPreview("pv1");
+  });
+
+  it("installs an EAS simulator build on an iOS simulator, launched with the arguments as -KEY value", async () => {
+    const easLog: string[] = [];
+    const h = makeEngine({ eas: fakeEas({}, easLog) });
+    h.engine.startPreview({ app: easApp, source: "eas", devices: [{ platform: "ios" }], access: "public" });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready", JSON.stringify(h.engine.getStatus("pv1")));
+    assert.equal(easLog[0], "eas resolve ios-simulator profile:sim");
+    assert.ok(h.simctlCalls.some((c) => /^install \S+ \/cache\/eas\/App\.app$/.test(c)), h.simctlCalls.join("\n"));
+    const env = h.engine.getStatus("pv1")!.environment!;
+    assert.deepEqual([env.source, env.verified], ["launch-args", false]);
+    assert.match(env.note ?? "", /iOS app log is not captured/);
+    await h.engine.stopPreview("pv1");
+  });
+
+  it("passes the environment's launch arguments to a git build on an emulator and a simulator", async () => {
+    const launched: string[] = [];
+    const phoneLog: string[] = [];
+    const h = makeEngine({
+      simctl: fakeSimctl({ launch: async (_u: string, b: string, args: string[] = []) => void launched.push(`simctl ${b} ${args.join(" ")}`), appContainer: async () => "/c" }),
+      phones: fakePhones({}, phoneLog, phoneAdb()),
+    });
+    const rnEnv = appSchema.parse({ ...rnApp, environments: { default: "stage", stage: { launchArgs: { API: "stage" } } } });
+    h.engine.startPreview({ app: rnEnv, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }, { platform: "android" }], access: "public" });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready", JSON.stringify(h.engine.getStatus("pv1")));
+    assert.deepEqual(h.engine.getStatus("pv1")!.devices.map((d) => d.phase), ["ready", "ready"]);
+    assert.deepEqual(launched, ["simctl com.example.myapp -API stage"]);
+    assert.ok(phoneLog.some((c) => c.endsWith("'-e' 'API' 'stage'") && c.includes("emulator-")), phoneLog.join("\n"));
+    assert.deepEqual(h.engine.getStatus("pv1")!.environment, { name: "stage", source: "launch-args", verified: "no-marker" });
+    await h.engine.stopPreview("pv1");
   });
 });

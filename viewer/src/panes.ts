@@ -296,6 +296,7 @@ export function pollDecision(
  * sentinel "local", and there "local working copy" is the whole truth rather than filler.
  */
 export function sourceLabel(source: string | undefined, refName: string | undefined): { key: string; value: string } {
+  if (source === "eas") return { key: "Build", value: refName || "EAS build" };
   if (source !== "local") return { key: "Branch", value: refName || "—" };
   if (!refName || refName === "local") return { key: "Source", value: "local working copy" };
   return { key: "Branch", value: refName };

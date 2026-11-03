@@ -411,8 +411,10 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     `End EVERY message you write the user with this link on its own line — ${url} — so they never have to scroll back to find the sim.`;
 
   /** The daily-loop guidance attached to start/restart results (agent-led contract, PLAN §6). */
-  const loopNextStep = (source: "git" | "local", url: string, ref?: string): string =>
-    source === "local"
+  const loopNextStep = (source: "git" | "local" | "eas", url: string, ref?: string): string =>
+    source === "eas"
+      ? `Give the user this link NOW: ${url} — it's already live (it shows the download and install while the device boots) and is stable for this app; relay it before any other work, don't wait for ready. Then poll preview_status for readiness, and read its \`environment\`: before signing in or submitting anything, confirm environment.verified is true (or "no-marker", and tell the user it cannot be proven). This is a build EAS already made, so code edits do not reach it; after a new EAS build of the profile, restart_preview installs the newest one. ${TEST_RUN_CONTRACT} ${linkFooter(url)}`
+      : source === "local"
       ? `Give the user this link NOW: ${url} — it's already live (it shows build progress while the sim boots) and is stable for this app across restarts; relay it before any other work, don't wait for ready. Then poll preview_status for readiness. While the preview runs, file saves livesync to the simulator automatically, so after editing code there is nothing to call — just tell the user the change is on the sim. Only call restart_preview after native-level changes (new plugins, Podfile/gradle edits) or if the app looks stuck. ${TEST_RUN_CONTRACT} ${linkFooter(url)}`
       : `Give the user this link NOW: ${url} — it's already live (it shows build progress) and is stable for this app; relay it before any other work, don't wait for ready. Then poll preview_status for readiness. After pushing new commits to ${ref ?? "the branch"}, call restart_preview to rebuild the same simulators at the new tip — the link stays the same. ${TEST_RUN_CONTRACT} ${linkFooter(url)}`;
 
@@ -492,7 +494,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Start a preview",
       description:
-        "Returns the live viewer link INSTANTLY — surface it to the user first, before any other work (it's live the moment the preview starts and shows build progress while devices boot); then poll preview_status for readiness. Starts a preview and returns its shareable viewer link — or, if an equivalent preview is already running, returns THAT one (idempotent: each app keeps a stable URL, so this is also the way to answer \"what's the link?\"). With ref/pr it builds that git ref; with neither, an app with a local path previews its local working copy (dev mode — file saves then livesync to the simulator automatically, no pushing needed), and a repo-only app builds its default branch. Pass `alongside` to put more sources on the SAME page — another app, this app at another ref, a worktree, an arbitrary repo — and the viewer shows them side by side under one link and one PIN. That is how you compare old vs new: there is no separate compare tool or compare view. IMPORTANT: before every call you MUST ask the user whether to protect the link with a PIN or make it public, and pass that as `share` (this call fails until you do). If they choose a PIN, ask for a 4–6 digit code — never repeat that code back in chat.",
+        "Returns the live viewer link INSTANTLY — surface it to the user first, before any other work (it's live the moment the preview starts and shows build progress while devices boot); then poll preview_status for readiness. Starts a preview and returns its shareable viewer link — or, if an equivalent preview is already running, returns THAT one (idempotent: each app keeps a stable URL, so this is also the way to answer \"what's the link?\"). With ref/pr it builds that git ref; with neither, an app with a local path previews its local working copy (dev mode — file saves then livesync to the simulator automatically, no pushing needed), and a repo-only app builds its default branch. Pass `alongside` to put more sources on the SAME page — another app, this app at another ref, a worktree, an arbitrary repo — and the viewer shows them side by side under one link and one PIN. That is how you compare old vs new: there is no separate compare tool or compare view. Pass `eas` to install a build EAS already made instead of building one. An app that lists `environments` always runs one: its default (a test/stage backend) unless the user explicitly asked for another by name — only then pass `environment`; preview_status reports `environment` {name, source, verified}. IMPORTANT: before every call you MUST ask the user whether to protect the link with a PIN or make it public, and pass that as `share` (this call fails until you do). If they choose a PIN, ask for a 4–6 digit code — never repeat that code back in chat.",
       inputSchema: {
         app: z.string().describe("app id from list_apps"),
         ref: z.string().optional().describe("branch name or commit SHA; omit for local dev mode or the default branch"),
@@ -527,6 +529,21 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           .array(z.string())
           .optional()
           .describe(`parity checklist items to seed (flows/screens). ${PARITY_CONTRACT}`),
+        eas: z
+          .object({
+            buildId: z.string().optional().describe("an EAS build id, or a unique prefix of one (8+ characters)"),
+            profile: z.string().optional().describe("an EAS build profile: its newest finished build for each device's platform"),
+          })
+          .optional()
+          .describe(
+            "preview a build EAS already made instead of building: Android .apk on emulators and phones, iOS simulator builds on simulators. {} takes the newest build of the profile the environment maps. Needs the app's EAS project id (list_apps easProjectId) and an Expo token on the machine. Not with ref/pr or alongside.",
+          ),
+        environment: z
+          .string()
+          .optional()
+          .describe(
+            "which backend the app runs against, from list_apps `environments`. OMIT IT: the app's default environment (a test/stage backend) is what previews use. Pass another name ONLY when the user explicitly asked for that environment, in those words.",
+          ),
         freshApp: z
           .enum(["data", "reinstall"])
           .optional()
@@ -545,6 +562,9 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         const resolved = resolveApp(args.app);
         if (isResult(resolved)) return resolved;
         if (args.ref && args.pr) return fail("bad_request", "pass either ref or pr, not both");
+        if (args.eas && (args.ref || args.pr)) return fail("bad_request", "pass eas or ref/pr, not both", "eas installs a build EAS already made; ref/pr build a git ref here");
+        if (args.eas && resolved.type === "web") return fail("bad_request", "a web app has no EAS builds", "omit eas");
+        if (args.eas && args.alongside?.length) return fail("eas_not_in_panes", "an EAS build cannot be combined with alongside", "start the comparison from git or local sources, or preview the EAS build on its own");
 
         // Web apps are device-less local dev servers: no ref/pr, no simulator.
         const isWeb = resolved.type === "web";
@@ -596,7 +616,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         const devices = isWeb ? [{ platform: "web" as const }] : paneDevices;
 
         const wantsGit = Boolean(args.ref || args.pr);
-        const source = isWeb || (!wantsGit && resolved.path) ? ("local" as const) : ("git" as const);
+        const source = args.eas && !isWeb ? ("eas" as const) : isWeb || (!wantsGit && resolved.path) ? ("local" as const) : ("git" as const);
         let spec;
         if (source === "git") {
           if (!resolved.repo) {
@@ -697,6 +717,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             devices,
             access: access === "pin" ? "password" : "public",
             ...(args.freshApp ? { freshApp: args.freshApp } : {}),
+            ...(source === "eas" ? { eas: { ...(args.eas?.buildId ? { buildId: args.eas.buildId } : {}), ...(args.eas?.profile ? { profile: args.eas.profile } : {}) } } : {}),
+            ...(args.environment ? { environment: args.environment } : {}),
           });
         } catch (e) {
           engine.restoreAppPin(resolved.id, priorPin);
@@ -762,7 +784,9 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
                 ? `Saving files hot-reloads the page automatically; call restart_preview only after dependency/config changes. ${linkFooter(result.url)}`
                 : (source === "local"
                     ? "File saves livesync to it automatically; call restart_preview only after native-level changes. "
-                    : "After pushing new commits, call restart_preview to rebuild it at the new tip. ") +
+                    : source === "eas"
+                      ? "It runs a build EAS already made; restart_preview installs the profile's newest build. "
+                      : "After pushing new commits, call restart_preview to rebuild it at the new tip. ") +
                   `${TEST_RUN_CONTRACT} ${linkFooter(result.url)}`)
             : isWeb
               ? `Give the user this link NOW: ${result.url} (stable for this app) — relay it before any other work; then poll preview_status for readiness. It's a live web dev server — saving files hot-reloads the page automatically, so after editing there is nothing to call. Use restart_preview only after dependency/config changes (new packages, vite.config edits) or if the server looks stuck. Deckhand runs this working copy in place and only reads/runs it — never commit or push any local changes deckhand caused (dev-server caches, a stray lockfile); its git state is not yours to write. ${linkFooter(result.url)}${webHostWarning}`
@@ -1132,6 +1156,10 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             interactiveOnly: args.interactiveOnly,
             maxDepth: args.maxDepth,
           });
+        const devClient = () => {
+          const note = engine.devClientNote(args.previewId, args.deviceId);
+          return note ? { devClient: note } : {};
+        };
         // The dev menu is the one thing on screen that is not the app. An agent that
         // does not know that files the overlay's behaviour as an app bug — observed.
         if (args.format === "text") {
@@ -1139,11 +1167,11 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             const tree = await capture();
             const book = engine.screenBook(args.previewId, args.deviceId);
             book.record(tree);
-            return ok({ screen: book.full(), ...devMenuHint(tree) });
+            return ok({ screen: book.full(), ...devMenuHint(tree), ...devClient() });
           });
         }
         const tree = await capture();
-        return ok({ describe: tree, ...devMenuHint(tree) });
+        return ok({ describe: tree, ...devMenuHint(tree), ...devClient() });
       }),
   );
 
@@ -1815,7 +1843,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         easProjectId: z
           .string()
           .optional()
-          .describe("the app's EAS project id (a UUID), so start_preview can install builds EAS already made; detected from the app config (extra.eas.projectId) when omitted"),
+          .describe("the app's EAS project id (a UUID), so start_preview can install builds EAS already made; detected from the app config when omitted"),
       },
     },
     (args) =>
@@ -1849,7 +1877,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         const probeFor = (b: string): App => ({ id, repo: args.repo, type: args.type ?? "react-native", defaultBranch: b, env: {} });
         let branch = args.branch ?? "main";
         if (args.easProjectId && !EAS_PROJECT_ID_RE.test(args.easProjectId)) {
-          return fail("bad_request", `easProjectId "${args.easProjectId}" is not an EAS project id`, "it is the UUID under extra.eas.projectId in the app config, or on the project's expo.dev page");
+          return fail("bad_request", `easProjectId "${args.easProjectId}" is not an EAS project id`, "it is the project UUID in the app config's EAS settings, or on the project's expo.dev page");
         }
         let detected: { type: AppType | null; bundleId: string | null; easProjectId: string | null };
         try {

@@ -1211,6 +1211,15 @@ describe("share PIN protection", () => {
     await admin.close();
   });
 
+  it("start_preview refuses eas with a ref, and eas on a server with no EAS source, before any device is asked for", async () => {
+    const admin = await client(ADMIN);
+    const withRef = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", ref: "main", eas: {}, share: { access: "public" } } }));
+    assert.equal((withRef.error as { code: string }).code, "bad_request");
+    const noSource = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", eas: { profile: "e2e" }, share: { access: "public" } } }));
+    assert.equal((noSource.error as { code: string }).code, "eas_unavailable");
+    await admin.close();
+  });
+
   it("access:pin protects the share (proxy /state locks); set_pin removes it", async () => {
     const admin = await client(ADMIN);
     const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "pin", pin: "4821" } } })) as {

@@ -32,7 +32,7 @@ interface Props {
   /** What the preview shows — for the info popover. */
   repo: string;
   refName: string;
-  source?: "git" | "local";
+  source?: "git" | "local" | "eas";
   /** Watch-only share: no device controls. */
   viewOnly?: boolean;
 }

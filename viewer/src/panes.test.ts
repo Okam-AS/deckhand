@@ -419,6 +419,10 @@ describe("what the info panel says a preview is built from", () => {
     }
   });
 
+  it("calls an EAS build a build, not a branch", () => {
+    assert.deepEqual(sourceLabel("eas", "eas profile e2e"), { key: "Build", value: "eas profile e2e" });
+  });
+
   it("is unchanged for a git preview", () => {
     assert.deepEqual(sourceLabel("git", "main"), { key: "Branch", value: "main" });
     assert.deepEqual(sourceLabel("git", undefined), { key: "Branch", value: "—" });

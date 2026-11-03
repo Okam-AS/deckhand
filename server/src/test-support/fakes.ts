@@ -6,6 +6,8 @@ import { RegisteredApp, type AndroidPhones, type PhoneInfo } from "../devices/an
 import type { WorktreeManager, PreparedWorktree } from "../engine/worktree.ts";
 import type { Reaper } from "../engine/reaper.ts";
 import type { App } from "../config.ts";
+import type { EasPreviews, PreparedBuild, EasTarget } from "../eas/source.ts";
+import type { EasBuild } from "../eas/client.ts";
 
 /**
  * Complete test doubles, one per injected dependency.
@@ -219,4 +221,56 @@ export function fakePhones(
     removeReverse: async (serial: string, port: number) => void log.push(`reverse --remove ${serial} tcp:${port}`),
   };
   return Object.assign(complete as unknown as AndroidPhones, over);
+}
+
+/** A finished internal Android build of profile e2e, as EAS lists it. */
+export function easBuild(over: Partial<EasBuild> = {}): EasBuild {
+  return {
+    id: "9a14f495-ad71-4e37-9648-b51a4620cea5",
+    platform: "ANDROID",
+    buildProfile: "e2e",
+    status: "FINISHED",
+    distribution: "INTERNAL",
+    appVersion: "3.61.0",
+    appBuildVersion: "412",
+    gitCommitHash: "0123456789abcdef",
+    createdAt: "2026-11-01T10:00:00Z",
+    completedAt: "2026-11-01T10:20:00Z",
+    artifacts: { buildUrl: "https://storage.example/app.apk" },
+    developmentClient: false,
+    updateChannel: null,
+    ...over,
+  };
+}
+
+/**
+ * The EAS source with no network and no artifact on disk: `resolve` answers the build the test
+ * names (by target), and `prepare` vets it against the registered id the way the real one does.
+ */
+export function fakeEas(over: Partial<EasPreviews> = {}, log: string[] = [], builds: Partial<Record<EasTarget, EasBuild>> = {}): EasPreviews {
+  const complete: PublicOf<EasPreviews> = {
+    ready: () => ({ ok: true }),
+    resolve: async (projectId: string, target: EasTarget, sel) => {
+      log.push(`eas resolve ${target} ${sel.buildId ?? `profile:${sel.profile ?? "-"}`}`);
+      const profile = sel.profile ?? "e2e";
+      return builds[target] ?? easBuild(target === "android" ? { buildProfile: profile } : { buildProfile: profile, platform: "IOS", isForIosSimulator: true, artifacts: { buildUrl: "https://storage.example/app.tar.gz" } });
+    },
+    prepare: async (projectId: string, target: EasTarget, build: EasBuild, expected: string): Promise<PreparedBuild> => {
+      log.push(`eas prepare ${target} ${build.id}`);
+      return {
+        build,
+        target,
+        projectId,
+        installPath: target === "android" ? "/cache/eas/app.apk" : "/cache/eas/App.app",
+        cached: true,
+        bundleId: expected,
+        versionName: "3.61.0",
+        versionCode: "1",
+        schemes: target === "android" ? [] : ["exp+demo"],
+      };
+    },
+    latestUpdate: async () => null,
+    projectSlug: async () => "demo",
+  };
+  return Object.assign(complete as unknown as EasPreviews, over);
 }
