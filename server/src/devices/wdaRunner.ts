@@ -294,7 +294,9 @@ export class WdaRunner {
     }
     if (this.runner === runner) this.runner = undefined;
     killGroup(runner);
-    throw new WdaStartError(`WDA on ${this.udid} was not ready after ${Math.round(this.startTimeoutMs / 1000)} s: ${this.logTail()}`, startFailureHint(this.readLog()));
+    const log = this.readLog();
+    const waiting = /Running tests/.test(log) ? "WDA launched on the phone but never served; if the phone shows an Automation Mode prompt, someone there must approve it" : undefined;
+    throw new WdaStartError(`WDA on ${this.udid} was not ready after ${Math.round(this.startTimeoutMs / 1000)} s: ${this.logTail()}`, startFailureHint(log) ?? waiting);
   }
 
   private onExit(runner: ChildProcess, code: number | null): void {
@@ -328,7 +330,8 @@ export class WdaRunner {
   }
 
   private logTail(): string {
-    const lines = this.readLog().trim().split("\n");
+    // xcodebuild logs an "error = invalidDigitCount" record on every run against iOS 27; it is never the reason.
+    const lines = this.readLog().trim().split("\n").filter((l) => l.trim() && !/IDESchemeActionSDKRecord|xcodebuild: WARNING/.test(l));
     const telling = lines.filter((l) => /error|fail|denied|locked|trust|automation|provision/i.test(l)).slice(-4);
     return (telling.length ? telling : lines.slice(-3)).join(" | ").slice(0, 500) || `(empty log ${this.logPath})`;
   }

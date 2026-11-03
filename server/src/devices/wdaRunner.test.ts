@@ -20,7 +20,7 @@ interface Spawned {
 }
 
 class FakeChild extends EventEmitter {
-  pid = 4000 + Math.floor(Math.random() * 1000);
+  pid = 900_000_000 + Math.floor(Math.random() * 1000);
   exitCode: number | null = null;
   signalCode: NodeJS.Signals | null = null;
   killed: string[] = [];
@@ -149,7 +149,7 @@ describe("the loopback .xctestrun", () => {
   });
 });
 
-function runnerFixture(opts: { ready?: () => boolean; onSpawn?: (s: Spawned, log: string) => void; wifi?: Exec } = {}) {
+function runnerFixture(opts: { ready?: () => boolean; onSpawn?: (s: Spawned, log: string) => void; wifi?: Exec; startTimeoutMs?: number } = {}) {
   const dir = products();
   const log = join(dir, "wda.log");
   const wda = fakeWda();
@@ -169,7 +169,7 @@ function runnerFixture(opts: { ready?: () => boolean; onSpawn?: (s: Spawned, log
   forward.ensure = async () => void (fwdUp = true);
   const exec: Exec = async (cmd, args, o) => (cmd === "curl" ? (opts.wifi ?? noExec)(cmd, args, o) : defaultExec(cmd, args, o));
   const runner = new WdaRunner({
-    udid: UDID, productsDir: dir, logPath: log, spawnImpl: xcode.impl, fetchImpl, forward, exec, sleep: () => new Promise((r) => setImmediate(r)), restartDelayMs: 1, startTimeoutMs: 50_000,
+    udid: UDID, productsDir: dir, logPath: log, spawnImpl: xcode.impl, fetchImpl, forward, exec, sleep: () => new Promise((r) => setImmediate(r)), restartDelayMs: 1, startTimeoutMs: opts.startTimeoutMs ?? 50_000,
   });
   return { dir, log, runner, spawned: xcode.spawned, wda, setReady: (v: boolean) => (ready = v), fwd: () => fwdUp };
 }
@@ -197,14 +197,28 @@ describe("WdaRunner", () => {
   it("says what the phone needs when xcodebuild gives up", async () => {
     const f = runnerFixture({
       onSpawn: (s, log) => {
-        appendFileSync(log, "Testing failed:\n\tTimed out while enabling automation mode.\n");
+        appendFileSync(log, "2026-11-03 14:08:36.479 xcodebuild[1:2] [MT] IDESchemeActionSDKRecord: operatingSystemBuild = <DVTBuildVersion 24A94232>, error = invalidDigitCount(94232).\nTesting failed:\n\tTimed out while enabling automation mode.\n");
         setImmediate(() => s.child.exit(65));
       },
     });
     try {
-      await assert.rejects(() => f.runner.ensureRunning(), (e: unknown) => e instanceof WdaStartError && /Automation Mode prompt/.test(e.hint ?? ""));
+      await assert.rejects(
+        () => f.runner.ensureRunning(),
+        (e: unknown) => e instanceof WdaStartError && /Automation Mode prompt/.test(e.hint ?? "") && /Timed out while enabling/.test(e.message) && !/invalidDigitCount/.test(e.message),
+      );
       await new Promise((r) => setTimeout(r, 300));
       assert.equal(f.spawned.length, 1, "a runner that never came up was restarted behind the caller's back");
+    } finally {
+      rmSync(f.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("gives up on a runner that launched and never served, stops it, and says what to look for", async () => {
+    const f = runnerFixture({ startTimeoutMs: 200, onSpawn: (_s, log) => appendFileSync(log, "WebDriverAgentRunner-Runner[1:2] [Default] Running tests...\n") });
+    try {
+      await assert.rejects(() => f.runner.ensureRunning(), (e: unknown) => e instanceof WdaStartError && /not ready after/.test(e.message) && /Automation Mode prompt/.test(e.hint ?? ""));
+      assert.deepEqual(f.spawned[0]!.child.killed, ["SIGTERM"]);
+      assert.deepEqual(f.runner.livePids(), []);
     } finally {
       rmSync(f.dir, { recursive: true, force: true });
     }
