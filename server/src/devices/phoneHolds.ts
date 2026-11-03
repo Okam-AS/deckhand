@@ -1,0 +1,41 @@
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { paths } from "../paths.ts";
+
+// A hold takes a phone off the market from the Mac: a held phone is listed with who holds it
+// and is never handed to a preview. Its own file, not state.json: the CLI writes it while the
+// server runs, and the server rewrites state.json from memory on every transition, which would
+// drop a hold written there by another process.
+
+export interface PhoneHold {
+  who: string;
+  since: string;
+}
+
+export type PhoneHolds = Record<string, PhoneHold>;
+
+/** The holds on disk. Missing means none; an unreadable file throws rather than freeing every phone. */
+export function loadPhoneHolds(file = paths.phoneHolds()): PhoneHolds {
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw new Error(`cannot read ${file}: ${(e as Error).message}`);
+  }
+  const parsed = JSON.parse(text) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`${file} is not a JSON object of holds`);
+  const out: PhoneHolds = {};
+  for (const [serial, h] of Object.entries(parsed as Record<string, unknown>)) {
+    const hold = h as Partial<PhoneHold> | null;
+    if (hold && typeof hold.who === "string" && typeof hold.since === "string") out[serial] = { who: hold.who, since: hold.since };
+  }
+  return out;
+}
+
+export function savePhoneHolds(holds: PhoneHolds, file = paths.phoneHolds()): void {
+  mkdirSync(dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(holds, null, 2)}\n`, { mode: 0o600 });
+  renameSync(tmp, file);
+}

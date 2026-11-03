@@ -78,7 +78,10 @@ Everything else, for when you already know what you want:
   deckhand env set <appId> KEY=VALUE
   deckhand secret set typesafe                     store the TypeSafe API key that turns on \`navigate\`
                                                    (read from TYPESAFE_API_KEY or stdin, never argv)
-  deckhand secret rm typesafe`;
+  deckhand secret rm typesafe
+  deckhand phone list                              Android phones plugged in: free, held, or in a preview
+  deckhand phone hold <id> [--who <name>]          keep a phone out of every preview until released
+  deckhand phone release <id>                      give a held phone back to previews`;
 
 /**
  * Keep one bad request from taking every live preview down with it.
@@ -192,6 +195,16 @@ async function main(): Promise<void> {
     case "env":
       if (sub === "set") return cmdEnvSet(_[2], _[3]);
       return fail(`unknown env subcommand; see 'deckhand'`);
+
+    case "phone": {
+      const { cmdPhone } = await import("./cli/phone.ts");
+      try {
+        console.log(await cmdPhone(sub, _[2], str(flags.who)));
+      } catch (e) {
+        return fail((e as Error).message);
+      }
+      return;
+    }
 
     default:
       console.log(USAGE);

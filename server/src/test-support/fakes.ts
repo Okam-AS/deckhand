@@ -1,7 +1,8 @@
 import type { MetroManager, MetroHandle } from "../engine/metro.ts";
 import type { DevProcessManager, DevRunSpec } from "../engine/devProcess.ts";
 import type { Simctl } from "../devices/ios.ts";
-import type { AndroidManager } from "../devices/android.ts";
+import type { AndroidManager, ExecResult } from "../devices/android.ts";
+import { RegisteredApp, type AndroidPhones, type PhoneInfo } from "../devices/androidPhone.ts";
 import type { WorktreeManager, PreparedWorktree } from "../engine/worktree.ts";
 import type { Reaper } from "../engine/reaper.ts";
 import type { App } from "../config.ts";
@@ -191,4 +192,31 @@ export function fakeReaper(over: Partial<Reaper> = {}, log: string[] = []): Reap
     reap: async () => ({ sims: [], avds: [], keptPooled: [] }),
   };
   return Object.assign(complete as unknown as Reaper, over);
+}
+
+/**
+ * Phones. `registeredApp` hands back the REAL guarded RegisteredApp over a recording adb, so a
+ * test exercises the guard itself; `adb` answers what it is told to, Success by default.
+ */
+export function fakePhones(
+  over: Partial<AndroidPhones> = {},
+  log: string[] = [],
+  adb: (args: string[]) => Partial<ExecResult> = () => ({ stdout: Buffer.from("Success") }),
+): AndroidPhones {
+  const exec = async (_cmd: string, args: string[]): Promise<ExecResult> => {
+    log.push(`adb ${args.join(" ")}`);
+    const r = adb(args);
+    return { code: r.code ?? 0, stdout: r.stdout ?? Buffer.from(""), stderr: r.stderr ?? "" };
+  };
+  const phone = (id: string): PhoneInfo => ({ id, state: "device", model: "SM-G980F", manufacturer: "samsung", os: "Android 13", awake: true, locked: false });
+  const complete: PublicOf<AndroidPhones> = {
+    list: async () => [],
+    probe: async (serial: string) => phone(serial),
+    adbState: async () => "device",
+    waitUsable: async (serial: string) => phone(serial),
+    clockOffsetMs: async () => 0,
+    registeredApp: (serial: string, pkg: string) => new RegisteredApp(exec, serial, pkg),
+    removeReverse: async (serial: string, port: number) => void log.push(`reverse --remove ${serial} tcp:${port}`),
+  };
+  return Object.assign(complete as unknown as AndroidPhones, over);
 }

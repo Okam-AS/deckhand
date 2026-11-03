@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fakeMetro, fakeDevProcs, fakeSimctl, fakeAndroid, fakeWorktrees, fakeReaper } from "../test-support/fakes.ts";
+import { fakeMetro, fakeDevProcs, fakeSimctl, fakeAndroid, fakeWorktrees, fakeReaper, fakePhones } from "../test-support/fakes.ts";
 import { PreviewEngine, PreviewError, buildStepDetail, redactForShare, type PreviewEngineDeps, type StartPreviewRequest, type DeviceRequest } from "./preview.ts";
 import type { SimDeckControl } from "../testing/control.ts";
 import type { App, Config } from "../config.ts";
@@ -232,6 +232,8 @@ function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (
     secretsEnv: () => ({ SECRET_TOKEN: "s3cr3t" }),
     genPreviewId: () => "pv1",
     genShareId: () => "share-abc",
+    phones: fakePhones(),
+    phoneHolds: () => ({}),
     ...overrides,
   };
   return { engine: new PreviewEngine(deps), store, simctlCalls, buildEnvSeen, removedWorktrees, worktreeCalls, devProcCalls, detached, audit, firstFrameResults, attachCalls };
@@ -2756,16 +2758,15 @@ describe("buildStepDetail", () => {
 // ---------------------------------------------------------------------------
 
 describe("listDevices", () => {
-  it("reports simulator runtimes/models, emulator API levels and capacity — and nothing about attached hardware", async () => {
+  it("reports simulator runtimes/models, emulator API levels, capacity and the phones plugged in", async () => {
     const h = makeEngine();
     const out = await h.engine.listDevices();
     assert.deepEqual(out.ios.models, ["iPhone 16 Pro"]);
     assert.equal(out.ios.runtimes[0]!.name, "iOS 26.0");
     assert.deepEqual(out.android, { apiLevels: [34] });
     assert.deepEqual(out.capacity, { inUse: 0, max: config.limits.maxTotalDevices });
-    // The wire shape IS the decision: a physical-device scan reported hardware
-    // start_preview could never build to, which reads to an agent as an offer.
-    assert.deepEqual(Object.keys(out).sort(), ["android", "capacity", "ios"]);
+    assert.deepEqual(Object.keys(out).sort(), ["android", "capacity", "ios", "physical"]);
+    assert.deepEqual(out.physical, { phones: [] });
   });
 
   it("lists every runtime's models, so a model only a beta runtime supports is still offered", async () => {
@@ -3109,5 +3110,206 @@ describe("ios.reduceTransparency", () => {
   it("leaves the device as it is by default, and when set false", async () => {
     assert.deepEqual(await run(undefined), []);
     assert.deepEqual(await run(false), []);
+  });
+});
+
+describe("physical Android phones", () => {
+  const PHONE = "RF8N30YRFKY";
+  const startPhone = (h: Harness, extra: Partial<Parameters<PreviewEngine["startPreview"]>[0]> = {}) =>
+    h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "android", serial: PHONE }], access: "password", ...extra });
+
+  it("is waited for, never booted, and on teardown its app is stopped — never the phone shut down, wiped or deleted", async () => {
+    const calls: string[] = [];
+    const phoneLog: string[] = [];
+    const h = makeEngine({ android: androidFake(calls), phones: fakePhones({}, phoneLog) });
+    startPhone(h);
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready", JSON.stringify(h.engine.getStatus("pv1")));
+    const st = h.engine.getStatus("pv1")!;
+    assert.equal(st.devices[0]!.label, "samsung SM-G980F · Android 13 (phone)");
+    assert.deepEqual(calls.filter((c) => /avd|emu/.test(c)), [], "no AVD and no emulator for a phone");
+    await h.engine.stopPreview("pv1");
+    assert.ok(phoneLog.includes(`adb -s ${PHONE} shell am force-stop com.example.myapp`), phoneLog.join("\n"));
+    assert.ok(!phoneLog.some((c) => /uninstall|pm clear|reboot|settings/.test(c)), phoneLog.join("\n"));
+  });
+
+  it("refuses a second preview of a busy phone with device_busy, naming the holder and how to free it", async () => {
+    const h = makeEngine({ phones: fakePhones() });
+    startPhone(h);
+    const second = { ...rnApp, id: "other-app" };
+    assert.throws(
+      () => h.engine.startPreview({ app: second, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "android", serial: PHONE }], access: "password" }),
+      (e: unknown) => e instanceof PreviewError && e.code === "device_busy" && /pv1/.test(e.message) && /stop_preview/.test(e.hint ?? ""),
+    );
+  });
+
+  it("refuses a held phone, naming who holds it and the release command", async () => {
+    const h = makeEngine({ phones: fakePhones(), phoneHolds: () => ({ [PHONE]: { who: "dana", since: "2026-11-03T10:00:00Z" } }) });
+    try {
+      assert.throws(
+        () => startPhone(h),
+        (e: unknown) => e instanceof PreviewError && e.code === "device_busy" && /held by dana/.test(e.message) && /deckhand phone release RF8N30YRFKY/.test(e.hint ?? ""),
+      );
+    } finally {
+      await h.engine.stopPreview("pv1").catch(() => {});
+    }
+  });
+
+  it("keeps phones out of maxTotalDevices, which protects the Mac's CPU and RAM", async () => {
+    // config.limits.maxTotalDevices is 2: two emulators fill it, and a phone still fits.
+    const h = makeEngine({ phones: fakePhones() });
+    h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "android" }, { platform: "ios" }, { platform: "android", serial: PHONE }], access: "password" });
+    assert.equal(h.engine.getStatus("pv1")!.devices.length, 3);
+  });
+
+  it("drives describe and ui on a phone over adb, never through SimDeck", async () => {
+    const seen: string[] = [];
+    const h = makeEngine({
+      phones: fakePhones(),
+      simdeck: { describe: async () => seen.push("simdeck") } as unknown as PreviewEngineDeps["simdeck"],
+      phoneControl: {
+        describe: async (t) => seen.push(`adb describe ${t.udid}`),
+        action: async (t, a) => seen.push(`adb ${a.type} ${t.udid}`),
+      },
+    });
+    startPhone(h);
+    await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
+    await h.engine.describe("pv1", "android-0");
+    await h.engine.ui("pv1", "android-0", { type: "back" });
+    assert.deepEqual(seen, [`adb describe ${PHONE}`, `adb back ${PHONE}`]);
+  });
+
+  it("freshApp: data clears only the registered app's data, before launch", async () => {
+    const phoneLog: string[] = [];
+    const h = makeEngine({ phones: fakePhones({}, phoneLog) });
+    startPhone(h, { freshApp: "data" });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+    assert.deepEqual(phoneLog.filter((c) => /pm clear|uninstall/.test(c)), [`adb -s ${PHONE} shell pm clear com.example.myapp`]);
+  });
+
+  it("freshApp: reinstall uninstalls the registered app before the build installs it", async () => {
+    const phoneLog: string[] = [];
+    const order: string[] = [];
+    const h = makeEngine({ phones: fakePhones({}, phoneLog, (args) => {
+      if (args.includes("uninstall")) order.push("uninstall");
+      if (args.includes("path")) return { stdout: Buffer.from("package:/data/app/base.apk") };
+      return { stdout: Buffer.from("Success") };
+    }) }, (step) => {
+      order.push(step.name);
+      return { code: 0, timedOut: false, aborted: false };
+    });
+    startPhone(h, { freshApp: "reinstall" });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+    assert.deepEqual(order, ["uninstall", "install-deps", "build"]);
+    assert.ok(phoneLog.includes(`adb -s ${PHONE} uninstall com.example.myapp`));
+  });
+
+  it("on a signature conflict uninstalls and reinstalls the registered app only, and says so in the log", async () => {
+    const phoneLog: string[] = [];
+    const h = makeEngine(
+      {
+        phones: fakePhones({}, phoneLog, (args) =>
+          args.includes("dumpsys")
+            ? { stdout: Buffer.from("versionName=3.61.0\nversionCode=1\ninstallerPackageName=com.android.vending") }
+            : { stdout: Buffer.from(args.includes("path") ? "package:/data/app/base.apk" : "Success") },
+        ),
+        runStep: async (step, opts) => {
+          if (step.name !== "build") return { code: 0, timedOut: false, aborted: false };
+          opts?.onLog?.("adb: failed to install app-debug.apk: Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: Existing package com.example.myapp signatures do not match newer version; ignoring!]", "stderr");
+          return { code: 1, timedOut: false, aborted: false };
+        },
+      },
+    );
+    startPhone(h);
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready", JSON.stringify(h.engine.getStatus("pv1")));
+    const touched = phoneLog.filter((c) => /uninstall|install -r/.test(c));
+    assert.deepEqual(touched, [`adb -s ${PHONE} uninstall com.example.myapp`, `adb -s ${PHONE} install -r /wt/app-debug.apk`]);
+    assert.match(h.engine.logs("pv1", "android-0", "build")!, /signature mismatch.*uninstalling com\.example\.myapp 3\.61\.0.*No other app/);
+  });
+
+  it("a build that failed for another reason stays failed — nothing is uninstalled", async () => {
+    const phoneLog: string[] = [];
+    const h = makeEngine({ phones: fakePhones({}, phoneLog) }, (step) => ({ code: step.name === "build" ? 1 : 0, timedOut: false, aborted: false }));
+    startPhone(h);
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "failed");
+    assert.ok(!phoneLog.some((c) => c.includes("uninstall")));
+  });
+
+  it("ends the device with an error when the phone leaves adb, instead of staying ready", async () => {
+    let state = "device";
+    const h = makeEngine({ phones: fakePhones({ adbState: async () => state }) });
+    startPhone(h);
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+    state = "missing";
+    assert.deepEqual(await h.engine.checkPhones(), ["android-0"]);
+    const dev = h.engine.getStatus("pv1")!.devices[0]!;
+    assert.equal(dev.phase, "failed");
+    assert.match(dev.error ?? "", /left adb.*unplugged/);
+  });
+
+  it("never hands a physical serial to the reaper or the emulator teardown, and keeps its stream at the boot sweep", async () => {
+    const calls: string[] = [];
+    let keep: ReadonlySet<string> = new Set();
+    const h = makeEngine({
+      android: androidFake(calls, {
+        attachedSerials: async () => [PHONE],
+        listAvds: async () => [PHONE, "deckhand_orphan"],
+        shutdown: async (serial: string) => {
+          calls.push(`shutdown ${serial}`);
+          return true;
+        },
+        deleteAvd: async (name: string) => void calls.push(`avd delete ${name}`),
+      }),
+      phones: fakePhones(),
+      streaming: { attach: async () => ({ origin: "o", helperBasePath: "/h", waitForFirstFrame: async () => true, describe: async () => "", detach: async () => {} }), reapOrphans: async (k: ReadonlySet<string>) => void (keep = k) } as unknown as PreviewEngineDeps["streaming"],
+    });
+    startPhone(h);
+    await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
+    await h.engine.reapOrphans();
+    await h.engine.stopPreview("pv1");
+    assert.ok(keep.has(PHONE), "the boot sweep must spare the phone's live stream");
+    assert.ok(!calls.some((c) => c.includes(PHONE)), `nothing destructive may name the phone: ${calls.join(", ")}`);
+  });
+
+  it("picks the phone this app already has, else a free targetable one, and says why none is free", async () => {
+    const listing = (ids: { id: string; state?: string }[]) =>
+      fakePhones({ list: async () => ids.map(({ id, state }) => ({ id, state: state ?? "device", model: "Pixel 5", awake: true, locked: false })) });
+    const h = makeEngine({ phones: listing([{ id: "A", state: "unauthorized" }, { id: "B" }]) });
+    assert.deepEqual(await h.engine.resolvePhoneRequests(rnApp, [{ platform: "android", physical: true }]), [{ platform: "android", serial: "B" }]);
+    const none = makeEngine({ phones: listing([{ id: "A", state: "unauthorized" }]) });
+    await assert.rejects(
+      none.engine.resolvePhoneRequests(rnApp, [{ platform: "android", physical: true }]),
+      (e: unknown) => e instanceof PreviewError && e.code === "no_phone" && /A.*not authorized for USB debugging.*Allow USB debugging/.test(e.message),
+    );
+  });
+
+  it("lists each phone as targetable, or with its one blocker and fix", async () => {
+    const h = makeEngine({
+      phones: fakePhones({
+        list: async () => [
+          { id: "A", state: "device", manufacturer: "Google", model: "Pixel 5", os: "Android 14", awake: true, locked: false },
+          { id: "B", state: "device", model: "SM-G980F", awake: true, locked: true },
+          { id: "C", state: "device", awake: true, locked: false },
+        ],
+      }),
+      phoneHolds: () => ({ C: { who: "dana", since: "t" } }),
+    });
+    const { phones } = (await h.engine.listDevices()).physical;
+    assert.deepEqual(phones[0], { id: "A", platform: "android", model: "Google Pixel 5", os: "Android 14", targetable: true });
+    assert.deepEqual([phones[1]!.targetable, "blocker" in phones[1]! && phones[1].blocker], [false, "locked"]);
+    assert.ok("fix" in phones[2]! && /deckhand phone release C/.test(phones[2].fix));
+  });
+
+  it("reads the app log in the Mac's clock and says whether the process runs", async () => {
+    const h = makeEngine({
+      phones: fakePhones({ clockOffsetMs: async () => -1000 }, [], (args) => {
+        if (args.includes("logcat")) return { stdout: Buffer.from("  1700000000.000  77  77 I ReactNativeJS: hi\n") };
+        if (args.includes("pidof")) return { stdout: Buffer.from("77\n") };
+        return { stdout: Buffer.from("Success") };
+      }),
+    });
+    startPhone(h);
+    await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
+    const log = await h.engine.appLog("pv1", "android-0");
+    assert.equal(log, `process com.example.myapp: running (pid 77)\n${new Date(1_700_000_001_000).toISOString()} 77 I ReactNativeJS: hi`);
   });
 });

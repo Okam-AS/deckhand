@@ -11,7 +11,7 @@ import { versionStatus, type UpdateStatus } from "../version.ts";
 import { DEV_MENU_PREFLIGHT, devMenuHint } from "../testing/devMenu.ts";
 import { selectorMissHint } from "../testing/tree.ts";
 import type { Principal } from "../auth.ts";
-import type { PreviewEngine, CompareReference } from "../engine/preview.ts";
+import type { PreviewEngine, CompareReference, DeviceRequest } from "../engine/preview.ts";
 import { PreviewError } from "../engine/preview.ts";
 import { parseRefSpec, refDescription, RefError } from "../engine/worktree.ts";
 import { detectWebFrameworkFromDir, webHostingMode } from "../engine/detect.ts";
@@ -146,7 +146,7 @@ function localCheckoutHint(host: { hostname: string; user: string }, repo: strin
 function toFail(e: unknown): CallToolResult {
   if (e instanceof SimDeckUnavailableError) return fail("simdeck_unavailable", e.message, e.hint);
   if (e instanceof SimDeckActionError) return fail("ui_error", e.message);
-  if (e instanceof PreviewError) return fail("preview_error", e.message, e.hint);
+  if (e instanceof PreviewError) return fail(e.code ?? "preview_error", e.message, e.hint);
   if (e instanceof RefError) return fail("invalid_ref", e.message);
   return fail("internal_error", e instanceof Error ? e.message : String(e));
 }
@@ -294,7 +294,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         ok({
           guide: [
             "Start with `list_apps`. When you can run commands on the deckhand host, prefer its existing checkout: register it with `deckhand app add <id> --path <dir>`; otherwise use `add_app` for a GitHub source. Never ask for or relay a credential or app secret in chat; relay the one-time setup link if `add_app` returns one.",
-            "Before `start_preview`, ask the user to choose public access or a PIN. A public link is open to anyone with its URL; web previews require a PIN. Pass a user-chosen 4–6 digit PIN without repeating it in chat.",
+            "Before `start_preview`, ask the user to choose public access or a PIN. A public link is open to anyone with its URL; web previews require a PIN, and a preview on a physical phone defaults to one (make it public only when the user explicitly asks). Pass a user-chosen 4–6 digit PIN without repeating it in chat.",
             "Give the `start_preview` URL to the user immediately, then poll `preview_status` until the target is ready before driving it. Reuse an equivalent live preview; use `restart_preview` for a local native/dependency change or after pushing new git commits, not for ordinary hot reloads.",
             "For visible, end-to-end work, start a test run, then use `describe` to orient and `ui` to act — `ui` returns the screen after it, and takes a list of `actions` for a known sequence — and `screenshot` to verify. Update each test step as it runs and finish the run with an evidence-based verdict.",
             "When build or launch fails, read `logs` with its default build source. When a ready viewer has no video, read `logs` with source `stream`. Stop previews you no longer need with `stop_preview`.",
@@ -349,7 +349,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "List devices",
       description:
-        "List the iOS simulator runtimes and models and the Android emulator API levels this machine can boot, plus current capacity. Simulators and emulators are the ONLY things deckhand can preview on: it cannot build to, stream from, or see a real iPhone or Android phone plugged into the machine. Asked about one, say previewing on physical devices is not supported and offer the closest simulator or emulator from this list — do not say deckhand can see the device, and do not suggest plugging it in.",
+        "List what this machine can preview on: the iOS simulator runtimes and models and Android emulator API levels it can boot, plus current capacity, and under `physical` the Android phones plugged into it by cable. A phone is listed with `targetable: true` (start_preview can take it: devices [{platform: \"android\", id: \"<its id>\"}], or {platform: \"android\", physical: true} for any free one), or with `targetable: false` and the one `blocker` stopping it plus the `fix` to relay to the user. Phones are outside the simulator capacity, and one phone runs one preview at a time. A physical iPhone is not supported yet: offer an iOS simulator instead. A phone is a real device that can call, buy and log in — sign it in to test accounts only.",
       inputSchema: {},
     },
     () => audited("list_devices", {}, async () => ok(await engine.listDevices())),
@@ -498,11 +498,13 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
               platform: z.enum(["ios", "android"]).default("ios"),
               runtime: z.string().optional().describe('e.g. "26" or "iOS 26"'),
               model: z.string().optional().describe('e.g. "iPhone 16 Pro"'),
+              id: z.string().optional().describe("an Android phone plugged into this Mac, by the id list_devices reports under `physical`"),
+              physical: z.boolean().optional().describe("true: any free Android phone plugged into this Mac (list_devices shows which are targetable)"),
             }),
           )
           .min(1)
           .optional()
-          .describe("devices to boot (default: one iOS simulator)"),
+          .describe("devices to boot (default: one iOS simulator); an Android phone by `id` or `physical: true`"),
         alongside: z
           .array(
             z.object({
@@ -520,6 +522,10 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           .array(z.string())
           .optional()
           .describe(`parity checklist items to seed (flows/screens). ${PARITY_CONTRACT}`),
+        freshApp: z
+          .enum(["data", "reinstall"])
+          .optional()
+          .describe("Android devices only, when they boot: start the app fresh. data = clear its data and signed-in session before launch (pm clear); reinstall = uninstall it before installing this build. Only the preview's own app is touched."),
         share: z
           .object({
             access: z.enum(["public", "pin"]).describe("REQUIRED — ask the user first: protect with a PIN, or public?"),
@@ -530,7 +536,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       },
     },
     (args) =>
-      audited("start_preview", args, () => {
+      audited("start_preview", args, async () => {
         const resolved = resolveApp(args.app);
         if (isResult(resolved)) return resolved;
         if (args.ref && args.pr) return fail("bad_request", "pass either ref or pr, not both");
@@ -559,11 +565,29 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         // Hoisted so the extra panes boot on the same devices: a web preview's
         // pseudo-device would not typecheck as a simulator request, and extra
         // panes are rejected for web above anyway.
-        const paneDevices = (args.devices ?? [{ platform: "ios" as const }]).map((d) => ({
+        const asked = (args.devices ?? [{ platform: "ios" as const }]).map((d) => ({
           platform: d.platform ?? ("ios" as const),
           runtime: d.runtime,
           model: d.model,
+          ...(d.id ? { serial: d.id } : {}),
+          ...(d.physical ? { physical: true } : {}),
         }));
+        const wantsPhone = !isWeb && asked.some((d) => d.serial || d.physical);
+        if (wantsPhone && asked.some((d) => (d.serial || d.physical) && d.platform !== "android")) {
+          return fail("phone_not_supported", "only Android phones can be previewed on", "a physical iPhone is not supported yet — use an iOS simulator ({platform: \"ios\"})");
+        }
+        if (wantsPhone && extra.length) {
+          return fail("phone_not_in_panes", "a phone cannot be shared across panes — every `alongside` pane boots the same devices, and a phone runs one preview at a time", "start the comparison on simulators/emulators, or preview on the phone without `alongside`");
+        }
+        // A phone controls a real device that can call, buy and log in, so its link is PIN-protected unless the user explicitly asks for public.
+        if (wantsPhone && !args.share) {
+          return fail(
+            "needs_pin",
+            "A preview on a physical phone is PIN-protected by default: anyone with the link drives the whole phone, not just the app.",
+            'Ask the user for a 4–6 digit PIN and call again with share: { access: "pin", pin: "<digits>" }. Only if the user explicitly asks for a public link, pass share: { access: "public" }. Don\'t repeat the PIN in chat.',
+          );
+        }
+        const paneDevices = await engine.resolvePhoneRequests(resolved, asked);
         const devices = isWeb ? [{ platform: "web" as const }] : paneDevices;
 
         const wantsGit = Boolean(args.ref || args.pr);
@@ -667,6 +691,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             spec,
             devices,
             access: access === "pin" ? "password" : "public",
+            ...(args.freshApp ? { freshApp: args.freshApp } : {}),
           });
         } catch (e) {
           engine.restoreAppPin(resolved.id, priorPin);
@@ -687,9 +712,13 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           );
         }
         const protectionNote =
-          access === "pin"
+          (access === "pin"
             ? " This link is PIN-protected: viewers must enter the PIN the user set (don't repeat the PIN in chat)."
-            : " This link is public — anyone with the URL can open it.";
+            : " This link is public — anyone with the URL can open it.") +
+          (wantsPhone
+            ? ` It drives a real phone (${devices.flatMap((d) => ("serial" in d && d.serial ? [d.serial] : [])).join(", ")}): deckhand only installs, stops and wipes this app on it, and never another app or a setting.` +
+              (access === "public" ? " ⚠ A public link lets anyone with it drive that whole phone." : "")
+            : "");
         // A subdomain-hosted web framework (Nuxt/Next/static) needs a configured
         // webHost to be publicly reachable; without one the URL is loopback-only.
         const webFw = isWeb && resolved.path ? detectWebFrameworkFromDir(resolved.path) : null;
@@ -744,7 +773,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   );
 
   /** Boot an app in its natural mode: local dev (livesync) when a working copy is registered, else git default-branch. */
-  const bootWorkingApp = (app: App, devices: { platform: "ios" | "android"; runtime?: string; model?: string }[], access: "public" | "password") => {
+  const bootWorkingApp = (app: App, devices: DeviceRequest[], access: "public" | "password") => {
     const source = app.path ? ("local" as const) : ("git" as const);
     const spec = source === "git" ? parseRefSpec({ ref: app.defaultBranch }) : undefined;
     return engine.startPreview({ app, source, spec, devices, access });
@@ -764,7 +793,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   const bootReference = (
     workingApp: App,
     alongside: { app?: string; ref?: string; worktree?: string; repo?: string } | undefined,
-    devices: { platform: "ios" | "android"; runtime?: string; model?: string }[],
+    devices: DeviceRequest[],
     share: { access: "public" | "pin"; pin?: string },
   ): { reference: CompareReference; previewId: string; booted: boolean } | CallToolResult => {
     // An entry with nothing named means "my migratesFrom" — that is the whole
@@ -1361,7 +1390,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Read a device's logs",
       description:
-        "Read deckhand's captured logs for a device in a preview — the fastest way to find out WHY a build failed, why a screen came up wrong, or why the viewer will not show a picture. `build` (default) carries the build/install step output plus the NativeScript livesync and web dev-server streams: compile errors, install failures, and dev-server crashes surface here. **`stream` is the one to read when the viewer is stuck on \"Connecting…\" or shows a black screen while the device says ready** — it traces the whole browser→helper path: helper attach + first-frame probes, every proxied stream request with its upstream status and byte count, WebSocket upgrade accepts/refusals with the exact reason, and what the viewer's own player reports (fallback to MJPEG, decode failure, giving up). Pair with `describe`/`screenshot` when the app is up but misbehaving. Pass previewId or app id; deviceId defaults to the first/only device. Returns the last `tailLines` lines (500 are retained per source).",
+        "Read deckhand's captured logs for a device in a preview — the fastest way to find out WHY a build failed, why a screen came up wrong, or why the viewer will not show a picture. `build` (default) carries the build/install step output plus the NativeScript livesync and web dev-server streams: compile errors, install failures, and dev-server crashes surface here. **`stream` is the one to read when the viewer is stuck on \"Connecting…\" or shows a black screen while the device says ready** — it traces the whole browser→helper path: helper attach + first-frame probes, every proxied stream request with its upstream status and byte count, WebSocket upgrade accepts/refusals with the exact reason, and what the viewer's own player reports (fallback to MJPEG, decode failure, giving up). On Android, `app` is the app's own logcat since launch plus the system's crash lines about it, and says whether its process is running — read it when the app crashed or misbehaves. Pair with `describe`/`screenshot` when the app is up but misbehaving. Pass previewId or app id; deviceId defaults to the first/only device. Returns the last `tailLines` lines (500 are retained per source).",
       inputSchema: {
         previewId: z.string().optional().describe("from start_preview; or pass app instead"),
         app: z.string().optional().describe("app id — reads its running preview"),
@@ -1370,19 +1399,20 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           .enum(["build", "metro", "app", "stream"])
           .optional()
           .describe(
-            "build (default): build/install + livesync + web dev-server output. stream: the browser→helper streaming trace — read this for a viewer that never shows a picture. metro/app runtime streams are reserved and not captured yet.",
+            "build (default): build/install + livesync + web dev-server output. stream: the browser→helper streaming trace — read this for a viewer that never shows a picture. app (Android): the app's logcat since launch — its own lines plus the system's crash lines about it — headed by whether its process is running now. metro, and app on iOS, are reserved and not captured yet.",
           ),
         tailLines: z.number().int().positive().max(500).optional().describe("trailing lines to return (default 200)"),
       },
     },
     (args) =>
-      audited("logs", args, () => {
+      audited("logs", args, async () => {
         const id = resolvePreviewId(args);
         if (typeof id !== "string") return id;
         const denied = requireLivePreview(id);
         if (denied) return denied;
         const source = args.source ?? "build";
-        const log = engine.logs(id, args.deviceId, source, args.tailLines ?? 200);
+        const android = source === "app" && engine.platformOfDevice(id, args.deviceId) === "android";
+        const log = android ? await engine.appLog(id, args.deviceId, args.tailLines ?? 200) : engine.logs(id, args.deviceId, source, args.tailLines ?? 200);
         if (log === null) {
           return fail(
             "unknown_device",

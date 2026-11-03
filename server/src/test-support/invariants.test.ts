@@ -850,8 +850,8 @@ describe("fakes are complete", () => {
     // how anyone writing a standalone fake would name it, and that form passed until mutation
     // put `{} as unknown as Simctl` in a test file and nothing failed. The quote class is for
     // the same reason — `Deps['simctl']` is the same cast.
-    const covered = "simctl|android|worktrees|reaper|metro|devProcs";
-    const classes = "Simctl|AndroidManager|WorktreeManager|Reaper|MetroManager|DevProcessManager";
+    const covered = "simctl|android|worktrees|reaper|metro|devProcs|phones";
+    const classes = "Simctl|AndroidManager|WorktreeManager|Reaper|MetroManager|DevProcessManager|AndroidPhones";
     const banned = new RegExp(`as unknown as (?:\\w*Deps\\[["'](${covered})["']\\]|(${classes})\\b)`);
     const fakeFor: Record<string, string> = {
       simctl: "fakeSimctl",
@@ -860,12 +860,14 @@ describe("fakes are complete", () => {
       reaper: "fakeReaper",
       metro: "fakeMetro",
       devProcs: "fakeDevProcs",
+      phones: "fakePhones",
       Simctl: "fakeSimctl",
       AndroidManager: "fakeAndroid",
       WorktreeManager: "fakeWorktrees",
       Reaper: "fakeReaper",
       MetroManager: "fakeMetro",
       DevProcessManager: "fakeDevProcs",
+      AndroidPhones: "fakePhones",
     };
     for (const file of testFiles()) {
       const m = banned.exec(read(file));

@@ -30,7 +30,9 @@ export interface PersistedDevice {
   platform: Platform;
   label: string; // human label, e.g. "iPhone 16 Pro · iOS 26"
   udid?: string; // simulator UDID once created
-  serial?: string; // android adb serial (P2)
+  serial?: string; // android adb serial
+  /** A phone plugged in by cable: borrowed, never booted, wiped or reaped; one live preview at a time. */
+  physical?: true;
   runtime?: string; // e.g. "iOS 26.0"
   model?: string; // e.g. "iPhone 16 Pro"
   phase: DevicePhase;

@@ -18,6 +18,8 @@ import { pruneDerivedData } from "./derivedData.ts";
 import { Simctl, selectSimulator, supportedBy, deviceLabel, type SimDevice } from "../devices/ios.ts";
 import { AndroidManager, AVD_PREFIX, selectSystemImage, portForSerial, serialForPort } from "../devices/android.ts";
 import { resolveAndroidEnv } from "../devices/toolEnv.ts";
+import { AndroidPhones, InstallConflictError, classifyInstallFailure, isEmulatorSerial, usabilityBlocker, type RegisteredApp } from "../devices/androidPhone.ts";
+import { loadPhoneHolds, type PhoneHolds } from "../devices/phoneHolds.ts";
 import { Reaper, POOL_SIM_PREFIX, POOL_AVD_PREFIX } from "./reaper.ts";
 import { METRO_MARKER_ENV } from "./metro.ts";
 import { DEV_MARKER_ENV } from "./devProcess.ts";
@@ -41,7 +43,8 @@ import { readMigrationLedger } from "./migrationLedger.ts";
 import { DevProcessManager } from "./devProcess.ts";
 import type { AttachedStream, StreamingBackend } from "../streaming/backend.ts";
 import { LIVE_DEVICE_ID, type LiveShareRegistry } from "../share/liveShares.ts";
-import { SimDeckControl, type SimDeckTarget, type DescribeOptions, type UiAction } from "../testing/control.ts";
+import { SimDeckControl, type ControlBackend, type SimDeckTarget, type DescribeOptions, type UiAction } from "../testing/control.ts";
+import { AdbControl } from "../testing/adbControl.ts";
 import { ScreenBook } from "../testing/screen.ts";
 
 // ---------------------------------------------------------------------------
@@ -174,6 +177,16 @@ interface LiveDevice {
   deviceName?: string;
   /** Emulator console port, reserved before the boot that may never return one. */
   androidPort?: number;
+  /** The Android package the build resolved; the only one deckhand touches on a phone. */
+  appPackage?: string;
+  /** Epoch ms the app was last launched, where the `app` log starts. */
+  launchedAt?: number;
+  /** A phone's clock minus the Mac's, measured at boot (`logcat -T` filters on the phone's). */
+  clockOffsetMs?: number | null;
+  /** Device ports deckhand pointed at this Mac with `adb reverse`; removed again at teardown. */
+  reversed?: Set<number>;
+  /** `freshApp` has been applied to this device (a restart does not wipe the app again). */
+  freshApplied?: boolean;
 }
 
 interface LivePreview {
@@ -189,6 +202,8 @@ interface LivePreview {
    * → `preview.test.ts` "never re-mints a retired device id, on any platform".
    */
   nextDeviceIndex: number;
+  /** Consumed by the first build: a restart rebuilds without wiping the app again. */
+  freshApp?: FreshApp;
   prep?: Promise<string>; // memoized source dir (shared across devices)
   sourceDir?: string;
   attached: Map<string, AttachedStream>;
@@ -275,7 +290,12 @@ export interface DeviceRequest {
   platform: Platform;
   runtime?: string;
   model?: string;
+  /** A phone plugged into this Mac, by adb serial. Never booted, never counted against maxTotalDevices. */
+  serial?: string;
 }
+
+/** What `start_preview` may ask for on a phone before it is installed and launched. */
+export type FreshApp = "data" | "reinstall";
 
 /**
  * One live device record. Extracted so a cold start and a later add produce IDENTICAL
@@ -309,16 +329,30 @@ export function newLiveDevice(dev: DeviceRequest, index: number, position: numbe
       label:
         dev.platform === "web"
           ? "Web app"
-          : dev.model && dev.runtime
-            ? `${dev.model} · ${dev.runtime}`
-            : `${dev.platform} device ${position}`,
+          : dev.serial
+            ? `phone ${dev.serial}`
+            : dev.model && dev.runtime
+              ? `${dev.model} · ${dev.runtime}`
+              : `${dev.platform} device ${position}`,
       runtime: dev.runtime,
       model: dev.model,
+      ...(dev.serial ? { serial: dev.serial, physical: true as const } : {}),
       phase: "pending",
     },
     logs: { build: [], metro: [], app: [], stream: [] },
     abort: new AbortController(),
   };
+}
+
+/** One phone in `list_devices`: targetable now, or the one thing stopping it and how to clear it. */
+export type PhoneListing =
+  | { id: string; platform: "android"; model?: string; os?: string; targetable: true }
+  | { id: string; platform: "android"; model?: string; os?: string; targetable: false; blocker: string; fix: string };
+
+export interface PhysicalListing {
+  phones: PhoneListing[];
+  /** Set when adb could not be asked, so an empty list is not mistaken for "no phones". */
+  unavailable?: string;
 }
 
 export interface StartPreviewRequest {
@@ -335,6 +369,8 @@ export interface StartPreviewRequest {
    * public cost.
    */
   reference?: boolean;
+  /** Start the registered app fresh on Android devices: wipe its data, or uninstall it first. */
+  freshApp?: FreshApp;
 }
 
 export interface StartPreviewResult {
@@ -384,6 +420,12 @@ export interface PreviewEngineDeps {
   reaper?: Reaper;
   /** Agent-driven testing backend (describe/ui). Lazily constructed from config if absent. */
   simdeck?: SimDeckControl;
+  /** Phones plugged in by cable (adb). */
+  phones?: AndroidPhones;
+  /** describe/ui on a phone, which SimDeck cannot address. */
+  phoneControl?: ControlBackend;
+  /** Who holds which phone (`deckhand phone hold`); read on every claim. */
+  phoneHolds?: () => PhoneHolds;
   runStep?: (step: CommandStep, opts?: { onLog?: (l: string, s: "stdout" | "stderr") => void; signal?: AbortSignal }) => Promise<RunResult>;
   secretsEnv?: (appId: string) => Record<string, string>;
   now?: () => number;
@@ -396,6 +438,8 @@ export class PreviewError extends Error {
   constructor(
     message: string,
     public readonly hint?: string,
+    /** A structured code for the MCP error; `preview_error` when absent. */
+    public readonly code?: string,
   ) {
     super(message);
     this.name = "PreviewError";
@@ -533,6 +577,54 @@ export class PreviewEngine {
   private android(): AndroidManager {
     if (!this.d.android) this.d.android = new AndroidManager();
     return this.d.android;
+  }
+
+  private phones(): AndroidPhones {
+    if (!this.d.phones) this.d.phones = new AndroidPhones();
+    return this.d.phones;
+  }
+
+  private phoneControl(): ControlBackend {
+    if (!this.d.phoneControl) this.d.phoneControl = new AdbControl({ appOf: (serial) => this.registeredAppOn(serial) });
+    return this.d.phoneControl;
+  }
+
+  private holds(): PhoneHolds {
+    return (this.d.phoneHolds ?? loadPhoneHolds)();
+  }
+
+  /** The live preview holding a phone, or null. Every non-stopped preview counts, a failed one included. */
+  private phoneTenant(serial: string): { p: LivePreview; dev: LiveDevice } | null {
+    for (const p of this.previews.values()) {
+      if (p.record.phase === "stopped") continue;
+      for (const dev of p.devices) if (dev.record.physical && dev.record.serial === serial) return { p, dev };
+    }
+    return null;
+  }
+
+  /** Why this phone cannot be handed to a new preview, as the structured `device_busy` error; null when it can. */
+  private phoneBusy(serial: string, holds: PhoneHolds): PreviewError | null {
+    const hold = holds[serial];
+    if (hold) {
+      return new PreviewError(
+        `phone ${serial} is held by ${hold.who} (since ${hold.since})`,
+        `it is off the market until they release it: \`deckhand phone release ${serial}\` on the deckhand Mac`,
+        "device_busy",
+      );
+    }
+    const t = this.phoneTenant(serial);
+    if (!t) return null;
+    return new PreviewError(
+      `phone ${serial} is in use by preview ${t.p.record.previewId} (app "${t.p.record.appId}", share ${this.viewerUrl(t.p.record.shareId)})`,
+      `a phone runs one preview at a time — free it with stop_preview {previewId: "${t.p.record.previewId}"}, or stop_device on its ${t.dev.record.deviceId}`,
+      "device_busy",
+    );
+  }
+
+  /** The registered app on a phone some live preview drives, once its package is known. */
+  private registeredAppOn(serial: string): RegisteredApp | null {
+    const t = this.phoneTenant(serial);
+    return t?.dev.appPackage ? this.phones().registeredApp(serial, t.dev.appPackage) : null;
   }
 
   private devProcs(): DevProcessManager {
@@ -1240,9 +1332,9 @@ export class PreviewEngine {
       // satisfied: the missing devices are added to the live preview and the running ones are
       // left alone. If adding fails (capacity, a web preview) the reason is reported rather
       // than swallowed — the caller still gets its link, with the failure attached.
-      const missing = this.missingPlatforms(existing, req);
+      const specs = this.missingDevices(existing, req);
+      const missing = [...new Set(specs.map((d) => d.platform))];
       if (missing.length) {
-        const specs = req.devices.filter((d) => missing.includes(d.platform));
         try {
           this.addDevices(existing.record.previewId, specs);
           return this.resultFor(existing, true);
@@ -1262,12 +1354,15 @@ export class PreviewEngine {
         "request fewer devices or raise limits.maxDevicesPerPreview",
       );
     }
+    this.checkPhoneRequests(req.devices);
     // Devices still being released for THIS app are already spoken for by this
     // request — don't make it queue behind its own teardown. Only what is still
     // held is discounted; releases that already completed are out of the tally
     // anyway, and discounting them twice would over-admit.
     const totalActive = Math.max(0, this.devicesInUse() - stillReleasing());
-    if (totalActive + req.devices.length > this.d.config.limits.maxTotalDevices) {
+    // A phone costs the Mac no CPU or RAM, which is all this cap protects.
+    const booting = req.devices.filter((d) => !d.serial).length;
+    if (booting && totalActive + booting > this.d.config.limits.maxTotalDevices) {
       throw new PreviewError(
         `device capacity reached (${totalActive}/${this.d.config.limits.maxTotalDevices} in use)`,
         "stop an existing preview or raise limits.maxTotalDevices",
@@ -1302,6 +1397,7 @@ export class PreviewEngine {
       spec: req.spec,
       devices,
       nextDeviceIndex: devices.length,
+      ...(req.freshApp ? { freshApp: req.freshApp } : {}),
       attached: new Map(),
       lastActivityAt: this.d.now!(),
       lastProgressAt: this.d.now!(),
@@ -1384,17 +1480,19 @@ export class PreviewEngine {
         "stop a device or raise limits.maxDevicesPerPreview",
       );
     }
-    if (this.devicesInUse() + specs.length > this.d.config.limits.maxTotalDevices) {
+    const booting = specs.filter((sp) => !sp.serial).length;
+    if (booting && this.devicesInUse() + booting > this.d.config.limits.maxTotalDevices) {
       throw new PreviewError(
         `device capacity reached (${this.devicesInUse()}/${this.d.config.limits.maxTotalDevices} in use)`,
         "stop another preview or raise limits.maxTotalDevices",
       );
     }
+    this.checkPhoneRequests(specs);
 
     // A per-preview counter, NOT `p.devices.length`: `removeDevices` (the `stop_device` tool)
     // shrinks the list, so the length handed a retired index straight back. Called through
     // startPreview that was merely confusing — the id carries the platform and
-    // `missingPlatforms()` filters by it, so nothing live collided — but this method is
+    // `missingDevices()` filters by it, so nothing live collided — but this method is
     // public, and a caller that does not filter gave two LIVE devices one id. A device id is
     // how a viewer pane addresses a stream, so that is one pane showing another's video.
     const start = p.nextDeviceIndex;
@@ -1488,9 +1586,41 @@ export class PreviewEngine {
    *
    * An empty result and a satisfied request must not look the same (CONSTITUTION §3).
    */
-  private missingPlatforms(p: LivePreview, req: StartPreviewRequest): Platform[] {
-    const live = new Set(p.devices.map((d) => d.record.platform));
-    return [...new Set(req.devices.map((d) => d.platform))].filter((pl) => !live.has(pl));
+  private missingDevices(p: LivePreview, req: StartPreviewRequest): DeviceRequest[] {
+    const live = new Set(p.devices.filter((d) => !d.record.physical).map((d) => d.record.platform));
+    const phones = new Set(p.devices.flatMap((d) => (d.record.physical && d.record.serial ? [d.record.serial] : [])));
+    const wanted = new Set<Platform>();
+    return req.devices.filter((d) => {
+      // A phone is its own device: an emulator already on the preview does not stand in for it.
+      if (d.serial) return !phones.has(d.serial);
+      if (live.has(d.platform) || wanted.has(d.platform)) return false;
+      wanted.add(d.platform);
+      return true;
+    });
+  }
+
+  /**
+   * Phones asked for are hardware this Mac can hand over: Android, not an emulator, asked for once,
+   * and neither held nor in another live preview. Read synchronously with the claim that follows,
+   * so two start_previews cannot both take one phone.
+   */
+  private checkPhoneRequests(devices: DeviceRequest[]): void {
+    const phones = devices.filter((d) => d.serial);
+    if (!phones.length) return;
+    const holds = this.holds();
+    const seen = new Set<string>();
+    for (const d of phones) {
+      const serial = d.serial!;
+      if (d.platform !== "android") {
+        throw new PreviewError("only Android phones can be previewed on", "an iPhone plugged into this Mac is not supported yet — use an iOS simulator", "bad_request");
+      }
+      if (!/^[A-Za-z0-9._:-]{1,64}$/.test(serial)) throw new PreviewError(`"${serial}" is not an adb serial`, "pass the id list_devices reports under physical", "bad_request");
+      if (isEmulatorSerial(serial)) throw new PreviewError(`${serial} is an emulator, not a phone`, "ask for an emulator by platform and runtime instead", "bad_request");
+      if (seen.has(serial)) throw new PreviewError(`phone ${serial} was asked for twice`, "list each phone once", "bad_request");
+      seen.add(serial);
+      const busy = this.phoneBusy(serial, holds);
+      if (busy) throw busy;
+    }
   }
 
   private resultFor(p: LivePreview, alreadyRunning: boolean, missing: Platform[] = [], why?: string): StartPreviewResult {
@@ -1583,7 +1713,7 @@ export class PreviewEngine {
    * reached", which is precisely the flow this path exists to serve.
    */
   private releaseInBackground(p: LivePreview): () => number {
-    let held = p.devices.length;
+    let held = p.devices.filter((d) => !d.record.physical).length;
     this.tearingDown += held;
     const releaseOne = (): void => {
       if (held <= 0) return;
@@ -1800,7 +1930,31 @@ export class PreviewEngine {
     throw new PreviewError("preview was stopped while its device was starting");
   }
 
+  /**
+   * A phone is not booted: it is waited for. Awake and unlocked is the person's to give; the only
+   * thing deckhand sends is one wake key. Its clock offset is measured here because the `app` log
+   * filters on the phone's clock, which can be wrong by years.
+   */
+  private async bootPhone(p: LivePreview, dev: LiveDevice): Promise<string> {
+    const serial = dev.record.serial!;
+    const phones = this.phones();
+    this.setPhase(p, dev, "booting", "waiting for the phone to be awake and unlocked");
+    const info = await phones.waitUsable(serial, 120_000, dev.abort.signal, (b) => {
+      dev.record.detail = `phone is ${b.blocker} — ${b.fix}`;
+    });
+    const name = [info.manufacturer, info.model].filter(Boolean).join(" ") || serial;
+    dev.record.model = info.model;
+    dev.record.runtime = info.os;
+    dev.record.label = `${name}${info.os ? ` · ${info.os}` : ""} (phone)`;
+    dev.clockOffsetMs = await phones.clockOffsetMs(serial).catch(() => null);
+    if (dev.clockOffsetMs != null && Math.abs(dev.clockOffsetMs) > 60_000) {
+      this.appendLog(dev, "build", `deckhand: this phone's clock is ${Math.round(dev.clockOffsetMs / 1000)}s off the Mac's; the app log corrects for it (the clock is never changed)`);
+    }
+    return serial;
+  }
+
   private async bootAndroid(p: LivePreview, dev: LiveDevice): Promise<string> {
+    if (dev.record.physical) return this.bootPhone(p, dev);
     const android = this.android();
     const image = selectSystemImage(await android.listSystemImages(), dev.record.runtime);
     const profile = dev.record.model ?? "pixel_7";
@@ -1974,12 +2128,15 @@ export class PreviewEngine {
     await Promise.all([...groups.values()].map((group) => this.orchestrateGroup(p, group)));
   }
 
-  private platformGroups(p: LivePreview): Map<Platform, LiveDevice[]> {
-    const groups = new Map<Platform, LiveDevice[]>();
+  private platformGroups(p: LivePreview): Map<string, LiveDevice[]> {
+    const groups = new Map<string, LiveDevice[]>();
     for (const dev of p.devices) {
-      const g = groups.get(dev.record.platform) ?? [];
+      // A phone builds on its own: copying an emulator's APK onto someone's phone is an install
+      // conflict waiting to happen, and the phone's build tool sees the phone's ABI.
+      const key = dev.record.physical ? `phone:${dev.record.serial}` : dev.record.platform;
+      const g = groups.get(key) ?? [];
       g.push(dev);
-      groups.set(dev.record.platform, g);
+      groups.set(key, g);
     }
     return groups;
   }
@@ -2091,6 +2248,7 @@ export class PreviewEngine {
     try {
       appEnv = this.appEnv(p.app);
       bundleId = this.resolveBundleId(p.app, sourceDir, platform);
+      if (platform === "android") for (const dev of group) dev.appPackage = bundleId;
       builderHandle = await handleOf(0);
       await this.applyDevicePreferences(platform, builderHandle);
 
@@ -2098,7 +2256,12 @@ export class PreviewEngine {
       for (const dev of group) {
         this.setPhase(p, dev, "building", dev === builder ? "building the app" : "building the app (shared)");
       }
-      await this.runBuildPlan(p, builder, platform, builderHandle, sourceDir, appEnv, local);
+      await this.freshBeforeInstall(p, builder, builderHandle);
+      try {
+        await this.runBuildPlan(p, builder, platform, builderHandle, sourceDir, appEnv, local);
+      } catch (e) {
+        if (!(await this.resolveInstallConflict(p, builder, builderHandle, sourceDir))) throw e;
+      }
       // Android only: its dev-client deep link carries the slug; iOS launches with --initialUrl.
       if (platform === "android" && usesMetroDeepLink(p.app.type)) slug = await this.resolveExpoSlug(sourceDir, appEnv);
 
@@ -2115,6 +2278,7 @@ export class PreviewEngine {
         this.setPhase(p, builder, "installing-app", "verifying install");
         await this.verifyInstalled(platform, builderHandle, bundleId);
         await this.silenceDevOverlays(platform, builderHandle, bundleId);
+        await this.freshAfterInstall(p, builder, builderHandle);
         this.setPhase(p, builder, "launching", "launching app");
         await this.launch(p, builder, builderHandle, bundleId, sourceDir, appEnv, slug);
       }
@@ -2146,9 +2310,11 @@ export class PreviewEngine {
           const handle = await handleOf(i + 1);
           await this.applyDevicePreferences(platform, handle);
           this.setPhase(p, dev, "installing-app", "installing");
+          await this.freshBeforeInstall(p, dev, handle);
           await this.installProduct(platform, handle, appPath);
           await this.verifyInstalled(platform, handle, bundleId);
           await this.silenceDevOverlays(platform, handle, bundleId);
+          await this.freshAfterInstall(p, dev, handle);
           this.setPhase(p, dev, "launching", "launching app");
           await this.launch(p, dev, handle, bundleId, sourceDir, appEnv, slug);
           await this.attachAndReady(p, dev, platform, handle);
@@ -2292,6 +2458,58 @@ export class PreviewEngine {
     const built = await this.d.simctl.appContainer(handle, bundleId);
     if (!built) throw new PreviewError("could not locate the built app to install to other devices");
     return built;
+  }
+
+  /** The guarded handle on this device's registered app; never another package. */
+  private registeredApp(dev: LiveDevice, serial: string): RegisteredApp {
+    if (!dev.appPackage) throw new PreviewError("the app's Android package is not resolved yet");
+    return this.phones().registeredApp(serial, dev.appPackage);
+  }
+
+  /** `freshApp: "reinstall"`: the registered app goes before the build installs it again. Android only. */
+  private async freshBeforeInstall(p: LivePreview, dev: LiveDevice, serial: string): Promise<void> {
+    if (p.freshApp !== "reinstall" || dev.freshApplied || dev.record.platform !== "android") return;
+    dev.freshApplied = true;
+    const app = this.registeredApp(dev, serial);
+    const before = await app.installed(app.pkg);
+    if (!before) return;
+    this.appendLog(dev, "build", `deckhand: freshApp=reinstall — uninstalling ${app.pkg} ${before.versionName ?? "?"} (${before.versionCode ?? "?"}) before installing this build`);
+    await app.uninstall(app.pkg);
+  }
+
+  /** `freshApp: "data"`: the installed app's data and signed-in session are cleared before launch. Android only. */
+  private async freshAfterInstall(p: LivePreview, dev: LiveDevice, serial: string): Promise<void> {
+    if (p.freshApp !== "data" || dev.freshApplied || dev.record.platform !== "android") return;
+    dev.freshApplied = true;
+    const app = this.registeredApp(dev, serial);
+    this.appendLog(dev, "build", `deckhand: freshApp=data — clearing ${app.pkg}'s data before launch`);
+    await app.clearData(app.pkg);
+  }
+
+  /**
+   * A phone already holding the registered app signed with another key, or at a higher version,
+   * refuses the build's install. That app — and only that app — is uninstalled and this build
+   * installed, and the log says what was removed. Anything else stays a failed build.
+   * Returns whether it resolved the failure.
+   */
+  private async resolveInstallConflict(p: LivePreview, dev: LiveDevice, serial: string, sourceDir: string): Promise<boolean> {
+    if (!dev.record.physical || !dev.appPackage) return false;
+    const conflict = classifyInstallFailure(dev.logs.build.slice(-200).join("\n"));
+    if (!(conflict instanceof InstallConflictError)) return false;
+    const apk = await this.android().findApk(sourceDir);
+    if (!apk) return false;
+    const app = this.registeredApp(dev, serial);
+    const before = await app.installed(app.pkg);
+    this.appendLog(
+      dev,
+      "build",
+      `deckhand: ${conflict.message} — uninstalling ${app.pkg} ${before?.versionName ?? "?"} (versionCode ${before?.versionCode ?? "?"}, installer ${before?.installer ?? "?"}, first installed ${before?.firstInstallTime ?? "?"}) and installing this build. No other app on the phone is touched.`,
+    );
+    this.setPhase(p, dev, "installing-app", `reinstalling ${app.pkg} (${conflict.kind === "signature" ? "signed with another key" : "newer version on the phone"})`);
+    await app.uninstall(app.pkg);
+    await app.install(app.pkg, apk);
+    this.d.audit.record({ actor: "engine", tool: "phone_reinstall", args: { preview: p.record.previewId, device: dev.record.deviceId, package: app.pkg, reason: conflict.kind }, result: "ok" });
+    return true;
   }
 
   private async installProduct(platform: Platform, handle: string, productPath: string): Promise<void> {
@@ -2474,10 +2692,18 @@ export class PreviewEngine {
     slug: string | null,
   ): Promise<void> {
     if (dev.record.platform === "android") {
+      dev.launchedAt = this.d.now!();
       if (usesMetroDeepLink(p.app.type)) {
         if (!slug) throw new PreviewError("could not resolve the Expo slug from app.json or app.config.*");
         const metro = await this.d.metro.ensure(p.app.id, worktreePath, appEnv);
-        await this.reverseMetroPorts(handle, metro.port);
+        await this.reverseMetroPorts(dev, handle, metro.port);
+        if (dev.record.physical) {
+          // Addressed to the registered app, so no other dev client on the phone can answer the link.
+          const app = this.registeredApp(dev, handle);
+          await app.forceStop(app.pkg);
+          await app.openUrl(app.pkg, expoDevClientUrl(slug, `http://localhost:${metro.port}`));
+          return;
+        }
         // Cold start, then name the server explicitly. Both halves are needed:
         // `expo run:android` already launched the app at the end of the build,
         // pointed at whatever answered 8081 then — and a dev client that is
@@ -2630,6 +2856,28 @@ export class PreviewEngine {
     return dev.logs[source].slice(-tailLines).join("\n");
   }
 
+  /**
+   * The `app` log on an Android device: logcat since the app was launched, filtered to its pids and
+   * to the system's crash lines about it, in the Mac's clock, headed by whether the process is
+   * running now. Facts only — whether the run passed is the caller's call.
+   */
+  async appLog(previewId: string, deviceId: string | undefined, tailLines = 200): Promise<string | null> {
+    const p = this.active(previewId);
+    if (!p) return null;
+    const dev = deviceId ? p.devices.find((d) => d.record.deviceId === deviceId) : p.devices[0];
+    if (!dev) return null;
+    if (dev.record.platform !== "android") {
+      throw new PreviewError("the `app` log is captured on Android devices only", "on iOS read source `build` or `stream`; the iOS app log is not captured yet");
+    }
+    const serial = dev.record.serial;
+    if (!serial || !dev.appPackage) throw new PreviewError("the app is not on this device yet, so it has no log", "wait for preview_status to report the device ready");
+    const offset = (await this.phones().clockOffsetMs(serial).catch(() => null)) ?? dev.clockOffsetMs ?? 0;
+    const app = this.phones().registeredApp(serial, dev.appPackage);
+    const { lines, pids } = await app.log(app.pkg, dev.launchedAt ?? Date.parse(p.record.createdAt), offset);
+    const fact = pids.length ? `process ${app.pkg}: running (pid ${pids.join(", ")})` : `process ${app.pkg}: NOT running`;
+    return [fact, ...lines.slice(-tailLines)].join("\n");
+  }
+
   /** The simulator UDID for a device (for the screenshot/ui tools). */
   udidFor(previewId: string, deviceId: string): string | null {
     const p = this.active(previewId);
@@ -2779,6 +3027,7 @@ export class PreviewEngine {
   async listDevices(): Promise<{
     ios: { runtimes: { version: string; name: string; models?: string[] }[]; models: string[] };
     android: { apiLevels: number[] };
+    physical: PhysicalListing;
     capacity: { inUse: number; max: number };
   }> {
     const [runtimes, deviceTypes] = await Promise.all([this.d.simctl.listRuntimes(), this.d.simctl.listDeviceTypes()]);
@@ -2801,8 +3050,96 @@ export class PreviewEngine {
         models: deviceTypes.map((d) => d.name),
       },
       android: { apiLevels },
+      physical: await this.listPhones(),
       capacity: { inUse, max: this.d.config.limits.maxTotalDevices },
     };
+  }
+
+  /**
+   * The phones plugged into this Mac that a preview could take: each is either targetable now, or
+   * names its one blocker and the action that clears it. A failed adb is said, not shown as "none".
+   */
+  async listPhones(): Promise<PhysicalListing> {
+    let phones;
+    let holds: PhoneHolds;
+    try {
+      phones = await this.phones().list();
+      holds = this.holds();
+    } catch (e) {
+      return { phones: [], unavailable: `could not list phones: ${e instanceof Error ? e.message : String(e)}` };
+    }
+    return {
+      phones: phones.map((info): PhoneListing => {
+        const base = { id: info.id, platform: "android" as const, ...(info.model ? { model: [info.manufacturer, info.model].filter(Boolean).join(" ") } : {}), ...(info.os ? { os: info.os } : {}) };
+        const blocked = usabilityBlocker(info) ?? this.phoneBusyBlocker(info.id, holds);
+        return blocked ? { ...base, targetable: false, ...blocked } : { ...base, targetable: true };
+      }),
+    };
+  }
+
+  private phoneBusyBlocker(serial: string, holds: PhoneHolds): { blocker: string; fix: string } | null {
+    const e = this.phoneBusy(serial, holds);
+    return e ? { blocker: e.message, fix: e.hint ?? "" } : null;
+  }
+
+  /**
+   * Turn `{physical: true}` into a serial: the phone this app's live preview already has, else the
+   * first targetable phone. A named serial is checked by startPreview itself.
+   */
+  async resolvePhoneRequests(app: App, devices: (DeviceRequest & { physical?: boolean })[]): Promise<DeviceRequest[]> {
+    if (!devices.some((d) => d.physical && !d.serial)) return devices.map(({ physical: _p, ...d }) => d);
+    const mine = new Set<string>();
+    for (const p of this.previews.values()) {
+      if (p.record.appId !== app.id || p.record.phase === "stopped" || p.record.phase === "failed") continue;
+      for (const d of p.devices) if (d.record.physical && d.record.serial) mine.add(d.record.serial);
+    }
+    const listing = await this.listPhones();
+    if (listing.unavailable) throw new PreviewError(listing.unavailable, "check that `adb devices` works on the deckhand Mac", "no_phone");
+    const taken = new Set(devices.flatMap((d) => (d.serial ? [d.serial] : [])));
+    const out: DeviceRequest[] = [];
+    for (const { physical, ...d } of devices) {
+      if (!physical || d.serial) {
+        out.push(d);
+        continue;
+      }
+      const pick = [...mine].find((s) => !taken.has(s)) ?? listing.phones.find((ph) => ph.targetable && !taken.has(ph.id))?.id;
+      if (!pick) {
+        const why = listing.phones.length
+          ? listing.phones.map((ph) => `${ph.id}${ph.model ? ` (${ph.model})` : ""}: ${ph.targetable ? "taken by this request" : `${ph.blocker} — ${ph.fix}`}`).join("; ")
+          : "no phone is plugged into this Mac (adb lists none)";
+        throw new PreviewError(`no free Android phone: ${why}`, "fix the blocker named above, or ask for an emulator instead", "no_phone");
+      }
+      taken.add(pick);
+      out.push({ ...d, platform: "android", serial: pick });
+    }
+    return out;
+  }
+
+  /**
+   * Ask adb, not the bookkeeping: a phone that left adb (unplugged, revoked, offline) ends its
+   * device with an error instead of a `ready` that no longer drives anything.
+   */
+  async checkPhones(): Promise<string[]> {
+    const lost: string[] = [];
+    for (const p of this.previews.values()) {
+      if (p.record.phase === "stopped" || p.record.phase === "stopping") continue;
+      for (const dev of p.devices) {
+        if (!dev.record.physical || !dev.record.serial || dev.record.phase === "failed") continue;
+        const state = await this.phones().adbState(dev.record.serial).catch(() => null);
+        if (state === null || state === "device") continue;
+        lost.push(dev.record.deviceId);
+        dev.abort.abort();
+        const stream = p.attached.get(dev.record.deviceId);
+        p.attached.delete(dev.record.deviceId);
+        void stream?.detach().catch(() => {});
+        dev.record.error = `phone ${dev.record.serial} left adb (${state === "missing" ? "unplugged, or USB debugging revoked" : `adb says "${state}"`})`;
+        dev.record.phase = "failed";
+        dev.record.detail = this.failureDetail(dev.record.error);
+        this.touch(p);
+        this.d.audit.record({ actor: "engine", tool: "device_failed", args: { preview: p.record.previewId, device: dev.record.deviceId }, result: "error", error: dev.record.error });
+      }
+    }
+    return lost;
   }
 
   /**
@@ -2865,6 +3202,8 @@ export class PreviewEngine {
       throw new PreviewError("describe/ui aren't supported for web previews", "open the share link in a browser to drive the web app");
     }
     if (dev.record.platform === "android") {
+      // A phone is driven over adb by its serial: SimDeck resolves only an AVD name.
+      if (dev.record.physical) return { platform: "android", udid: dev.record.serial! };
       // record.udid holds the AVD name for Android; SimDeck resolves the adb serial from it.
       if (!dev.record.udid) throw new PreviewError(`device ${deviceId} has no emulator yet`);
       return { platform: "android", udid: `android:${dev.record.udid}` };
@@ -2885,20 +3224,35 @@ export class PreviewEngine {
     return null;
   }
 
-  /** Accessibility tree for a device (SimDeck describe) — the agent's "eyes". */
-  describe(previewId: string, deviceId: string, opts: DescribeOptions = {}): Promise<unknown> {
-    return this.simdeckControl().describe(this.simdeckTarget(previewId, deviceId), opts);
+  /** SimDeck for simulators and emulators; adb for a phone, which SimDeck cannot address. */
+  private controlFor(previewId: string, deviceId: string): ControlBackend {
+    const dev = this.active(previewId)?.devices.find((d) => d.record.deviceId === deviceId);
+    return dev?.record.physical ? this.phoneControl() : this.simdeckControl();
   }
 
-  /** Drive one UI action on a device (SimDeck action) — the agent's "hands". */
+  /** Accessibility tree for a device — the agent's "eyes". */
+  describe(previewId: string, deviceId: string, opts: DescribeOptions = {}): Promise<unknown> {
+    const target = this.simdeckTarget(previewId, deviceId);
+    return this.controlFor(previewId, deviceId).describe(target, opts);
+  }
+
+  /** Drive one UI action on a device — the agent's "hands". */
   ui(previewId: string, deviceId: string, action: UiAction): Promise<unknown> {
-    return this.simdeckControl().action(this.simdeckTarget(previewId, deviceId), action);
+    const target = this.simdeckTarget(previewId, deviceId);
+    return this.controlFor(previewId, deviceId).action(target, action);
   }
 
   /** Where the app's own files are for this preview: the worktree once prepared, else the registered path. */
   sourceDirOf(previewId: string): string | undefined {
     const p = this.active(previewId);
     return p ? (p.sourceDir ?? p.app.path) : undefined;
+  }
+
+  /** A device's platform without resolving a control target; null when there is no such device. */
+  platformOfDevice(previewId: string, deviceId: string | undefined): Platform | null {
+    const p = this.previews.get(previewId);
+    const dev = deviceId ? p?.devices.find((d) => d.record.deviceId === deviceId) : p?.devices[0];
+    return dev?.record.platform ?? null;
   }
 
   platformOf(previewId: string, deviceId: string): "ios" | "android" {
@@ -3355,6 +3709,7 @@ export class PreviewEngine {
       await this.stopPreview(id).catch(() => {});
       stopped.push(id);
     }
+    await this.checkPhones().catch(() => []);
     await this.reassertAndroidReverse();
     // Teardown keeps the checkout (it is the next build's warm cache), so this
     // sweep is the only thing that ever gives that disk back on a server that
@@ -3377,8 +3732,10 @@ export class PreviewEngine {
       const port = this.d.metro.portForApp(p.app.id, p.sourceDir ?? p.record.worktreePath);
       if (!port) continue;
       for (const dev of p.devices.values()) {
-        if (dev.record.platform !== "android" || !dev.androidPort) continue;
-        await this.reverseMetroPorts(serialForPort(dev.androidPort), port).catch(() => {});
+        // Keyed on the serial the device has, emulator or phone — not on a console port only an emulator has.
+        if (dev.record.platform !== "android" || dev.record.phase === "failed") continue;
+        const serial = dev.record.serial ?? (dev.androidPort ? serialForPort(dev.androidPort) : undefined);
+        if (serial) await this.reverseMetroPorts(dev, serial, port).catch(() => {});
       }
     }
   }
@@ -3391,8 +3748,13 @@ export class PreviewEngine {
    * on the host. 8081 is the debug build's compiled-in fallback, and pointing it
    * here too is what stops another project's `expo start` from owning it.
    */
-  private async reverseMetroPorts(serial: string, metroPort: number): Promise<void> {
-    if (metroPort !== METRO_PORT) await this.android().reversePort(serial, metroPort, metroPort);
+  private async reverseMetroPorts(dev: LiveDevice, serial: string, metroPort: number): Promise<void> {
+    const reversed = (dev.reversed ??= new Set());
+    if (metroPort !== METRO_PORT) {
+      reversed.add(metroPort);
+      await this.android().reversePort(serial, metroPort, metroPort);
+    }
+    reversed.add(METRO_PORT);
     await this.android().reversePort(serial, METRO_PORT, metroPort);
   }
 
@@ -3473,6 +3835,7 @@ export class PreviewEngine {
     for (const p of this.previews.values()) {
       if (p.record.phase === "stopped") continue;
       for (const dev of p.devices) {
+        if (dev.record.physical) continue;
         const booted = Boolean(dev.record.udid ?? dev.record.serial ?? dev.record.webPort);
         // A device still working toward ready has a slot reserved for it.
         if (booted || (dev.record.phase !== "failed" && p.record.phase !== "failed")) n++;
@@ -3502,6 +3865,12 @@ export class PreviewEngine {
         dev.record.webPort = undefined;
         onReleased?.();
         continue; // no simulator/emulator to tear down; the dev process is stopped by the caller
+      }
+      if (dev.record.physical) {
+        // Borrowed hardware: stop driving it. The app is stopped and deckhand's own reverse
+        // rules go; the phone is never shut down, wiped or reaped, and is not in the capacity tally.
+        await this.releasePhone(dev);
+        continue;
       }
       // A pooled device is released, not destroyed: the next preview of the same
       // shape boots it again instead of paying for a create (and, on Android, a
@@ -3542,6 +3911,19 @@ export class PreviewEngine {
       onReleased?.();
     }
     await this.trimPool();
+  }
+
+  private async releasePhone(dev: LiveDevice): Promise<void> {
+    const serial = dev.record.serial;
+    if (serial) {
+      if (dev.appPackage) {
+        const app = this.phones().registeredApp(serial, dev.appPackage);
+        await app.forceStop(app.pkg).catch(() => {});
+      }
+      for (const port of dev.reversed ?? []) await this.phones().removeReverse(serial, port);
+    }
+    dev.reversed = undefined;
+    // The serial stays on the record (a phone has no handle to lose); the preview leaving the map is what frees it.
   }
 
   /**

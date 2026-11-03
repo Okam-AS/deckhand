@@ -894,6 +894,11 @@ change eases in/out — nothing snaps.
 - `deckhand serve` — run the server (what launchd invokes).
 - `deckhand token add|rm|list|url`, `deckhand app add|list`,
   `deckhand env set <appId> KEY=VALUE`.
+- `deckhand phone list|hold|release` — the Android phones plugged into this Mac and who has
+  them. `phone hold <id> [--who <name>]` takes a phone off the market: a held phone is never handed
+  to a preview until `phone release <id>`. Holds live in `phone-holds.json` under the deckhand home,
+  apart from `state.json`, because the CLI writes them while the server runs and the server
+  rewrites `state.json` from memory; the server reads the file on every claim.
 - `deckhand secret set|rm typesafe` — the TypeSafe key `navigate` needs, from stdin or
   `TYPESAFE_API_KEY`, never argv. Setting it is the consent: `navigate` then sends screens from
   every app it drives to TypeSafe, and `deckhand doctor` prints a `navigate egress` warning line.

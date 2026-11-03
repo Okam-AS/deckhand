@@ -196,6 +196,14 @@ describe("buildPlan — android", () => {
     assert.match(script, /npx expo run:android --device "\$_avd" --no-bundler/);
   });
 
+  it("expo on a phone names it by the model adb lists, since expo matches device names, not serials", () => {
+    const plan = buildPlan({ ...androidInput, udid: "RF8N30YRFKY", type: "expo" });
+    const script = (plan[1]!.run as { script: string }).script;
+    assert.doesNotMatch(script, /emu avd name/);
+    assert.match(script, /adb devices -l \| awk '\$1 == "RF8N30YRFKY"/);
+    assert.match(script, /npx expo run:android --device "\$_name" --no-bundler/);
+  });
+
   it("bare react-native android uses run-android --deviceId", () => {
     const plan = buildPlan({ ...androidInput, type: "react-native" });
     assert.deepEqual((plan[1]!.run as { args: string[] }).args, [

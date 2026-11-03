@@ -349,6 +349,17 @@ const expoAndroidRun = (serial: string): string =>
     `npx expo run:android --device "$_avd" --no-bundler`,
   ].join("\n");
 
+/**
+ * A phone's expo device name is the `model:` adb lists for it (`SM_G980F`), not its serial.
+ * Two phones of one model are the same name to expo, which installs on the first one adb lists.
+ */
+const expoPhoneRun = (serial: string): string =>
+  [
+    `_name=$(adb devices -l | awk '$1 == "${serial}" { for (i = 2; i <= NF; i++) if ($i ~ /^model:/) { sub(/^model:/, "", $i); print $i } }')`,
+    `[ -n "$_name" ] || { echo "adb lists no model for ${serial}, and expo run:android names a phone by its model" >&2; exit 1; }`,
+    `npx expo run:android --device "$_name" --no-bundler`,
+  ].join("\n");
+
 function androidPlan(i: BuildPlanInput): CommandStep[] {
   // `i.udid` carries the adb serial for Android.
   const serial = i.udid;
@@ -356,7 +367,7 @@ function androidPlan(i: BuildPlanInput): CommandStep[] {
     if (i.type === "expo") {
       return {
         name: "build",
-        run: { kind: "shell", script: expoAndroidRun(serial) },
+        run: { kind: "shell", script: /^emulator-\d+$/.test(serial) ? expoAndroidRun(serial) : expoPhoneRun(serial) },
         cwd: i.worktreePath,
         env: i.appEnv,
         idleTimeoutMs: GENERAL_IDLE_MS,
