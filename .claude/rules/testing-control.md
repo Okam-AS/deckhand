@@ -33,6 +33,15 @@ Hardest rules, each with the check that enforces it:
   "sends no credential to SimDeck" (the same recursive source scan, so a path nobody exercises is
   still covered).
 
+**A phone is not SimDeck's.** SimDeck 0.2.0 resolves Android only as `android:<AVD name>` and
+answers a phone's serial with "Android emulator `<serial>` is not running", so `describe`/`ui` on a
+phone go to `adbControl.ts` behind the same `ControlBackend` interface, returning the tree in the
+shape `screen.ts` reads. Its rules: the dump goes to stdout so nothing is left on the phone;
+`input text` is ASCII-only, so non-ASCII is a 422 naming the characters, never a mangled string;
+nothing that changes the phone (dark mode, power, volume) is pressed; and `openUrl` is addressed to
+the registered app only. → `adbControl.test.ts` "refuses non-ASCII text with a clear error and
+types nothing", "never changes a setting: no dark-mode toggle, no power or volume button"
+
 Two facts about the daemon that no check in this repo can see, because it is not our process:
 
 - **Never start SimDeck with `--bind 0.0.0.0`.** It binds loopback by default, and a LAN mode

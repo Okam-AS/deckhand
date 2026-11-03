@@ -81,9 +81,18 @@ PLAN describes the architecture. The invariants that bind every change:
   statement plus four health questions. It returns probabilities and pass/fail/unsure,
   never a finding — the caller confirms with a screenshot. Keep health questions narrow:
   one broad "looks broken?" read a normal list as broken.
-- **Physical devices are OUT** on both platforms; PLAN §2 says why. **Three known gaps, so
-  do not imply otherwise:** the local (`path`) livesync build path is unvalidated on-device,
-  the `metro`/`app` `logs` sources are accepted and capture nothing, and PLAN §11 item 7's
+- **Android phones are IN, iPhones are not yet** (PLAN §2). A phone plugged in by cable is
+  borrowed hardware: waited for, never booted, wiped, killed or reaped, never a setting changed,
+  one live preview at a time (`device_busy`), and deckhand touches only the preview's registered
+  app on it — every install, uninstall, `pm clear` and force-stop goes through `RegisteredApp`
+  (`devices/androidPhone.ts`), whose guard refuses any other package. `describe`/`ui` on a phone
+  go over adb (`testing/adbControl.ts`): SimDeck addresses Android only by AVD name. **Never start
+  a second `deckhand serve` to try a phone, even under a scratch `DECKHAND_HOME`:** its boot reap
+  treats every `deckhand-*` simulator and `deckhand_*` AVD on the Mac as an orphan and deletes the
+  live server's devices. Drive a `PreviewEngine` from a script, or `deckhand doctor --device-only`.
+  **Three known gaps, so do not imply otherwise:** the local (`path`) livesync build path is
+  unvalidated on-device, the `metro` `logs` source (and `app` on iOS) is accepted and captures
+  nothing, and PLAN §11 item 7's
   host hygiene (dedicated macOS user, no personal credentials, FileVault) is stated in PLAN
   and in no runbook — nothing tells an operator how to set it up or check it holds.
 
@@ -308,6 +317,7 @@ several minutes. Three capabilities on **both** platforms, as six independent ch
 |---|---|---|---|
 | **ios** | `simctl create` + boot | serve-sim first frame | accessibility tree |
 | **android** | AVD create + emulator boot | adb helper first frame | `uiautomator dump` |
+| **android phone** | free phone awake + unlocked | first frame, and its codec | `uiautomator dump` over adb |
 
 Separate on purpose: "it booted" must never stand in for "it streamed" — a device that
 comes up and never produces a frame is the most common failure here, and it was invisible
@@ -317,7 +327,9 @@ while one check covered both.
 pasting this output.** Not "tests pass" — that is `npm run ci`, which never touches a
 device. If you cannot run it, say which of the six is unverified and who has to run it.
 `?` is an honest answer; a tick you did not earn is not. It does NOT cover **input
-injection**: `describe` proves the control path can READ, nothing more.
+injection** on simulators and emulators: `describe` proves the control path can READ, nothing
+more. The phone column has a fourth check, **input** (a swipe opens the notification shade, back
+closes it), because a phone is where input fails silently; with no free phone all four print `?`.
 
 ## Waiting for a preview to build
 

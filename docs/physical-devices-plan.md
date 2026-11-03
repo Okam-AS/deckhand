@@ -1,6 +1,10 @@
 # Physical devices and prebuilt EAS builds
 
-**Proposed, not built.** This document asks to reverse two locked decisions in PLAN §2,
+**Status (2026-11-03): item 2 of the landing order, physical Android, is built** (see
+"Landing order" below for what it settled and where it differs from this plan). Items 3–5 —
+the EAS source and everything iPhone — are proposed, not built.
+
+This document asks to reverse two locked decisions in PLAN §2,
 "NO physical devices, either platform" and "Build strategy: … No CI artifacts", and lays out
 how deckhand would then drive phones plugged into the Mac by cable and install builds that
 EAS already made. Nothing here exists yet. Tool parameters, config keys and file names
@@ -259,9 +263,25 @@ in this plan is "tested" without that output pasted from a run with a phone atta
 One PR at a time, each landed before the next is opened (AGENTS.md):
 
 1. **This document**, for the decisions D1–D7.
-2. **Physical Android:** discovery, tenancy, lifecycle branches, control (D6), streaming
-   ownership fix, the `app` log source. Built locally from a checkout, installed with
-   `adb install -r`.
+2. **Physical Android — built.** Discovery, tenancy and holds, lifecycle branches, control,
+   the streaming ownership fix, the `app` log source, the phone column in `test:device`. What it
+   settled, and where it differs from the text above:
+   - **D6:** SimDeck cannot address a phone (it answers its serial with "Android emulator
+     `<serial>` is not running"), so control is adb behind `ControlBackend`.
+   - **D4 is reversed for the registered app, by the operator's rule:** on a signature mismatch
+     or downgrade, deckhand uninstalls the preview's registered app and installs the build, and
+     the `build` log records what it removed. It never touches another package
+     (`RegisteredApp`). `start_preview` also takes `freshApp: "data" | "reinstall"`.
+   - **Holds are not in `state.json`** but in `phone-holds.json`: the CLI writes holds while the
+     server runs, and the server rewrites `state.json` from memory, which would drop them.
+     Preview tenancy does live in `state.json`, as the persisted live previews.
+   - **D5** is enforced as: a phone preview without `share` is refused with `needs_pin`; public
+     only when the caller passes it explicitly, and the reply then warns it drives a whole phone.
+   - The build is the app's own tool on the phone (`expo run:android --device <adb model>`),
+     not `adb install -r`; deckhand's own install is the conflict path.
+   - Found on hardware: Samsung's Android 13 `screenrecord` v1.3 refuses an unlimited recording,
+     `wm size` reports an override size that `input` uses, and `adb exec-out` quotes each of
+     several arguments.
 3. **EAS source:** Android `.apk` and simulator `.tar.gz` first, then `.ipa` vetting. The
    token noun for `deckhand secret`, the download cache, launch arguments.
 4. **Physical iPhone control:** WDA placement, loopback launcher and `iproxy`, `doctor`
