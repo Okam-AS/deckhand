@@ -308,6 +308,15 @@ export class Simctl {
    * purpose — a user meets that too, and granting it silently would have every agent
    * testing a flow nobody ships.
    *
+   * WHERE they are written matters. `defaults write <bundle-id>` inside the simulator writes the
+   * device's shared preferences, but an installed app reads its own data container's
+   * Library/Preferences/<bundle-id>.plist — so that write alone never reached the app, and the
+   * dev menu kept opening on every fresh install (seen 2026-11-03 on Uno-X, expo-dev-menu
+   * 57.0.20: the shared domain held all three keys off, the container none of them). The
+   * container plist is written by path, still through the simulator's own `defaults`, so its
+   * preferences daemon takes the change instead of overwriting it from its cache. The shared
+   * write stays for an app that is not installed yet.
+   *
    * Best-effort: a preview must not fail because a preference did not write.
    */
   async silenceDevOverlays(udid: string, bundleId: string): Promise<void> {
@@ -316,13 +325,22 @@ export class Simctl {
       ["EXDevMenuIsOnboardingFinished", "YES"],
       ["EXDevMenuShowFloatingActionButton", "NO"],
     ];
-    for (const [key, value] of prefs) {
-      await this.run(["spawn", udid, "defaults", "write", bundleId, key, "-bool", value]).catch(() => undefined);
+    const data = await this.run(["get_app_container", udid, bundleId, "data"]).catch(() => null);
+    const container = data && data.code === 0 ? data.stdout.toString().trim() : "";
+    const domains = [bundleId, ...(container ? [`${container}/Library/Preferences/${bundleId}`] : [])];
+    for (const domain of domains) {
+      for (const [key, value] of prefs) {
+        await this.run(["spawn", udid, "defaults", "write", domain, key, "-bool", value]).catch(() => undefined);
+      }
     }
   }
 
-  async launch(udid: string, bundleId: string): Promise<void> {
-    const res = await this.run(["launch", udid, bundleId]);
+  /**
+   * `args` go to the app's process (after the bundle id); `terminateRunning` restarts it if it is
+   * already up, so the launch is a cold start that reads its preferences afresh.
+   */
+  async launch(udid: string, bundleId: string, opts: { args?: string[]; terminateRunning?: boolean } = {}): Promise<void> {
+    const res = await this.run(["launch", ...(opts.terminateRunning ? ["--terminate-running-process"] : []), udid, bundleId, ...(opts.args ?? [])]);
     if (res.code !== 0) throw new SimctlError(`simctl launch failed: ${res.stderr.trim().slice(0, 200)}`);
   }
 

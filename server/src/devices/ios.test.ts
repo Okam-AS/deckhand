@@ -227,6 +227,48 @@ describe("silencing the dev-build overlays", () => {
   });
 });
 
+describe("Simctl dev-overlay preferences reach the app's own container", () => {
+  it("writes each key to the shared domain AND, by path, to the installed app's data-container plist", async () => {
+    const calls: string[][] = [];
+    const container = "/Users/x/Library/Developer/CoreSimulator/Devices/U/data/Containers/Data/Application/A";
+    await new Simctl(async (_cmd: string, args: string[]) => {
+      calls.push(args);
+      const out = args[1] === "get_app_container" ? `${container}\n` : "";
+      return { code: 0, stdout: Buffer.from(out), stderr: "" };
+    }).silenceDevOverlays("UDID-1", "com.acme.app");
+    assert.deepEqual(calls.find((c) => c[1] === "get_app_container"), ["simctl", "get_app_container", "UDID-1", "com.acme.app", "data"]);
+    const writes = calls.filter((c) => c[1] === "spawn");
+    assert.equal(writes.length, 6);
+    const inContainer = writes.filter((c) => c[5] === `${container}/Library/Preferences/com.acme.app`);
+    assert.deepEqual(inContainer.map((c) => [c[6], c[8]]), [["EXDevMenuShowsAtLaunch", "NO"], ["EXDevMenuIsOnboardingFinished", "YES"], ["EXDevMenuShowFloatingActionButton", "NO"]]);
+  });
+
+  it("still writes the shared domain when the app has no container yet", async () => {
+    const calls: string[][] = [];
+    await new Simctl(async (_cmd: string, args: string[]) => {
+      calls.push(args);
+      return { code: args[1] === "get_app_container" ? 2 : 0, stdout: Buffer.from(""), stderr: "" };
+    }).silenceDevOverlays("UDID-1", "com.acme.app");
+    assert.equal(calls.filter((c) => c[1] === "spawn").length, 3);
+  });
+});
+
+describe("Simctl launch", () => {
+  it("restarts the app and passes arguments to its process after the bundle id", async () => {
+    const calls: string[][] = [];
+    const simctl = new Simctl(async (_cmd: string, args: string[]) => {
+      calls.push(args);
+      return { code: 0, stdout: Buffer.from(""), stderr: "" };
+    });
+    await simctl.launch("UDID-1", "com.acme.app", { terminateRunning: true, args: ["--initialUrl", "http://127.0.0.1:8081"] });
+    await simctl.launch("UDID-1", "com.acme.app");
+    assert.deepEqual(calls, [
+      ["simctl", "launch", "--terminate-running-process", "UDID-1", "com.acme.app", "--initialUrl", "http://127.0.0.1:8081"],
+      ["simctl", "launch", "UDID-1", "com.acme.app"],
+    ]);
+  });
+});
+
 describe("Simctl install", () => {
   it("is bounded by a timeout", async () => {
     const seen: Record<string, number | undefined> = {};

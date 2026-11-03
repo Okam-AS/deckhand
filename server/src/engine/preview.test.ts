@@ -158,10 +158,12 @@ function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (
     install: async (udid: string, p: string) => {
       simctlCalls.push(`install ${udid} ${p}`);
     },
-    launch: async (_udid: string, b: string) => {
-      simctlCalls.push(`launch ${b}`);
+    launch: async (_udid: string, b: string, opts?: { args?: string[]; terminateRunning?: boolean }) => {
+      simctlCalls.push(`launch ${b}${opts?.terminateRunning ? " (restart)" : ""}${opts?.args?.length ? ` ${opts.args.join(" ")}` : ""}`);
     },
-    openUrl: async () => {},
+    openUrl: async (_udid: string, url: string) => {
+      simctlCalls.push(`openUrl ${url}`);
+    },
     shutdown: async (u: string) => {
       simctlCalls.push(`shutdown ${u}`);
     },

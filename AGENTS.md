@@ -267,7 +267,10 @@ instead of respected.
 
 An Expo dev build registers three launch overlays as UserDefaults *defaults*
 (`EXDevMenuShowsAtLaunch`, `EXDevMenuIsOnboardingFinished`,
-`EXDevMenuShowFloatingActionButton`); deckhand writes all three off before launch. That
+`EXDevMenuShowFloatingActionButton`); deckhand writes all three off before launch — into
+the app's own data-container plist, by path, because that is what an installed app reads
+(the simulator's shared domain alone never reached it) — and then cold-starts the app with
+`--initialUrl <metro>` rather than a deep link. That
 needs no detection — on a non-Expo app they are unread keys in its own preference domain,
 and writing them twice is the same as once — so do not add an "is it Expo, is it already
 off" check.
