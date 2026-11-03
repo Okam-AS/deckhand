@@ -69,6 +69,8 @@ function escape(s: string): string {
 
 export interface IphoneSyslogOptions {
   udid: string;
+  /** The app's process name (CFBundleExecutable): its lines and the crash reporter's get their own buffer. */
+  appProcess?: string;
   maxLines?: number;
   spawnImpl?: typeof spawn;
   now?: () => Date;
@@ -81,6 +83,10 @@ export class IphoneSyslog {
   private readonly now: () => Date;
   private child: ChildProcess | undefined;
   private buffer: SyslogLine[] = [];
+  /** A phone writes thousands of lines a second; without this the app's own lines are evicted within seconds. */
+  private appBuffer: SyslogLine[] = [];
+  private appProcess: string | undefined;
+  private last: SyslogLine | undefined;
   private rest = "";
   /** Set when the stream ended without stop(): what it holds stops at that moment. */
   ended: string | undefined;
@@ -88,6 +94,7 @@ export class IphoneSyslog {
   constructor(opts: IphoneSyslogOptions) {
     this.udid = opts.udid;
     this.maxLines = opts.maxLines ?? 20_000;
+    this.appProcess = opts.appProcess;
     this.spawnImpl = opts.spawnImpl ?? spawn;
     this.now = opts.now ?? (() => new Date());
   }
@@ -127,13 +134,27 @@ export class IphoneSyslog {
     if (cut < 0) return;
     const text = this.rest.slice(0, cut);
     this.rest = this.rest.slice(cut + 1);
-    this.buffer.push(...parseIdeviceSyslog(text, this.now(), this.buffer.at(-1)));
+    const parsed = parseIdeviceSyslog(text, this.now(), this.last);
+    if (!parsed.length) return;
+    this.last = parsed.at(-1);
+    this.buffer.push(...parsed);
     if (this.buffer.length > this.maxLines) this.buffer.splice(0, this.buffer.length - this.maxLines);
+    const own = parsed.filter((l) => l.process === this.appProcess || REPORTERS.test(l.process));
+    if (!own.length) return;
+    this.appBuffer.push(...own);
+    if (this.appBuffer.length > this.maxLines) this.appBuffer.splice(0, this.appBuffer.length - this.maxLines);
   }
 
   /** Lines held now, optionally since a time and from one process (the app's executable name). */
   lines(filter: { since?: Date; process?: string } = {}): SyslogLine[] {
-    return this.buffer.filter((l) => (!filter.since || l.at >= filter.since) && (!filter.process || l.process === filter.process));
+    const from = filter.process && filter.process === this.appProcess ? this.appBuffer : this.buffer;
+    return from.filter((l) => (!filter.since || l.at >= filter.since) && (!filter.process || l.process === filter.process));
+  }
+
+  /** Crash markers for the app since `since`, read from the app's own buffer. */
+  crashes(bundleId: string, since?: Date): SyslogLine[] {
+    if (!this.appProcess) return [];
+    return crashMarkers(this.appBuffer.filter((l) => !since || l.at >= since), { process: this.appProcess, bundleId });
   }
 
   stop(): void {

@@ -115,6 +115,23 @@ describe("the syslog stream", () => {
     assert.deepEqual(log.lines().map((l) => l.process), ["ReportCrash", "runningboardd"]);
   });
 
+  it("keeps the app's lines and crash reports when the rest of the phone floods the buffer", async () => {
+    const spawned: FakeChild[] = [];
+    const impl = (() => {
+      const c = new FakeChild();
+      spawned.push(c);
+      return c as unknown as ChildProcess;
+    }) as unknown as typeof spawn;
+    const log = new IphoneSyslog({ udid: "U1", appProcess: "Demo", maxLines: 10, spawnImpl: impl, now: () => now });
+    log.start();
+    spawned[0]!.stdout.write(`${CRASH}\n`);
+    spawned[0]!.stdout.write(`${Array.from({ length: 50 }, (_, i) => `Oct 23 18:03:00.${String(i).padStart(6, "0")} kernel[0] <Debug>: noise ${i}`).join("\n")}\n`);
+    await new Promise((r) => setImmediate(r));
+    assert.equal(log.lines().length, 10);
+    assert.equal(log.lines({ process: "Demo" }).length, 3);
+    assert.deepEqual(log.crashes("com.example.preview").map((l) => l.process), ["Demo", "ReportCrash"]);
+  });
+
   it("says when the stream ended by itself, and not when it was stopped", () => {
     const a = stream();
     a.log.start();
