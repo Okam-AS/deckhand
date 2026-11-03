@@ -1,3 +1,4 @@
+import { discoverIphones, type PhysicalIphone } from "../devices/iphoneDiscovery.ts";
 import { readFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { AndroidPhones, usabilityBlocker, type PhoneInfo } from "../devices/androidPhone.ts";
@@ -32,17 +33,18 @@ export function releasePhone(holds: PhoneHolds, id: string): { holds: PhoneHolds
   return { holds: rest, said: `${id} is released: previews may use it again` };
 }
 
-export function formatPhones(phones: PhoneInfo[], holds: PhoneHolds, tenants: Record<string, string>): string {
-  const ids = new Set([...phones.map((p) => p.id), ...Object.keys(holds)]);
-  if (!ids.size) return "no phones plugged in (adb lists none) and none held";
+export function formatPhones(phones: PhoneInfo[], holds: PhoneHolds, tenants: Record<string, string>, iphones: PhysicalIphone[] = []): string {
+  const ids = new Set([...phones.map((p) => p.id), ...iphones.map((p) => p.udid), ...Object.keys(holds)]);
+  if (!ids.size) return "no phones plugged in (adb and devicectl list none) and none held";
   return [...ids]
     .map((id) => {
       const p = phones.find((x) => x.id === id);
-      const name = p ? [p.manufacturer, p.model, p.os].filter(Boolean).join(" ") : "not plugged in";
+      const i = iphones.find((x) => x.udid === id);
+      const name = p ? [p.manufacturer, p.model, p.os].filter(Boolean).join(" ") : i ? [i.model ?? i.name, i.osVersion ? `iOS ${i.osVersion}` : null].filter(Boolean).join(" ") : "not plugged in";
       const hold = holds[id] ? `held by ${holds[id].who} since ${holds[id].since}` : null;
       const tenant = tenants[id] ? `in preview ${tenants[id]}` : null;
       const blocked = p ? usabilityBlocker(p) : null;
-      const status = [hold, tenant, blocked ? `${blocked.blocker} — ${blocked.fix}` : null].filter(Boolean).join("; ") || "free";
+      const status = [hold, tenant, blocked ? `${blocked.blocker} — ${blocked.fix}` : null, ...(i?.blockers ?? [])].filter(Boolean).join("; ") || "free";
       return `${id}  ${name}  ${status}`;
     })
     .join("\n");
@@ -58,8 +60,8 @@ function readState(): PersistedState | null {
 
 export async function cmdPhone(sub: string | undefined, id: string | undefined, who: string | undefined): Promise<string> {
   if (sub === "list" || sub === undefined) {
-    const phones = await new AndroidPhones().list();
-    return formatPhones(phones, loadPhoneHolds(), phoneTenants(readState()));
+    const [phones, iphones] = await Promise.all([new AndroidPhones().list().catch(() => []), discoverIphones().catch(() => [])]);
+    return formatPhones(phones, loadPhoneHolds(), phoneTenants(readState()), iphones);
   }
   if (!id || !/^[A-Za-z0-9._:-]{1,64}$/.test(id)) throw new Error(`usage: deckhand phone ${sub === "release" ? "release <id>" : "hold <id> [--who <name>]"} — the id is the serial \`deckhand phone list\` shows`);
   if (sub === "hold") {

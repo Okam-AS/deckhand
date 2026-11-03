@@ -4,6 +4,10 @@ import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  checkWda,
+  checkWifiExposure,
+  pickSmokeIphone,
+  unknownIphoneChecks,
   DOCTOR_AVD_NAME,
   DOCTOR_SIM_NAME,
   DOCTOR_SMOKE_SERIAL,
@@ -495,5 +499,41 @@ describe("the expo token check", () => {
     assert.equal(c.warn, true);
     assert.match(c.detail ?? "", /refused.*401/);
     assert.ok(!formatChecks([c]).includes(TOKEN));
+  });
+});
+
+describe("the iPhone checks", () => {
+  const now = new Date("2026-11-03T12:00:00Z");
+  const ip = (udid: string, blockers: string[] = []) => ({ udid, name: "QA", model: "iPhone 15", osVersion: "27.0.1", blockers });
+  const wda = { expires: "2027-10-23T14:18:08Z", provisionedDevices: ["00008120-00000000000000AA"], provisionsAllDevices: false };
+
+  it("reports WDA's expiry and the cabled UDIDs its profile does not list, and needs no WDA without an iPhone", () => {
+    assert.equal(checkWda(null, [], "/h/wda/Products", now).skipped, true);
+    assert.equal(checkWda(null, [ip("00008120-00000000000000AA")], "/h/wda/Products", now).ok, false);
+    const ok = checkWda(wda, [ip("00008120-00000000000000aa")], "/h/wda/Products", now);
+    assert.equal(ok.ok, true);
+    assert.match(ok.detail ?? "", /expires 2027-10-23 \(354 days\)/);
+    const missing = checkWda(wda, [ip("00008120-0000000000000BBB")], "/h/wda/Products", now);
+    assert.equal(missing.ok, false);
+    assert.match(missing.detail ?? "", /does NOT list cabled 00008120-0000000000000BBB/);
+    assert.equal(checkWda({ ...wda, expires: "2026-11-20T00:00:00Z" }, [], "/h", now).warn, true);
+    assert.match(checkWda({ ...wda, expires: "2026-01-01T00:00:00Z" }, [], "/h", now).detail ?? "", /EXPIRED/);
+  });
+
+  it("calls Wi-Fi exposure safe only on a refusal, and says can't tell otherwise", () => {
+    assert.equal(checkWifiExposure("U", { verdict: "exposed", ip: "10.0.0.2", ports: { 8100: "exposed" } }).ok, false);
+    assert.equal(checkWifiExposure("U", { verdict: "not-exposed", ip: "10.0.0.2", ports: { 8100: "refused", 9100: "refused" } }).ok, true);
+    const unsure = checkWifiExposure("U", { verdict: "cant-tell", ip: "10.0.0.2", ports: { 8100: "cant-tell" } });
+    assert.deepEqual([unsure.ok, unsure.warn], [true, true]);
+    assert.match(unsure.detail ?? "", /can't tell/);
+  });
+
+  it("prints ? for every iPhone capability with the reason when no iPhone can be tested, and picks only a free one", () => {
+    assert.deepEqual(formatChecks(unknownIphoneChecks("no iPhone cabled")).split("\n"), ["attach", "stream", "describe", "input"].map((c) => `? smoke iphone: ${c} — no iPhone cabled`));
+    assert.equal(deviceGateExit([...bothPlatforms(), ...unknownIphoneChecks("x")]).code, 0);
+    const blocked = ip("B", ["WDA could not start: someone at the phone must approve the Automation Mode prompt"]);
+    assert.match(pickSmokeIphone([blocked], {}, {}).why, /Automation Mode/);
+    assert.equal(pickSmokeIphone([ip("A"), ip("C")], { A: { who: "dana", since: "t" } }, {}).phone?.udid, "C");
+    assert.equal(pickSmokeIphone([ip("A")], {}, { A: "pv1" }).phone, null);
   });
 });

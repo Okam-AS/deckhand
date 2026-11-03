@@ -32,6 +32,15 @@ describe("deckhand phone", () => {
     assert.match(out, /^C {2}not plugged in {2}held by dana/m);
   });
 
+  it("lists iPhones beside Android phones, with discovery's blockers", () => {
+    const out = formatPhones([], {}, {}, [
+      { udid: "00008120-00000000000000AA", name: "QA", model: "iPhone 15", osVersion: "27.0.1", blockers: [] },
+      { udid: "00008120-0000000000000BBB", name: "B", model: null, osVersion: null, blockers: ["no WDA installed: copy a WebDriverAgent Products folder"] },
+    ]);
+    assert.match(out, /^00008120-00000000000000AA {2}iPhone 15 iOS 27\.0\.1 {2}free$/m);
+    assert.match(out, /^00008120-0000000000000BBB {2}B {2}no WDA installed/m);
+  });
+
   it("reads which preview drives a phone from state.json, ignoring stopped previews", () => {
     const dev = (serial: string) => ({ deviceId: "android-0", platform: "android" as const, label: "x", serial, physical: true as const, phase: "ready" as const });
     const base = { shareId: "s", appId: "a", ref: "local", source: "local" as const, createdAt: "", updatedAt: "", passwordProtected: true };
