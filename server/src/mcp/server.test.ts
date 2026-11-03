@@ -1833,6 +1833,20 @@ describe("navigate (server-side drive loop)", () => {
     }
   });
 
+  it("lists check beside navigate once a key is configured, and names it in the guide", async () => {
+    const admin = await client(ADMIN);
+    try {
+      jevAccess = scriptedJev().access;
+      assert.ok((await admin.listTools()).tools.some((t) => t.name === "check"));
+      const guide = parse(await admin.callTool({ name: "get_guide", arguments: {} }));
+      assert.ok((guide.guide as string[]).some((l) => /`check`/.test(l)), "get_guide names check");
+      jevAccess = { ok: false, code: "navigate_disabled", message: "navigate is off", hint: "deckhand secret set typesafe" };
+      assert.ok(!(await admin.listTools()).tools.some((t) => t.name === "check"), "no key, no check");
+    } finally {
+      await admin.close();
+    }
+  });
+
   it("is listed once a key is configured", async () => {
     const admin = await client(ADMIN);
     try {

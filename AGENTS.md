@@ -76,6 +76,11 @@ PLAN describes the architecture. The invariants that bind every change:
   on an agent's say-so, and only on a machine whose apps show test data. What is sent is minimised in
   `navigate/screen.ts`; a change there is a privacy change, and `navigate/egress.test.ts` is its
   guardrail.
+- **`check` is navigate's verifying half and exists under the same key**: one Jev request
+  with the screenshot (and a reference device's, for parity), one yes/no per caller
+  statement plus four health questions. It returns probabilities and pass/fail/unsure,
+  never a finding — the caller confirms with a screenshot. Keep health questions narrow:
+  one broad "looks broken?" read a normal list as broken.
 - **Physical devices are OUT** on both platforms; PLAN §2 says why. **Three known gaps, so
   do not imply otherwise:** the local (`path`) livesync build path is unvalidated on-device,
   the `metro`/`app` `logs` sources are accepted and capture nothing, and PLAN §11 item 7's

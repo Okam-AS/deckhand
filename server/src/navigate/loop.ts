@@ -391,7 +391,7 @@ export function sameScreen(a: Buffer, b: Buffer, ratio = STILL_RATIO): boolean {
  * row — a push transition starts after the tap returns, so two frames grabbed first read as still.
  * A failed screenshot settles nothing.
  */
-async function waitSettled(frame: NavigateDeps["frame"], now: () => number): Promise<{ settled: boolean; shot: Buffer | null }> {
+export async function waitSettled(frame: NavigateDeps["frame"], now: () => number): Promise<{ settled: boolean; shot: Buffer | null }> {
   if (!frame) return { settled: false, shot: null };
   const deadline = now() + SETTLE_TIMEOUT_MS;
   let last = await grab(frame);
