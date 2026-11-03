@@ -354,7 +354,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "List devices",
       description:
-        "List what this machine can preview on: the iOS simulator runtimes and models and Android emulator API levels it can boot, plus current capacity, and under `physical` the Android phones plugged into it by cable. A phone is listed with `targetable: true` (start_preview can take it: devices [{platform: \"android\", id: \"<its id>\"}], or {platform: \"android\", physical: true} for any free one), or with `targetable: false` and the one `blocker` stopping it plus the `fix` to relay to the user. Phones are outside the simulator capacity, and one phone runs one preview at a time. A physical iPhone is not supported yet: offer an iOS simulator instead. A phone is a real device that can call, buy and log in — sign it in to test accounts only.",
+        "List what this machine can preview on: the iOS simulator runtimes and models and Android emulator API levels it can boot, plus current capacity, and under `physical` the Android phones and iPhones plugged into it by cable. A phone is listed with `targetable: true` (start_preview can take it: devices [{platform: \"android\" or \"ios\", id: \"<its id>\"}], or {platform, physical: true} for any free one), or with `targetable: false` and the one `blocker` stopping it plus the `fix` to relay to the user (an iPhone's can be a human step at the phone, such as approving the Automation Mode prompt). A physical iPhone runs only an EAS internal-distribution build whose profile lists it: pass `eas` with it. Phones are outside the simulator capacity, and one phone runs one preview at a time. A phone is a real device that can call, buy and log in — sign it in to test accounts only.",
       inputSchema: {},
     },
     () => audited("list_devices", {}, async () => ok(await engine.listDevices())),
@@ -505,13 +505,13 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
               platform: z.enum(["ios", "android"]).default("ios"),
               runtime: z.string().optional().describe('e.g. "26" or "iOS 26"'),
               model: z.string().optional().describe('e.g. "iPhone 16 Pro"'),
-              id: z.string().optional().describe("an Android phone plugged into this Mac, by the id list_devices reports under `physical`"),
-              physical: z.boolean().optional().describe("true: any free Android phone plugged into this Mac (list_devices shows which are targetable)"),
+              id: z.string().optional().describe("a phone plugged into this Mac (Android serial or iPhone UDID), by the id list_devices reports under `physical`"),
+              physical: z.boolean().optional().describe("true: any free phone of this platform plugged into this Mac (list_devices shows which are targetable)"),
             }),
           )
           .min(1)
           .optional()
-          .describe("devices to boot (default: one iOS simulator); an Android phone by `id` or `physical: true`"),
+          .describe("devices to boot (default: one iOS simulator); a phone by `id` or `physical: true` — an iPhone only with `eas`"),
         alongside: z
           .array(
             z.object({
@@ -536,7 +536,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           })
           .optional()
           .describe(
-            "preview a build EAS already made instead of building: Android .apk on emulators and phones, iOS simulator builds on simulators. {} takes the newest build of the profile the environment maps. Needs the app's EAS project id (list_apps easProjectId) and an Expo token on the machine. Not with ref/pr or alongside.",
+            "preview a build EAS already made instead of building: Android .apk on emulators and phones, iOS simulator builds on simulators, an internal-distribution .ipa on a physical iPhone (the only way to preview on one). {} takes the newest build of the profile the environment maps. Needs the app's EAS project id (list_apps easProjectId) and an Expo token on the machine. Not with ref/pr or alongside.",
           ),
         environment: z
           .string()
@@ -547,7 +547,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         freshApp: z
           .enum(["data", "reinstall"])
           .optional()
-          .describe("Android devices only, when they boot: start the app fresh. data = clear its data and signed-in session before launch (pm clear); reinstall = uninstall it before installing this build. Only the preview's own app is touched."),
+          .describe("Android devices and iPhones, when they boot: start the app fresh. data = clear its data and signed-in session before launch (pm clear; on an iPhone, which cannot clear in place, a reinstall); reinstall = uninstall it before installing this build. Only the preview's own app is touched."),
         share: z
           .object({
             access: z.enum(["public", "pin"]).describe("REQUIRED — ask the user first: protect with a PIN, or public?"),
@@ -598,8 +598,12 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           ...(d.physical ? { physical: true } : {}),
         }));
         const wantsPhone = !isWeb && asked.some((d) => d.serial || d.physical);
-        if (wantsPhone && asked.some((d) => (d.serial || d.physical) && d.platform !== "android")) {
-          return fail("phone_not_supported", "only Android phones can be previewed on", "a physical iPhone is not supported yet — use an iOS simulator ({platform: \"ios\"})");
+        if (wantsPhone && !args.eas && asked.some((d) => (d.serial || d.physical) && d.platform === "ios")) {
+          return fail(
+            "iphone_needs_eas",
+            "a physical iPhone runs only an EAS internal-distribution build",
+            "this Mac holds no Apple signing credentials, so deckhand cannot build or sign an app for a phone. Pass eas: {} (the newest build of the profile the environment maps for ios), eas: {profile} or eas: {buildId} — a build whose profile lists the phone — or preview on an iOS simulator ({platform: \"ios\"} without id/physical).",
+          );
         }
         if (wantsPhone && extra.length) {
           return fail("phone_not_in_panes", "a phone cannot be shared across panes — every `alongside` pane boots the same devices, and a phone runs one preview at a time", "start the comparison on simulators/emulators, or preview on the phone without `alongside`");
@@ -1423,7 +1427,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Read a device's logs",
       description:
-        "Read deckhand's captured logs for a device in a preview — the fastest way to find out WHY a build failed, why a screen came up wrong, or why the viewer will not show a picture. `build` (default) carries the build/install step output plus the NativeScript livesync and web dev-server streams: compile errors, install failures, and dev-server crashes surface here. **`stream` is the one to read when the viewer is stuck on \"Connecting…\" or shows a black screen while the device says ready** — it traces the whole browser→helper path: helper attach + first-frame probes, every proxied stream request with its upstream status and byte count, WebSocket upgrade accepts/refusals with the exact reason, and what the viewer's own player reports (fallback to MJPEG, decode failure, giving up). On Android, `app` is the app's own logcat since launch plus the system's crash lines about it, and says whether its process is running — read it when the app crashed or misbehaves. Pair with `describe`/`screenshot` when the app is up but misbehaving. Pass previewId or app id; deviceId defaults to the first/only device. Returns the last `tailLines` lines (500 are retained per source).",
+        "Read deckhand's captured logs for a device in a preview — the fastest way to find out WHY a build failed, why a screen came up wrong, or why the viewer will not show a picture. `build` (default) carries the build/install step output plus the NativeScript livesync and web dev-server streams: compile errors, install failures, and dev-server crashes surface here. **`stream` is the one to read when the viewer is stuck on \"Connecting…\" or shows a black screen while the device says ready** — it traces the whole browser→helper path: helper attach + first-frame probes, every proxied stream request with its upstream status and byte count, WebSocket upgrade accepts/refusals with the exact reason, and what the viewer's own player reports (fallback to MJPEG, decode failure, giving up). On Android and on a physical iPhone, `app` is the app's own log since launch (logcat; the iPhone's syslog) plus the system's crash lines about it, and says whether its process is running — read it when the app crashed or misbehaves. Pair with `describe`/`screenshot` when the app is up but misbehaving. Pass previewId or app id; deviceId defaults to the first/only device. Returns the last `tailLines` lines (500 are retained per source).",
       inputSchema: {
         previewId: z.string().optional().describe("from start_preview; or pass app instead"),
         app: z.string().optional().describe("app id — reads its running preview"),
@@ -1432,7 +1436,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           .enum(["build", "metro", "app", "stream"])
           .optional()
           .describe(
-            "build (default): build/install + livesync + web dev-server output. stream: the browser→helper streaming trace — read this for a viewer that never shows a picture. app (Android): the app's logcat since launch — its own lines plus the system's crash lines about it — headed by whether its process is running now. metro, and app on iOS, are reserved and not captured yet.",
+            "build (default): build/install + livesync + web dev-server output. stream: the browser→helper streaming trace — read this for a viewer that never shows a picture. app (Android, physical iPhone): the app's log since launch — its own lines plus the system's crash lines about it — headed by whether its process is running now. metro, and app on an iOS simulator, are reserved and not captured yet.",
           ),
         tailLines: z.number().int().positive().max(500).optional().describe("trailing lines to return (default 200)"),
       },
@@ -1444,7 +1448,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         const denied = requireLivePreview(id);
         if (denied) return denied;
         const source = args.source ?? "build";
-        const android = source === "app" && engine.platformOfDevice(id, args.deviceId) === "android";
+        const android = source === "app" && engine.capturesAppLog(id, args.deviceId);
         const log = android ? await engine.appLog(id, args.deviceId, args.tailLines ?? 200) : engine.logs(id, args.deviceId, source, args.tailLines ?? 200);
         if (log === null) {
           return fail(

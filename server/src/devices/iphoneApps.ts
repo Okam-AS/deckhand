@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { defaultExec, type Exec } from "./ios.ts";
+import { LAUNCH_ARG_KEY_RE, LAUNCH_ARG_VALUE_RE } from "../config.ts";
 
 // ---------------------------------------------------------------------------
 // Installing, launching and stopping the preview's app on a physical iPhone, with `devicectl`.
@@ -85,15 +86,15 @@ export function classifyInstallFailure(message: string): IphoneAppError {
   return new IphoneAppError(message, "devicectl_failed");
 }
 
-const ARG_KEY = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
-const ARG_VALUE = /^[A-Za-z0-9_.:\/-]{0,256}$/;
+const ARG_KEY = LAUNCH_ARG_KEY_RE;
+const ARG_VALUE = LAUNCH_ARG_VALUE_RE;
 
 /** `-KEY value` process arguments, which react-native-launch-arguments reads; the one place a caller's text reaches argv. */
 export function launchArgs(args: Record<string, string>): string[] {
   const out: string[] = [];
   for (const [k, v] of Object.entries(args)) {
     if (!ARG_KEY.test(k) || !ARG_VALUE.test(v)) {
-      throw new IphoneAppError(`refusing launch argument ${JSON.stringify(k)}: keys are identifiers and values letters, digits and _ . : / -`, "bad_launch_arg");
+      throw new IphoneAppError(`refusing launch argument ${JSON.stringify(k)}: keys are identifiers and values letters, digits and _ . : / @ + -, not starting with -`, "bad_launch_arg");
     }
     out.push(`-${k}`, v);
   }

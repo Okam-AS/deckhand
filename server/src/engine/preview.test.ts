@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fakeMetro, fakeDevProcs, fakeSimctl, fakeAndroid, fakeWorktrees, fakeReaper, fakePhones, fakeEas, easBuild } from "../test-support/fakes.ts";
+import { fakeMetro, fakeDevProcs, fakeSimctl, fakeAndroid, fakeWorktrees, fakeReaper, fakePhones, fakeIphones, fakeEas, easBuild, FAKE_IPHONE } from "../test-support/fakes.ts";
+import { fakeWda } from "../test-support/wdaFake.ts";
+import { IPHONE_MARKER_ENV } from "../devices/iproxy.ts";
 import { appSchema } from "../config.ts";
 import { createHash } from "node:crypto";
 import type { ExecResult } from "../devices/android.ts";
@@ -237,6 +239,7 @@ function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (
     genShareId: () => "share-abc",
     phones: fakePhones(),
     phoneHolds: () => ({}),
+    iphones: fakeIphones(),
     ...overrides,
   };
   return { engine: new PreviewEngine(deps), store, simctlCalls, buildEnvSeen, removedWorktrees, worktreeCalls, devProcCalls, detached, audit, firstFrameResults, attachCalls };
@@ -3511,7 +3514,7 @@ describe("EAS builds and environments", () => {
     assert.ok(h.simctlCalls.some((c) => /^install \S+ \/cache\/eas\/App\.app$/.test(c)), h.simctlCalls.join("\n"));
     const env = h.engine.getStatus("pv1")!.environment!;
     assert.deepEqual([env.source, env.verified], ["launch-args", false]);
-    assert.match(env.note ?? "", /iOS app log is not captured/);
+    assert.match(env.note ?? "", /iOS simulator.s app log is not captured/);
     await h.engine.stopPreview("pv1");
   });
 
@@ -3529,6 +3532,177 @@ describe("EAS builds and environments", () => {
     assert.deepEqual(launched, ["simctl com.example.myapp -API stage"]);
     assert.ok(phoneLog.some((c) => c.endsWith("'-e' 'API' 'stage'") && c.includes("emulator-")), phoneLog.join("\n"));
     assert.deepEqual(h.engine.getStatus("pv1")!.environment, { name: "stage", source: "launch-args", verified: "no-marker" });
+    await h.engine.stopPreview("pv1");
+  });
+});
+
+describe("physical iPhones", () => {
+  const IPHONE = FAKE_IPHONE;
+  const APP_URL = "file:///private/var/containers/Bundle/Application/ABC/Demo.app/";
+  const iosApp: App = appSchema.parse({
+    id: "ios-app",
+    repo: "github.com/acme/ios-app",
+    type: "expo",
+    bundleId: "com.example.eas",
+    easProjectId: "6ff82c98-0000-4000-8000-000000000001",
+    environments: {
+      default: "uat",
+      uat: { easProfile: { ios: "internal", android: "e2e" }, launchArgs: { APP_ENV: "test" }, logMarker: "Launching \\*\\* test" },
+      prod: { easProfile: { ios: "production" } },
+    },
+  });
+  const ipaBuild = easBuild({ platform: "IOS", isForIosSimulator: false, buildProfile: "internal", artifacts: { buildUrl: "https://storage.example/app.ipa" } });
+  /** devicectl as a phone holding the registered app (and only answering for it). */
+  const devicectl = (over: (args: string[]) => { outcome?: string; result?: unknown; error?: unknown } | null = () => null) => (args: string[]) => {
+    const o = over(args);
+    if (o) return o;
+    if (args.includes("apps")) return { result: { apps: [{ bundleIdentifier: iosApp.bundleId, version: "3.61.0", bundleVersion: "1", url: APP_URL }] } };
+    if (args.includes("processes")) return { result: { runningProcesses: [{ executable: `${APP_URL}Demo`, processIdentifier: 812 }] } };
+    if (args.includes("launch")) return { result: { process: { processIdentifier: 812 } } };
+    return { result: {} };
+  };
+  const start = (h: Harness, extra: Partial<StartPreviewRequest> = {}) =>
+    h.engine.startPreview({ app: iosApp, source: "eas", devices: [{ platform: "ios", serial: IPHONE }], access: "password", ...extra });
+
+  it("refuses a local or git build for an iPhone, naming eas as the way", () => {
+    const h = makeEngine({ eas: fakeEas() });
+    for (const source of ["git", "local"] as const) {
+      assert.throws(
+        () => h.engine.startPreview({ app: { ...iosApp, path: "/src/app" }, source, spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios", serial: IPHONE }], access: "password" }),
+        (e: unknown) => e instanceof PreviewError && e.code === "iphone_needs_eas" && /eas: \{\}/.test(e.hint ?? "") && /no Apple signing credentials/.test(e.hint ?? ""),
+      );
+    }
+    assert.throws(() => start(h, { devices: [{ platform: "ios", serial: "not-a-udid" }] }), (e: unknown) => e instanceof PreviewError && e.code === "bad_request");
+  });
+
+  it("installs the environment's EAS .ipa, starts syslog before a launch with -KEY value, and verifies the environment from the app log", async () => {
+    const log: string[] = [];
+    const easLog: string[] = [];
+    const attached: StreamDeviceRef[] = [];
+    const h = makeEngine({
+      eas: fakeEas({}, easLog, { "ios-device": ipaBuild }),
+      iphones: fakeIphones({ list: async () => [{ udid: IPHONE, name: "QA", model: "iPhone 15", osVersion: "27.0.1", blockers: [] }] }, log, { devicectl: devicectl(), appLines: ["** Launching ** test", "Running main"] }),
+      streaming: { attach: async (d: StreamDeviceRef) => (attached.push(d), { origin: "o", helperBasePath: "/h", waitForFirstFrame: async () => true, describe: async () => "", detach: async () => {} }), reapOrphans: async () => {} } as unknown as PreviewEngineDeps["streaming"],
+    });
+    start(h);
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready", JSON.stringify(h.engine.getStatus("pv1")));
+    assert.deepEqual(easLog, ["eas resolve ios-device profile:internal", `eas prepare ios-device ${ipaBuild.id}`]);
+    assert.ok(log.includes(`devicectl device install app --device ${IPHONE} /cache/eas/app.ipa`), log.join("\n"));
+    const syslogAt = log.findIndex((l) => l.startsWith("idevicesyslog"));
+    const launchAt = log.findIndex((l) => l.includes("process launch"));
+    assert.ok(syslogAt >= 0 && syslogAt < launchAt, `syslog must start before launch: ${log.join(" | ")}`);
+    assert.equal(log[launchAt], `devicectl device process launch --device ${IPHONE} --terminate-existing ${iosApp.bundleId} -- -APP_ENV test`);
+    assert.ok(log.indexOf(`wda ${IPHONE}`) < log.findIndex((l) => l.includes("install app")), "WDA answers before anything is installed");
+    assert.deepEqual(attached, [{ platform: "ios", udid: IPHONE, physical: true }]);
+    const dev = h.engine.getStatus("pv1")!.devices[0]!;
+    assert.equal(dev.label, "iPhone 15 · iOS 27.0.1 (phone)");
+    const app = (await h.engine.appLog("pv1", "ios-0"))!;
+    assert.match(app, /process com\.example\.eas \(Demo\): running/);
+    assert.match(app, /Demo\[812\] I \*\* Launching \*\* test/);
+    assert.deepEqual(h.engine.getStatus("pv1")!.environment, { name: "uat", source: "launch-args", verified: true });
+    assert.equal(h.engine.capturesAppLog("pv1", "ios-0"), true);
+    await h.engine.stopPreview("pv1");
+    assert.ok(log.some((l) => l.startsWith(`devicectl device process terminate --device ${IPHONE} --pid 812`)), log.join("\n"));
+    assert.ok(!h.simctlCalls.some((c) => c.includes(IPHONE)), `no simctl call may name the phone: ${h.simctlCalls.join(", ")}`);
+    assert.ok(!log.some((l) => /uninstall/.test(l)), "nothing was uninstalled");
+  });
+
+  it("checks the .ipa's profile against this phone before the phone is touched", async () => {
+    const log: string[] = [];
+    const notListed = fakeEas({
+      prepare: async (projectId, target, build, expected) => ({
+        build, target, projectId, installPath: "/cache/eas/app.ipa", cached: true, bundleId: expected, versionName: "1", versionCode: "1", schemes: [],
+        ipa: { bundleId: expected, version: "1", buildVersion: "1", schemes: [], teamId: "T1", provisionedDevices: ["00008120-0000000000000BBB"], provisionsAllDevices: false, profileExpires: null },
+      }),
+    }, [], { "ios-device": ipaBuild });
+    const h = makeEngine({ eas: notListed, iphones: fakeIphones({}, log, { devicectl: devicectl() }) });
+    start(h);
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "failed");
+    assert.match(h.engine.getStatus("pv1")!.devices[0]!.error ?? "", /does not list this iPhone.*eas device:create/);
+    assert.deepEqual(log, [], "neither WDA nor devicectl was asked anything");
+  });
+
+  it("replaces only the registered app on an install conflict, and audits it", async () => {
+    const log: string[] = [];
+    let installs = 0;
+    const h = makeEngine({
+      eas: fakeEas({}, [], { "ios-device": ipaBuild }),
+      iphones: fakeIphones({ list: async () => [{ udid: IPHONE, name: "QA", model: "iPhone 15", osVersion: "27.0.1", blockers: [] }] }, log, {
+        devicectl: devicectl((args) => (args.includes("install") && installs++ === 0 ? { outcome: "failed", error: { userInfo: { NSLocalizedDescription: { string: "MismatchedApplicationIdentifierEntitlement" } } } } : null)),
+      }),
+    });
+    start(h);
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready", JSON.stringify(h.engine.getStatus("pv1")));
+    assert.deepEqual(log.filter((l) => /install|uninstall/.test(l)), [
+      `devicectl device install app --device ${IPHONE} /cache/eas/app.ipa`,
+      `devicectl device uninstall app --device ${IPHONE} ${iosApp.bundleId}`,
+      `devicectl device install app --device ${IPHONE} /cache/eas/app.ipa`,
+    ]);
+    assert.match(h.engine.logs("pv1", "ios-0", "build")!, /No other app on the phone is touched/);
+    assert.ok(h.audit.some((a) => a.tool === "phone_reinstall"));
+    await h.engine.stopPreview("pv1");
+  });
+
+  it("drives describe/ui/screenshot through WDA, and refuses a touch while another app is in front", async () => {
+    const wda = fakeWda({ bundleId: "com.apple.springboard", source: { type: "Application", label: "Demo", isVisible: "1", rect: { x: 0, y: 0, width: 390, height: 844 }, children: [{ type: "Button", label: "Get started", isVisible: "1", isEnabled: "1", isAccessible: "1", rect: { x: 20, y: 700, width: 350, height: 50 } }] } });
+    const h = makeEngine({ eas: fakeEas({}, [], { "ios-device": ipaBuild }), iphones: fakeIphones({ list: async () => [{ udid: IPHONE, name: "QA", model: "iPhone 15", osVersion: "27", blockers: [] }] }, [], { devicectl: devicectl(), wda: wda.fetch }) });
+    start(h);
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+    assert.ok(await h.engine.describe("pv1", "ios-0"));
+    await assert.rejects(h.engine.ui("pv1", "ios-0", { type: "tap", x: 0.5, y: 0.5 }), /not the preview's app/);
+    assert.ok(!wda.calls.some((c) => c.path.endsWith("/actions")), "no touch reached the phone");
+    wda.state.bundleId = iosApp.bundleId!;
+    await h.engine.ui("pv1", "ios-0", { type: "tap", x: 0.5, y: 0.5 });
+    assert.ok(wda.calls.some((c) => c.path.endsWith("/actions")));
+    await assert.rejects(h.engine.ui("pv1", "ios-0", { type: "home" }), /never presses home/);
+    assert.equal((await h.engine.screenshot("pv1", "ios-0")).readUInt32BE(0), 0x89504e47);
+    await h.engine.iphoneStreamAction(IPHONE, { type: "tap", x: 0.1, y: 0.1 });
+    await assert.rejects(h.engine.iphoneStreamAction("00008120-0000000000000BBB", { type: "tap", x: 0.1, y: 0.1 }), /no live preview drives/);
+    await h.engine.stopPreview("pv1");
+  });
+
+  it("lists iPhones with their blockers and tenancy, and turns physical:true into a free one", async () => {
+    const h = makeEngine({
+      eas: fakeEas({}, [], { "ios-device": ipaBuild }),
+      iphones: fakeIphones({
+        list: async () => [
+          { udid: IPHONE, name: "QA", model: "iPhone 15", osVersion: "27.0.1", blockers: [] },
+          { udid: "00008120-0000000000000BBB", name: "B", model: "iPhone 13", osVersion: "26", blockers: ["WDA could not start: someone at the phone must approve the Automation Mode prompt with Face ID or the passcode, then retry", "locked: unlock it"] },
+        ],
+      }, [], { devicectl: devicectl() }),
+      phoneHolds: () => ({}),
+    });
+    const { phones } = (await h.engine.listDevices()).physical;
+    assert.deepEqual(phones[0], { id: IPHONE, platform: "ios", model: "iPhone 15", os: "iOS 27.0.1", targetable: true });
+    assert.equal(phones[1]!.targetable, false);
+    assert.match((phones[1] as { blocker: string }).blocker, /WDA could not start/);
+    assert.match((phones[1] as { fix: string }).fix, /Automation Mode.*then also: locked/);
+    assert.deepEqual(await h.engine.resolvePhoneRequests(iosApp, [{ platform: "ios", physical: true }]), [{ platform: "ios", serial: IPHONE }]);
+    start(h);
+    assert.throws(() => start(h, { environment: "prod" }), (e: unknown) => e instanceof PreviewError && e.code === "device_busy");
+    await assert.rejects(h.engine.resolvePhoneRequests({ ...iosApp, id: "other" }, [{ platform: "ios", physical: true }]), (e: unknown) => e instanceof PreviewError && e.code === "no_phone" && /no free iPhone/.test(e.message));
+    await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
+    await h.engine.stopPreview("pv1");
+  });
+
+  it("fails the device when the iPhone is unplugged, reaps iPhone helpers by marker sparing its own, and never counts the phone as capacity", async () => {
+    const reaped: [string, number[]][] = [];
+    let cabled = true;
+    const h = makeEngine({
+      eas: fakeEas({}, [], { "ios-device": ipaBuild }),
+      iphones: fakeIphones({ list: async () => [{ udid: IPHONE, name: "QA", model: "iPhone 15", osVersion: "27", blockers: [] }], connected: async () => cabled, livePids: () => [4100, 4101] }, [], { devicectl: devicectl() }),
+      reaper: fakeReaper({ reapOrphansByMarker: async (marker: string, keep: Iterable<number> = []) => (reaped.push([marker, [...keep]]), []) }),
+    });
+    start(h);
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+    assert.equal((await h.engine.listDevices()).capacity.inUse, 0);
+    await h.engine.reapOrphans();
+    const iphone = reaped.find(([m]) => m === IPHONE_MARKER_ENV);
+    assert.ok(iphone, reaped.map(([m]) => m).join(", "));
+    assert.deepEqual(iphone![1].sort(), [4100, 4101, 7000]);
+    cabled = false;
+    assert.deepEqual(await h.engine.checkPhones(), ["ios-0"]);
+    assert.match(h.engine.getStatus("pv1")!.devices[0]!.error ?? "", /no longer cabled/);
     await h.engine.stopPreview("pv1");
   });
 });

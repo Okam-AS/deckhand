@@ -1,4 +1,4 @@
-import { fakeMetro, fakeDevProcs, fakeSimctl, fakeWorktrees, fakePhones } from "../test-support/fakes.ts";
+import { fakeMetro, fakeDevProcs, fakeSimctl, fakeWorktrees, fakePhones, fakeIphones } from "../test-support/fakes.ts";
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -106,6 +106,7 @@ function fakeEngine(): PreviewEngine {
     secretsEnv: () => ({}),
     phones: fakePhones(),
     phoneHolds: () => ({}),
+    iphones: fakeIphones(),
     simdeck: {
       // SimDeck answers with `roots`/`children` — verified against a live daemon.
       describe: async () => ({
@@ -770,6 +771,7 @@ function onboardingEngine(): PreviewEngine {
     secretsEnv: () => ({}),
     phones: fakePhones(),
     phoneHolds: () => ({}),
+    iphones: fakeIphones(),
   };
   return new PreviewEngine(deps);
 }
@@ -1208,6 +1210,14 @@ describe("share PIN protection", () => {
 
     const badPin = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "pin", pin: "12" } } }));
     assert.equal((badPin.error as { code: string }).code, "needs_pin");
+    await admin.close();
+  });
+
+  it("start_preview refuses a physical iPhone without eas, naming why and what to pass", async () => {
+    const admin = await client(ADMIN);
+    const res = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", devices: [{ platform: "ios", id: "00008120-00000000000000AA" }], share: { access: "pin", pin: "4321" } } }));
+    assert.equal((res.error as { code: string }).code, "iphone_needs_eas");
+    assert.match(JSON.stringify(res.error), /no Apple signing credentials.*eas: \{\}/);
     await admin.close();
   });
 

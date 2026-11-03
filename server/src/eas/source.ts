@@ -1,5 +1,5 @@
 import type { Exec } from "../devices/android.ts";
-import { apkBadging, downloadArtifact, extractSimulatorApp, findAapt2, requireKind, vetApk } from "./artifact.ts";
+import { apkBadging, downloadArtifact, extractSimulatorApp, findAapt2, inspectIpa, requireKind, vetApk, type IpaInfo } from "./artifact.ts";
 import { EasClient, EasError, type EasBuild, type EasPlatform, type EasUpdate, type TokenSource } from "./client.ts";
 
 // ---------------------------------------------------------------------------
@@ -7,8 +7,13 @@ import { EasClient, EasError, type EasBuild, type EasPlatform, type EasUpdate, t
 // and hand back a local path ready to install. Nothing here touches a device.
 // ---------------------------------------------------------------------------
 
-/** Which artifact a device can take. A physical iPhone (`ios-device`) is not wired yet. */
-export type EasTarget = "android" | "ios-simulator";
+/** Which artifact a device can take: an .apk, a simulator build, or an internal-distribution .ipa for a physical iPhone. */
+export type EasTarget = "android" | "ios-simulator" | "ios-device";
+
+/** The environment's `easProfile` key for an artifact kind. */
+export function easProfileKey(target: EasTarget): "android" | "iosSimulator" | "ios" {
+  return target === "android" ? "android" : target === "ios-simulator" ? "iosSimulator" : "ios";
+}
 
 export interface EasSelection {
   buildId?: string;
@@ -19,7 +24,7 @@ export interface PreparedBuild {
   build: EasBuild;
   target: EasTarget;
   projectId: string;
-  /** The .apk, or the unpacked simulator .app. */
+  /** The .apk, the unpacked simulator .app, or the .ipa. */
   installPath: string;
   cached: boolean;
   /** The artifact's own identity and version, read from it — not what EAS reports. */
@@ -27,9 +32,11 @@ export interface PreparedBuild {
   versionName: string | null;
   versionCode: string | null;
   schemes: string[];
+  /** ios-device: the .ipa's profile, checked against each phone's UDID before the phone is touched. */
+  ipa?: IpaInfo;
 }
 
-const PLATFORM: Record<EasTarget, EasPlatform> = { android: "ANDROID", "ios-simulator": "IOS" };
+const PLATFORM: Record<EasTarget, EasPlatform> = { android: "ANDROID", "ios-simulator": "IOS", "ios-device": "IOS" };
 
 export class EasPreviews {
   constructor(
@@ -79,7 +86,7 @@ export class EasPreviews {
 
   /** Download (once per build id) and vet against the registered app id, before any device sees it. */
   async prepare(projectId: string, target: EasTarget, build: EasBuild, expectedBundleId: string, onLog: (line: string) => void): Promise<PreparedBuild> {
-    requireKind(build, target === "android" ? "apk" : "simulator");
+    requireKind(build, target === "android" ? "apk" : target === "ios-device" ? "ipa" : "simulator");
     let shown = -1;
     const { path, cached } = await downloadArtifact(build, {
       cacheDir: this.opts.cacheDir,
@@ -95,6 +102,13 @@ export class EasPreviews {
       const badge = await apkBadging(path, this.opts.exec, (this.opts.aapt2 ?? findAapt2)());
       vetApk(badge, expectedBundleId, build.id);
       return { build, target, projectId, installPath: path, cached, bundleId: badge.pkg, versionName: badge.versionName, versionCode: badge.versionCode, schemes: [] };
+    }
+    if (target === "ios-device") {
+      const ipa = await inspectIpa(path, this.opts.exec);
+      if (ipa.bundleId !== expectedBundleId) {
+        throw new EasError(`EAS build ${build.id} is ${ipa.bundleId}, but this app is registered as ${expectedBundleId} — refusing to install it`, "pick a build of this app", "eas_wrong_app");
+      }
+      return { build, target, projectId, installPath: path, cached, bundleId: ipa.bundleId, versionName: ipa.version, versionCode: ipa.buildVersion, schemes: ipa.schemes, ipa };
     }
     const app = await extractSimulatorApp(path, this.opts.exec);
     if (app.bundleId !== expectedBundleId) {
