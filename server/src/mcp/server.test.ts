@@ -939,10 +939,10 @@ describe("MCP onboarding contract (add_app / empty state / setup URL)", () => {
 
   it("add_app records an EAS project id it is given, and refuses one that is not a UUID", async () => {
     const admin = await oclient(ADMIN);
-    const bad = parse(await admin.callTool({ name: "add_app", arguments: { repo: "github.com/okam-as/eas-app", easProjectId: "nope" } })) as { ok: boolean; error?: { code: string } };
+    const bad = parse(await admin.callTool({ name: "add_app", arguments: { repo: "github.com/acme/eas-app", easProjectId: "nope" } })) as { ok: boolean; error?: { code: string } };
     assert.equal(bad.error?.code, "bad_request");
     const id = "6ff82c98-0000-4000-8000-000000000009";
-    const res = parse(await admin.callTool({ name: "add_app", arguments: { repo: "github.com/okam-as/eas-app", easProjectId: id } })) as { ok: boolean; registered?: { easProjectId: string | null } };
+    const res = parse(await admin.callTool({ name: "add_app", arguments: { repo: "github.com/acme/eas-app", easProjectId: id } })) as { ok: boolean; registered?: { easProjectId: string | null } };
     assert.equal(res.registered?.easProjectId, id);
     assert.equal(registry.find((a) => a.id === "eas-app")?.easProjectId, id);
     registry.splice(registry.findIndex((a) => a.id === "eas-app"), 1);

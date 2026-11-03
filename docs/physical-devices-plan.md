@@ -1,8 +1,8 @@
 # Physical devices and prebuilt EAS builds
 
-**Status (2026-11-03): item 2 of the landing order, physical Android, is built** (see
-"Landing order" below for what it settled and where it differs from this plan). Items 3–5 —
-the EAS source and everything iPhone — are proposed, not built.
+**Status (2026-11-03): items 2 and 3 of the landing order — physical Android and the EAS
+source — are built** (see "Landing order" below for what each settled and where it differs from
+this plan). Items 4–5, everything iPhone, are proposed, not built.
 
 This document asks to reverse two locked decisions in PLAN §2,
 "NO physical devices, either platform" and "Build strategy: … No CI artifacts", and lays out
@@ -282,8 +282,27 @@ One PR at a time, each landed before the next is opened (AGENTS.md):
    - Found on hardware: Samsung's Android 13 `screenrecord` v1.3 refuses an unlimited recording,
      `wm size` reports an override size that `input` uses, and `adb exec-out` quotes each of
      several arguments.
-3. **EAS source:** Android `.apk` and simulator `.tar.gz` first, then `.ipa` vetting. The
-   token noun for `deckhand secret`, the download cache, launch arguments.
+3. **EAS source — built.** `deckhand secret set|rm expo`, `eas/` (client, cache, vetting),
+   `start_preview` `eas`, and app environments. Where it differs from the text above:
+   - **Launch arguments are not a `start_preview` parameter.** They belong to an app
+     *environment* in apps.yaml (`environments: {default, <name>: {easProfile, launchArgs,
+     logMarker}}`), and `start_preview` takes only `environment`, by name. A caller's text never
+     reaches a process's arguments, and the operator's rule — previews run against a test/stage
+     backend unless the user asks otherwise — is the default rather than a convention. Environments
+     apply to every source, not only EAS.
+   - **Proving the backend is deckhand's, where it can:** `preview_status` `environment.verified`
+     is true once the Android `app` log matches the environment's `logMarker`. On iOS it stays
+     false (no app log yet).
+   - **"Already installed"** is the same versionName/versionCode *and* the same bytes (the
+     installed `base.apk`'s sha256): an e2e APK can declare one versionCode for every build, and
+     there is no install record to consult. On a simulator the build is always installed.
+   - **Install conflicts** from an EAS APK use the D4 reversal of item 2: the registered app only.
+   - The `.ipa` vetting exists (`eas/artifact.ts` `inspectIpa`, `vetIpa`) and is not reachable
+     yet: a physical iPhone is item 4. `iosLaunchArgs` (`engine/environment.ts`) is the
+     `-KEY value` form `devicectl device process launch` takes; `devClientUpdateUrl` and
+     `EasPreviews.latestUpdate` are the dev-client update lookup it needs.
+   - The phone column's input check no longer swipes the notification shade (it acted outside any
+     test app): it injects KEYCODE_UNKNOWN and reads `dumpsys power`'s last user activity.
 4. **Physical iPhone control:** WDA placement, loopback launcher and `iproxy`, `doctor`
    checks, the WDA control backend, `devicectl` install and launch from an EAS `.ipa`,
    syslog.

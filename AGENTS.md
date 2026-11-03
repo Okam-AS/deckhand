@@ -90,6 +90,14 @@ PLAN describes the architecture. The invariants that bind every change:
   a second `deckhand serve` to try a phone, even under a scratch `DECKHAND_HOME`:** its boot reap
   treats every `deckhand-*` simulator and `deckhand_*` AVD on the Mac as an orphan and deletes the
   live server's devices. Drive a `PreviewEngine` from a script, or `deckhand doctor --device-only`.
+- **EAS builds are a third preview source, and environments are binding** (PLAN §2 "Build
+  strategy", §7 "EAS source"). `start_preview` `eas` installs a build EAS already made, fetched
+  with a read-only Expo robot token (`deckhand secret set expo`; it goes to `api.expo.dev` and
+  nowhere else) and vetted before a device is touched. An app's `environments` in apps.yaml
+  decide its backend: every preview runs the app's default unless the user explicitly named
+  another, and `preview_status` `environment.verified` says whether the app log proved it —
+  check it before signing in or submitting anything. An app with no environments is "unknown";
+  never invent one.
   **Three known gaps, so do not imply otherwise:** the local (`path`) livesync build path is
   unvalidated on-device, the `metro` `logs` source (and `app` on iOS) is accepted and captures
   nothing, and PLAN §11 item 7's
