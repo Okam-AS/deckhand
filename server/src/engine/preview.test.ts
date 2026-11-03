@@ -3074,3 +3074,25 @@ describe("Expo dev-client launch on iOS", () => {
     }
   });
 });
+
+describe("ios.reduceTransparency", () => {
+  const run = async (reduce: boolean | undefined) => {
+    const turnedOn: string[] = [];
+    const h = makeEngine({
+      config: { ...config, ...(reduce === undefined ? {} : { ios: { reduceTransparency: reduce } }) },
+      simctl: fakeSimctl({ reduceTransparency: async (udid: string) => void turnedOn.push(udid) }),
+    });
+    h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+    return turnedOn;
+  };
+
+  it("turns Reduce Transparency on for each iOS device it prepares when the operator set it", async () => {
+    assert.equal((await run(true)).length, 1);
+  });
+
+  it("leaves the device as it is by default, and when set false", async () => {
+    assert.deepEqual(await run(undefined), []);
+    assert.deepEqual(await run(false), []);
+  });
+});
