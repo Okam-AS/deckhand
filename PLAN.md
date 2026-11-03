@@ -964,8 +964,9 @@ change eases in/out — nothing snaps.
    `mcp/` is handed a provider that yields a client or a reason there is none, never the key
    — `navigate/secrets.ts` is named so that "keeps secrets out of the MCP surface" refuses its
    import there.
-   **Egress — the one path by which app content leaves this machine for a third party.**
-   `navigate` POSTs to `api.typesafe.ai`, once per step. What decides it, in order:
+   **Egress — the one destination app content leaves this machine for: TypeSafe's API, from two
+   tools under one key.** `navigate` POSTs to `api.typesafe.ai` once per step, `check` once per
+   call. What decides it, in order:
    - **Consent is the key, and it covers every app.** Configuring the key sends screen text from
      ALL apps' previews that `navigate` drives to `api.typesafe.ai`; there is no per-app switch.
      No key file (or an empty one) and the tool is not registered at all. Removing the key stops
@@ -989,6 +990,12 @@ change eases in/out — nothing snaps.
      `openUrl`, no free text, no coordinate of its own. → `navigate/screen.test.ts` "offers only
      taps on the tree's own elements, back and scrolls — whatever the screen text says", and a
      type-level pin on `NavigateAction` in the same file.
+   - **`check` always sends the screenshot**, unmasked, and with `referenceDeviceId` that
+     device's too — from another live preview when `referencePreviewId` names one. Its tree lines
+     are the same minimised ones `navigate` sends; it has no `text` values and no actions. It is
+     audited as `check:egress` (question count, byte size, image count, never the statements) and
+     refused once the key is gone. → `mcp/server.test.ts` "audits its one request (sizes, never
+     the statements) and sends nothing once the key is removed"
    - **Every request is audited** as a `navigate:egress` line in `audit.jsonl`: app, preview,
      device, destination, candidate count and byte size, never content, written before the
      request goes out.
