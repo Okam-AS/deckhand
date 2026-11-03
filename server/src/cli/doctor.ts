@@ -11,6 +11,11 @@ import { ServeSimBackend, vendoredServeSimBin } from "../streaming/serveSim.ts";
 import { AndroidAdbBackend } from "../streaming/androidAdb.ts";
 import { AndroidManager, AVD_PREFIX, selectSystemImage, serialForPort } from "../devices/android.ts";
 import { SIM_PREFIX } from "../engine/reaper.ts";
+import { AndroidPhones, usabilityBlocker, type PhoneInfo } from "../devices/androidPhone.ts";
+import { loadPhoneHolds, type PhoneHolds } from "../devices/phoneHolds.ts";
+import { AdbControl, type UiNode } from "../testing/adbControl.ts";
+import { phoneTenants } from "./phone.ts";
+import type { PersistedState } from "../state.ts";
 import { detectWebFrameworkFromDir, webHostingMode } from "../engine/detect.ts";
 import { repoRoot } from "../version.ts";
 import { lookupTypesafeKey, type KeyLookup } from "../navigate/secrets.ts";
@@ -78,6 +83,8 @@ export interface Check {
   gate?: true;
   /** The check that actually boots a device, tagged by platform. Its absence must fail the gate, not pass it. */
   smoke?: SmokePlatform;
+  /** Not run, and not known either way (no phone plugged in): printed `?`, never a tick. */
+  unknown?: true;
 }
 
 /** Both must appear in a gate run. A device gate that covered one platform is half a gate. */
@@ -486,6 +493,123 @@ async function smokeAndroid(): Promise<Check[]> {
   return checks;
 }
 
+/** Helper ports for the phone leg, beside the emulator leg's and outside the preview range. */
+const PHONE_SMOKE_PORTS: [number, number] = [3280, 3289];
+export const PHONE_CAPS = ["attach", "stream", "describe", "input"] as const;
+
+/** The first phone free to test: targetable, not held, and in no live preview (read from state.json). */
+export function pickSmokePhone(phones: PhoneInfo[], holds: PhoneHolds, busy: Record<string, string>): { phone: PhoneInfo | null; why: string } {
+  const free = phones.find((p) => !usabilityBlocker(p) && !holds[p.id] && !busy[p.id]);
+  if (free) return { phone: free, why: "" };
+  if (!phones.length) return { phone: null, why: "no Android phone plugged in" };
+  return {
+    phone: null,
+    why: phones
+      .map((p) => `${p.id}: ${holds[p.id] ? `held by ${holds[p.id]!.who}` : busy[p.id] ? `in preview ${busy[p.id]}` : (usabilityBlocker(p)?.blocker ?? "?")}`)
+      .join("; "),
+  };
+}
+
+/** `?` for every capability: nothing was run, so nothing is claimed. */
+export function unknownPhoneChecks(why: string): Check[] {
+  return PHONE_CAPS.map((cap) => ({ name: `smoke android phone: ${cap}`, ok: false, skipped: true, unknown: true as const, detail: why }));
+}
+
+/**
+ * The physical-phone column: attach (usable), stream (first frame, and whether it is H.264),
+ * describe (uiautomator over adb) and input — the one place input injection fails silently. The
+ * input proof opens the notification shade with a swipe and closes it with back, so no app on the
+ * phone is touched and no setting changes. With no free phone every check is `?`, not a tick.
+ */
+async function smokePhone(): Promise<Check[]> {
+  const label = (cap: string) => `smoke android phone: ${cap}`;
+  const phones = new AndroidPhones();
+  let picked: ReturnType<typeof pickSmokePhone>;
+  try {
+    let state: PersistedState | null = null;
+    try {
+      state = JSON.parse(readFileSync(paths.state(), "utf8")) as PersistedState;
+    } catch {
+      state = null;
+    }
+    picked = pickSmokePhone(await phones.list(), loadPhoneHolds(), phoneTenants(state));
+  } catch (e) {
+    return unknownPhoneChecks(`could not list phones: ${(e as Error).message.slice(0, 120)}`);
+  }
+  const phone = picked.phone;
+  if (!phone) return unknownPhoneChecks(picked.why);
+  const serial = phone.id;
+  const checks: Check[] = [];
+  const done = (cap: string, ok: boolean, detail: string) => checks.push({ name: label(cap), ok, gate: true, detail });
+  try {
+    const info = await phones.waitUsable(serial, 15_000);
+    done("attach", true, `${serial} — ${[info.manufacturer, info.model, info.os].filter(Boolean).join(" ")}`);
+
+    const backend = new AndroidAdbBackend({ portRange: PHONE_SMOKE_PORTS });
+    const stream = await backend.attach({ platform: "android", udid: serial, serial });
+    try {
+      const framed = await stream.waitForFirstFrame();
+      let codec = "";
+      if (framed) {
+        const ctl = new AbortController();
+        const t = setTimeout(() => ctl.abort(), 8_000);
+        try {
+          const res = await fetch(`${stream.origin}${stream.helperBasePath}/stream.avcc`, { signal: ctl.signal });
+          if (res.ok && res.body) {
+            const reader = res.body.getReader();
+            const first = await reader.read();
+            codec = first.value?.length ? ", H.264" : ", no H.264 bytes";
+            await reader.cancel().catch(() => {});
+          } else codec = `, no H.264 (stream.avcc ${res.status}) — MJPEG fallback`;
+        } catch {
+          codec = ", no H.264 within 8s — MJPEG fallback";
+        } finally {
+          clearTimeout(t);
+        }
+      }
+      done("stream", framed, framed ? `first frame${codec}` : "no first frame");
+    } finally {
+      await stream.detach().catch(() => {});
+    }
+
+    const control = new AdbControl();
+    const tree = await control.tree(serial, 30_000);
+    let n = 0;
+    const walk = (node: UiNode): void => {
+      for (const c of node.children) {
+        n++;
+        walk(c);
+      }
+    };
+    walk(tree.roots[0]!);
+    done("describe", n > 0, `${n} elements`);
+
+    const focus = async () => {
+      const r = await new Promise<string>((resolve) =>
+        execFile("adb", ["-s", serial, "shell", "dumpsys", "window"], { timeout: 10_000, maxBuffer: 16 * 1024 * 1024 }, (_e, out) => resolve(String(out ?? ""))),
+      );
+      return /mCurrentFocus=Window\{\S+ \S+ ([^}]+)\}/.exec(r)?.[1] ?? "";
+    };
+    const before = await focus();
+    if (/NotificationShade/.test(before)) {
+      checks.push({ name: label("input"), ok: false, skipped: true, unknown: true, detail: "the notification shade was already open, so a swipe could not prove anything — close it and re-run" });
+    } else {
+      const target = { platform: "android" as const, udid: serial };
+      await control.action(target, { type: "swipe", startX: 0.5, startY: 0.002, endX: 0.5, endY: 0.6, durationMs: 300 });
+      await new Promise((r) => setTimeout(r, 1500));
+      const opened = /NotificationShade/.test(await focus());
+      await control.action(target, { type: "back" });
+      await new Promise((r) => setTimeout(r, 1500));
+      const after = await focus();
+      done("input", opened && after === before, opened ? (after === before ? "swipe opened the notification shade, back closed it" : `shade opened, but back left focus on ${after}`) : "a swipe from the top edge did not open the notification shade");
+    }
+  } catch (e) {
+    const have = new Set(checks.map((c) => c.name));
+    for (const cap of PHONE_CAPS) if (!have.has(label(cap))) done(cap, false, (e as Error).message.slice(0, 160));
+  }
+  return checks;
+}
+
 /**
  * Release the gate's emulator, and delete its AVD only if the emulator confirmed it
  * had gone.
@@ -667,6 +791,7 @@ export async function runDoctor(opts: { smoke?: boolean } = {}): Promise<{ check
       // Android stream look broken in the first place. The gate is allowed to be slow.
       checks.push(...(await smokeIos(config)));
       checks.push(...(await smokeAndroid()));
+      checks.push(...(await smokePhone()));
     }
   }
 
@@ -676,6 +801,6 @@ export async function runDoctor(opts: { smoke?: boolean } = {}): Promise<{ check
 
 export function formatChecks(checks: Check[]): string {
   return checks
-    .map((c) => `${c.skipped ? "•" : c.warn ? "⚠" : c.ok ? "✓" : "✗"} ${c.name}${c.detail ? ` — ${c.detail}` : ""}`)
+    .map((c) => `${c.unknown ? "?" : c.skipped ? "•" : c.warn ? "⚠" : c.ok ? "✓" : "✗"} ${c.name}${c.detail ? ` — ${c.detail}` : ""}`)
     .join("\n");
 }

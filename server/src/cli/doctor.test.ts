@@ -10,7 +10,10 @@ import {
   checkConnectorAuth,
   checkPublicUrl,
   deviceGateExit,
+  formatChecks,
   freshnessVerdict,
+  pickSmokePhone,
+  unknownPhoneChecks,
   readTokens,
   releaseSmokeAvd,
   type Check,
@@ -417,5 +420,30 @@ describe("parseAgentStatus", () => {
     const live = '{\n\t"LastExitStatus" = 15;\n\t"PID" = 38428;\n};';
     assert.deepEqual(parseAgentStatus(dead), { running: false, lastExit: 19968 });
     assert.deepEqual(parseAgentStatus(live), { running: true, lastExit: 15 });
+  });
+});
+
+describe("the physical phone column", () => {
+  const phone = (id: string, over: object = {}) => ({ id, state: "device", awake: true, locked: false, ...over });
+
+  it("prints ? for attach, stream, describe and input with no phone, and does not fail the gate", () => {
+    const checks = unknownPhoneChecks("no Android phone plugged in");
+    assert.deepEqual(
+      formatChecks(checks).split("\n"),
+      ["attach", "stream", "describe", "input"].map((c) => `? smoke android phone: ${c} — no Android phone plugged in`),
+    );
+    assert.equal(deviceGateExit([...bothPlatforms(), ...checks]).code, 0);
+  });
+
+  it("fails the gate when a phone was tested and one capability failed", () => {
+    assert.equal(deviceGateExit([...bothPlatforms(), { name: "smoke android phone: input", ok: false, gate: true }]).code, 1);
+  });
+
+  it("tests only a phone that is free: not held, in no preview, and usable", () => {
+    const picked = pickSmokePhone([phone("A", { state: "unauthorized" }), phone("B"), phone("C"), phone("D")], { B: { who: "dana", since: "t" } }, { C: "pv1 (app x)" });
+    assert.equal(picked.phone?.id, "D");
+    const none = pickSmokePhone([phone("B"), phone("C")], { B: { who: "dana", since: "t" } }, { C: "pv1 (app x)" });
+    assert.equal(none.phone, null);
+    assert.equal(none.why, "B: held by dana; C: in preview pv1 (app x)");
   });
 });

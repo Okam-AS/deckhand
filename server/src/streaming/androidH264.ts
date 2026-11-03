@@ -137,8 +137,12 @@ export function recorderArgv(bounded: boolean): string[] {
  */
 export const PID_PREAMBLE = ["echo", "$$;", "exec"] as const;
 
-const defaultSpawnRecorder: SpawnRecorder = (serial, bounded) =>
-  spawn("adb", ["-s", serial, "exec-out", ...PID_PREAMBLE, ...recorderArgv(bounded)]);
+/** ONE argument: `adb exec-out` quotes each of several arguments, which would print `$$` literally. */
+export function recorderCommand(bounded: boolean): string {
+  return [...PID_PREAMBLE, ...recorderArgv(bounded)].join(" ");
+}
+
+const defaultSpawnRecorder: SpawnRecorder = (serial, bounded) => spawn("adb", ["-s", serial, "exec-out", recorderCommand(bounded)]);
 
 const defaultKillRecorder: KillRecorder = (serial, pid) => {
   spawn("adb", ["-s", serial, "shell", "kill", "-INT", String(pid)], { stdio: "ignore" }).unref();

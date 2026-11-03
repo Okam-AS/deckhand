@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { readFileSync } from "node:fs";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { AvccSource, PID_PREAMBLE, RECORDER_ARGV, RECORDER_PKILL_PATTERN, recorderArgv } from "./androidH264.ts";
+import { AvccSource, PID_PREAMBLE, RECORDER_ARGV, RECORDER_PKILL_PATTERN, recorderArgv, recorderCommand } from "./androidH264.ts";
 import { AVCC_TAG_DELTA, AVCC_TAG_DESCRIPTION, AVCC_TAG_KEYFRAME } from "./h264.ts";
 
 const hdr = (t: number) => 0x60 | t;
@@ -395,7 +395,8 @@ test("the device-side sweep hunts for the argv we actually spawn", () => {
   const src = readFileSync(new URL("./androidH264.ts", import.meta.url), "utf8");
   const decl = /const defaultSpawnRecorder[\s\S]*?;/.exec(src)?.[0];
   assert.ok(decl, "defaultSpawnRecorder is gone or renamed — this check needs updating with it");
-  assert.match(decl, /\.\.\.recorderArgv\(/, "the default recorder must spawn RECORDER_ARGV (through recorderArgv), not its own copy of the flags");
+  assert.match(decl, /recorderCommand\(/, "the default recorder must spawn RECORDER_ARGV (through recorderCommand), not its own copy of the flags");
+  assert.equal(recorderCommand(false), `echo $$; exec ${RECORDER_ARGV.join(" ")}`);
   assert.deepEqual(recorderArgv(false), [...RECORDER_ARGV]);
   assert.deepEqual(recorderArgv(true).slice(0, 2), [...RECORDER_ARGV].slice(0, 2), "the bounded recorder must still match the sweep's pattern");
   const literals = [...decl.matchAll(/"([^"]*)"|'([^']*)'|`([^`]*)`/g)].map((m) => m[1] ?? m[2] ?? m[3]);
