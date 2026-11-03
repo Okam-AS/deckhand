@@ -6,7 +6,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { App, AppType, Config } from "../config.ts";
-import { appSchema, ConfigError, enterprisePatPath, parseRepo, publicBaseUrl } from "../config.ts";
+import { appEnvironments, appSchema, ConfigError, EAS_PROJECT_ID_RE, enterprisePatPath, parseRepo, publicBaseUrl } from "../config.ts";
 import { versionStatus, type UpdateStatus } from "../version.ts";
 import { DEV_MENU_PREFLIGHT, devMenuHint } from "../testing/devMenu.ts";
 import { selectorMissHint } from "../testing/tree.ts";
@@ -312,7 +312,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "List apps",
       description:
-        "List the apps registered on this machine that you can preview. Apps come from a GitHub repo (git previews of a branch/PR), a local folder on this machine (dev-mode previews of the working copy, no pushing needed), or both.",
+        "List the apps registered on this machine that you can preview. Apps come from a GitHub repo (git previews of a branch/PR), a local folder on this machine (dev-mode previews of the working copy, no pushing needed), or both. An app with `easProjectId` can also preview a build EAS already made (start_preview's `eas`). `environments` names the backends an app can run against and its default, which every preview uses unless the user asked for another; null means the app declares none.",
       inputSchema: {},
     },
     () =>
@@ -325,6 +325,11 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             source: a.path ? (a.repo ? "github+local" : "local") : "github",
             type: a.type,
             defaultBranch: a.defaultBranch,
+            easProjectId: a.easProjectId ?? null,
+            environments: (() => {
+              const e = appEnvironments(a);
+              return e ? { default: e.default, names: [...e.byName.keys()] } : null;
+            })(),
           })),
           // Empty-state onboarding (PLAN §6): tell the agent exactly what to ask
           // the user next. Relay `nextStep` to the user verbatim. Local checkout
@@ -1807,6 +1812,10 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           .string()
           .optional()
           .describe("app id this is being migrated FROM (the source/oracle) — start_preview then shows it alongside this app by default"),
+        easProjectId: z
+          .string()
+          .optional()
+          .describe("the app's EAS project id (a UUID), so start_preview can install builds EAS already made; detected from the app config (extra.eas.projectId) when omitted"),
       },
     },
     (args) =>
@@ -1839,7 +1848,10 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
 
         const probeFor = (b: string): App => ({ id, repo: args.repo, type: args.type ?? "react-native", defaultBranch: b, env: {} });
         let branch = args.branch ?? "main";
-        let detected: { type: AppType | null; bundleId: string | null };
+        if (args.easProjectId && !EAS_PROJECT_ID_RE.test(args.easProjectId)) {
+          return fail("bad_request", `easProjectId "${args.easProjectId}" is not an EAS project id`, "it is the UUID under extra.eas.projectId in the app config, or on the project's expo.dev page");
+        }
+        let detected: { type: AppType | null; bundleId: string | null; easProjectId: string | null };
         try {
           // Auto-detect the repo's actual default branch (origin/HEAD) unless the
           // caller pinned one — repos on master/develop must not fail as "main".
@@ -1895,6 +1907,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           );
         }
         const bundleId = args.bundleId ?? detected.bundleId ?? undefined;
+        const easProjectId = args.easProjectId ?? detected.easProjectId ?? undefined;
 
         const app = appSchema.parse({
           id,
@@ -1903,12 +1916,13 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           defaultBranch: branch,
           ...(bundleId ? { bundleId } : {}),
           ...(args.migratesFrom ? { migratesFrom: args.migratesFrom } : {}),
+          ...(easProjectId ? { easProjectId } : {}),
         });
         apps.push(app);
         persistApps(apps);
 
         return ok({
-          registered: { id: app.id, repo: app.repo, type: app.type, defaultBranch: app.defaultBranch, bundleId: bundleId ?? null },
+          registered: { id: app.id, repo: app.repo, type: app.type, defaultBranch: app.defaultBranch, bundleId: bundleId ?? null, easProjectId: easProjectId ?? null },
           checks: [
             { name: "repo reachable", ok: true },
             { name: "app type", ok: true, detail: app.type },

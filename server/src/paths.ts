@@ -42,6 +42,10 @@ export const paths = {
   secretsEnv: (appId: string) => join(deckhandHome(), "secrets", `${appId}.env`),
   /** TypeSafe API key for `navigate` (mode 0600); `.key`, so no app id's `.env` can collide. */
   typesafeKey: () => join(deckhandHome(), "secrets", "typesafe.key"),
+  /** Read-only Expo robot token for the EAS source (mode 0600). */
+  expoToken: () => join(deckhandHome(), "secrets", "expo.token"),
+  /** Downloaded EAS build artifacts, one directory per build id. */
+  easCache: () => join(deckhandHome(), "cache", "eas"),
   reposDir: () => join(deckhandHome(), "repos"),
   repo: (appId: string) => join(deckhandHome(), "repos", appId),
   worktreesDir: () => join(deckhandHome(), "worktrees"),

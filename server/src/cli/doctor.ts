@@ -20,6 +20,8 @@ import { detectWebFrameworkFromDir, webHostingMode } from "../engine/detect.ts";
 import { repoRoot } from "../version.ts";
 import { lookupTypesafeKey, type KeyLookup } from "../navigate/secrets.ts";
 import { EGRESS_HOST } from "../navigate/egress.ts";
+import { EasClient, type EasError } from "../eas/client.ts";
+import { expoTokenSource, lookupExpoToken, type ExpoTokenLookup } from "../eas/secrets.ts";
 
 /** Helper ports for the Android smoke leg — outside the configured preview range, so a gate run cannot evict a live preview's helper. */
 const ANDROID_SMOKE_PORTS: [number, number] = [3290, 3299];
@@ -330,6 +332,26 @@ function checkWebHost(config: Config, apps: App[]): Check {
     warn: true,
     detail: `${subdomain.length} web app(s) (Nuxt/Next/static) need subdomain hosting but no webHost is set — previews work on loopback only. Set webHost (+ a DNS route/ingress) to share them publicly.`,
   };
+}
+
+/**
+ * Whether previews of EAS builds can work: the Expo token is set, the Expo API accepts it, and it
+ * can list builds of each registered EAS project. Never prints the token. Absent is not a failure:
+ * the EAS source is opt-in.
+ */
+export async function checkExpoToken(key: ExpoTokenLookup, client: Pick<EasClient, "whoami" | "builds">, projectIds: string[]): Promise<Check> {
+  const name = "expo token";
+  if (key.state === "missing") return { name, ok: true, skipped: true, detail: "not set — previews of EAS builds are off. On: `deckhand secret set expo`" };
+  if (key.state === "error") return { name, ok: true, warn: true, detail: key.message };
+  try {
+    const who = await client.whoami();
+    const ids = [...new Set(projectIds)];
+    for (const id of ids) await client.builds(id, { limit: 1 });
+    return { name, ok: true, detail: `set; the Expo API accepts it (${who})${ids.length ? ` and it lists builds of ${ids.length} registered EAS project(s)` : "; no app has an easProjectId yet"}` };
+  } catch (e) {
+    const err = e as EasError;
+    return { name, ok: true, warn: true, detail: `set, but ${err.message}${err.hint ? ` — ${err.hint}` : ""}` };
+  }
 }
 
 /**
@@ -791,6 +813,7 @@ export async function runDoctor(opts: { smoke?: boolean } = {}): Promise<{ check
     checks.push(checkWebHost(config, apps));
     const egress = checkNavigateEgress(lookupTypesafeKey());
     if (egress) checks.push(egress);
+    checks.push(await checkExpoToken(lookupExpoToken(), new EasClient(expoTokenSource()), apps.flatMap((a) => (a.easProjectId ? [a.easProjectId] : []))));
     checks.push(await checkServerFreshness(config));
     checks.push(await checkPublicUrl(config));
     if (opts.smoke) {

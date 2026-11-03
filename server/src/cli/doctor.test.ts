@@ -16,6 +16,7 @@ import {
   unknownPhoneChecks,
   lastUserActivity,
   inputProof,
+  checkExpoToken,
   readTokens,
   releaseSmokeAvd,
   type Check,
@@ -464,5 +465,35 @@ describe("the phone input proof", () => {
     assert.deepEqual(inputProof(10, 10).ok, false);
     assert.equal(inputProof(null, 20).ok, null);
     assert.match(inputProof(null, null).detail, /dumpsys power/);
+  });
+});
+
+describe("the expo token check", () => {
+  const TOKEN = "robot-secret-77";
+  const client = (over: { whoami?: () => Promise<string>; builds?: (id: string) => Promise<never[]> } = {}) => ({
+    whoami: over.whoami ?? (async () => "Robot"),
+    builds: over.builds ?? (async () => []),
+  });
+
+  it("says absent without failing, and how to turn it on", async () => {
+    const c = await checkExpoToken({ state: "missing" }, client(), []);
+    assert.equal(c.skipped, true);
+    assert.match(c.detail ?? "", /deckhand secret set expo/);
+  });
+
+  it("proves the token lists builds of every registered EAS project, and never prints it", async () => {
+    const asked: string[] = [];
+    const c = await checkExpoToken({ state: "ok", token: TOKEN }, client({ builds: async (id) => (asked.push(id), []) }), ["p1", "p2", "p1"]);
+    assert.deepEqual(asked, ["p1", "p2"]);
+    assert.equal(c.ok && !c.warn, true);
+    assert.ok(!formatChecks([c]).includes(TOKEN));
+  });
+
+  it("warns, with the API's reason and not the token, when the Expo API refuses it", async () => {
+    const { EasError } = await import("../eas/client.ts");
+    const c = await checkExpoToken({ state: "ok", token: TOKEN }, client({ whoami: async () => { throw new EasError("the Expo API refused deckhand's token (HTTP 401)", "set a new one"); } }), []);
+    assert.equal(c.warn, true);
+    assert.match(c.detail ?? "", /refused.*401/);
+    assert.ok(!formatChecks([c]).includes(TOKEN));
   });
 });

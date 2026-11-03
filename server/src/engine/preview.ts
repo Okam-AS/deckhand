@@ -3147,7 +3147,7 @@ export class PreviewEngine {
    * a checkout. Used by add_app before registering. Propagates credential/ref
    * errors so the caller can turn them into onboarding steps.
    */
-  async inspectAppRepo(app: App, spec: RefSpec): Promise<{ type: AppType | null; bundleId: string | null }> {
+  async inspectAppRepo(app: App, spec: RefSpec): Promise<{ type: AppType | null; bundleId: string | null; easProjectId: string | null }> {
     const insp = await this.d.worktrees.inspect(app, spec);
     return detectFromRepo(insp.read, insp.hasEntry);
   }

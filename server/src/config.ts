@@ -170,6 +170,73 @@ export type AppType = z.infer<typeof appTypeSchema>;
  */
 const LEGACY_APP_KEYS = ["allowForkPRs"] as const;
 
+export const EAS_PROJECT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export const EAS_PROFILE_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+export const ENVIRONMENT_NAME_RE = /^[a-z][a-z0-9-]{0,31}$/;
+/**
+ * Launch arguments reach a process's argv on iOS and a device-side shell line on Android (adb
+ * joins `am start -e K V` into one), so both halves are allow-listed: no quoting, no spaces, and
+ * a value never starts with `-`, where it would read as a flag.
+ */
+export const LAUNCH_ARG_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+export const LAUNCH_ARG_VALUE_RE = /^(?:[A-Za-z0-9_.:/@+][A-Za-z0-9_.:/@+-]{0,199})?$/;
+
+function compilesAsRegex(s: string): boolean {
+  try {
+    new RegExp(s);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export const environmentSchema = z
+  .object({
+    /** The EAS build profile that is this environment, per artifact kind. */
+    easProfile: z
+      .object({
+        android: z.string().regex(EAS_PROFILE_RE).optional(),
+        ios: z.string().regex(EAS_PROFILE_RE).optional(),
+        iosSimulator: z.string().regex(EAS_PROFILE_RE).optional(),
+      })
+      .strict()
+      .optional(),
+    /** Passed at every launch: Android intent string extras, iOS process arguments. */
+    launchArgs: z
+      .record(
+        z.string().regex(LAUNCH_ARG_KEY_RE, "a launch argument key is letters, digits and _"),
+        z.string().regex(LAUNCH_ARG_VALUE_RE, "a launch argument value is letters, digits and _ . : / @ + -, and does not start with -"),
+      )
+      .default({}),
+    /** A regular expression the app's log matches once it runs against this environment. */
+    logMarker: z.string().min(1).max(300).refine(compilesAsRegex, "logMarker must be a valid regular expression").optional(),
+  })
+  .strict();
+export type AppEnvironment = z.infer<typeof environmentSchema>;
+
+/** `default: <name>` plus one entry per environment name. */
+export const environmentsSchema = z
+  .object({ default: z.string() })
+  .catchall(environmentSchema)
+  .superRefine((envs, ctx) => {
+    const names = Object.keys(envs).filter((k) => k !== "default");
+    for (const n of names) {
+      if (!ENVIRONMENT_NAME_RE.test(n)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [n], message: `environment name "${n}" must be lowercase letters, digits and -` });
+    }
+    if (!names.includes(envs.default)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["default"], message: `default "${envs.default}" is not one of the environments defined here (${names.join(", ") || "none"})` });
+    }
+  });
+export type AppEnvironments = z.infer<typeof environmentsSchema>;
+
+/** An app's environments by name, or null when it declares none. */
+export function appEnvironments(app: Pick<App, "environments">): { default: string; byName: Map<string, AppEnvironment> } | null {
+  if (!app.environments) return null;
+  const byName = new Map<string, AppEnvironment>();
+  for (const [k, v] of Object.entries(app.environments)) if (k !== "default") byName.set(k, v as AppEnvironment);
+  return { default: app.environments.default, byName };
+}
+
 export const appSchema = z
   .preprocess((raw) => {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
@@ -196,6 +263,10 @@ export const appSchema = z
     // referenced id must exist (checked across the whole apps file, see appsSchema).
     migratesFrom: z.string().min(1).optional(),
     env: z.record(z.string(), z.string()).default({}),
+    /** The EAS project whose builds `start_preview`'s `eas` source installs. */
+    easProjectId: z.string().regex(EAS_PROJECT_ID_RE, "easProjectId is the EAS project's UUID").optional(),
+    /** Which backend a preview runs against; omitted, the app's environment is unknown and never invented. */
+    environments: environmentsSchema.optional(),
   })
   .strict()
   .refine((a) => a.repo || a.path, { message: "an app needs a repo, a local path, or both" })
