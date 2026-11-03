@@ -365,3 +365,33 @@ describe("AndroidAdbBackend.reapOrphans — recorders left inside the emulator",
     }
   });
 });
+
+describe("AndroidAdbBackend input — the viewer's Rotate button", () => {
+  const rotate = async (serial: string): Promise<string[][]> => {
+    const { WebSocket } = await import("ws");
+    const { adb, calls } = fakeAdb();
+    const b = new AndroidAdbBackend({ portRange: [3900, 3910], adb });
+    const s = await b.attach({ platform: "android", udid: serial, serial });
+    try {
+      const ws = new WebSocket(`${s.origin.replace("http", "ws")}${s.helperBasePath}/ws`);
+      await new Promise<void>((resolve, reject) => {
+        ws.once("open", () => resolve());
+        ws.once("error", reject);
+      });
+      ws.send(Buffer.concat([Buffer.from([0x07]), Buffer.from(JSON.stringify({ orientation: "landscape_left" }))]));
+      await new Promise((r) => setTimeout(r, 100));
+      ws.close();
+    } finally {
+      await s.detach().catch(() => {});
+    }
+    return calls.filter((c) => c.includes("settings"));
+  };
+
+  it("turns an emulator by its rotation setting", async () => {
+    assert.ok((await rotate("emulator-5554")).length > 0);
+  });
+
+  it("never writes a setting on a phone", async () => {
+    assert.deepEqual(await rotate("RF8N30YRFKY"), []);
+  });
+});

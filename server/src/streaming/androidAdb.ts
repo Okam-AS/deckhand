@@ -4,6 +4,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { allocatePort, helperBasePath, type AttachedStream, type StreamDeviceRef, type StreamingBackend } from "./backend.ts";
 import { AvccSource, RECORDER_PKILL_PATTERN } from "./androidH264.ts";
 import { AVD_PREFIX, parseAdbDevices } from "../devices/android.ts";
+import { isEmulatorSerial } from "../devices/androidPhone.ts";
 
 /**
  * How long to keep asking a freshly booted emulator for a frame. Matches the
@@ -59,7 +60,8 @@ export interface AndroidAdbOptions {
 
 /** Parse `adb shell wm size` → device pixel dimensions. */
 export function parseWmSize(output: string): { w: number; h: number } | null {
-  const m = /(\d+)x(\d+)/.exec(output);
+  // `input tap` takes the override size; a phone whose resolution was lowered reports both.
+  const m = /Override size:\s*(\d+)x(\d+)/.exec(output) ?? /(\d+)x(\d+)/.exec(output);
   return m ? { w: Number(m[1]), h: Number(m[2]) } : null;
 }
 
@@ -559,7 +561,8 @@ export class AndroidAdbBackend implements StreamingBackend {
         }
       } else {
         const rotation = orientationToUserRotation(frame.orientation);
-        if (rotation === null) return;
+        // Rotation is a system setting, and a phone's settings are its owner's.
+        if (rotation === null || !isEmulatorSerial(serial)) return;
         // `input tap/swipe` operates in the rotated coordinate space: transpose
         // the live size for 90°/270°. Mutates the shared object so every ws
         // connection to this device maps consistently.
@@ -593,7 +596,7 @@ export class AndroidAdbBackend implements StreamingBackend {
    * `sweepDeviceRecorders` load-bearing rather than belt-and-braces.
    *
    * The one Android resource that DOES outlive us is the on-device `screenrecord`:
-   * androidH264.ts pkills it from its own `stop()`, which is our graceful teardown only, so a
+   * androidH264.ts kills it by pid from its own `stop()`, which is our graceful teardown only, so a
    * crashed or SIGKILLed server leaves it running with no owner. Not cosmetic — the host
    * encoder is single-instance across emulators, so one orphan makes every other device
    * produce zero bytes with no error at all, which from inside androidH264.ts is
@@ -614,9 +617,11 @@ export class AndroidAdbBackend implements StreamingBackend {
    * deckhand. Four tests have to pass before a device is touched, and each one
    * is load-bearing:
    *
-   *   1. the serial is an emulator. Deckhand never targets or streams physical
-   *      hardware (PLAN §2 "NO physical devices"), so a `screenrecord` on a
-   *      plugged-in phone is always somebody else's.
+   *   1. the serial is an emulator. Deckhand streams phones too, but nothing
+   *      on a phone can prove a recorder is ours — there is no AVD name to ask —
+   *      so one there may be somebody else's and is left alone. Deckhand's own
+   *      recorder on a phone is stopped by its device pid (androidH264.ts), and
+   *      one orphaned by a crash outlives us until the phone is replugged.
    *   2. the AVD is deckhand-named. A developer's own emulator is out of
    *      bounds, and a console that will not tell us the name reads as "not
    *      provably ours" — the safe direction.
@@ -645,8 +650,8 @@ export class AndroidAdbBackend implements StreamingBackend {
    * Then the kill itself is narrowed once more, to our own recorder's argv
    * (`RECORDER_PKILL_PATTERN`). An `adb shell` process carries no env marker
    * from this side, so that argv is the closest thing to a marker that exists
-   * on the device; the graceful `stop()` path kills by name and can afford to,
-   * because it owns the recorder it is killing and this does not.
+   * on the device; the graceful `stop()` path kills the one pid its recorder
+   * printed, which needs no proof of ownership.
    *
    * Never throws, and fails towards killing nothing: a failed enumeration is
    * "no orphans found", never "no live work found".

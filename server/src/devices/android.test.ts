@@ -126,6 +126,12 @@ describe("AndroidManager.shutdown", () => {
     });
     assert.equal(await mgr.shutdown("emulator-5554", 5_000), true);
   });
+
+  it("refuses a physical serial before sending anything to it", async () => {
+    const { mgr, calls } = fakeManager(() => ({ code: 1 }));
+    await assert.rejects(() => mgr.shutdown("RF8N30YRFKY", 1_000), /physical device/);
+    assert.deepEqual(calls, [], "no `emu kill` and no get-state poll may reach a phone");
+  });
 });
 
 describe("AndroidManager.findApk", () => {

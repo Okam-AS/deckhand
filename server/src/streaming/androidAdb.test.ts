@@ -94,6 +94,10 @@ describe("parseWmSize", () => {
     assert.deepEqual(parseWmSize("Override size: 720x1600\n"), { w: 720, h: 1600 });
     assert.equal(parseWmSize("garbage"), null);
   });
+
+  it("takes the override size a phone reports beside its panel size, since `input` taps in it", () => {
+    assert.deepEqual(parseWmSize("Physical size: 1440x3200\nOverride size: 1080x2400\n"), { w: 1080, h: 2400 });
+  });
 });
 
 describe("parseEmuAvdName", () => {
