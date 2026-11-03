@@ -2353,6 +2353,7 @@ export class PreviewEngine {
   private async silenceDevOverlays(platform: Platform, handle: string, bundleId: string): Promise<void> {
     if (platform !== "ios") return;
     await this.d.simctl.silenceDevOverlays(handle, bundleId).catch(() => {});
+    if (this.d.config.ios?.reduceTransparency) await this.d.simctl.reduceTransparency(handle).catch(() => {});
   }
 
   private async attachAndReady(p: LivePreview, dev: LiveDevice, platform: Platform, handle: string): Promise<void> {

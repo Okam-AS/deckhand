@@ -269,6 +269,20 @@ describe("Simctl launch", () => {
   });
 });
 
+describe("Simctl reduceTransparency", () => {
+  it("writes the system's own Reduce Transparency switch on the device, and never throws", async () => {
+    const calls: string[][] = [];
+    await new Simctl(async (_cmd: string, args: string[]) => {
+      calls.push(args);
+      return { code: 0, stdout: Buffer.from(""), stderr: "" };
+    }).reduceTransparency("UDID-1");
+    assert.deepEqual(calls, [["simctl", "spawn", "UDID-1", "defaults", "write", "com.apple.Accessibility", "EnhancedBackgroundContrastEnabled", "-bool", "YES"]]);
+    await new Simctl(async () => {
+      throw new Error("simctl spawn exploded");
+    }).reduceTransparency("UDID-1");
+  });
+});
+
 describe("Simctl install", () => {
   it("is bounded by a timeout", async () => {
     const seen: Record<string, number | undefined> = {};

@@ -284,6 +284,12 @@ off" check.
 the APP does. A location permission alert is deliberately not on that list — a user meets
 it too, so an agent should dismiss it the way a user would.
 
+`ios.reduceTransparency` (config, off by default) is the one device setting deckhand may
+turn on, and only because the operator chose it: the system's own Reduce Transparency, so
+iOS 26 glass bars and sheets draw solid for the viewer and for screenshots sent to Jev. It
+is an accessibility setting a real user can have, not a change to the app — keep it that
+way, and keep it opt-in.
+
 If a dev menu still appears, `describe` says so and how to close it. Treat that as
 deckhand's packaging, never an app bug: three runs in one session hit a dev overlay and
 reported a working app as having "critical UI bugs".
