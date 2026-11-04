@@ -1613,6 +1613,15 @@ export class PreviewEngine {
         "stop a device or raise limits.maxDevicesPerPreview",
       );
     }
+    if (p.record.source === "local") {
+      const platforms = [...p.devices, ...specs].map((d) => ("record" in d ? d.record.platform : d.platform));
+      if (new Set(platforms).size < platforms.length) {
+        throw new PreviewError(
+          "local previews run one device per platform",
+          "the livesync process targets a single device; stop_device the one this preview has on that platform first",
+        );
+      }
+    }
     const booting = specs.filter((sp) => !sp.serial).length;
     if (booting && this.devicesInUse() + booting > this.d.config.limits.maxTotalDevices) {
       throw new PreviewError(
@@ -1685,7 +1694,7 @@ export class PreviewEngine {
 
     // The livesync process is keyed by app+PLATFORM, not by device — so removing a
     // device only ends it if that platform is leaving with it. Unconditional here ONLY
-    // because startPreview enforces one device per platform on local previews, which is
+    // because startPreview and addDevices enforce one device per platform on local previews, which is
     // the only source that has a livesync process at all: a removed device is always the
     // last of its platform. If that rule is ever relaxed, this must check for a surviving
     // sibling first, or it kills livesync for a device nobody asked to touch. Written as

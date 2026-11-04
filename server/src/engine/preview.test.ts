@@ -3251,6 +3251,24 @@ describe("physical Android phones", () => {
     assert.ok(!phoneLog.some((c) => c.includes("uninstall")));
   });
 
+  it("is not added beside an emulator of its platform on a local preview, whose livesync drives one device", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "deckhand-local-phone-"));
+    try {
+      const app: App = { id: "local-app", path: dir, type: "nativescript", defaultBranch: "main", bundleId: "org.ns.demo", env: {} };
+      const h = makeEngine({ phones: fakePhones() });
+      h.engine.startPreview({ app, source: "local", devices: [{ platform: "android" }], access: "public" });
+      assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+      const again = h.engine.startPreview({ app, source: "local", devices: [{ platform: "android", serial: PHONE }], access: "public" });
+      assert.deepEqual(again.notAdded, ["android"]);
+      assert.match(again.nextStep ?? "", /one device per platform/);
+      assert.deepEqual(h.engine.getStatus("pv1")!.devices.map((d) => d.deviceId), ["android-0"]);
+      assert.equal(h.devProcCalls.filter((c) => c.startsWith("start ")).length, 1, "a second livesync for the platform replaced the emulator's");
+      await h.engine.stopPreview("pv1");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("a restart that fails before the install stays failed, though an earlier run resolved a conflict", async () => {
     const phoneLog: string[] = [];
     let run = 0;
