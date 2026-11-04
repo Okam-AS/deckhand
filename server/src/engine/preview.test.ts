@@ -2756,13 +2756,6 @@ describe("buildStepDetail", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// listDevices enumerates what deckhand can actually BOOT — simulator runtimes
-// and models, emulator API levels, and capacity. Hardware plugged into the
-// machine is neither targeted nor reported (PLAN §2 "NO physical devices"), so
-// the response has no `physical` section to read.
-// ---------------------------------------------------------------------------
-
 describe("listDevices", () => {
   it("reports simulator runtimes/models, emulator API levels, capacity and the phones plugged in", async () => {
     const h = makeEngine();

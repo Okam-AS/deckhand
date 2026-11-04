@@ -3585,10 +3585,8 @@ export class PreviewEngine {
   }
 
   /**
-   * Enumerate available iOS runtimes/models, Android API levels, and current
-   * capacity. Simulators and emulators only: deckhand does not target hardware
-   * plugged into the machine, and does not report it either (PLAN §2 "NO
-   * physical devices").
+   * Enumerate available iOS runtimes/models, Android API levels, current capacity, and the
+   * phones cabled to this Mac with what blocks each.
    */
   async listDevices(): Promise<{
     ios: { runtimes: { version: string; name: string; models?: string[] }[]; models: string[] };
