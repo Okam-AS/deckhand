@@ -295,6 +295,33 @@ describe("WdaRunner", () => {
     }
   });
 
+  it("rides out a /status that misses while its runner is alive, and kills that runner before it starts another", async () => {
+    let up = false;
+    let misses = 0;
+    const f = runnerFixture({
+      ready: () => up && (misses > 0 ? (misses--, false) : true),
+      onSpawn: (_s, log) => {
+        appendFileSync(log, "t = 0.01s ServerURLHere->http://127.0.0.1:8100<-ServerURLHere\n");
+        up = true;
+      },
+    });
+    try {
+      await f.runner.ensureRunning();
+      misses = 1;
+      await f.runner.ensureRunning();
+      const runs = () => f.spawned.filter((s) => s.cmd === "xcodebuild");
+      assert.equal(runs().length, 1, "one missed /status started a second WDA run on the phone");
+      misses = 4;
+      await f.runner.ensureRunning();
+      assert.equal(runs().length, 2);
+      assert.deepEqual(runs()[0]!.child.killed, ["SIGTERM"], "the replaced runner was orphaned, still running");
+      assert.deepEqual(f.runner.livePids(), [runs()[1]!.child.pid]);
+    } finally {
+      f.runner.stop();
+      rmSync(f.dir, { recursive: true, force: true });
+    }
+  });
+
   it("restarts a runner that exits on its own, and not one it stopped", async () => {
     const f = runnerFixture();
     try {

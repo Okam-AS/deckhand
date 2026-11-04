@@ -201,7 +201,11 @@ export class WdaRunner {
   async ensureRunning(): Promise<WdaStatus> {
     this.stopped = false;
     await this.forward.ensure();
-    const st = await this.client.status();
+    let st = await this.client.status();
+    for (let i = 0; i < 3 && !st?.ready && this.runnerAlive(); i++) {
+      await this.sleep(1_000);
+      st = await this.client.status();
+    }
     if (st?.ready) {
       if (this.runnerAlive()) return st;
       const exposure = await wifiExposure(st.wifiIp, this.exec);
@@ -276,6 +280,12 @@ export class WdaRunner {
   }
 
   private async start(): Promise<void> {
+    const old = this.runner;
+    this.runner = undefined;
+    if (old) {
+      this.log(`WDA on ${this.udid} stopped answering while its runner was alive; replacing it`);
+      killGroup(old);
+    }
     const xctestrun = await this.loopbackXctestrun();
     mkdirSync(dirname(this.logPath), { recursive: true });
     const fd = openSync(this.logPath, "w");
