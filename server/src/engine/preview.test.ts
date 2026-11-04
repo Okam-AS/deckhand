@@ -3445,6 +3445,36 @@ describe("EAS builds and environments", () => {
   const startEas = (h: Harness, extra: Partial<StartPreviewRequest> = {}) =>
     h.engine.startPreview({ app: easApp, source: "eas", devices: [{ platform: "android", serial: PHONE }], access: "password", ...extra });
 
+  it("a preview stopped while its adb install runs changes nothing more on the phone once the install returns", async () => {
+    const log: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let installs = 0;
+    const exec = async (_cmd: string, args: string[]): Promise<ExecResult> => {
+      log.push(`adb ${args.join(" ")}`);
+      if (args.includes("install") && ++installs === 1) await gate;
+      const r = phoneAdb()(args);
+      return { code: r.code ?? 0, stdout: r.stdout ?? Buffer.from(""), stderr: "" };
+    };
+    let n = 0;
+    const h = makeEngine({
+      genPreviewId: () => `pv${++n}`,
+      genShareId: () => `share-${n}`,
+      phones: fakePhones({ registeredApp: (serial: string, pkg: string) => new RegisteredApp(exec, serial, pkg) }),
+      eas: fakeEas(),
+    });
+    startEas(h, { freshApp: "data" });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(installs, 1, log.join("\n"));
+    await h.engine.stopPreview("pv1");
+    startEas(h);
+    assert.equal(await waitForPhase(h.engine, "pv2", ["ready", "failed"]), "ready", JSON.stringify(h.engine.getStatus("pv2")));
+    const at = log.length;
+    release();
+    await new Promise((r) => setTimeout(r, 300));
+    assert.deepEqual(log.slice(at).filter((l) => /pm clear|uninstall|install|am start/.test(l)), [], log.slice(at).join("\n"));
+  });
+
   it("installs the default environment's EAS build on a phone with its launch arguments, building nothing", async () => {
     const phoneLog: string[] = [];
     const easLog: string[] = [];
@@ -3689,6 +3719,38 @@ describe("physical iPhones", () => {
 
     const held = makeEngine({ eas: fakeEas({}, [], { "ios-device": ipaBuild }), phoneHolds: () => ({ [IPHONE.toLowerCase()]: { who: "dana", since: "t" } }), iphones: fakeIphones(listed, [], { devicectl: devicectl() }) });
     assert.throws(() => start(held), (e: unknown) => e instanceof PreviewError && e.code === "device_busy" && /dana/.test(e.message));
+  });
+
+  it("an EAS run stopped while it asks what the phone holds removes and installs nothing once devicectl answers", async () => {
+    const log: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let asked = 0;
+    const base = fakeIphones({ list: async () => [{ udid: IPHONE, name: "QA", model: "iPhone 15", osVersion: "27.0.1", blockers: [] }] }, log, { devicectl: devicectl(), appLines: ["x"] });
+    const iphones = fakeIphones({
+      list: base.list,
+      apps: (udid: string, bundleId: string) => {
+        const apps = base.apps(udid, bundleId);
+        const installedApp = apps.installedApp.bind(apps);
+        apps.installedApp = async (...a: Parameters<typeof installedApp>) => {
+          if (++asked === 1) await gate;
+          return installedApp(...a);
+        };
+        return apps;
+      },
+    }, log, { devicectl: devicectl(), appLines: ["x"] });
+    let n = 0;
+    const h = makeEngine({ eas: fakeEas({}, [], { "ios-device": ipaBuild }), genPreviewId: () => `pv${++n}`, genShareId: () => `share-${n}`, iphones });
+    start(h, { freshApp: "reinstall" });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(asked, 1, log.join("\n"));
+    await h.engine.stopPreview("pv1");
+    start(h);
+    assert.equal(await waitForPhase(h.engine, "pv2", ["ready", "failed"]), "ready", JSON.stringify(h.engine.getStatus("pv2")));
+    const at = log.length;
+    release();
+    await new Promise((r) => setTimeout(r, 300));
+    assert.deepEqual(log.slice(at).filter((l) => /uninstall|install app|process launch/.test(l)), [], log.slice(at).join("\n"));
   });
 
   it("an EAS run stopped during its download never installs, launches, logs or streams on the phone it gave back", async () => {

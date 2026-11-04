@@ -708,7 +708,20 @@ export class PreviewEngine {
   /** The registered app's guarded handle on a physical iPhone; no other bundle id gets through it. */
   private iphoneApps(dev: LiveDevice): IphoneApps {
     if (!dev.appPackage || !dev.record.serial) throw new PreviewError("the app's iOS bundle id is not resolved yet");
-    return this.iphones().apps(dev.record.serial, dev.appPackage);
+    return this.whileWanted(dev, this.iphones().apps(dev.record.serial, dev.appPackage), ["install", "uninstall", "launch"]);
+  }
+
+  /** The handle with each change to the phone refused once the preview no longer wants the device; stopping the app stays open to teardown. */
+  private whileWanted<T extends object, K extends keyof T>(dev: LiveDevice, handle: T, changes: K[]): T {
+    const guarded = Object.create(handle) as T;
+    for (const k of changes) {
+      const real = handle[k] as unknown as (...a: unknown[]) => Promise<unknown>;
+      (guarded as Record<K, unknown>)[k] = async (...a: unknown[]) => {
+        this.stillWanted(dev);
+        return real.apply(handle, a);
+      };
+    }
+    return guarded;
   }
 
   private isIphone(dev: LiveDevice): boolean {
@@ -2993,7 +3006,7 @@ export class PreviewEngine {
   /** The guarded handle on this device's registered app; never another package. */
   private registeredApp(dev: LiveDevice, serial: string): RegisteredApp {
     if (!dev.appPackage) throw new PreviewError("the app's Android package is not resolved yet");
-    return this.phones().registeredApp(serial, dev.appPackage);
+    return this.whileWanted(dev, this.phones().registeredApp(serial, dev.appPackage), ["install", "uninstall", "clearData", "launch", "openUrl"]);
   }
 
   /** `freshApp: "reinstall"`: the registered app goes before the build installs it again. Android only. */
