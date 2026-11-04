@@ -1,13 +1,13 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChildProcess, spawn } from "node:child_process";
 import { IPHONE_MARKER_ENV, IproxyForward, iproxyArgs, wdaPortsFor } from "./iproxy.ts";
 import {
-  LOOPBACK_XCTESTRUN, WdaRunner, WdaStartError, parseServerUrl, probeWifiPort, startFailureHint, wifiExposure, xctestrunTargets,
+  loopbackXctestrunName, WdaRunner, WdaStartError, parseServerUrl, probeWifiPort, startFailureHint, wifiExposure, xctestrunTargets,
 } from "./wdaRunner.ts";
 import { defaultExec, type Exec } from "./ios.ts";
 import { fakeWda } from "../test-support/wdaFake.ts";
@@ -123,7 +123,7 @@ describe("the loopback .xctestrun", () => {
       const runner = new WdaRunner({ udid: UDID, productsDir: dir, logPath: join(dir, "wda.log") });
       const original = readFileSync(runner.sourceXctestrun(), "utf8");
       const copy = await runner.loopbackXctestrun();
-      assert.equal(copy, join(dir, LOOPBACK_XCTESTRUN));
+      assert.equal(copy, join(dir, loopbackXctestrunName(UDID)));
       assert.equal(readFileSync(runner.sourceXctestrun(), "utf8"), original);
       const j = await plist(copy);
       for (const t of ["WebDriverAgentRunner", "SecondTarget"]) {
@@ -133,6 +133,27 @@ describe("the loopback .xctestrun", () => {
       }
       assert.equal(j.WebDriverAgentRunner!.EnvironmentVariables!.TERM, "dumb");
       assert.match(runner.sourceXctestrun(), /WebDriverAgentRunner_iphoneos/, "deckhand's own copy is never the source");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("never leaves a started runner's copy unbound while another start rewrites it", async () => {
+    const dir = products();
+    try {
+      const a = new WdaRunner({ udid: UDID, productsDir: dir, logPath: join(dir, "a.log") });
+      const running = await a.loopbackXctestrun();
+      const seen: unknown[] = [];
+      const watching: Exec = async (cmd, args, o) => {
+        seen.push((await plist(running)).WebDriverAgentRunner!.EnvironmentVariables!.USE_IP);
+        return defaultExec(cmd, args, o);
+      };
+      const sameUdid = new WdaRunner({ udid: UDID, productsDir: dir, logPath: join(dir, "b.log"), exec: watching });
+      assert.equal(await sameUdid.loopbackXctestrun(), running);
+      assert.ok(seen.length > 0);
+      assert.deepEqual([...new Set(seen)], ["127.0.0.1"], "a concurrent start exposed the unbound copy to a running xcodebuild");
+      assert.notEqual(await new WdaRunner({ udid: "00008110-000000000000AAAA", productsDir: dir }).loopbackXctestrun(), running);
+      assert.deepEqual(readdirSync(dir).filter((n) => n.endsWith(".tmp")), []);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -182,7 +203,7 @@ describe("WdaRunner", () => {
       assert.equal(st.ready, true);
       assert.equal(f.fwd(), true);
       const x = f.spawned.find((s) => s.cmd === "xcodebuild")!;
-      assert.deepEqual(x.args, ["test-without-building", "-xctestrun", join(f.dir, LOOPBACK_XCTESTRUN), "-destination", `id=${UDID}`]);
+      assert.deepEqual(x.args, ["test-without-building", "-xctestrun", join(f.dir, loopbackXctestrunName(UDID)), "-destination", `id=${UDID}`]);
       assert.equal(x.opts.detached, true);
       assert.equal(x.opts.env?.[IPHONE_MARKER_ENV], "1");
       assert.ok(f.runner.livePids().includes(x.child.pid));

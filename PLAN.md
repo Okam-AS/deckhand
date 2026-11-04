@@ -1012,7 +1012,7 @@ change eases in/out — nothing snaps.
   phone; copy the whole `Build/Products` folder (the `Debug-iphoneos` directory and the
   `*iphoneos*.xctestrun` beside it) to `wda/Products` under the deckhand home. Deckhand never
   builds or signs it and never runs that `.xctestrun` as is: it writes
-  `deckhand-loopback.xctestrun` beside it with `USE_IP=127.0.0.1` on every test target. Re-sign
+  `deckhand-loopback-<udid>.xctestrun` beside it with `USE_IP=127.0.0.1` on every test target. Re-sign
   and copy again when the profile nears expiry or a phone is added; `deckhand doctor` says which.
 - `deckhand secret set|rm typesafe` — the TypeSafe key `navigate` needs, from stdin or
   `TYPESAFE_API_KEY`, never argv. Setting it is the consent: `navigate` then sends screens from

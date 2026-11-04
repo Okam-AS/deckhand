@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { isIP } from "node:net";
 import { dirname, join } from "node:path";
 import { paths } from "../paths.ts";
@@ -28,7 +28,9 @@ export class WdaStartError extends Error {
   }
 }
 
-export const LOOPBACK_XCTESTRUN = "deckhand-loopback.xctestrun";
+export function loopbackXctestrunName(udid: string): string {
+  return `deckhand-loopback-${udid}.xctestrun`;
+}
 
 const SERVER_URL = /ServerURLHere->(\S+?)<-ServerURLHere|ServerURLHere->(\S+)/;
 
@@ -225,20 +227,27 @@ export class WdaRunner {
    */
   async loopbackXctestrun(): Promise<string> {
     const src = this.sourceXctestrun();
-    const dst = join(dirname(src), LOOPBACK_XCTESTRUN);
-    copyFileSync(src, dst);
-    const targets = xctestrunTargets(await this.plistJson(dst));
-    if (targets.length === 0) throw new WdaStartError(`${src} has no test target`);
-    const env: [string, string][] = [["USE_IP", "127.0.0.1"], ["USE_PORT", String(WDA_DEVICE_PORT)], ["MJPEG_SERVER_PORT", String(WDA_MJPEG_DEVICE_PORT)]];
-    for (const t of targets) {
-      if (at(await this.plistJson(dst), `${t}.EnvironmentVariables`) === undefined) {
-        await this.plutil(["-insert", `${t}.EnvironmentVariables`, "-dictionary", dst]);
+    const dst = join(dirname(src), loopbackXctestrunName(this.udid));
+    // Edited under a private name, then renamed: an xcodebuild already started on `dst` must never read it unbound mid-edit.
+    const tmp = join(dirname(src), `.deckhand-loopback-${this.udid}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`);
+    copyFileSync(src, tmp);
+    try {
+      const targets = xctestrunTargets(await this.plistJson(tmp));
+      if (targets.length === 0) throw new WdaStartError(`${src} has no test target`);
+      const env: [string, string][] = [["USE_IP", "127.0.0.1"], ["USE_PORT", String(WDA_DEVICE_PORT)], ["MJPEG_SERVER_PORT", String(WDA_MJPEG_DEVICE_PORT)]];
+      for (const t of targets) {
+        if (at(await this.plistJson(tmp), `${t}.EnvironmentVariables`) === undefined) {
+          await this.plutil(["-insert", `${t}.EnvironmentVariables`, "-dictionary", tmp]);
+        }
+        for (const [k, v] of env) await this.plutil(["-replace", `${t}.EnvironmentVariables.${k}`, "-string", v, tmp]);
       }
-      for (const [k, v] of env) await this.plutil(["-replace", `${t}.EnvironmentVariables.${k}`, "-string", v, dst]);
-    }
-    const written = await this.plistJson(dst);
-    for (const t of targets) {
-      if (at(written, `${t}.EnvironmentVariables.USE_IP`) !== "127.0.0.1") throw new WdaStartError(`could not bind WDA to loopback in ${dst} (${t})`);
+      const written = await this.plistJson(tmp);
+      for (const t of targets) {
+        if (at(written, `${t}.EnvironmentVariables.USE_IP`) !== "127.0.0.1") throw new WdaStartError(`could not bind WDA to loopback in ${dst} (${t})`);
+      }
+      renameSync(tmp, dst);
+    } finally {
+      rmSync(tmp, { force: true });
     }
     return dst;
   }
