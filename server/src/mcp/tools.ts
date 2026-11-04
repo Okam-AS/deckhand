@@ -27,7 +27,9 @@ import { drive, isMutating, rotationWarning } from "../testing/drive.ts";
 import { FLOWS_FILENAME, readFlow } from "../engine/flows.ts";
 import { RefError as ScreenRefError } from "../testing/screen.ts";
 import type { JevProvider } from "../navigate/jev.ts";
-import { navigate } from "../navigate/loop.ts";
+import { navigate, SETTLE_TIMEOUT_MS, waitSettled } from "../navigate/loop.ts";
+import { check, MAX_CHECKS, PASS_AT, FAIL_AT, HEALTH_FAIL_AT } from "../navigate/check.ts";
+import { readScreen, pngSize } from "../navigate/screen.ts";
 import { EGRESS_HOST } from "../navigate/egress.ts";
 
 // ---------------------------------------------------------------------------
@@ -296,6 +298,9 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             "Give the `start_preview` URL to the user immediately, then poll `preview_status` until the target is ready before driving it. Reuse an equivalent live preview; use `restart_preview` for a local native/dependency change or after pushing new git commits, not for ordinary hot reloads.",
             "For visible, end-to-end work, start a test run, then use `describe` to orient and `ui` to act — `ui` returns the screen after it, and takes a list of `actions` for a known sequence — and `screenshot` to verify. Update each test step as it runs and finish the run with an evidence-based verdict.",
             "When build or launch fails, read `logs` with its default build source. When a ready viewer has no video, read `logs` with source `stream`. Stop previews you no longer need with `stop_preview`.",
+            ...(ctx.jev?.().ok
+              ? ["To verify what a screen SHOWS, call `check` with the statements that should hold (\"the Premium wash costs 325,-\") and those that should not; it also flags an error screen, a dev overlay, a blank page or overlapping text. Pass `referenceDeviceId` to compare against the reference app's device. A fail or unsure is the model's reading of pixels: confirm it with a `screenshot` before you report it."]
+              : []),
             "If any JSON tool response includes `deckhandUpdate`, ask the operator before pulling or restarting. Never update or restart automatically: a restart tears down booted simulators and emulators.",
           ],
         }),
@@ -1255,6 +1260,99 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             ? "The decision model judged the goal reached. Confirm it with one `ui` assert or waitFor on what the goal promised before you report it."
             : `navigate handed back: ${result.message}. Continue from finalScreen yourself with describe + ui, or call navigate again with a narrower goal.`;
         return ok({ ...result, nextStep, ...testRunNudge(args.previewId, "tap") });
+      }),
+  );
+
+  // Like navigate, `check` exists only while a TypeSafe key is set: the key is the consent to send screens (PLAN §11 item 5).
+  if (decider) server.registerTool(
+    "check",
+    {
+      title: "Check that a screen looks right (TypeSafe Jev, screenshot)",
+      description:
+        `Verify what a screen SHOWS in one call: deckhand waits up to ${SETTLE_TIMEOUT_MS / 1000} s for the screen to settle (one still moving comes back \`unsure\`, with \`unsettled\` naming it), ` +
+        "takes the screenshot and asks a vision model (TypeSafe Jev) one yes/no question per statement — `expect` must hold, `expectNot` must not — plus four built-in health questions (an error or crash screen, a developer overlay such as the Expo dev menu or a redbox, a blank or half-loaded page, overlapping text or controls), which fail at ≥" +
+        `${HEALTH_FAIL_AT}. ` +
+        `Each statement comes back with the model's probability and a verdict: pass at ≥${PASS_AT} (≤${FAIL_AT} for expectNot), fail at the other end, unsure between. ` +
+        "Pass `referenceDeviceId` (another device in this preview, e.g. the reference app shown alongside) — or `referencePreviewId`+`referenceDeviceId` — to also ask whether the two screens match in content and layout: the parity check. " +
+        "Write statements a person could judge from the screen alone, one fact each (\"the price shows 325,-\", \"the Logg inn button is visible\"). The verdict is the model's reading of pixels: report an `unsure` or a surprising `fail` with a screenshot, not as a confirmed bug. The whole screenshot leaves the machine for TypeSafe's API.",
+      inputSchema: {
+        previewId: z.string(),
+        deviceId: z.string(),
+        expect: z.record(z.string(), z.string().min(3).max(500)).optional().describe("name → a statement that should be TRUE of the screen"),
+        expectNot: z.record(z.string(), z.string().min(3).max(500)).optional().describe("name → a statement that should be FALSE of the screen"),
+        referenceDeviceId: z.string().optional().describe("a device whose current screen this one should match"),
+        referencePreviewId: z.string().optional().describe("the preview holding referenceDeviceId, when it is not this one"),
+        uiLanguage: z.string().min(2).max(35).optional(),
+      },
+    },
+    (args) =>
+      audited("check", { ...args, expect: args.expect ? Object.keys(args.expect) : undefined, expectNot: args.expectNot ? Object.keys(args.expectNot) : undefined }, async () => {
+        const denied = requireLivePreview(args.previewId);
+        if (denied) return denied;
+        const n = Object.keys(args.expect ?? {}).length + Object.keys(args.expectNot ?? {}).length;
+        if (n > MAX_CHECKS) return fail("too_many_checks", `${n} statements; at most ${MAX_CHECKS} per call`, "split them over several check calls");
+        const refPreview = args.referencePreviewId ?? args.previewId;
+        if (args.referencePreviewId) {
+          const refDenied = requireLivePreview(args.referencePreviewId);
+          if (refDenied) return refDenied;
+        }
+        if (n === 0 && !args.referenceDeviceId) return fail("nothing_to_check", "pass `expect`, `expectNot` or `referenceDeviceId`", "state what the screen should show");
+        const appId = engine.appIdFor(args.previewId);
+        const refDevice = args.referenceDeviceId;
+        const refAudit = refDevice ? { referenceApp: engine.appIdFor(refPreview), referencePreviewId: refPreview, referenceDeviceId: refDevice } : {};
+        const locale = args.uiLanguage ?? (await engine.uiLanguage(args.previewId, args.deviceId));
+        const frame = () => within(engine.screenshot(args.previewId, args.deviceId), 30_000, "the screenshot");
+        let result: Awaited<ReturnType<typeof check>>;
+        try {
+          result = await onDevice(args.previewId, args.deviceId, async () => {
+          const unsettled: Array<"screenshot" | "reference"> = [];
+          const settled = await waitSettled(frame, Date.now);
+          if (!settled.settled) unsettled.push("screenshot");
+          const shot = settled.shot ?? (await frame());
+          let screenLines: string[] | undefined;
+          try {
+            screenLines = readScreen(await engine.describe(args.previewId, args.deviceId, { source: "auto" }), pngSize(shot)).lines.slice(0, 120);
+          } catch {
+            screenLines = undefined;
+          }
+          let reference: Buffer | null = null;
+          if (refDevice) {
+            // Not under onDevice(refDevice): two checks referencing each other would deadlock.
+            const refFrame = () => within(engine.screenshot(refPreview, refDevice), 30_000, "the reference screenshot");
+            const refSettled = await waitSettled(refFrame, Date.now);
+            if (!refSettled.settled) unsettled.push("reference");
+            reference = refSettled.shot ?? (await refFrame());
+          }
+          return check(
+            { expect: args.expect ?? {}, expectNot: args.expectNot, screenLines, locale },
+            {
+              shot,
+              reference,
+              unsettled,
+              jev: decider,
+              onEgress: (e) => {
+                if (!ctx.jev?.().ok) throw new Error("the TypeSafe key was removed");
+                audit.record({
+                  actor: principal.name,
+                  tool: "check:egress",
+                  args: { app: appId, previewId: args.previewId, deviceId: args.deviceId, ...refAudit, to: EGRESS_HOST, questions: e.questions, bytes: e.bytes, images: e.images },
+                  result: "ok",
+                });
+              },
+            },
+          );
+          });
+        } catch (e) {
+          return fail("check_failed", `check could not run: ${e instanceof Error ? e.message : String(e)}`, "take a `screenshot` and judge the screen yourself");
+        }
+        const nextStep = result.unsettled
+          ? `${result.unsettled.length > 1 ? "Both screens were" : result.unsettled[0] === "reference" ? "The reference screen was" : "The screen was"} still changing after ${SETTLE_TIMEOUT_MS / 1000} s, so the answers describe one frame of a moving screen and the verdict is unsure. Wait for it to finish and check again, or take a \`screenshot\` and judge it yourself.`
+          : result.verdict === "pass"
+            ? "Every statement held. Record it as evidence (update_test_run evidence: the check names and p) — a pass is the model's reading, strong but not proof."
+            : result.verdict === "fail"
+              ? "At least one statement failed. Take a `screenshot` and look before you report it: confirm it is the app, not a dev overlay or a statement the screen cannot show."
+              : "Some statements are unsure. Take a `screenshot` and judge those yourself, or restate them as one concrete visible fact each.";
+        return ok({ ...result, nextStep, ...testRunNudge(args.previewId, "screenshot") });
       }),
   );
 

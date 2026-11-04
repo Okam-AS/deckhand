@@ -102,7 +102,7 @@ const FINAL_SCREEN_LINES = 80;
 export const TOKEN_BUDGET = 28_000;
 /** Checked against TypeSafe's billed input_tokens (live only, no test can): on large Norwegian screens the bill ran ~7% ABOVE chars/3, ~11% below chars/2.5. */
 const CHARS_PER_TOKEN = 2.5;
-const SETTLE_TIMEOUT_MS = 4_000;
+export const SETTLE_TIMEOUT_MS = 4_000;
 const MAX_SCREEN_CHANGES = 2;
 const STILL_RATIO = 0.002;
 /** Of the tapped element's region: a list that shifted by a row changes most of it, a blinking caret almost none. */
@@ -391,7 +391,7 @@ export function sameScreen(a: Buffer, b: Buffer, ratio = STILL_RATIO): boolean {
  * row — a push transition starts after the tap returns, so two frames grabbed first read as still.
  * A failed screenshot settles nothing.
  */
-async function waitSettled(frame: NavigateDeps["frame"], now: () => number): Promise<{ settled: boolean; shot: Buffer | null }> {
+export async function waitSettled(frame: NavigateDeps["frame"], now: () => number): Promise<{ settled: boolean; shot: Buffer | null }> {
   if (!frame) return { settled: false, shot: null };
   const deadline = now() + SETTLE_TIMEOUT_MS;
   let last = await grab(frame);

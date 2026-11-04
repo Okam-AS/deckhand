@@ -71,11 +71,16 @@ PLAN describes the architecture. The invariants that bind every change:
   "Navigate", §11 item 5) — without one it is not even listed:
   deckhand's own `describe` → a closed action list → one TypeSafe Jev decision → `ui`, handing
   back on low confidence, a repeated move or a disputed `done`. It picks, it never diagnoses;
-  the caller still verifies. It is the one path by which app content leaves the machine for a
-  third party, and the key is the only opt-in: once set, every app's screens can go. Never set it
+  the caller still verifies. It and `check` (below) are the only paths by which app content
+  leaves the machine for a third party, both to TypeSafe under the same key, and the key is the only opt-in: once set, every app's screens can go. Never set it
   on an agent's say-so, and only on a machine whose apps show test data. What is sent is minimised in
   `navigate/screen.ts`; a change there is a privacy change, and `navigate/egress.test.ts` is its
   guardrail.
+- **`check` is navigate's verifying half and exists under the same key**: one Jev request
+  that ALWAYS carries the screenshot, unmasked (and a reference device's, for parity), one yes/no per caller
+  statement plus four health questions. It returns probabilities and pass/fail/unsure,
+  never a finding — the caller confirms with a screenshot. Keep health questions narrow:
+  one broad "looks broken?" read a normal list as broken.
 - **Physical devices are OUT** on both platforms; PLAN §2 says why. **Three known gaps, so
   do not imply otherwise:** the local (`path`) livesync build path is unvalidated on-device,
   the `metro`/`app` `logs` sources are accepted and capture nothing, and PLAN §11 item 7's

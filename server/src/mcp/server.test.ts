@@ -21,6 +21,7 @@ import type { App, Config, TokenEntry } from "../config.ts";
 import type { AttachedStream, StreamDeviceRef } from "../streaming/backend.ts";
 import type { JevAccess } from "../navigate/jev.ts";
 import { typesafeProvider } from "../navigate/secrets.ts";
+import { encodePng } from "../navigate/png.ts";
 import type { AuditEntry } from "../audit.ts";
 
 const config: Config = {
@@ -1833,6 +1834,20 @@ describe("navigate (server-side drive loop)", () => {
     }
   });
 
+  it("lists check beside navigate once a key is configured, and names it in the guide", async () => {
+    const admin = await client(ADMIN);
+    try {
+      jevAccess = scriptedJev().access;
+      assert.ok((await admin.listTools()).tools.some((t) => t.name === "check"));
+      const guide = parse(await admin.callTool({ name: "get_guide", arguments: {} }));
+      assert.ok((guide.guide as string[]).some((l) => /`check`/.test(l)), "get_guide names check");
+      jevAccess = { ok: false, code: "navigate_disabled", message: "navigate is off", hint: "deckhand secret set typesafe" };
+      assert.ok(!(await admin.listTools()).tools.some((t) => t.name === "check"), "no key, no check");
+    } finally {
+      await admin.close();
+    }
+  });
+
   it("is listed once a key is configured", async () => {
     const admin = await client(ADMIN);
     try {
@@ -1869,5 +1884,98 @@ describe("navigate (server-side drive loop)", () => {
     assert.equal(seen.length, 2);
     assert.ok(!seen.some((b) => b.includes(TYPED)), "a typed value never goes to TypeSafe");
     await admin.close();
+  });
+});
+
+describe("check (one Jev request about the screen)", () => {
+  const shot = encodePng({ width: 300, height: 600, data: Buffer.alloc(300 * 600 * 4, 255) });
+
+  /** A key whose API answers every Noul: 0.95 for the caller's statements, 0.05 for the health questions. */
+  function noulJev(): { access: JevAccess; seen: string[] } {
+    const seen: string[] = [];
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      seen.push(String(init?.body ?? ""));
+      const questions = (JSON.parse(String(init?.body)) as { questions: Record<string, unknown> }).questions;
+      const answers = Object.fromEntries(Object.keys(questions).map((id) => [id, { type: "noul", noul: id.startsWith("health_") ? 0.05 : 0.95 }]));
+      return new Response(JSON.stringify({ model: "jev-1.13.0", answers, usage: { input_tokens: 100 } }), { status: 200 });
+    };
+    return { access: typesafeProvider(() => ({ state: "ok", key: JEV_TEST_KEY }), fetchImpl)(), seen };
+  }
+
+  it("audits its one request (sizes, never the statements) and sends nothing once the key is removed", async () => {
+    const admin = await client(ADMIN);
+    const realShot = engine.screenshot;
+    try {
+      const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
+      await waitReadyByApp(admin, "app-local");
+      const { access, seen } = noulJev();
+      jevAccess = access;
+      engine.screenshot = async () => shot;
+      audited.length = 0;
+      const args = { previewId: started.previewId, deviceId: "ios-0", expect: { price: "The wash costs 325-must-not-leak" } };
+      const r = parse(await admin.callTool({ name: "check", arguments: args }));
+      assert.equal(r.verdict, "pass", JSON.stringify(r));
+      const egress = audited.filter((e) => e.tool === "check:egress");
+      assert.equal(egress.length, 1);
+      assert.equal(seen.length, 1);
+      assert.deepEqual(Object.keys(egress[0]!.args ?? {}).sort(), ["app", "bytes", "deviceId", "images", "previewId", "questions", "to"]);
+      assert.equal(egress[0]!.args?.images, 1);
+      assert.ok(!JSON.stringify(audited).includes("325-must-not-leak"), "no statement in the audit");
+
+      // The key goes while the screen is being read: the request must not leave.
+      engine.screenshot = async () => {
+        jevAccess = { ok: false, code: "navigate_disabled", message: "navigate is off", hint: "deckhand secret set typesafe" };
+        return shot;
+      };
+      const refused = await admin.callTool({ name: "check", arguments: args });
+      assert.equal(refused.isError, true);
+      assert.match(JSON.stringify(refused.content), /key was removed/);
+      assert.equal(seen.length, 1, "nothing was sent after the key was removed");
+    } finally {
+      engine.screenshot = realShot;
+      jevAccess = { ok: false, code: "navigate_disabled", message: "navigate is off", hint: "deckhand secret set typesafe" };
+      await admin.close();
+    }
+  });
+
+  it("names the reference device in the egress audit, and calls a screen that never settled unsure", async () => {
+    const admin = await client(ADMIN);
+    const realShot = engine.screenshot;
+    try {
+      const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
+      await waitReadyByApp(admin, "app-local");
+      const { access } = noulJev();
+      jevAccess = access;
+      // A first frame that fails leaves waitSettled unsettled at once; the fallback frame is then a moving screen's.
+      const failFirst = (deviceId: string) => {
+        let calls = 0;
+        engine.screenshot = async (_p, d) => {
+          if (d === deviceId && calls++ === 0) throw new Error("mid-transition");
+          return shot;
+        };
+      };
+      failFirst("ios-ref");
+      audited.length = 0;
+      const r = parse(await admin.callTool({ name: "check", arguments: { previewId: started.previewId, deviceId: "ios-0", referenceDeviceId: "ios-ref" } }));
+      assert.equal(r.verdict, "unsure", JSON.stringify(r));
+      assert.deepEqual(r.unsettled, ["reference"]);
+      assert.match(String(r.nextStep), /reference screen was still changing/);
+      const egress = audited.filter((e) => e.tool === "check:egress");
+      assert.equal(egress.length, 1);
+      assert.equal(egress[0]!.args?.images, 2);
+      assert.deepEqual(
+        { app: egress[0]!.args?.referenceApp, preview: egress[0]!.args?.referencePreviewId, device: egress[0]!.args?.referenceDeviceId },
+        { app: "app-local", preview: started.previewId, device: "ios-ref" },
+      );
+
+      failFirst("ios-0");
+      const own = parse(await admin.callTool({ name: "check", arguments: { previewId: started.previewId, deviceId: "ios-0", expect: { price: "costs 325,-" } } }));
+      assert.deepEqual(own.unsettled, ["screenshot"]);
+      assert.equal(own.verdict, "unsure");
+    } finally {
+      engine.screenshot = realShot;
+      jevAccess = { ok: false, code: "navigate_disabled", message: "navigate is off", hint: "deckhand secret set typesafe" };
+      await admin.close();
+    }
   });
 });

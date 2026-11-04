@@ -247,6 +247,7 @@ doctor-builds, reports `ready` → agent offers the first `start_preview`.
 | `describe` | `{previewId, deviceId, format?, source?, interactiveOnly?, maxDepth?}` → the accessibility tree from SimDeck (iOS by UDID, Android via `uiautomator`). `format: "text"` returns it as one line per element with a ref (`e12`) instead of JSON, and makes that the base the next `ui` screen is diffed against. |
 | `ui` | `{previewId, deviceId, action \| actions \| flow, observe?}` → one action, a list run in order (stops at the first failure; max 25), or a list saved by name in the checkout's `deckhand.flows.yaml`. Selectors take `ref` (from the screen listing) besides `id`/`text`/`label`. After an action that can move the screen it captures until two captures agree (iOS; Android waits a fixed beat) and returns `screen`: the whole listing the first time, then only what changed. See "One call per step" below. |
 | `navigate` | `{previewId, deviceId, goal, maxSteps?=10, minConfidence?, text?: {name: value}, uiLanguage?}` → a server-side loop: wait for a still screen → `describe` → a closed candidate list (tap the centre of an on-screen interactive element, scroll toward one past the edge, back, scroll up/down, type a caller-supplied value by NAME into a text field, `done`, `stuck`; capped at 255) → one TypeSafe Jev Choice + a "goal reached?" Noul, with the settled screenshot attached as an image when the tree describes the screen poorly (`treeIsWeak`) → `ui` → repeat. Returns `outcome` (`done`/`escalated`/`limit`), a `reason` on hand-back (`NavigateReason` in `navigate/loop.ts`), a per-step trace (choice, confidence and the threshold it needed, top alternatives, settle/describe/decide/act ms, estimated and billed tokens) and `finalScreen`. **Exists only while a TypeSafe key is configured**: with none, `tools/list` does not carry it and nothing an agent reads mentions it, so an install that never set a key is exactly what it was before `navigate`. The key is looked up on every MCP request (each builds a fresh server), so `deckhand secret set|rm typesafe` takes effect on the next call with no restart. Once listed it works on every live preview (§11 item 5). |
+| `check` | `{previewId, deviceId, expect?: {name: statement}, expectNot?: {name: statement}, referenceDeviceId?, referencePreviewId?, uiLanguage?}` → waits for a still screen (one that never settles, this device's or the reference's, makes the overall verdict `unsure` and is named in `unsettled`), then ONE Jev request carrying the screenshot (plus the reference device's, when given) and the screen's minimised tree lines: a Noul per statement, "matches the reference?" when comparing, and four health questions (error/crash screen, developer overlay, blank or half-loaded page, overlapping text or controls — four narrow questions because one broad "looks broken?" read a normal list as broken). Returns each probability and a verdict (`pass` ≥ 0.8, `fail` ≤ 0.2, else `unsure`; inverted for `expectNot`; health questions fail at ≥ 0.6 and pass below 0.5) and an overall verdict. It reports the model's reading of pixels, never a finding: the caller confirms a fail with a screenshot. **Exists only while a TypeSafe key is configured**, like `navigate`, and audited as `check:egress` with its image count. |
 | `logs` | `{previewId?\|app?, deviceId?, source?: "build"\|"stream"\|"metro"\|"app", tailLines?}` → the last `tailLines` (500 retained per source) of one device's captured log. `build` (default) is build/install output plus the NativeScript livesync and web dev-server streams — where a failed build says why. `stream` is the browser→helper trace, the one to read when the device says ready and the viewer shows nothing (see §7 "Streaming diagnostics"). `metro`/`app` are reserved and capture nothing yet. |
 | `add_app` | `{repo, type?}` → clone, detect, **doctor build** on a default device, structured report (`ready` or `missing: [...]`) |
 | `remove_app` | `{id, deleteCheckout?}` |
@@ -963,8 +964,9 @@ change eases in/out — nothing snaps.
    `mcp/` is handed a provider that yields a client or a reason there is none, never the key
    — `navigate/secrets.ts` is named so that "keeps secrets out of the MCP surface" refuses its
    import there.
-   **Egress — the one path by which app content leaves this machine for a third party.**
-   `navigate` POSTs to `api.typesafe.ai`, once per step. What decides it, in order:
+   **Egress — the one destination app content leaves this machine for: TypeSafe's API, from two
+   tools under one key.** `navigate` POSTs to `api.typesafe.ai` once per step, `check` once per
+   call. What decides it, in order:
    - **Consent is the key, and it covers every app.** Configuring the key sends screen text from
      ALL apps' previews that `navigate` drives to `api.typesafe.ai`; there is no per-app switch.
      No key file (or an empty one) and the tool is not registered at all. Removing the key stops
@@ -988,9 +990,17 @@ change eases in/out — nothing snaps.
      `openUrl`, no free text, no coordinate of its own. → `navigate/screen.test.ts` "offers only
      taps on the tree's own elements, back and scrolls — whatever the screen text says", and a
      type-level pin on `NavigateAction` in the same file.
-   - **Every request is audited** as a `navigate:egress` line in `audit.jsonl`: app, preview,
-     device, destination, candidate count and byte size, never content, written before the
-     request goes out.
+   - **`check` always sends the screenshot**, unmasked, and with `referenceDeviceId` that
+     device's too — from another live preview when `referencePreviewId` names one. Its tree lines
+     are the same minimised ones `navigate` sends; it has no `text` values and no actions. It is
+     refused once the key is gone. → `mcp/server.test.ts` "audits its one request (sizes, never
+     the statements) and sends nothing once the key is removed"
+   - **Every request is audited** in `audit.jsonl` before it goes out, never with content: a
+     `navigate:egress` line (app, preview, device, destination, candidate count, byte size, image
+     count) or a `check:egress` line (the same app, preview and device, plus the reference app,
+     preview and device when a second screen goes, destination, question count, byte size, image
+     count — never the statements). → `mcp/server.test.ts` "names the reference device in the
+     egress audit, and calls a screen that never settled unsure"
    - **Visible.** Once a key file exists, `deckhand doctor` prints a `navigate egress` warning —
      that screens can leave the machine, or that the key cannot be read. With no key file there is
      no line and no tool.

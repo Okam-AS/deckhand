@@ -3060,4 +3060,17 @@ describe("Expo dev-client launch on iOS", () => {
     assert.deepEqual(h.simctlCalls.filter((c) => c.startsWith("launch ")), ["launch com.example.expo (restart) --initialUrl http://127.0.0.1:8081"]);
     assert.deepEqual(h.simctlCalls.filter((c) => c.startsWith("openUrl ")), [], "a deep link makes iOS 27 ask before opening the app");
   });
+
+  it("launches an app with no resolvable slug, since the iOS launch never uses it", async () => {
+    const noSlug = mkdtempSync(join(tmpdir(), "deckhand-expo-noslug-"));
+    try {
+      writeFileSync(join(noSlug, "app.json"), JSON.stringify({ expo: { ios: { bundleIdentifier: "com.example.expo" } } }));
+      const h = makeEngine();
+      const app: App = { id: "expo-noslug", path: noSlug, type: "expo", defaultBranch: "main", bundleId: "com.example.expo", env: {} };
+      h.engine.startPreview({ app, source: "local", devices: [{ platform: "ios" }], access: "public" });
+      assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready", JSON.stringify(h.engine.getStatus("pv1")?.devices));
+    } finally {
+      rmSync(noSlug, { recursive: true, force: true });
+    }
+  });
 });

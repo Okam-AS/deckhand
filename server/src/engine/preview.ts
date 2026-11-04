@@ -2098,10 +2098,8 @@ export class PreviewEngine {
         this.setPhase(p, dev, "building", dev === builder ? "building the app" : "building the app (shared)");
       }
       await this.runBuildPlan(p, builder, platform, builderHandle, sourceDir, appEnv, local);
-      // Both platforms, not just iOS. The Android dev-client deep link needs the slug for
-      // the identical reason, and it read it straight out of app.json — which is empty for a
-      // project whose config is a dynamic app.config.*, the whole case this resolves.
-      if (usesMetroDeepLink(p.app.type)) slug = await this.resolveExpoSlug(sourceDir, appEnv);
+      // Android only: its dev-client deep link carries the slug; iOS launches with --initialUrl.
+      if (platform === "android" && usesMetroDeepLink(p.app.type)) slug = await this.resolveExpoSlug(sourceDir, appEnv);
 
       if (local && p.app.type === "nativescript") {
         // Livesync builds, installs, launches, then keeps watching for saves.
@@ -2465,7 +2463,7 @@ export class PreviewEngine {
     bundleId: string,
     worktreePath: string,
     appEnv: Record<string, string>,
-    /** Pre-resolved Expo slug (once per build); required for metro-deep-link apps. */
+    /** Pre-resolved Expo slug (once per build); required for metro-deep-link apps on Android. */
     slug: string | null,
   ): Promise<void> {
     if (dev.record.platform === "android") {
@@ -2489,7 +2487,6 @@ export class PreviewEngine {
       return;
     }
     if (usesMetroDeepLink(p.app.type)) {
-      if (!slug) throw new PreviewError("could not resolve the Expo slug from app.json or app.config.*");
       const metro = await this.d.metro.ensure(p.app.id, worktreePath, appEnv);
       // A cold start told its server by launch argument, not a deep link. expo-dev-launcher reads
       // `--initialUrl <url>` from its process arguments and loads that bundle (on a simulator it skips
