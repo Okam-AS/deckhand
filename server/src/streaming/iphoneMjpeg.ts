@@ -98,9 +98,12 @@ export class IphoneMjpegBackend implements StreamingBackend {
    * multipart body, and the viewer parses WDA's `Content-Length` framing out of the bytes either way.
    */
   private serveMjpeg(udid: string, res: ServerResponse, upstreams: Set<IncomingMessage>): void {
+    let viewerGone = false;
+    res.once("close", () => (viewerGone = true));
     void this.opts
       .mjpegUrl(udid)
       .then((url) => {
+        if (viewerGone) return;
         const req = get(url, (up) => {
           if (up.statusCode !== 200) {
             up.resume();

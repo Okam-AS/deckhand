@@ -71,6 +71,36 @@ describe("the iPhone MJPEG helper", () => {
     }
   });
 
+  it("opens no WDA stream for a viewer that left while WDA was still starting", async () => {
+    let opened = 0;
+    const wda = createServer((_req, res) => {
+      opened++;
+      res.writeHead(200, { "content-type": "multipart/x-mixed-replace; boundary=--BoundaryString" });
+    });
+    await new Promise<void>((r) => wda.listen(0, "127.0.0.1", () => r()));
+    const url = `http://127.0.0.1:${(wda.address() as { port: number }).port}/`;
+    let release!: () => void;
+    const started = new Promise<void>((r) => (release = r));
+    const port = await freePort();
+    const b = new IphoneMjpegBackend({ portRange: [port, port], mjpegUrl: async () => (await started, url), act: async () => {}, describe: async () => "" });
+    try {
+      const s = await b.attach({ platform: "ios", udid: UDID });
+      const ac = new AbortController();
+      const viewer = fetch(`${s.origin}${s.helperBasePath}/stream.mjpeg`, { signal: ac.signal }).catch(() => null);
+      await new Promise((r) => setTimeout(r, 50));
+      ac.abort();
+      await viewer;
+      await new Promise((r) => setTimeout(r, 50));
+      release();
+      await new Promise((r) => setTimeout(r, 200));
+      assert.equal(opened, 0, "a WDA stream was opened for nobody, and held until the phone's helper detached");
+    } finally {
+      await b.reapOrphans();
+      wda.closeAllConnections();
+      wda.close();
+    }
+  });
+
   it("reports no first frame when WDA sends none", async () => {
     const wda = await fakeWdaMjpeg([]);
     const b = await backendOnFreePort(wda.url);
