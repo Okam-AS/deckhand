@@ -3192,6 +3192,17 @@ describe("physical Android phones", () => {
     assert.deepEqual(phoneLog.filter((c) => /pm clear|uninstall/.test(c)), [`adb -s ${PHONE} shell pm clear com.example.myapp`]);
   });
 
+  it("freshApp: data is tried again on restart when the first clear failed, never skipped as done", async () => {
+    const phoneLog: string[] = [];
+    let clears = 0;
+    const h = makeEngine({ phones: fakePhones({}, phoneLog, (args) => (args.includes("clear") && ++clears === 1 ? { code: 1, stdout: Buffer.from("Failed") } : { stdout: Buffer.from("Success") })) });
+    startPhone(h, { freshApp: "data" });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "failed", "a clear that failed fails the device");
+    h.engine.restartPreview("pv1");
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready", JSON.stringify(h.engine.getStatus("pv1")));
+    assert.equal(phoneLog.filter((c) => /pm clear/.test(c)).length, 2, "the restart clears the data it did not clear the first time");
+  });
+
   it("freshApp: reinstall uninstalls the registered app before the build installs it", async () => {
     const phoneLog: string[] = [];
     const order: string[] = [];

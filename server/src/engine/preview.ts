@@ -2656,11 +2656,12 @@ export class PreviewEngine {
     const before = await apps.installedApp();
     const describeApp = (a: typeof before) => (a ? `${a.version ?? "?"} (${a.bundleVersion ?? "?"})` : "none");
     if (p.freshApp && !dev.freshApplied) {
-      dev.freshApplied = true;
       if (before) {
         this.appendLog(dev, "build", `deckhand: freshApp=${p.freshApp} — uninstalling ${apps.bundleId} ${describeApp(before)} before installing (iOS cannot clear an app's data in place)`);
         await apps.uninstall(apps.bundleId);
       }
+      // Recorded after the uninstall: one that threw is tried again by a restart.
+      dev.freshApplied = true;
     }
     this.appendLog(dev, "build", `deckhand: installing ${apps.bundleId} ${prep.versionName ?? "?"} (${prep.versionCode ?? "?"}) from EAS build ${prep.build.id}; on the phone now: ${describeApp(before)}`);
     try {
@@ -2931,21 +2932,24 @@ export class PreviewEngine {
   /** `freshApp: "reinstall"`: the registered app goes before the build installs it again. Android only. */
   private async freshBeforeInstall(p: LivePreview, dev: LiveDevice, serial: string): Promise<void> {
     if (p.freshApp !== "reinstall" || dev.freshApplied || dev.record.platform !== "android") return;
-    dev.freshApplied = true;
     const app = this.registeredApp(dev, serial);
     const before = await app.installed(app.pkg);
-    if (!before) return;
-    this.appendLog(dev, "build", `deckhand: freshApp=reinstall — uninstalling ${app.pkg} ${before.versionName ?? "?"} (${before.versionCode ?? "?"}) before installing this build`);
-    await app.uninstall(app.pkg);
+    if (before) {
+      this.appendLog(dev, "build", `deckhand: freshApp=reinstall — uninstalling ${app.pkg} ${before.versionName ?? "?"} (${before.versionCode ?? "?"}) before installing this build`);
+      await app.uninstall(app.pkg);
+    }
+    // Recorded after the uninstall: one that threw is tried again by a restart.
+    dev.freshApplied = true;
   }
 
   /** `freshApp: "data"`: the installed app's data and signed-in session are cleared before launch. Android only. */
   private async freshAfterInstall(p: LivePreview, dev: LiveDevice, serial: string): Promise<void> {
     if (p.freshApp !== "data" || dev.freshApplied || dev.record.platform !== "android") return;
-    dev.freshApplied = true;
     const app = this.registeredApp(dev, serial);
     this.appendLog(dev, "build", `deckhand: freshApp=data — clearing ${app.pkg}'s data before launch`);
     await app.clearData(app.pkg);
+    // Recorded after the clear: a clear that threw is tried again by a restart, not skipped.
+    dev.freshApplied = true;
   }
 
   /**
