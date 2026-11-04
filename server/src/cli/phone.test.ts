@@ -73,6 +73,8 @@ describe("deckhand phone", () => {
       assert.deepEqual(loadPhoneHolds(file), { RF8: { who: "dana", since: "t" } });
       writeFileSync(file, "{not json");
       assert.throws(() => loadPhoneHolds(file));
+      writeFileSync(file, JSON.stringify({ RF8: { who: "dana" } }));
+      assert.throws(() => loadPhoneHolds(file), /RF8/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

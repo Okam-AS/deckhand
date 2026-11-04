@@ -14,7 +14,7 @@ export interface PhoneHold {
 
 export type PhoneHolds = Record<string, PhoneHold>;
 
-/** The holds on disk. Missing means none; an unreadable file throws rather than freeing every phone. */
+/** The holds on disk. Missing means none; an unreadable file or entry throws rather than freeing a phone. */
 export function loadPhoneHolds(file = paths.phoneHolds()): PhoneHolds {
   let text: string;
   try {
@@ -28,7 +28,8 @@ export function loadPhoneHolds(file = paths.phoneHolds()): PhoneHolds {
   const out: PhoneHolds = {};
   for (const [serial, h] of Object.entries(parsed as Record<string, unknown>)) {
     const hold = h as Partial<PhoneHold> | null;
-    if (hold && typeof hold.who === "string" && typeof hold.since === "string") out[serial] = { who: hold.who, since: hold.since };
+    if (!hold || typeof hold.who !== "string" || typeof hold.since !== "string") throw new Error(`${file}: the hold on ${serial} has no who/since — fix or remove it`);
+    out[serial] = { who: hold.who, since: hold.since };
   }
   return out;
 }
