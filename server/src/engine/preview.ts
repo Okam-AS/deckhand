@@ -2677,6 +2677,8 @@ export class PreviewEngine {
     if (this.isIphone(dev)) {
       await this.installEasIpa(p, dev, prep);
     } else {
+      // The build paths set this in buildGroup; an EAS build never goes through there.
+      await this.applyDevicePreferences(platform, handle);
       await this.freshBeforeInstall(p, dev, handle);
       if (platform === "android") await this.installEasApk(p, dev, handle, prep);
       else await this.installProduct(platform, handle, prep.installPath);
