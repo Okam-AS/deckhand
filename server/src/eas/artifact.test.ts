@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -58,6 +58,42 @@ describe("downloadArtifact", () => {
       assert.equal(new Headers(calls[0]!.init.headers).get("authorization"), null);
       const again = await downloadArtifact({ id: ID, artifacts: { buildUrl: URL_ } }, { cacheDir: dir, fetchImpl });
       assert.deepEqual([again.cached, calls.length], [true, 1]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("never hands out a partial file when two downloads of one build overlap", async () => {
+    const dir = tmp();
+    try {
+      let calls = 0;
+      const slow: typeof fetch = async () => {
+        calls++;
+        let i = 0;
+        const body = new ReadableStream<Uint8Array>({
+          async pull(ctl) {
+            if (i === 10) return ctl.close();
+            await new Promise((r) => setTimeout(r, 5));
+            ctl.enqueue(new Uint8Array(100).fill(65 + i++));
+          },
+        });
+        return new Response(body, { status: 200, headers: { "content-length": "1000" } });
+      };
+      mkdirSync(join(dir, ID), { recursive: true });
+      const foreign = join(dir, ID, "app-e2e.apk.4242.other.part");
+      writeFileSync(foreign, "another process, mid-download");
+      const abandoned = join(dir, ID, "app-e2e.apk.1.dead.part");
+      writeFileSync(abandoned, "a crashed download");
+      utimesSync(abandoned, new Date(0), new Date(0));
+      const a = downloadArtifact({ id: ID, artifacts: { buildUrl: URL_ } }, { cacheDir: dir, fetchImpl: slow });
+      await new Promise((r) => setTimeout(r, 20));
+      const b = downloadArtifact({ id: ID, artifacts: { buildUrl: URL_ } }, { cacheDir: dir, fetchImpl: slow });
+      const [ra, rb] = await Promise.all([a, b]);
+      assert.equal(readFileSync(ra.path).length, 1000);
+      assert.equal(readFileSync(rb.path).length, 1000);
+      assert.equal(calls, 1, "one download per build at a time");
+      assert.ok(existsSync(foreign), "a .part another process is still writing was deleted");
+      assert.equal(existsSync(abandoned), false, "a .part nobody has written to for twice the idle window is left behind");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -176,7 +212,7 @@ describe("the iOS simulator archive", () => {
     assert.throws(() => simulatorAppFromListing("App.app/x\nscript.sh\n"), /beside the app/);
   });
 
-  it("unpacks once beside the archive and reads the bundle id", async () => {
+  it("unpacks once beside the archive, however many ask at once, and reads the bundle id", async () => {
     const dir = tmp();
     try {
       const src = join(dir, "src");
@@ -194,10 +230,11 @@ describe("the iOS simulator archive", () => {
           return { code: 1, stdout: Buffer.from(""), stderr: String(e) };
         }
       };
-      const a = await extractSimulatorApp(archive, exec);
+      const [a, overlapping] = await Promise.all([extractSimulatorApp(archive, exec), extractSimulatorApp(archive, exec)]);
       const b = await extractSimulatorApp(archive, exec);
       assert.equal(a.appPath, join(dir, "build", "unpacked", "App.app"));
-      assert.deepEqual([b.bundleId, b.buildVersion, untars], ["no.example.app", "9", 1]);
+      assert.equal(overlapping.appPath, a.appPath);
+      assert.deepEqual([b.bundleId, b.buildVersion, untars], ["no.example.app", "9", 1], "two overlapping unpacks each wiped the other's directory");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

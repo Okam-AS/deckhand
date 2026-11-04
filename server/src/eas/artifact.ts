@@ -1,6 +1,6 @@
 import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
@@ -18,8 +18,11 @@ import { EasError, UUID_RE, artifactKind, type EasBuild } from "./client.ts";
 
 const DOWNLOAD_IDLE_MS = 60_000;
 
+const downloading = new Map<string, Promise<{ path: string; cached: boolean }>>();
+const extracting = new Map<string, Promise<SimulatorApp>>();
+
 /**
- * Stream the artifact to `<cache>/<buildId>/<name>.part`, renamed only once complete, so a file
+ * Stream the artifact to a `.part` file of this call's own, renamed only once complete, so a file
  * at the final name is always whole. Aborted after `idleMs` with no bytes, not after a total: APKs
  * run to hundreds of MB. No credential is sent: artifact URLs are pre-authorised, and a redirect
  * can land on a storage host that must never see the Expo token.
@@ -44,15 +47,34 @@ export async function downloadArtifact(
   mkdirSync(dir, { recursive: true });
   const dest = join(dir, name);
   if (existsSync(dest) && statSync(dest).size > 0) return { path: dest, cached: true };
-  for (const f of readdirSync(dir)) if (f.endsWith(".part")) rmSync(join(dir, f), { force: true });
+  const inFlight = downloading.get(dest);
+  if (inFlight) return inFlight;
+  const run = fetchArtifact(b.id, url, dest, opts).finally(() => downloading.delete(dest));
+  downloading.set(dest, run);
+  return run;
+}
 
+async function fetchArtifact(
+  id: string,
+  url: URL,
+  dest: string,
+  opts: { fetchImpl?: typeof fetch; idleMs?: number; onProgress?: (got: number, total: number) => void },
+): Promise<{ path: string; cached: boolean }> {
+  const dir = dirname(dest);
   const idleMs = opts.idleMs ?? DOWNLOAD_IDLE_MS;
+  // Another process's download refreshes its .part's mtime with every chunk and is aborted after idleMs without one.
+  for (const f of readdirSync(dir)) {
+    if (!f.endsWith(".part")) continue;
+    const st = statSync(join(dir, f), { throwIfNoEntry: false });
+    if (st && Date.now() - st.mtimeMs > 2 * idleMs) rmSync(join(dir, f), { force: true });
+  }
+
   const ctl = new AbortController();
   let idle = setTimeout(() => ctl.abort(), idleMs);
-  const part = `${dest}.part`;
+  const part = `${dest}.${process.pid}.${Math.random().toString(36).slice(2)}.part`;
   try {
     const res = await (opts.fetchImpl ?? fetch)(url.toString(), { redirect: "follow", signal: ctl.signal });
-    if (!res.ok || !res.body) throw new EasError(`downloading EAS build ${b.id} failed: HTTP ${res.status}`, "the artifact link may have expired; try again, or pick a newer build");
+    if (!res.ok || !res.body) throw new EasError(`downloading EAS build ${id} failed: HTTP ${res.status}`, "the artifact link may have expired; try again, or pick a newer build");
     const expected = Number(res.headers.get("content-length") ?? NaN);
     let got = 0;
     const body = Readable.fromWeb(res.body as unknown as WebReadableStream<Uint8Array>);
@@ -63,11 +85,11 @@ export async function downloadArtifact(
       opts.onProgress?.(got, expected);
     });
     await pipeline(body, createWriteStream(part));
-    if (got === 0) throw new EasError(`downloading EAS build ${b.id} failed: empty body`);
-    if (Number.isFinite(expected) && got !== expected) throw new EasError(`downloading EAS build ${b.id} failed: got ${got} of ${expected} bytes`, "try again");
+    if (got === 0) throw new EasError(`downloading EAS build ${id} failed: empty body`);
+    if (Number.isFinite(expected) && got !== expected) throw new EasError(`downloading EAS build ${id} failed: got ${got} of ${expected} bytes`, "try again");
   } catch (e) {
     rmSync(part, { force: true });
-    if (ctl.signal.aborted) throw new EasError(`downloading EAS build ${b.id} stalled: no data for ${Math.round(idleMs / 1000)}s`, "check this Mac's network, then try again");
+    if (ctl.signal.aborted) throw new EasError(`downloading EAS build ${id} stalled: no data for ${Math.round(idleMs / 1000)}s`, "check this Mac's network, then try again");
     throw e;
   } finally {
     clearTimeout(idle);
@@ -273,7 +295,15 @@ export interface SimulatorApp {
 }
 
 /** Unpack once beside the archive (a `.complete` marker says it finished) and read its Info.plist. */
-export async function extractSimulatorApp(archive: string, exec: Exec = makeDefaultExec()): Promise<SimulatorApp> {
+export function extractSimulatorApp(archive: string, exec: Exec = makeDefaultExec()): Promise<SimulatorApp> {
+  const inFlight = extracting.get(archive);
+  if (inFlight) return inFlight;
+  const run = unpackSimulatorApp(archive, exec).finally(() => extracting.delete(archive));
+  extracting.set(archive, run);
+  return run;
+}
+
+async function unpackSimulatorApp(archive: string, exec: Exec): Promise<SimulatorApp> {
   const list = await exec("tar", ["-tzf", archive], { timeoutMs: 120_000 });
   if (list.code !== 0) throw new EasError(`tar could not list ${basename(archive)}: ${list.stderr.trim().slice(0, 200)}`);
   const name = simulatorAppFromListing(list.stdout.toString());
