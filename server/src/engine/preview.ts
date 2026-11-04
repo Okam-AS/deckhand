@@ -2092,6 +2092,7 @@ export class PreviewEngine {
       appEnv = this.appEnv(p.app);
       bundleId = this.resolveBundleId(p.app, sourceDir, platform);
       builderHandle = await handleOf(0);
+      await this.applyDevicePreferences(platform, builderHandle);
 
       // Mark the whole group building (non-builders wait on the shared build).
       for (const dev of group) {
@@ -2143,6 +2144,7 @@ export class PreviewEngine {
       group.slice(1).map(async (dev, i) => {
         try {
           const handle = await handleOf(i + 1);
+          await this.applyDevicePreferences(platform, handle);
           this.setPhase(p, dev, "installing-app", "installing");
           await this.installProduct(platform, handle, appPath);
           await this.verifyInstalled(platform, handle, bundleId);
@@ -2353,7 +2355,11 @@ export class PreviewEngine {
   private async silenceDevOverlays(platform: Platform, handle: string, bundleId: string): Promise<void> {
     if (platform !== "ios") return;
     await this.d.simctl.silenceDevOverlays(handle, bundleId).catch(() => {});
-    if (this.d.config.ios?.reduceTransparency) await this.d.simctl.reduceTransparency(handle).catch(() => {});
+  }
+
+  // Before the build, not beside the overlays: local livesync launches the app itself, and the app reads this at launch.
+  private async applyDevicePreferences(platform: Platform, handle: string): Promise<void> {
+    if (platform === "ios" && this.d.config.ios?.reduceTransparency) await this.d.simctl.reduceTransparency(handle).catch(() => {});
   }
 
   private async attachAndReady(p: LivePreview, dev: LiveDevice, platform: Platform, handle: string): Promise<void> {
