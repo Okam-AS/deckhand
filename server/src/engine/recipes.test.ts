@@ -204,6 +204,27 @@ describe("buildPlan — android", () => {
     assert.match(script, /npx expo run:android --device "\$_name" --no-bundler/);
   });
 
+  it("expo on a phone refuses to build when another device of its model is plugged in", () => {
+    const script = (buildPlan({ ...androidInput, udid: "RF8N30YRFKY", type: "expo" })[1]!.run as { script: string }).script;
+    const run = (devices: string) => {
+      const bin = fs.mkdtempSync(path.join(os.tmpdir(), "deckhand-adb-"));
+      try {
+        fs.writeFileSync(path.join(bin, "adb"), `#!/bin/sh\nprintf '%s\\n' 'List of devices attached' ${devices.split("\n").map((l) => `'${l}'`).join(" ")}\n`, { mode: 0o755 });
+        fs.writeFileSync(path.join(bin, "npx"), `#!/bin/sh\necho "npx $*"\n`, { mode: 0o755 });
+        return spawnSync("/bin/sh", ["-c", script], { env: { PATH: `${bin}:/usr/bin:/bin` }, encoding: "utf8" });
+      } finally {
+        fs.rmSync(bin, { recursive: true, force: true });
+      }
+    };
+    const alone = run("RF8N30YRFKY device usb:1-1 product:x1s model:SM_G980F device:x1s transport_id:1");
+    assert.equal(alone.status, 0, alone.stderr);
+    assert.match(alone.stdout, /npx expo run:android --device SM_G980F --no-bundler/);
+    const twins = run("RF8N30YRFKY device usb:1-1 product:x1s model:SM_G980F device:x1s transport_id:1\nRF8N30ZZZZZ device usb:1-2 product:x1s model:SM_G980F device:x1s transport_id:2");
+    assert.notEqual(twins.status, 0);
+    assert.doesNotMatch(twins.stdout, /npx expo/, "built onto whichever of two same-model phones adb lists first");
+    assert.match(twins.stderr, /2 devices of model SM_G980F/);
+  });
+
   it("bare react-native android uses run-android --deviceId", () => {
     const plan = buildPlan({ ...androidInput, type: "react-native" });
     assert.deepEqual((plan[1]!.run as { args: string[] }).args, [

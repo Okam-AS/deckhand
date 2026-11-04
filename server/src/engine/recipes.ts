@@ -351,12 +351,15 @@ const expoAndroidRun = (serial: string): string =>
 
 /**
  * A phone's expo device name is the `model:` adb lists for it (`SM_G980F`), not its serial.
- * Two phones of one model are the same name to expo, which installs on the first one adb lists.
+ * Two phones of one model are the same name to expo, which installs on the first one adb lists,
+ * so that build is refused rather than sent to a phone this preview does not hold.
  */
 const expoPhoneRun = (serial: string): string =>
   [
     `_name=$(adb devices -l | awk '$1 == "${serial}" { for (i = 2; i <= NF; i++) if ($i ~ /^model:/) { sub(/^model:/, "", $i); print $i } }')`,
     `[ -n "$_name" ] || { echo "adb lists no model for ${serial}, and expo run:android names a phone by its model" >&2; exit 1; }`,
+    `_same=$(adb devices -l | awk -v m="model:$_name" '{ for (i = 2; i <= NF; i++) if ($i == m) n++ } END { print n + 0 }')`,
+    `[ "$_same" = 1 ] || { echo "$_same devices of model $_name are plugged in, and expo run:android picks a phone by its model, so it could install on one this preview does not hold. Unplug the others while this builds, or preview an EAS build (start_preview eas), which installs by serial." >&2; exit 1; }`,
     `npx expo run:android --device "$_name" --no-bundler`,
   ].join("\n");
 
