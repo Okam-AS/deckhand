@@ -121,6 +121,7 @@ export class IphoneControl implements DeviceControl<IphoneTarget> {
         const hit = await this.poll(client, a.waitTimeoutMs ?? 0, (nodes) => find(nodes, a.selector));
         if (!hit) throw notFound(a.selector, a.waitTimeoutMs);
         if (hit.offscreen) throw new IphoneActionError(`${describeSel(a.selector)} is off screen — scroll it into view first (scrollUntilVisible, or a gesture)`, 409);
+        await this.inApp(client, target);
         await this.tapNode(client, hit);
         return { action: "tap", element: brief(hit) };
       }
@@ -142,7 +143,7 @@ export class IphoneControl implements DeviceControl<IphoneTarget> {
         await this.preset(client, a.preset);
         return { action: "gesture", preset: a.preset };
       case "back":
-        return this.back(client);
+        return this.back(client, target);
       case "dismissKeyboard":
         await wrap(
           () => client.dismissKeyboard(),
@@ -150,7 +151,7 @@ export class IphoneControl implements DeviceControl<IphoneTarget> {
         );
         return { action: "dismissKeyboard" };
       case "scrollUntilVisible":
-        return this.scrollUntilVisible(client, a.selector);
+        return this.scrollUntilVisible(client, target, a.selector);
     }
     throw new IphoneActionError(`${a.type} is not supported on a physical iPhone`, 422);
   }
@@ -217,8 +218,9 @@ export class IphoneControl implements DeviceControl<IphoneTarget> {
   }
 
   /** iOS has no back key: the navigation bar's back button, else UINavigationController's edge swipe. */
-  private async back(client: WdaClient): Promise<unknown> {
+  private async back(client: WdaClient, target: IphoneTarget): Promise<unknown> {
     const tree = await this.tree(client);
+    await this.inApp(client, target);
     const nodes = nodesOf(tree);
     const btn =
       nodes.find((n) => n.role === "Button" && n.id === "BackButton" && !n.offscreen) ??
@@ -236,7 +238,7 @@ export class IphoneControl implements DeviceControl<IphoneTarget> {
     };
   }
 
-  private async scrollUntilVisible(client: WdaClient, selector: Selector): Promise<unknown> {
+  private async scrollUntilVisible(client: WdaClient, target: IphoneTarget, selector: Selector): Promise<unknown> {
     let before = "";
     for (let i = 0; i <= SCROLL_TRIES; i++) {
       const tree = await this.tree(client);
@@ -245,7 +247,10 @@ export class IphoneControl implements DeviceControl<IphoneTarget> {
       const shape = shapeOf(tree);
       if (i > 0 && shape === before) break;
       before = shape;
-      if (i < SCROLL_TRIES) await this.preset(client, "scroll-down");
+      if (i < SCROLL_TRIES) {
+        await this.inApp(client, target);
+        await this.preset(client, "scroll-down");
+      }
     }
     throw new IphoneActionError(`${describeSel(selector)} did not come into view after scrolling down to where the screen stopped moving`, 404);
   }

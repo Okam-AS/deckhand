@@ -139,6 +139,28 @@ describe("IphoneControl", () => {
     }
   });
 
+  it("asks again which app is in front after waiting or scrolling, before it touches", async () => {
+    const icon = wdaNode({ type: "Icon", label: "Innstillinger", rect: { x: 100, y: 300, width: 60, height: 60 } });
+    const backButton = wdaNode({ type: "Button", label: "Back", rawIdentifier: "BackButton", rect: { x: 16, y: 58, width: 44, height: 44 } });
+    const cases: [UiAction, number, object][] = [
+      [{ type: "tapElement", selector: { label: "Innstillinger" }, waitTimeoutMs: 5_000 }, 2, icon],
+      [{ type: "scrollUntilVisible", selector: { label: "Innstillinger" } }, 1, wdaNode({ type: "StaticText", label: "Loading" })],
+      [{ type: "back" }, 1, backButton],
+    ];
+    for (const [a, leavesOnRead, seen] of cases) {
+      let reads = 0;
+      const { control, calls, state } = setup({
+        source: () => {
+          if (++reads < leavesOnRead) return app(wdaNode({ type: "StaticText", label: "Loading" }));
+          state.bundleId = "com.apple.springboard";
+          return app(seen);
+        },
+      });
+      await assert.rejects(() => control.action(target, a), /never acts outside/, a.type);
+      assert.deepEqual(pointerMoves(calls), [], `${a.type} touched the app that came to the front`);
+    }
+  });
+
   it("refuses to touch a phone with no app registered for it", async () => {
     const { control, calls } = setup();
     await assert.rejects(() => control.action({ platform: "ios", udid: target.udid }, { type: "tap", x: 0.1, y: 0.1 }), /no app is registered/);
