@@ -31,6 +31,8 @@ export const paths = {
   apps: () => join(deckhandHome(), "apps.yaml"),
   tokens: () => join(deckhandHome(), "tokens.yaml"),
   state: () => join(deckhandHome(), "state.json"),
+  /** Phones a person took off the market with `deckhand phone hold`; written by the CLI, read by the server. */
+  phoneHolds: () => join(deckhandHome(), "phone-holds.json"),
   /** OAuth clients and per-person connector grants (hashes only, mode 0600). */
   oauth: () => join(deckhandHome(), "oauth.json"),
   audit: () => join(deckhandHome(), "audit.jsonl"),
@@ -40,6 +42,10 @@ export const paths = {
   secretsEnv: (appId: string) => join(deckhandHome(), "secrets", `${appId}.env`),
   /** TypeSafe API key for `navigate` (mode 0600); `.key`, so no app id's `.env` can collide. */
   typesafeKey: () => join(deckhandHome(), "secrets", "typesafe.key"),
+  /** Read-only Expo robot token for the EAS source (mode 0600). */
+  expoToken: () => join(deckhandHome(), "secrets", "expo.token"),
+  /** Downloaded EAS build artifacts, one directory per build id. */
+  easCache: () => join(deckhandHome(), "cache", "eas"),
   reposDir: () => join(deckhandHome(), "repos"),
   repo: (appId: string) => join(deckhandHome(), "repos", appId),
   worktreesDir: () => join(deckhandHome(), "worktrees"),
@@ -55,4 +61,6 @@ export const paths = {
   // builds identically, so it can share one warm directory.
   worktree: (key: string) => join(deckhandHome(), "worktrees", `dh-${key}`),
   logsDir: () => join(deckhandHome(), "logs"),
+  /** A WebDriverAgent built and signed elsewhere, copied here by the operator; deckhand never builds or signs it. */
+  wdaProducts: () => join(deckhandHome(), "wda", "Products"),
 } as const;

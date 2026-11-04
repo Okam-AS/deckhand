@@ -25,6 +25,12 @@ export interface SimDeckTarget {
   udid: string;
 }
 
+/** What `describe` and `ui` need from a device's control backend: SimDeck, or adb for a phone (adbControl.ts). */
+export interface ControlBackend {
+  describe(target: SimDeckTarget, opts?: DescribeOptions): Promise<unknown>;
+  action(target: SimDeckTarget, action: UiAction): Promise<unknown>;
+}
+
 export interface DescribeOptions {
   /** auto | native-ax | nativescript | react-native | flutter | swiftui | uikit | android-uiautomator */
   source?: string;
@@ -138,7 +144,7 @@ function askedWaitMs(init: RequestInit | undefined): number {
   }
 }
 
-export class SimDeckControl {
+export class SimDeckControl implements ControlBackend {
   private readonly daemon: SimDeckDaemon;
   private readonly fetchImpl: typeof fetch;
 

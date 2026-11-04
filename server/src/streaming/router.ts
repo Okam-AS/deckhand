@@ -3,8 +3,9 @@ import type { AttachedStream, StreamDeviceRef, StreamingBackend } from "./backen
 // ---------------------------------------------------------------------------
 // Streaming backend router: dispatches by platform. iOS → serve-sim,
 // Android → the adb backend (`screenrecord` H.264, `screencap` MJPEG fallback),
-// web → the dev-server proxy backend. The engine, proxy, and MCP tools only ever
-// see the StreamingBackend interface.
+// web → the dev-server proxy backend, and a physical iPhone (`physical: true`) → WDA's
+// own MJPEG (iphoneMjpeg.ts). The engine, proxy, and MCP tools only ever see the
+// StreamingBackend interface.
 // ---------------------------------------------------------------------------
 
 export class StreamingRouter implements StreamingBackend {
@@ -12,9 +13,14 @@ export class StreamingRouter implements StreamingBackend {
     private readonly ios: StreamingBackend,
     private readonly android: StreamingBackend,
     private readonly web: StreamingBackend,
+    private readonly iphone?: StreamingBackend,
   ) {}
 
   attach(device: StreamDeviceRef): Promise<AttachedStream> {
+    if (device.platform === "ios" && device.physical) {
+      if (!this.iphone) return Promise.reject(new Error("no streaming backend for a physical iPhone is registered"));
+      return this.iphone.attach(device);
+    }
     return this.backendFor(device.platform).attach(device);
   }
 
@@ -25,6 +31,6 @@ export class StreamingRouter implements StreamingBackend {
   }
 
   async reapOrphans(keep?: ReadonlySet<string>): Promise<void> {
-    await Promise.all([this.ios.reapOrphans(keep), this.android.reapOrphans(keep), this.web.reapOrphans(keep)]);
+    await Promise.all([this.ios.reapOrphans(keep), this.android.reapOrphans(keep), this.web.reapOrphans(keep), this.iphone?.reapOrphans(keep)]);
   }
 }

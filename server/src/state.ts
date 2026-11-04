@@ -30,7 +30,9 @@ export interface PersistedDevice {
   platform: Platform;
   label: string; // human label, e.g. "iPhone 16 Pro · iOS 26"
   udid?: string; // simulator UDID once created
-  serial?: string; // android adb serial (P2)
+  serial?: string; // android adb serial
+  /** A phone plugged in by cable: borrowed, never booted, wiped or reaped; one live preview at a time. */
+  physical?: true;
   runtime?: string; // e.g. "iOS 26.0"
   model?: string; // e.g. "iPhone 16 Pro"
   phase: DevicePhase;
@@ -44,8 +46,8 @@ export interface PersistedDevice {
   webPort?: number; // web only: the dev server's loopback port
 }
 
-/** Where a preview's code comes from: a git ref checkout, or a local dir built in place. */
-export type PreviewSource = "git" | "local";
+/** Where a preview's code comes from: a git ref checkout, a local dir built in place, or a build EAS already made. */
+export type PreviewSource = "git" | "local" | "eas";
 
 export interface PersistedPreview {
   previewId: string;
@@ -67,6 +69,10 @@ export interface PersistedPreview {
    * from a failed lookup (which let any token drive any orphaned preview).
    */
   reference?: boolean;
+  /** The app environment this preview runs against, when the app declares environments. */
+  environment?: string;
+  /** eas only: the build asked for, by id or by profile. */
+  eas?: { buildId?: string; profile?: string };
   /** web only: the detected framework ("vite" | "nuxt" | "next" | "static"). Vite hosts
    *  path-based; the others host at the root of a per-share subdomain. */
   webFramework?: string;

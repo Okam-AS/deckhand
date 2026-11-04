@@ -296,7 +296,19 @@ export function pollDecision(
  * sentinel "local", and there "local working copy" is the whole truth rather than filler.
  */
 export function sourceLabel(source: string | undefined, refName: string | undefined): { key: string; value: string } {
+  if (source === "eas") return { key: "Build", value: refName || "EAS build" };
   if (source !== "local") return { key: "Branch", value: refName || "—" };
   if (!refName || refName === "local") return { key: "Source", value: "local working copy" };
   return { key: "Branch", value: refName };
+}
+
+/**
+ * What a device's pane offers. A physical iPhone streams WDA's MJPEG and nothing else, and
+ * deckhand never presses its home button or turns it (the server drops both), so neither is
+ * offered; it is labelled a physical device so its lower frame rate is not read as a fault.
+ */
+export function deviceChrome(device: { platform?: string; physical?: boolean }): { home: boolean; rotate: boolean; mjpegOnly: boolean; physicalNote: string | null } {
+  if (device.physical && device.platform === "ios") return { home: false, rotate: false, mjpegOnly: true, physicalNote: "Physical device — slower frame rate than a simulator" };
+  if (device.physical) return { home: true, rotate: true, mjpegOnly: false, physicalNote: "Physical device" };
+  return { home: true, rotate: true, mjpegOnly: false, physicalNote: null };
 }

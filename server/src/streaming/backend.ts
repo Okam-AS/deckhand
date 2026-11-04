@@ -13,6 +13,7 @@ export interface StreamDeviceRef {
   platform: Platform;
   udid: string;
   serial?: string; // android: the adb serial (`emulator-<port>`)
+  physical?: boolean; // ios: a cabled iPhone (WDA's MJPEG), not a simulator
   port?: number; // web: the dev server's loopback port
   basePath?: string; // web: the share base the dev server serves under (e.g. "/s/<id>/web")
 }

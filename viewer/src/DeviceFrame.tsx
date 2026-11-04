@@ -5,6 +5,7 @@ import { DeviceInput, ORIENTATION_CYCLE, type SpecialKey } from "./stream/input.
 import { deviceBase, deviceWsUrl, phaseBadge, phaseLabel, repoName, type ShareDevice } from "./api.ts";
 import { BranchIcon, CollapseIcon, ExpandIcon, HomeIcon, KeyboardIcon, PlatformGlyph, RepoGlyph, RotateIcon } from "./icons.tsx";
 import { TypeBar } from "./TypeBar.tsx";
+import { deviceChrome } from "./panes.ts";
 
 export type DeviceVariant = "grid" | "focus" | "thumb";
 
@@ -62,6 +63,7 @@ const fullscreenSupported = typeof document !== "undefined" && Boolean(document.
 export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = "grid", onSelect, registerControls, onRotationChange, hidden, topbarLead, viewOnly }: Props) {
   // Identity for the registry/FLIP map; the stream paths still use the raw deviceId.
   const key = paneKey ?? device.deviceId;
+  const chrome = deviceChrome(device);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const frameRef = useRef<HTMLElement>(null); // the whole card is the fullscreen target
   const inputRef = useRef<DeviceInput | null>(null); // control buttons ride the same HID ws as touch
@@ -177,7 +179,7 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
           }
         }
       },
-    });
+    }, { mjpegOnly: chrome.mjpegOnly });
     const input = viewOnly ? null : new DeviceInput(canvas, deviceWsUrl(shareId, device.deviceId));
     inputRef.current = input;
     playerRef.current = player;
@@ -276,24 +278,28 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
             <>
               {!viewOnly && (
                 <>
-                  <button
-                    type="button"
-                    className="ctrl-btn"
-                    onClick={pressHome}
-                    title="Home"
-                    aria-label="Press the device home button"
-                  >
-                    <HomeIcon />
-                  </button>
-                  <button
-                    type="button"
-                    className="ctrl-btn"
-                    onClick={rotate}
-                    title="Rotate"
-                    aria-label="Rotate the device 90 degrees"
-                  >
-                    <RotateIcon />
-                  </button>
+                  {chrome.home && (
+                    <button
+                      type="button"
+                      className="ctrl-btn"
+                      onClick={pressHome}
+                      title="Home"
+                      aria-label="Press the device home button"
+                    >
+                      <HomeIcon />
+                    </button>
+                  )}
+                  {chrome.rotate && (
+                    <button
+                      type="button"
+                      className="ctrl-btn"
+                      onClick={rotate}
+                      title="Rotate"
+                      aria-label="Rotate the device 90 degrees"
+                    >
+                      <RotateIcon />
+                    </button>
+                  )}
                   {/* Always offered. Typing into the focused canvas works with a real
                       keyboard, but it is invisible — the button is the only affordance
                       that says typing is possible at all, and it is also the path for
@@ -398,7 +404,10 @@ export function DeviceFrame({ shareId, device, paneKey, repo, branch, variant = 
               <span className="sr-only">Device</span>
               <PlatformGlyph platform={device.platform} />
             </dt>
-            <dd>{device.label}</dd>
+            <dd>
+              {device.label}
+              {chrome.physicalNote && <span className="fact-note"> · {chrome.physicalNote}</span>}
+            </dd>
           </div>
           <div className="fact">
             <dt className="fact-glyph">

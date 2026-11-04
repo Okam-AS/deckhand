@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   detectAppType,
   detectFromRepo,
+  easProjectIdFromConfigText,
   detectWebFramework,
   webHostingMode,
   expoBundleId,
@@ -28,7 +29,7 @@ describe("detectFromRepo", () => {
       "package.json": JSON.stringify({ dependencies: { "@nativescript/core": "^8" } }),
       "nativescript.config.ts": "export default { id: 'no.okam.admin', appPath: 'app' } as any;",
     });
-    assert.deepEqual(await detectFromRepo(read, hasEntry), { type: "nativescript", bundleId: "no.okam.admin" });
+    assert.deepEqual(await detectFromRepo(read, hasEntry), { type: "nativescript", bundleId: "no.okam.admin", easProjectId: null });
   });
 
   it("detects an Expo app + iOS bundle id from app.json", async () => {
@@ -36,12 +37,29 @@ describe("detectFromRepo", () => {
       "package.json": JSON.stringify({ dependencies: { expo: "~51.0.0" } }),
       "app.json": JSON.stringify({ expo: { slug: "demo", ios: { bundleIdentifier: "com.demo.app" } } }),
     });
-    assert.deepEqual(await detectFromRepo(read, hasEntry), { type: "expo", bundleId: "com.demo.app" });
+    assert.deepEqual(await detectFromRepo(read, hasEntry), { type: "expo", bundleId: "com.demo.app", easProjectId: null });
   });
 
   it("returns nulls when nothing identifies the app (caller asks for type)", async () => {
     const { read, hasEntry } = repoFrom({ "readme.md": "# hi" });
-    assert.deepEqual(await detectFromRepo(read, hasEntry), { type: null, bundleId: null });
+    assert.deepEqual(await detectFromRepo(read, hasEntry), { type: null, bundleId: null, easProjectId: null });
+  });
+});
+
+describe("the EAS project id from the app config", () => {
+  const ID = "6ff82c98-0000-4000-8000-000000000001";
+  it("reads extra.eas.projectId from app.json, or a literal one in a dynamic config, never evaluating it", async () => {
+    assert.equal(easProjectIdFromConfigText(JSON.stringify({ expo: { extra: { eas: { projectId: ID } } } }), []), ID);
+    assert.equal(easProjectIdFromConfigText(null, [null, `module.exports = () => ({ extra: { eas: { projectId: "${ID}" } } });`]), ID);
+    const { read, hasEntry } = repoFrom({
+      "package.json": JSON.stringify({ dependencies: { expo: "~51.0.0" } }),
+      "app.config.ts": `export default { extra: { eas: { projectId: '${ID}' } } };`,
+    });
+    assert.equal((await detectFromRepo(read, hasEntry)).easProjectId, ID);
+  });
+
+  it("is null when two different ids are written, rather than guessing", () => {
+    assert.equal(easProjectIdFromConfigText(null, [`projectId: "${ID}"`, `projectId: "${ID.replace("1", "2")}"`]), null);
   });
 });
 

@@ -81,9 +81,40 @@ PLAN describes the architecture. The invariants that bind every change:
   statement plus four health questions. It returns probabilities and pass/fail/unsure,
   never a finding — the caller confirms with a screenshot. Keep health questions narrow:
   one broad "looks broken?" read a normal list as broken.
-- **Physical devices are OUT** on both platforms; PLAN §2 says why. **Three known gaps, so
-  do not imply otherwise:** the local (`path`) livesync build path is unvalidated on-device,
-  the `metro`/`app` `logs` sources are accepted and capture nothing, and PLAN §11 item 7's
+- **Physical devices: Android phones and iPhones are IN** (PLAN §2). A phone plugged in by cable
+  is borrowed hardware: waited for, never booted, wiped, killed or reaped, never a setting changed,
+  one live preview at a time (`device_busy`), PIN-protected by default, outside `maxTotalDevices`,
+  and deckhand touches only the preview's registered app on it — install, update, downgrade,
+  uninstall, clear and stop go through `RegisteredApp` (`devices/androidPhone.ts`) on Android and
+  `IphoneApps` (`devices/iphoneApps.ts`) on an iPhone, each refusing every other app before a
+  command runs. `describe`/`ui` on an Android phone go over adb (`testing/adbControl.ts`): SimDeck
+  addresses Android only by AVD name. On an iPhone they go over WebDriverAgent
+  (`testing/iphoneControl.ts`), which refuses every touch while another app is in front and never
+  presses home; an Android phone has no such check, and `ui` can leave the app there. Those rules,
+  `RegisteredApp` and the PIN default bind deckhand's own client and the share link, **not the
+  phone**: WDA and the adb server have no authentication and sit on the Mac's loopback, which a
+  simulator shares, so a simulator share holder can drive any cabled phone whose WDA (or adb) is
+  up, held by a preview or idle (PLAN §11 item 1, accepted). On a Mac that serves untrusted
+  simulator shares, do not cable a phone. An iPhone runs only an EAS internal `.ipa` whose profile lists it — deckhand holds
+  no Apple credentials and builds nothing for a phone. WDA is signed elsewhere and placed under the
+  deckhand home; the server keeps one WDA runner and one loopback-only `iproxy` per phone across
+  previews (`devices/iphones.ts`), reaped by marker on boot, and a cold WDA start costs about 30 s. The
+  first start on a phone waits for a person to approve its Automation Mode prompt.
+  `list_devices` names that, like every other blocker, with the fix to relay. **Never start
+  a second `deckhand serve` to try a phone, even under a scratch `DECKHAND_HOME`:** its boot reap
+  treats every `deckhand-*` simulator and `deckhand_*` AVD on the Mac as an orphan and deletes the
+  live server's devices. Drive a `PreviewEngine` from a script, or `deckhand doctor --device-only`.
+- **EAS builds are a third preview source, and environments are binding** (PLAN §2 "Build
+  strategy", §7 "EAS source"). `start_preview` `eas` installs a build EAS already made, fetched
+  with a read-only Expo robot token (`deckhand secret set expo`; it goes to `api.expo.dev` and
+  nowhere else) and vetted before a device is touched. An app's `environments` in apps.yaml
+  decide its backend: every preview runs the app's default unless the user explicitly named
+  another, and `preview_status` `environment.verified` says whether the app log proved it —
+  check it before signing in or submitting anything. An app with no environments is "unknown";
+  never invent one.
+  **Three known gaps, so do not imply otherwise:** the local (`path`) livesync build path is
+  unvalidated on-device, the `metro` `logs` source (and `app` on an iOS simulator) is accepted and
+  captures nothing, and PLAN §11 item 7's
   host hygiene (dedicated macOS user, no personal credentials, FileVault) is stated in PLAN
   and in no runbook — nothing tells an operator how to set it up or check it holds.
 
@@ -302,12 +333,15 @@ code, not work (`cli.ts`, and PLAN §10 says which is for what). Nothing else in
 touches a device; plain `doctor` and `npm run ci` are paperwork. It is not in the hook and
 not in CI, because GitHub runners cannot do Android emulators and a green run there would
 mean "half the devices" while reading as "all of them" — so run it by hand; it takes
-several minutes. Three capabilities on **both** platforms, as six independent checks:
+several minutes. Three capabilities per kind of device, each an independent check, plus input on
+the two phone columns:
 
 |  | boot | stream | describe |
 |---|---|---|---|
 | **ios** | `simctl create` + boot | serve-sim first frame | accessibility tree |
 | **android** | AVD create + emulator boot | adb helper first frame | `uiautomator dump` |
+| **android phone** | free phone awake + unlocked | first frame, and its codec | `uiautomator dump` over adb |
+| **iphone** | free cabled iPhone, WDA up | WDA's MJPEG first frame | WDA's tree |
 
 Separate on purpose: "it booted" must never stand in for "it streamed" — a device that
 comes up and never produces a frame is the most common failure here, and it was invisible
@@ -315,9 +349,15 @@ while one check covered both.
 
 **Do not report a change to the device, streaming or control path as tested without
 pasting this output.** Not "tests pass" — that is `npm run ci`, which never touches a
-device. If you cannot run it, say which of the six is unverified and who has to run it.
+device. If you cannot run it, say which of these checks is unverified and who has to run it.
 `?` is an honest answer; a tick you did not earn is not. It does NOT cover **input
-injection**: `describe` proves the control path can READ, nothing more.
+injection** on simulators and emulators: `describe` proves the control path can READ, nothing
+more. The phone column has a fourth check, **input**, because a phone is where input fails silently:
+it injects a key that does nothing (KEYCODE_UNKNOWN) and reads the power manager's last-activity
+clock, so nothing outside a test app is acted on — a phone is shared hardware. With no free phone
+all four print `?`, and so does input on a phone whose `dumpsys power` has no such clock. The
+iPhone column's input is a pause-only pointer action through XCUITest: it proves the input path
+and touches nothing.
 
 ## Waiting for a preview to build
 

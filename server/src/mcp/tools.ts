@@ -6,12 +6,12 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { App, AppType, Config } from "../config.ts";
-import { appSchema, ConfigError, enterprisePatPath, parseRepo, publicBaseUrl } from "../config.ts";
+import { appEnvironments, appSchema, ConfigError, EAS_PROJECT_ID_RE, enterprisePatPath, parseRepo, publicBaseUrl } from "../config.ts";
 import { versionStatus, type UpdateStatus } from "../version.ts";
 import { DEV_MENU_PREFLIGHT, devMenuHint } from "../testing/devMenu.ts";
 import { selectorMissHint } from "../testing/tree.ts";
 import type { Principal } from "../auth.ts";
-import type { PreviewEngine, CompareReference } from "../engine/preview.ts";
+import type { PreviewEngine, CompareReference, DeviceRequest } from "../engine/preview.ts";
 import { PreviewError } from "../engine/preview.ts";
 import { parseRefSpec, refDescription, RefError } from "../engine/worktree.ts";
 import { detectWebFrameworkFromDir, webHostingMode } from "../engine/detect.ts";
@@ -146,7 +146,7 @@ function localCheckoutHint(host: { hostname: string; user: string }, repo: strin
 function toFail(e: unknown): CallToolResult {
   if (e instanceof SimDeckUnavailableError) return fail("simdeck_unavailable", e.message, e.hint);
   if (e instanceof SimDeckActionError) return fail("ui_error", e.message);
-  if (e instanceof PreviewError) return fail("preview_error", e.message, e.hint);
+  if (e instanceof PreviewError) return fail(e.code ?? "preview_error", e.message, e.hint);
   if (e instanceof RefError) return fail("invalid_ref", e.message);
   return fail("internal_error", e instanceof Error ? e.message : String(e));
 }
@@ -294,7 +294,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         ok({
           guide: [
             "Start with `list_apps`. When you can run commands on the deckhand host, prefer its existing checkout: register it with `deckhand app add <id> --path <dir>`; otherwise use `add_app` for a GitHub source. Never ask for or relay a credential or app secret in chat; relay the one-time setup link if `add_app` returns one.",
-            "Before `start_preview`, ask the user to choose public access or a PIN. A public link is open to anyone with its URL; web previews require a PIN. Pass a user-chosen 4–6 digit PIN without repeating it in chat.",
+            "Before `start_preview`, ask the user to choose public access or a PIN. A public link is open to anyone with its URL; web previews require a PIN, and a preview on a physical phone defaults to one (make it public only when the user explicitly asks). Pass a user-chosen 4–6 digit PIN without repeating it in chat.",
             "Give the `start_preview` URL to the user immediately, then poll `preview_status` until the target is ready before driving it. Reuse an equivalent live preview; use `restart_preview` for a local native/dependency change or after pushing new git commits, not for ordinary hot reloads.",
             "For visible, end-to-end work, start a test run, then use `describe` to orient and `ui` to act — `ui` returns the screen after it, and takes a list of `actions` for a known sequence — and `screenshot` to verify. Update each test step as it runs and finish the run with an evidence-based verdict.",
             "When build or launch fails, read `logs` with its default build source. When a ready viewer has no video, read `logs` with source `stream`. Stop previews you no longer need with `stop_preview`.",
@@ -312,7 +312,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "List apps",
       description:
-        "List the apps registered on this machine that you can preview. Apps come from a GitHub repo (git previews of a branch/PR), a local folder on this machine (dev-mode previews of the working copy, no pushing needed), or both.",
+        "List the apps registered on this machine that you can preview. Apps come from a GitHub repo (git previews of a branch/PR), a local folder on this machine (dev-mode previews of the working copy, no pushing needed), or both. An app with `easProjectId` can also preview a build EAS already made (start_preview's `eas`). `environments` names the backends an app can run against and its default, which every preview uses unless the user asked for another; null means the app declares none.",
       inputSchema: {},
     },
     () =>
@@ -325,6 +325,11 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             source: a.path ? (a.repo ? "github+local" : "local") : "github",
             type: a.type,
             defaultBranch: a.defaultBranch,
+            easProjectId: a.easProjectId ?? null,
+            environments: (() => {
+              const e = appEnvironments(a);
+              return e ? { default: e.default, names: [...e.byName.keys()] } : null;
+            })(),
           })),
           // Empty-state onboarding (PLAN §6): tell the agent exactly what to ask
           // the user next. Relay `nextStep` to the user verbatim. Local checkout
@@ -349,7 +354,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "List devices",
       description:
-        "List the iOS simulator runtimes and models and the Android emulator API levels this machine can boot, plus current capacity. Simulators and emulators are the ONLY things deckhand can preview on: it cannot build to, stream from, or see a real iPhone or Android phone plugged into the machine. Asked about one, say previewing on physical devices is not supported and offer the closest simulator or emulator from this list — do not say deckhand can see the device, and do not suggest plugging it in.",
+        "List what this machine can preview on: the iOS simulator runtimes and models and Android emulator API levels it can boot, plus current capacity, and under `physical` the Android phones and iPhones plugged into it by cable. A phone is listed with `targetable: true` (start_preview can take it: devices [{platform: \"android\" or \"ios\", id: \"<its id>\"}], or {platform, physical: true} for any free one), or with `targetable: false` and the one `blocker` stopping it plus the `fix` to relay to the user (an iPhone's can be a human step at the phone, such as approving the Automation Mode prompt). A physical iPhone runs only an EAS internal-distribution build whose profile lists it: pass `eas` with it. Phones are outside the simulator capacity, and one phone runs one preview at a time. A phone is a real device that can call, buy and log in — sign it in to test accounts only.",
       inputSchema: {},
     },
     () => audited("list_devices", {}, async () => ok(await engine.listDevices())),
@@ -406,8 +411,10 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     `End EVERY message you write the user with this link on its own line — ${url} — so they never have to scroll back to find the sim.`;
 
   /** The daily-loop guidance attached to start/restart results (agent-led contract, PLAN §6). */
-  const loopNextStep = (source: "git" | "local", url: string, ref?: string): string =>
-    source === "local"
+  const loopNextStep = (source: "git" | "local" | "eas", url: string, ref?: string): string =>
+    source === "eas"
+      ? `Give the user this link NOW: ${url} — it's already live (it shows the download and install while the device boots) and is stable for this app; relay it before any other work, don't wait for ready. Then poll preview_status for readiness, and read its \`environment\`: before signing in or submitting anything, confirm environment.verified is true (or "no-marker", and tell the user it cannot be proven). This is a build EAS already made, so code edits do not reach it; after a new EAS build of the profile, restart_preview installs the newest one. ${TEST_RUN_CONTRACT} ${linkFooter(url)}`
+      : source === "local"
       ? `Give the user this link NOW: ${url} — it's already live (it shows build progress while the sim boots) and is stable for this app across restarts; relay it before any other work, don't wait for ready. Then poll preview_status for readiness. While the preview runs, file saves livesync to the simulator automatically, so after editing code there is nothing to call — just tell the user the change is on the sim. Only call restart_preview after native-level changes (new plugins, Podfile/gradle edits) or if the app looks stuck. ${TEST_RUN_CONTRACT} ${linkFooter(url)}`
       : `Give the user this link NOW: ${url} — it's already live (it shows build progress) and is stable for this app; relay it before any other work, don't wait for ready. Then poll preview_status for readiness. After pushing new commits to ${ref ?? "the branch"}, call restart_preview to rebuild the same simulators at the new tip — the link stays the same. ${TEST_RUN_CONTRACT} ${linkFooter(url)}`;
 
@@ -487,7 +494,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Start a preview",
       description:
-        "Returns the live viewer link INSTANTLY — surface it to the user first, before any other work (it's live the moment the preview starts and shows build progress while devices boot); then poll preview_status for readiness. Starts a preview and returns its shareable viewer link — or, if an equivalent preview is already running, returns THAT one (idempotent: each app keeps a stable URL, so this is also the way to answer \"what's the link?\"). With ref/pr it builds that git ref; with neither, an app with a local path previews its local working copy (dev mode — file saves then livesync to the simulator automatically, no pushing needed), and a repo-only app builds its default branch. Pass `alongside` to put more sources on the SAME page — another app, this app at another ref, a worktree, an arbitrary repo — and the viewer shows them side by side under one link and one PIN. That is how you compare old vs new: there is no separate compare tool or compare view. IMPORTANT: before every call you MUST ask the user whether to protect the link with a PIN or make it public, and pass that as `share` (this call fails until you do). If they choose a PIN, ask for a 4–6 digit code — never repeat that code back in chat.",
+        "Returns the live viewer link INSTANTLY — surface it to the user first, before any other work (it's live the moment the preview starts and shows build progress while devices boot); then poll preview_status for readiness. Starts a preview and returns its shareable viewer link — or, if an equivalent preview is already running, returns THAT one (idempotent: each app keeps a stable URL, so this is also the way to answer \"what's the link?\"). With ref/pr it builds that git ref; with neither, an app with a local path previews its local working copy (dev mode — file saves then livesync to the simulator automatically, no pushing needed), and a repo-only app builds its default branch. Pass `alongside` to put more sources on the SAME page — another app, this app at another ref, a worktree, an arbitrary repo — and the viewer shows them side by side under one link and one PIN. That is how you compare old vs new: there is no separate compare tool or compare view. Pass `eas` to install a build EAS already made instead of building one. An app that lists `environments` always runs one: its default (a test/stage backend) unless the user explicitly asked for another by name — only then pass `environment`; preview_status reports `environment` {name, source, verified}. IMPORTANT: before every call you MUST ask the user whether to protect the link with a PIN or make it public, and pass that as `share` (this call fails until you do). If they choose a PIN, ask for a 4–6 digit code — never repeat that code back in chat.",
       inputSchema: {
         app: z.string().describe("app id from list_apps"),
         ref: z.string().optional().describe("branch name or commit SHA; omit for local dev mode or the default branch"),
@@ -498,11 +505,13 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
               platform: z.enum(["ios", "android"]).default("ios"),
               runtime: z.string().optional().describe('e.g. "26" or "iOS 26"'),
               model: z.string().optional().describe('e.g. "iPhone 16 Pro"'),
+              id: z.string().optional().describe("a phone plugged into this Mac (Android serial or iPhone UDID), by the id list_devices reports under `physical`"),
+              physical: z.boolean().optional().describe("true: any free phone of this platform plugged into this Mac (list_devices shows which are targetable)"),
             }),
           )
           .min(1)
           .optional()
-          .describe("devices to boot (default: one iOS simulator)"),
+          .describe("devices to boot (default: one iOS simulator); a phone by `id` or `physical: true` — an iPhone only with `eas`"),
         alongside: z
           .array(
             z.object({
@@ -520,6 +529,25 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           .array(z.string())
           .optional()
           .describe(`parity checklist items to seed (flows/screens). ${PARITY_CONTRACT}`),
+        eas: z
+          .object({
+            buildId: z.string().optional().describe("an EAS build id, or a unique prefix of one (8+ characters)"),
+            profile: z.string().optional().describe("an EAS build profile: its newest finished build for each device's platform"),
+          })
+          .optional()
+          .describe(
+            "preview a build EAS already made instead of building: Android .apk on emulators and phones, iOS simulator builds on simulators, an internal-distribution .ipa on a physical iPhone (the only way to preview on one). {} takes the newest build of the profile the environment maps. Needs the app's EAS project id (list_apps easProjectId) and an Expo token on the machine. Not with ref/pr or alongside.",
+          ),
+        environment: z
+          .string()
+          .optional()
+          .describe(
+            "which backend the app runs against, from list_apps `environments`. OMIT IT: the app's default environment (a test/stage backend) is what previews use. Pass another name ONLY when the user explicitly asked for that environment, in those words.",
+          ),
+        freshApp: z
+          .enum(["data", "reinstall"])
+          .optional()
+          .describe("Android devices and iPhones, when they boot: start the app fresh. data = clear its data and signed-in session before launch (pm clear; on an iPhone, which cannot clear in place, a reinstall); reinstall = uninstall it before installing this build. Only the preview's own app is touched."),
         share: z
           .object({
             access: z.enum(["public", "pin"]).describe("REQUIRED — ask the user first: protect with a PIN, or public?"),
@@ -530,10 +558,13 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       },
     },
     (args) =>
-      audited("start_preview", args, () => {
+      audited("start_preview", args, async () => {
         const resolved = resolveApp(args.app);
         if (isResult(resolved)) return resolved;
         if (args.ref && args.pr) return fail("bad_request", "pass either ref or pr, not both");
+        if (args.eas && (args.ref || args.pr)) return fail("bad_request", "pass eas or ref/pr, not both", "eas installs a build EAS already made; ref/pr build a git ref here");
+        if (args.eas && resolved.type === "web") return fail("bad_request", "a web app has no EAS builds", "omit eas");
+        if (args.eas && args.alongside?.length) return fail("eas_not_in_panes", "an EAS build cannot be combined with alongside", "start the comparison from git or local sources, or preview the EAS build on its own");
 
         // Web apps are device-less local dev servers: no ref/pr, no simulator.
         const isWeb = resolved.type === "web";
@@ -559,15 +590,37 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         // Hoisted so the extra panes boot on the same devices: a web preview's
         // pseudo-device would not typecheck as a simulator request, and extra
         // panes are rejected for web above anyway.
-        const paneDevices = (args.devices ?? [{ platform: "ios" as const }]).map((d) => ({
+        const asked = (args.devices ?? [{ platform: "ios" as const }]).map((d) => ({
           platform: d.platform ?? ("ios" as const),
           runtime: d.runtime,
           model: d.model,
+          ...(d.id ? { serial: d.id } : {}),
+          ...(d.physical ? { physical: true } : {}),
         }));
+        const wantsPhone = !isWeb && asked.some((d) => d.serial || d.physical);
+        if (wantsPhone && !args.eas && asked.some((d) => (d.serial || d.physical) && d.platform === "ios")) {
+          return fail(
+            "iphone_needs_eas",
+            "a physical iPhone runs only an EAS internal-distribution build",
+            "this Mac holds no Apple signing credentials, so deckhand cannot build or sign an app for a phone. Pass eas: {} (the newest build of the profile the environment maps for ios), eas: {profile} or eas: {buildId} — a build whose profile lists the phone — or preview on an iOS simulator ({platform: \"ios\"} without id/physical).",
+          );
+        }
+        if (wantsPhone && extra.length) {
+          return fail("phone_not_in_panes", "a phone cannot be shared across panes — every `alongside` pane boots the same devices, and a phone runs one preview at a time", "start the comparison on simulators/emulators, or preview on the phone without `alongside`");
+        }
+        // A phone controls a real device that can call, buy and log in, so its link is PIN-protected unless the user explicitly asks for public.
+        if (wantsPhone && !args.share) {
+          return fail(
+            "needs_pin",
+            "A preview on a physical phone is PIN-protected by default: anyone with the link drives the whole phone, not just the app.",
+            'Ask the user for a 4–6 digit PIN and call again with share: { access: "pin", pin: "<digits>" }. Only if the user explicitly asks for a public link, pass share: { access: "public" }. Don\'t repeat the PIN in chat.',
+          );
+        }
+        const paneDevices = await engine.resolvePhoneRequests(resolved, asked);
         const devices = isWeb ? [{ platform: "web" as const }] : paneDevices;
 
         const wantsGit = Boolean(args.ref || args.pr);
-        const source = isWeb || (!wantsGit && resolved.path) ? ("local" as const) : ("git" as const);
+        const source = args.eas && !isWeb ? ("eas" as const) : isWeb || (!wantsGit && resolved.path) ? ("local" as const) : ("git" as const);
         let spec;
         if (source === "git") {
           if (!resolved.repo) {
@@ -606,6 +659,15 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             "web_needs_pin",
             `web app "${resolved.id}" can only be shared with a PIN`,
             "Ask the user for a 4–6 digit code, then call again with share: { access: \"pin\", pin: \"<4-6 digits>\" }. Don't repeat the PIN in chat.",
+          );
+        }
+        // The PIN is the app's, so public here also opens a phone preview of this app that this call did not ask for.
+        const livePhones = isWeb ? [] : engine.livePhonesForApp(resolved.id);
+        if (access === "public" && !wantsPhone && livePhones.length) {
+          return fail(
+            "needs_pin",
+            `app "${resolved.id}" has a live preview on phone ${livePhones.join(", ")}, and the app's link is shared by its previews: making it public would let anyone with it drive that whole phone.`,
+            `Keep it PIN-protected: share: { access: "pin", pin: "<digits>" }. Only if the user explicitly wants that phone's preview public, call again with the phone in devices (id: "${livePhones[0]}") and share: { access: "public" }, or stop_preview it first.`,
           );
         }
 
@@ -667,6 +729,9 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             spec,
             devices,
             access: access === "pin" ? "password" : "public",
+            ...(args.freshApp ? { freshApp: args.freshApp } : {}),
+            ...(source === "eas" ? { eas: { ...(args.eas?.buildId ? { buildId: args.eas.buildId } : {}), ...(args.eas?.profile ? { profile: args.eas.profile } : {}) } } : {}),
+            ...(args.environment ? { environment: args.environment } : {}),
           });
         } catch (e) {
           engine.restoreAppPin(resolved.id, priorPin);
@@ -687,9 +752,13 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           );
         }
         const protectionNote =
-          access === "pin"
+          (access === "pin"
             ? " This link is PIN-protected: viewers must enter the PIN the user set (don't repeat the PIN in chat)."
-            : " This link is public — anyone with the URL can open it.";
+            : " This link is public — anyone with the URL can open it.") +
+          (wantsPhone || livePhones.length
+            ? ` It drives a real phone (${[...new Set([...devices.flatMap((d) => ("serial" in d && d.serial ? [d.serial] : [])), ...livePhones])].join(", ")}): deckhand only installs, stops and wipes this app on it, and never another app or a setting.` +
+              (access === "public" ? " ⚠ A public link lets anyone with it drive that whole phone." : "")
+            : "");
         // A subdomain-hosted web framework (Nuxt/Next/static) needs a configured
         // webHost to be publicly reachable; without one the URL is loopback-only.
         const webFw = isWeb && resolved.path ? detectWebFrameworkFromDir(resolved.path) : null;
@@ -728,7 +797,9 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
                 ? `Saving files hot-reloads the page automatically; call restart_preview only after dependency/config changes. ${linkFooter(result.url)}`
                 : (source === "local"
                     ? "File saves livesync to it automatically; call restart_preview only after native-level changes. "
-                    : "After pushing new commits, call restart_preview to rebuild it at the new tip. ") +
+                    : source === "eas"
+                      ? "It runs a build EAS already made; restart_preview installs the profile's newest build. "
+                      : "After pushing new commits, call restart_preview to rebuild it at the new tip. ") +
                   `${TEST_RUN_CONTRACT} ${linkFooter(result.url)}`)
             : isWeb
               ? `Give the user this link NOW: ${result.url} (stable for this app) — relay it before any other work; then poll preview_status for readiness. It's a live web dev server — saving files hot-reloads the page automatically, so after editing there is nothing to call. Use restart_preview only after dependency/config changes (new packages, vite.config edits) or if the server looks stuck. Deckhand runs this working copy in place and only reads/runs it — never commit or push any local changes deckhand caused (dev-server caches, a stray lockfile); its git state is not yours to write. ${linkFooter(result.url)}${webHostWarning}`
@@ -744,7 +815,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   );
 
   /** Boot an app in its natural mode: local dev (livesync) when a working copy is registered, else git default-branch. */
-  const bootWorkingApp = (app: App, devices: { platform: "ios" | "android"; runtime?: string; model?: string }[], access: "public" | "password") => {
+  const bootWorkingApp = (app: App, devices: DeviceRequest[], access: "public" | "password") => {
     const source = app.path ? ("local" as const) : ("git" as const);
     const spec = source === "git" ? parseRefSpec({ ref: app.defaultBranch }) : undefined;
     return engine.startPreview({ app, source, spec, devices, access });
@@ -764,7 +835,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   const bootReference = (
     workingApp: App,
     alongside: { app?: string; ref?: string; worktree?: string; repo?: string } | undefined,
-    devices: { platform: "ios" | "android"; runtime?: string; model?: string }[],
+    devices: DeviceRequest[],
     share: { access: "public" | "pin"; pin?: string },
   ): { reference: CompareReference; previewId: string; booted: boolean } | CallToolResult => {
     // An entry with nothing named means "my migratesFrom" — that is the whole
@@ -1098,6 +1169,10 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             interactiveOnly: args.interactiveOnly,
             maxDepth: args.maxDepth,
           });
+        const devClient = () => {
+          const note = engine.devClientNote(args.previewId, args.deviceId);
+          return note ? { devClient: note } : {};
+        };
         // The dev menu is the one thing on screen that is not the app. An agent that
         // does not know that files the overlay's behaviour as an app bug — observed.
         if (args.format === "text") {
@@ -1105,11 +1180,11 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             const tree = await capture();
             const book = engine.screenBook(args.previewId, args.deviceId);
             book.record(tree);
-            return ok({ screen: book.full(), ...devMenuHint(tree) });
+            return ok({ screen: book.full(), ...devMenuHint(tree), ...devClient() });
           });
         }
         const tree = await capture();
-        return ok({ describe: tree, ...devMenuHint(tree) });
+        return ok({ describe: tree, ...devMenuHint(tree), ...devClient() });
       }),
   );
 
@@ -1361,7 +1436,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Read a device's logs",
       description:
-        "Read deckhand's captured logs for a device in a preview — the fastest way to find out WHY a build failed, why a screen came up wrong, or why the viewer will not show a picture. `build` (default) carries the build/install step output plus the NativeScript livesync and web dev-server streams: compile errors, install failures, and dev-server crashes surface here. **`stream` is the one to read when the viewer is stuck on \"Connecting…\" or shows a black screen while the device says ready** — it traces the whole browser→helper path: helper attach + first-frame probes, every proxied stream request with its upstream status and byte count, WebSocket upgrade accepts/refusals with the exact reason, and what the viewer's own player reports (fallback to MJPEG, decode failure, giving up). Pair with `describe`/`screenshot` when the app is up but misbehaving. Pass previewId or app id; deviceId defaults to the first/only device. Returns the last `tailLines` lines (500 are retained per source).",
+        "Read deckhand's captured logs for a device in a preview — the fastest way to find out WHY a build failed, why a screen came up wrong, or why the viewer will not show a picture. `build` (default) carries the build/install step output plus the NativeScript livesync and web dev-server streams: compile errors, install failures, and dev-server crashes surface here. **`stream` is the one to read when the viewer is stuck on \"Connecting…\" or shows a black screen while the device says ready** — it traces the whole browser→helper path: helper attach + first-frame probes, every proxied stream request with its upstream status and byte count, WebSocket upgrade accepts/refusals with the exact reason, and what the viewer's own player reports (fallback to MJPEG, decode failure, giving up). On Android and on a physical iPhone, `app` is the app's own log since launch (logcat; the iPhone's syslog) plus the system's crash lines about it, and says whether its process is running — read it when the app crashed or misbehaves. Pair with `describe`/`screenshot` when the app is up but misbehaving. Pass previewId or app id; deviceId defaults to the first/only device. Returns the last `tailLines` lines (500 are retained per source).",
       inputSchema: {
         previewId: z.string().optional().describe("from start_preview; or pass app instead"),
         app: z.string().optional().describe("app id — reads its running preview"),
@@ -1370,19 +1445,20 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           .enum(["build", "metro", "app", "stream"])
           .optional()
           .describe(
-            "build (default): build/install + livesync + web dev-server output. stream: the browser→helper streaming trace — read this for a viewer that never shows a picture. metro/app runtime streams are reserved and not captured yet.",
+            "build (default): build/install + livesync + web dev-server output. stream: the browser→helper streaming trace — read this for a viewer that never shows a picture. app (Android, physical iPhone): the app's log since launch — its own lines plus the system's crash lines about it — headed by whether its process is running now. metro, and app on an iOS simulator, are reserved and not captured yet.",
           ),
         tailLines: z.number().int().positive().max(500).optional().describe("trailing lines to return (default 200)"),
       },
     },
     (args) =>
-      audited("logs", args, () => {
+      audited("logs", args, async () => {
         const id = resolvePreviewId(args);
         if (typeof id !== "string") return id;
         const denied = requireLivePreview(id);
         if (denied) return denied;
         const source = args.source ?? "build";
-        const log = engine.logs(id, args.deviceId, source, args.tailLines ?? 200);
+        const android = source === "app" && engine.capturesAppLog(id, args.deviceId);
+        const log = android ? await engine.appLog(id, args.deviceId, args.tailLines ?? 200) : engine.logs(id, args.deviceId, source, args.tailLines ?? 200);
         if (log === null) {
           return fail(
             "unknown_device",
@@ -1777,6 +1853,10 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           .string()
           .optional()
           .describe("app id this is being migrated FROM (the source/oracle) — start_preview then shows it alongside this app by default"),
+        easProjectId: z
+          .string()
+          .optional()
+          .describe("the app's EAS project id (a UUID), so start_preview can install builds EAS already made; detected from the app config when omitted"),
       },
     },
     (args) =>
@@ -1809,7 +1889,10 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
 
         const probeFor = (b: string): App => ({ id, repo: args.repo, type: args.type ?? "react-native", defaultBranch: b, env: {} });
         let branch = args.branch ?? "main";
-        let detected: { type: AppType | null; bundleId: string | null };
+        if (args.easProjectId && !EAS_PROJECT_ID_RE.test(args.easProjectId)) {
+          return fail("bad_request", `easProjectId "${args.easProjectId}" is not an EAS project id`, "it is the project UUID in the app config's EAS settings, or on the project's expo.dev page");
+        }
+        let detected: { type: AppType | null; bundleId: string | null; easProjectId: string | null };
         try {
           // Auto-detect the repo's actual default branch (origin/HEAD) unless the
           // caller pinned one — repos on master/develop must not fail as "main".
@@ -1865,6 +1948,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           );
         }
         const bundleId = args.bundleId ?? detected.bundleId ?? undefined;
+        const easProjectId = args.easProjectId ?? detected.easProjectId ?? undefined;
 
         const app = appSchema.parse({
           id,
@@ -1873,12 +1957,13 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           defaultBranch: branch,
           ...(bundleId ? { bundleId } : {}),
           ...(args.migratesFrom ? { migratesFrom: args.migratesFrom } : {}),
+          ...(easProjectId ? { easProjectId } : {}),
         });
         apps.push(app);
         persistApps(apps);
 
         return ok({
-          registered: { id: app.id, repo: app.repo, type: app.type, defaultBranch: app.defaultBranch, bundleId: bundleId ?? null },
+          registered: { id: app.id, repo: app.repo, type: app.type, defaultBranch: app.defaultBranch, bundleId: bundleId ?? null, easProjectId: easProjectId ?? null },
           checks: [
             { name: "repo reachable", ok: true },
             { name: "app type", ok: true, detail: app.type },

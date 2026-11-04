@@ -35,11 +35,11 @@ implementation:
 |---|---|
 | Streaming (iOS) | **[serve-sim](https://github.com/EvanBacon/serve-sim)** (Apache-2.0, npm) — H.264 served as `stream.avcc`, AVCC-framed over a long-lived **chunked HTTP response** (not a WebSocket), decoded with WebCodecs; automatic MJPEG-over-HTTP fallback; input over the helper's WebSocket, plus the accessibility tree on the same helper. Free, no relay infrastructure, rides the tunnel as plain HTTPS/WSS. Captures via `simctl io` (a public Apple interface — survives new iOS runtimes as long as simctl does). Pin the npm version. |
 | Streaming (Android) | **adb-based**, not scrcpy. The decision gate (ws-scrcpy vs embedded scrcpy-server) resolved against both: scrcpy's raw H.264 wire protocol is version-specific and needs extensive on-device iteration, which cannot be validated without a live emulator. Shipped: `screencap` MJPEG plus on-device `screenrecord` H.264, behind the same `StreamingBackend` seam — see §8 for the full outcome. A scrcpy upgrade remains possible behind that seam; it is not planned. |
-| NO physical devices, either platform | Real iPhones/Androids plugged into the machine are not previewed on, and since **2026-08-08** are not reported either. A read-only scanner shipped first (`devicectl` for iOS, `adb devices -l` for Android) with `list_devices` carrying a `physical` section and a `targetable: false` beside it; it was **deleted** rather than finished, because detection with no targeting behind it is not half a feature, it is an expectation — an agent handed "here is the iPhone I can see" offers what deckhand cannot do, and it can say "simulators only" perfectly well without a scan. The two platforms are not equally far away, which is what a future reader needs: **iOS is walled, Android is unfinished.** iOS building needs a developer certificate, a provisioning profile and a registered device UDID; serve-sim is simulator-only (CoreSimulator APIs), so streaming would need a new backend on AVFoundation capture over USB; and there is **no public API to inject touch into a physical iPhone from a Mac** — XCUITest can, but only through a test runner app deckhand would have to build, sign and install first. Android has none of those walls: the whole streaming and input path is serial-based adb (`wm size`, `exec-out screencap`, `exec-out screenrecord`, `input tap/keyevent/text`, `uiautomator dump`) and does not care whether a serial is an emulator. What Android lacks is **device lifecycle**: skip create/boot/delete for hardware that already exists, keep it out of the orphan reaper, and `adb install` a debug APK. So if physical devices come back, start with Android, and expect a lifecycle job rather than a new backend. |
+| Physical devices: Android phones and iPhones, by cable | Until 2026-11-03 real iPhones/Androids plugged into the machine were not previewed on, and from **2026-08-08** were not reported either. A read-only scanner had shipped first (`devicectl` for iOS, `adb devices -l` for Android) with `list_devices` carrying a `physical` section and a `targetable: false` beside it; it was **deleted** rather than finished, because detection with no targeting behind it is not half a feature, it is an expectation — an agent handed "here is the iPhone I can see" offers what deckhand cannot do, and it can say "simulators only" perfectly well without a scan. The two platforms were not equally far away when that was decided: **iOS was walled, Android unfinished.** iOS building needs a developer certificate, a provisioning profile and a registered device UDID; serve-sim is simulator-only (CoreSimulator APIs), so streaming would need a new backend on AVFoundation capture over USB; and there is **no public API to inject touch into a physical iPhone from a Mac** — XCUITest can, but only through a test runner app deckhand would have to build, sign and install first. Android has none of those walls: the whole streaming and input path is serial-based adb (`wm size`, `exec-out screencap`, `exec-out screenrecord`, `input tap/keyevent/text`, `uiautomator dump`) and does not care whether a serial is an emulator. What Android lacked was **device lifecycle**: skip create/boot/delete for hardware that already exists, keep it out of the orphan reaper, and `adb install` a debug APK — which is why Android came back first, as a lifecycle job rather than a new backend. **Amended (2026-11-03): Android phones are in** (docs/physical-devices-plan.md, D1). A phone plugged in by cable is a device `start_preview` can take by serial (`id`) or as `physical: true`; it is borrowed hardware — waited for, never booted, wiped, killed or reaped, never a setting changed — with one live preview at a time (`device_busy`), outside `maxTotalDevices`, and `deckhand phone hold` takes one off the market. Deckhand may install, update, clear or uninstall only the preview's registered app on it (`RegisteredApp` in `devices/androidPhone.ts` refuses every other package). `describe`/`ui` go over adb (`testing/adbControl.ts`), because SimDeck addresses Android only by AVD name. **Amended again (2026-11-03): iPhones are in**, each wall walked around rather than knocked down. Deckhand builds and signs nothing for a phone: a physical iPhone runs only an EAS internal-distribution `.ipa` whose profile lists it, and a local or git preview on one is refused (`iphone_needs_eas`). Touch, typing and the tree come from a WebDriverAgent the operator signed elsewhere and copied under the deckhand home (§10 "Preparing an iPhone"), run by this Mac with `xcodebuild test-without-building` bound to the phone's loopback and reached over USB through `iproxy -s 127.0.0.1` (`devices/wdaRunner.ts`, `devices/iproxy.ts`); video is WDA's own MJPEG, so no capture backend was needed (§8). The same tenancy, holds, `device_busy`, PIN default and `maxTotalDevices` exemption as Android apply; install, launch, stop and uninstall go through `IphoneApps` (`devices/iphoneApps.ts`), whose one guard refuses every bundle id but the preview's registered one; the server keeps one WDA runner and one forward per phone (`devices/iphones.ts`), reaped by marker on the next boot. |
 | NOT WebRTC/TURN; SimDeck for CONTROL only | An earlier revision of this plan used SimDeck + WebRTC relayed through Cloudflare TURN. **Rejected (2026-07-09):** TURN costs $0.05/GB and adds a credential/relay subsystem; SimDeck removed its WS transport (v0.1.31) and its display bridge rides private CoreSimulator APIs (unhedgeable risk against future Xcode); most of the predecessor project's operational scar tissue (display-heal ladder, daemon port cleanup, token discovery) was SimDeck-specific pathology. Serving H.264 over the ordinary HTTP tunnel has none of these problems: free, no relay to run or pay for, and exactly as firewall-proof as claude.ai itself — video and input ride the same HTTPS/WSS a browser already reaches claude.ai with. What SimDeck IS used for, since 2026-07-17, is its control/inspection REST surface behind `describe` and `ui` — see `.claude/rules/testing-control.md`. |
 | Navigate: a decider inside deckhand, opt-in by key | **Accepted (2026-09-23).** `navigate` (§6) runs `describe` → one TypeSafe Jev decision → `ui` on the server. It is not the "hand the drive loop to a cheaper model" advice §6 records as removed on 2026-08-02: that added agent round trips (66 MCP calls, 583s, ~5% of it deckhand) and let a weaker agent author confident wrong findings. Here the caller makes ONE call; the decider picks from a closed list code built from the tree — tap an on-screen element's centre, back, scroll, type a value the caller named, `done`, `stuck`, never `openUrl`, free text or a coordinate of its own — and it can author no finding, so judging the app stays with the caller. It is also the **first path by which app content leaves this machine for a third party**, and the key is the whole opt-in: with no key the tool does not exist; with one, it drives every app's previews and sends their screens, minimised and masked, auditing every request (§11 item 5). Since 2026-11-02 a decision on a screen the tree describes poorly (a web view, two or fewer things to tap, or ≥30% unlabelled ones) also carries the settled screenshot (TypeSafe's opt-in image input, shrunk to 1568 px), which is **not** masked: the masking covers the text, the picture shows the whole screen. **Until a DPA with zero data retention is signed with TypeSafe, set the key only on a machine whose apps show test data and test accounts.** |
 | App types (day one) | React Native (Expo **and** bare) + NativeScript. Flutter / plain-Xcode later. **Amended (2026-07-15): `web`.** A fourth app type hosts a **frontend web project** (a dev server). It is unlike the mobile types: no device/simulator, **local-`path` only** (registered on the machine via `deckhand app add <id> --path <dir> --type web`, never over MCP), and the "preview" IS the running dev server — `start_preview` starts `npm run dev` as a long-lived process (reusing `DevProcessManager`, like NativeScript livesync) on a loopback port and reverse-proxies it through the share URL. Ready = the dev server gives back **any** HTTP answer on its port (`WebBackend` returns `res.status > 0`, so a 404 or a 500 from a still-warming framework reads as ready; a dead port throws instead) — no first-frame/screenshot, and `screenshot` returns a clear error for web. Vite is started with `--base=/s/<shareId>/web/ --host 127.0.0.1 --port <p>` so every asset URL (and HMR) sits under the share path. Nuxt/Next **ship**, hosted at the root of their own host instead (§8 "Host-based web hosting"), because they cannot be given a base at runtime and deckhand may not edit the checkout. Git-based web previews are still a follow-up. |
-| Build strategy | Build locally on the mini: git worktree → install deps → native build. No CI artifacts. |
+| Build strategy | Build locally on the mini: git worktree → install deps → native build. No CI artifacts. **Amended (2026-11-03): one exception, EAS builds** (docs/physical-devices-plan.md, D2). `start_preview`'s `eas` installs a build EAS already made — an Android `.apk` on an emulator or phone, an iOS simulator build on a simulator, an internal-distribution `.ipa` on a physical iPhone (the only thing an iPhone runs) — fetched with a read-only Expo robot token (`deckhand secret set expo`), cached by build id and vetted before a device is touched. Local building stays the default; no other CI system is a source. |
 | Local dev mode + daily-loop contract | **Amended (2026-07-15):** an app may declare a local `path` (instead of, or alongside, `repo`). Local previews build **in place** in the developer's working copy — no worktree, no push — and NativeScript runs as a long-lived **livesync** process (`ns run --no-hmr`, watch on, HMR off — NS HMR is unreliable) so file saves reach the running sim with no tool calls. The loop rides in the tools themselves: `start_preview` is **idempotent** per (app, source, ref), share ids are **stable per app** (persisted; a bookmarked viewer URL never rots), and `restart_preview` rebuilds in place (git: fetch new tip + reset worktree; local: re-run) on the same booted devices. Consequence: named branches/PRs now **always fetch** (the old local-first shortcut served stale commits; SHAs remain local-first, and are fetched when missing). Local previews trade snapshot determinism for the loop — the build mirrors whatever is on disk; the source dir is borrowed, never wiped (`npm ci` guarded) and never removed. Local apps are registered on the machine itself (`deckhand app add <id> --path <dir>`), not over MCP. |
 | Tunnel | `cloudflared` **named tunnel** with a stable hostname on the owner's Cloudflare-managed domain. Deckhand binds `127.0.0.1` only. |
 | MCP auth | An `Authorization: Bearer` credential at `/mcp` — **never a path segment**. Two ways to hold one, both per-person: an **OAuth grant** (the claude.ai path), or a local `tokens.yaml` token for a client on the machine that has no browser. Every credential is still the operator's, so authenticating IS authorizing and there are still no roles. **Superseded (2026-08-07): the path token, and the "no OAuth" decision with it.** `/mcp/<token>` was safe only while the connector URL was a secret, and it is not: a connector added in **Claude Enterprise is visible to the whole organisation**, so everyone in it could read the credential out of the URL and drive this Mac. OAuth is what makes each client authorize individually; completing it needs a pairing code the operator mints at the machine — `deckhand pair`, typed into the page `/oauth/authorize` serves (§11.6). The original worry — many people on one Mac's six device slots — is answered by that approval, not by hoping a URL stays private. |
@@ -155,6 +155,18 @@ apps:
     path: /Users/dev/apps/my-app  # absolute; previews build IN PLACE (no worktree, no push)
     # repo: …                     # optional alongside path — ref/pr previews still work
     type: nativescript
+  - id: my-eas-app               # EAS builds and environments (2026-11-03)
+    repo: github.com/ainfrastructure/my-eas-app
+    type: expo
+    easProjectId: 6ff82c98-0000-4000-8000-000000000001   # `--eas-project`, or read from the app config
+    environments:                 # optional; without it a preview's backend is "unknown"
+      default: uat                # what every preview runs unless the caller names another
+      uat:
+        easProfile: { android: e2e, ios: development, iosSimulator: development-sim }
+        launchArgs: { APP_ENV: test }       # am start -e K V / simctl launch -K V; allow-listed
+        logMarker: 'Launching.*test'        # a regex the app log matches on this backend
+      prod:
+        easProfile: { android: production }
   - id: my-app-rn                 # migration target (§6 migration features, 2026-07-18)
     path: /Users/dev/apps/my-app-rn
     type: react-native
@@ -239,20 +251,20 @@ doctor-builds, reports `ready` → agent offers the first `start_preview`.
 | Tool | Input → Output |
 |---|---|
 | `get_guide` | → concise agent workflow: begin with `list_apps` and prefer a local checkout on the deckhand host; keep credentials and app secrets out of chat; ask for an explicit public-or-PIN share choice; hand over the preview URL, wait for `preview_status` before driving, and use the test-run/`describe`/`ui`/`screenshot` loop; use `logs` for build or stream diagnostics; stop unused previews; ask before acting on a `deckhandUpdate` notice. |
-| `list_apps` | → apps with `{id, repo, type, defaultBranch, lastDoctor}` |
-| `list_devices` | → available iOS runtimes + device types (`simctl list -j`), Android API levels/system images, current capacity vs `limits`. Simulators and emulators only — nothing here reports hardware plugged into the machine (see §2 "NO physical devices") |
-| `start_preview` | `{app, ref?, pr?, devices?: [{platform: "ios"\|"android", runtime?, model?}], alongside?: [{app?\|ref?\|worktree?\|repo?}], items?, share: {access: "public"\|"pin", pin?}}` → `{previewId, url, source, alreadyRunning, alongside?, nextStep, devices: [...]}`. **Idempotent**: an equivalent live preview (same app+source(+ref)) is returned as-is with `alreadyRunning: true` — this is also how the agent answers "what's the link?". No ref/pr on a `path` app → local dev mode. Returns immediately; work continues async. **Amended (2026-07-31):** `alongside` puts extra sources on the SAME page — the page is a set of panes, so one link and one PIN cover however many sources. `{}` means the app's registered `migratesFrom`. Each `alongside` entry carries the pane's own `previewId` — panes are drivable, but ONLY by that id: a pane runs under a synthetic app id, so by-app lookups answer `app_is_a_pane` with the pane's previewId instead of a "boot one" hint, and a plain `start_preview` of an app already on a page as a pane returns `duplicatesPane` with a leading warning in `nextStep` (the duplicate's devices are invisible to whoever watches the page). See "One page, several sources" below. |
+| `list_apps` | → apps with `{id, repo, path, source, type, defaultBranch, easProjectId, environments: {default, names} \| null}` |
+| `list_devices` | → available iOS runtimes + device types (`simctl list -j`), Android API levels/system images, current capacity vs `limits`, and `physical`: the Android phones plugged in (`adb devices -l` minus `emulator-*`), each `targetable: true` or `targetable: false` with ONE `blocker` (not authorized, offline, asleep, locked, held, in another preview) and the `fix` that clears it. A failed adb is `unavailable`, never an empty list. Cabled iPhones are listed beside them with `platform: "ios"` (`xcrun devicectl list devices`, paired and wired only): their blockers are not paired, not cabled, Developer Mode off, locked, no WDA under the deckhand home, a WDA profile that does not list the phone or has expired, and — once a WDA start has failed — the reason from its log, such as someone at the phone having to approve the Automation Mode prompt; further blockers ride in `fix`. A failed devicectl is `iphonesUnavailable`. |
+| `start_preview` | `{app, ref?, pr?, devices?: [{platform: "ios"\|"android", runtime?, model?, id?, physical?}], alongside?: [{app?\|ref?\|worktree?\|repo?}], items?, freshApp?: "data"\|"reinstall", share: {access: "public"\|"pin", pin?}}` → `{previewId, url, source, alreadyRunning, alongside?, nextStep, devices: [...]}`. **Idempotent**: an equivalent live preview (same app+source(+ref)) is returned as-is with `alreadyRunning: true` — this is also how the agent answers "what's the link?". No ref/pr on a `path` app → local dev mode. Returns immediately; work continues async. **Amended (2026-07-31):** `alongside` puts extra sources on the SAME page — the page is a set of panes, so one link and one PIN cover however many sources. `{}` means the app's registered `migratesFrom`. Each `alongside` entry carries the pane's own `previewId` — panes are drivable, but ONLY by that id: a pane runs under a synthetic app id, so by-app lookups answer `app_is_a_pane` with the pane's previewId instead of a "boot one" hint, and a plain `start_preview` of an app already on a page as a pane returns `duplicatesPane` with a leading warning in `nextStep` (the duplicate's devices are invisible to whoever watches the page). See "One page, several sources" below. **Amended (2026-11-03): phones.** A device entry with `id` (an adb serial or an iPhone UDID) or `physical: true` (this app's phone of that platform if it has one, else the first targetable one) is a phone; an iPhone needs `eas` (`iphone_needs_eas` otherwise, naming why: this Mac holds no signing credentials); a phone that is held or in another live preview fails with `device_busy`, naming the preview and its share and how to free it, and none free fails with `no_phone` naming each phone's blocker. A phone preview needs a PIN unless the caller explicitly asks for public (D5) — and since the PIN is the app's, a public call that does not name the phone is refused while a preview of the app holds one — and cannot be combined with `alongside`. `freshApp` (Android devices and iPhones, when they boot; an iPhone cannot clear an app's data in place, so both mean a reinstall there): `data` clears the registered app's data before launch, `reinstall` uninstalls it before the build installs it. On a phone, an install refused for a signature mismatch or a downgrade uninstalls the registered app and installs the build, and the `build` log says what was removed. **Amended (2026-11-03): `eas` and `environment`.** `eas: {buildId?, profile?}` makes the source a build EAS already made (§7 "EAS source"); not with `ref`/`pr` or `alongside`. `environment` picks one of the app's `environments`; omitted, the app's default — the tool description tells the caller to pass it only when the user asked. An unknown name, or any name for an app that declares none, is refused with the names it does have. Previews are reused only within one environment. |
 | `restart_preview` | `{previewId?}` or `{app?}` → rebuild in place on the same booted devices, same shareId/URL. Local: re-run the livesync build (needed after native-level changes; ordinary edits livesync by themselves). Git: fetch the ref's new tip, reset the worktree, rebuild — the post-push step of the loop. |
-| `preview_status` | `{previewId?}` or `{app?}` → per-device `{phase, detail, error?, logTail?}`; overall `{ready, url, source}` |
+| `preview_status` | `{previewId?}` or `{app?}` → per-device `{phase, detail, error?, logTail?, environment, devClient?}`; overall `{ready, url, source, environment}`. `environment` is `{name, source: "eas-profile"\|"launch-args"\|"build-default", verified: true\|false\|"no-marker", note?}` — verified when the app log matched the environment's `logMarker` (Android and a physical iPhone; an iOS simulator's app log is not captured, so it stays false there), and combined across devices as the weakest claim. An app with no environments reports `name: null, source: "unknown"`. `devClient` says what a dev-client EAS build loaded, or "dev launcher: …" when it has nothing to load. |
 | `stop_preview` | `{previewId|app}` → teardown (devices deleted, worktree removed per policy; a local app's source dir is never touched) |
 | `stop_device` | `{previewId|app, deviceId}` → tear down ONE device, leave the rest running and the URL unchanged. The way back from `start_preview` with an extra platform. Refuses the last device — that is `stop_preview`, which also frees the worktree and the share |
-| `screenshot` | `{previewId, deviceId}` → MCP image content (PNG). iOS: `xcrun simctl io <udid> screenshot`; Android: `adb -s <serial> exec-out screencap -p` |
-| `describe` | `{previewId, deviceId, format?, source?, interactiveOnly?, maxDepth?}` → the accessibility tree from SimDeck (iOS by UDID, Android via `uiautomator`). `format: "text"` returns it as one line per element with a ref (`e12`) instead of JSON, and makes that the base the next `ui` screen is diffed against. |
+| `screenshot` | `{previewId, deviceId}` → MCP image content (PNG). iOS: `xcrun simctl io <udid> screenshot`; Android (emulator or phone): `adb -s <serial> exec-out screencap -p`; a physical iPhone: WDA's `/screenshot` |
+| `describe` | `{previewId, deviceId, format?, source?, interactiveOnly?, maxDepth?}` → the accessibility tree from SimDeck (iOS by UDID, Android via `uiautomator`); on an Android phone from adb's `uiautomator dump` (`testing/adbControl.ts`), in the same shape, because SimDeck cannot address a phone. On a physical iPhone both come from WDA (`testing/iphoneControl.ts`): the tree from `/source`, taps as W3C pointer actions in points, typing through `/wda/keys`, and every touch or keystroke refused while any app but the registered one is in front; `home`, hardware buttons, `openUrl` and `toggleAppearance` are refused there outright. On an Android phone `ui` refuses non-ASCII `type` (adb `input text` would mangle it), `toggleAppearance`, and power/volume buttons (all settings), and `openUrl` is addressed to the registered app only; it has no app-in-front check, so Home and the app switcher take it out of the app. `format: "text"` returns it as one line per element with a ref (`e12`) instead of JSON, and makes that the base the next `ui` screen is diffed against. |
 | `ui` | `{previewId, deviceId, action \| actions \| flow, observe?}` → one action, a list run in order (stops at the first failure; max 25), or a list saved by name in the checkout's `deckhand.flows.yaml`. Selectors take `ref` (from the screen listing) besides `id`/`text`/`label`. After an action that can move the screen it captures until two captures agree (iOS; Android waits a fixed beat) and returns `screen`: the whole listing the first time, then only what changed. See "One call per step" below. |
 | `navigate` | `{previewId, deviceId, goal, maxSteps?=10, minConfidence?, text?: {name: value}, uiLanguage?}` → a server-side loop: wait for a still screen → `describe` → a closed candidate list (tap the centre of an on-screen interactive element, scroll toward one past the edge, back, scroll up/down, type a caller-supplied value by NAME into a text field, `done`, `stuck`; capped at 255) → one TypeSafe Jev Choice + a "goal reached?" Noul, with the settled screenshot attached as an image when the tree describes the screen poorly (`treeIsWeak`) → `ui` → repeat. Returns `outcome` (`done`/`escalated`/`limit`), a `reason` on hand-back (`NavigateReason` in `navigate/loop.ts`), a per-step trace (choice, confidence and the threshold it needed, top alternatives, settle/describe/decide/act ms, estimated and billed tokens) and `finalScreen`. **Exists only while a TypeSafe key is configured**: with none, `tools/list` does not carry it and nothing an agent reads mentions it, so an install that never set a key is exactly what it was before `navigate`. The key is looked up on every MCP request (each builds a fresh server), so `deckhand secret set|rm typesafe` takes effect on the next call with no restart. Once listed it works on every live preview (§11 item 5). |
 | `check` | `{previewId, deviceId, expect?: {name: statement}, expectNot?: {name: statement}, referenceDeviceId?, referencePreviewId?, uiLanguage?}` → waits for a still screen (one that never settles, this device's or the reference's, makes the overall verdict `unsure` and is named in `unsettled`), then ONE Jev request carrying the screenshot (plus the reference device's, when given) and the screen's minimised tree lines: a Noul per statement, "matches the reference?" when comparing, and four health questions (error/crash screen, developer overlay, blank or half-loaded page, overlapping text or controls — four narrow questions because one broad "looks broken?" read a normal list as broken). Returns each probability and a verdict (`pass` ≥ 0.8, `fail` ≤ 0.2, else `unsure`; inverted for `expectNot`; health questions fail at ≥ 0.6 and pass below 0.5) and an overall verdict. It reports the model's reading of pixels, never a finding: the caller confirms a fail with a screenshot. **Exists only while a TypeSafe key is configured**, like `navigate`, and audited as `check:egress` with its image count. |
-| `logs` | `{previewId?\|app?, deviceId?, source?: "build"\|"stream"\|"metro"\|"app", tailLines?}` → the last `tailLines` (500 retained per source) of one device's captured log. `build` (default) is build/install output plus the NativeScript livesync and web dev-server streams — where a failed build says why. `stream` is the browser→helper trace, the one to read when the device says ready and the viewer shows nothing (see §7 "Streaming diagnostics"). `metro`/`app` are reserved and capture nothing yet. |
-| `add_app` | `{repo, type?}` → clone, detect, **doctor build** on a default device, structured report (`ready` or `missing: [...]`) |
+| `logs` | `{previewId?\|app?, deviceId?, source?: "build"\|"stream"\|"metro"\|"app", tailLines?}` → the last `tailLines` (500 retained per source) of one device's captured log. `build` (default) is build/install output plus the NativeScript livesync and web dev-server streams — where a failed build says why. `stream` is the browser→helper trace, the one to read when the device says ready and the viewer shows nothing (see §7 "Streaming diagnostics"). `app` on Android is the app's logcat since launch, filtered to its pids plus the system's crash lines naming it, re-stamped from the phone's clock (measured with `date +%s`, never set) and headed by whether the process is running. On a physical iPhone `app` is the app's own lines from `idevicesyslog` (started before every launch, since it only streams) plus the crash reporter's lines about it, headed by whether the process runs and any crash markers. `metro`, and `app` on an iOS simulator, are reserved and capture nothing yet. |
+| `add_app` | `{repo, type?, easProjectId?}` → clone, detect, **doctor build** on a default device, structured report (`ready` or `missing: [...]`). The EAS project id, when not given, is read as text from the repo's app.json or a literal one in app.config.* — never evaluated |
 | `remove_app` | `{id, deleteCheckout?}` |
 | `start_test_run` / `update_test_run` / `finish_test_run` / `clear_test_run` | **Amended (2026-07-17):** agent-driven end-to-end testing. The agent (the brain) reports what it's testing — `{title, steps}`, per-step `running`/`passed`/`failed`, then a verdict + summary — surfaced live in the viewer as a calm spinner button + step popover. deckhand records; the agent writes the human report in chat. |
 | `parity_set` / `parity_status` | Maintain and read the per-item parity checklist (`pending`/`doing`/`done`/`adjusted`/`regression`). Deliberately NOT merged with the `*_test_run` tools: a test run is one ephemeral pass whose steps go pending → running → passed, parity is a durable per-screen verdict, and the viewer renders them as separate sections precisely because the statuses do not mean the same thing. Separate is not independent: `finish_test_run` refuses a `passed` verdict while any item is still `pending` or `doing`, because a green run beside an untouched checklist is a claim about flows nobody judged. |
@@ -282,7 +294,7 @@ element on a root deckhand cannot place is refused. A landscape device whose tur
 refuses the touch; a portrait one is touched as if upright and the result says so
 (`orientationUnverified`). A SimDeck already on the port that is not the pinned version is refused,
 never driven. `scrollUntilVisible` still scrolls in SimDeck's unrotated axes, and `ui` says so.
-`logs` ships (see the tool table); its `metro` and `app` sources are the part that
+`logs` ships (see the tool table); its `metro` source, and `app` on an iOS simulator, are the part that
 did not — they are accepted by the schema and reserved, and nothing appends to them.
 
 **Amended (2026-08-01): the drive loop is steered to a cheaper model.** Driving
@@ -463,6 +475,37 @@ Key orchestration rules (rationale in `docs/reference/auto-mate-learnings.md`):
    the first frame is verified **before** `preview_status` reports ready — never hand out a
    link that shows a black frame.
 
+### EAS source (2026-11-03)
+
+A third source next to git and local (`engine/preview.ts` `easGroup`, `eas/`): no checkout and
+no build. Per artifact kind (Android `.apk`, iOS simulator `.tar.gz`, iPhone `.ipa`), once per preview run: the
+build is resolved over the Expo GraphQL API (an id or unique prefix, else the newest FINISHED
+build of `eas.profile` or of the environment's `easProfile`), downloaded into
+`cache/eas/<build-id>/` (a `.part` renamed when whole, a 60 s idle timeout, content-length
+checked, a complete file reused), and vetted: a store `.aab` is refused with the eas.json change
+that makes an APK, `aapt2 dump badging` must name the registered package, a simulator archive must
+hold one `.app` with the registered bundle id. On a phone the vet finishes before the phone is
+woken. Then the ordinary install → verify → launch → attach. On Android the install goes through
+`RegisteredApp`: skipped when the same versionName/versionCode is installed and the installed
+`base.apk` hashes to the artifact's sha256; a signature or downgrade conflict replaces the
+registered app only. A dev-client build is pointed at the newest EAS Update on the branches its
+channel maps to; with no channel or no update it shows the dev launcher, and `describe` says so.
+`restart_preview` resolves the profile's newest build again. An `.ipa` (environment key
+`easProfile.ios`) must hold one `Payload/*.app` with the registered bundle id — only Info.plist
+and embedded.mobileprovision are extracted — and its profile must list the phone's UDID, checked
+before the phone is touched. It is installed with `devicectl` through `IphoneApps`; a signer,
+team or version conflict uninstalls the registered app only and installs again, and the `build`
+log and audit say so. A downgrade of the registered app is allowed. The launch passes the
+environment's `-KEY value` arguments and, for a dev client, the update link as the launch payload.
+
+**Environments.** An app's `environments` decide which backend a preview talks to: launch
+arguments at every launch (Android intent string extras, iOS `-KEY value` process arguments; a
+NativeScript livesync preview, which launches itself, is refused rather than run without them),
+and a log marker the engine watches for in the `app` log for 90 s after launch (Android and
+physical iPhones; an iOS simulator's app log is not captured, so its marker stays unverified). An app that
+declares environments never silently runs another one; one that declares none is reported as
+unknown.
+
 ### Worktrees & git
 
 - Base clone per app at `~/.deckhand/repos/<appId>`; per-preview detached worktree
@@ -495,7 +538,7 @@ Key orchestration rules (rationale in `docs/reference/auto-mate-learnings.md`):
 
 | Type | iOS | Android | Launch |
 |---|---|---|---|
-| **expo** | `npx expo run:ios --device <udid> --no-bundler` | `npx expo run:android --device <avd-name> --no-bundler` — the AVD NAME, resolved over `adb … emu avd name`, because `expo run:android --device` matches on device name and a serial fails with "Could not find device with name"; the serial is the fallback for physical devices | Start Metro (`npx expo start --dev-client --port <allocated>`, **never `--clear`**, **never `--localhost`**), write the dev-menu preferences into the app's data container, then on iOS `simctl launch --terminate-running-process <udid> <bundle> --initialUrl <metro>` — a cold start told its server by launch argument (expo-dev-launcher's `--initialUrl`), not a deep link, which on iOS 27 raised "Open in «App»?" and landed in the process `run:ios` had started on its LAN-IP URL; on Android, force-stop and open `exp+<slug>://expo-development-client/?url=…&disableOnboarding=1` |
+| **expo** | `npx expo run:ios --device <udid> --no-bundler` | `npx expo run:android --device <avd-name> --no-bundler` — the AVD NAME, resolved over `adb … emu avd name`, because `expo run:android --device` matches on device name and a serial fails with "Could not find device with name"; a phone is named by the `model:` that `adb devices -l` lists | Start Metro (`npx expo start --dev-client --port <allocated>`, **never `--clear`**, **never `--localhost`**), write the dev-menu preferences into the app's data container, then on iOS `simctl launch --terminate-running-process <udid> <bundle> --initialUrl <metro>` — a cold start told its server by launch argument (expo-dev-launcher's `--initialUrl`), not a deep link, which on iOS 27 raised "Open in «App»?" and landed in the process `run:ios` had started on its LAN-IP URL; on Android, force-stop and open `exp+<slug>://expo-development-client/?url=…&disableOnboarding=1` |
 | **react-native** (bare) | guarded `pod install` (skip when `Podfile.lock` == `Pods/Manifest.lock`), then `npx react-native run-ios --udid <udid> --mode Release --no-packager` | `npx react-native run-android --deviceId <serial>` | `simctl launch` (Release embeds the JS bundle; no Metro) |
 | **nativescript** | pre-resolve SPM out-of-band, then `ns run ios --no-hmr --no-watch --justlaunch --device <udid>` | `ns run android --no-hmr --no-watch --justlaunch --device <serial>` | ns launches as part of run |
 
@@ -540,6 +583,26 @@ default wildcard bind costs).
   measurement that settled it. Wait for `adb wait-for-device` +
   `sys.boot_completed=1`. The serial is deterministic from the console port deckhand assigns
   (`emulator-<port>`). Install with `ANDROID_SERIAL=<serial>`.
+- **Android phones** (2026-11-03): the serial adb lists is the handle. Deckhand waits for the
+  phone to be awake and unlocked (one wake key, never a passcode), measures its clock offset, and
+  builds on it with the app's own tool (`expo run:android --device <adb model>`, since expo names
+  a phone by model, so an expo build is refused while another device of that model is plugged in).
+  That tool installs before deckhand can check what it built, so an expo build is refused unless
+  `expo config`'s `android.package` is the package deckhand will check. Not covered: a Gradle
+  flavour's `applicationIdSuffix`, and react-native and NativeScript builds, checked only once installed.
+  A phone is its own build group, never handed another device's APK.
+  Teardown force-stops the registered app and removes deckhand's own `adb reverse` rules; it never
+  `emu kill`s or deletes anything (`AndroidManager.shutdown` refuses a non-emulator serial). The
+  janitor asks adb every pass and fails a phone's device once adb no longer lists it.
+- **iPhones** (2026-11-03): the UDID is the handle (on `serial`; `udid` stays a simulator's, so
+  no simulator path can reach a phone). "Boot" is: listed paired, cabled and unblocked (a locked
+  phone is waited for up to two minutes), then WDA up — the server starts one per phone on first
+  use and keeps it across previews, since a cold start costs about 30 s, restarting it at most
+  three times in ten minutes. Then install, syslog, launch. Teardown terminates the registered
+  app and ends the device's syslog; WDA and its forward stay up, idle or not, which leaves an
+  unauthenticated WDA on the Mac's loopback for as long as the phone is cabled (§11 item 1).
+  The janitor asks `idevice_id -l`
+  every pass and fails the device once the phone is gone.
 - Tool env resolution (JAVA_HOME/ANDROID_HOME/PATH) is fiddly on macOS — port the approach
   described in the learnings doc.
 
@@ -606,6 +669,11 @@ The contract now:
   the subdomain-web host resolver, which has no viewer page behind it — and per-preview
   `preview_status` calls count as traffic; `list()` deliberately does not, or one agent's
   enumeration would keep every idle preview alive. Each sweep takes 0 to disable.
+- **Phones are outside all of this**: never reaped (the sweeps select by simulator and AVD
+  name, and a phone has neither; the boot reap kills iPhone helpers — WDA runners, `iproxy`,
+  `idevicesyslog` — by `IPHONE_MARKER_ENV`, sparing what the server runs), never pooled, never counted against `maxTotalDevices`, which
+  protects the Mac's CPU and RAM. Tenancy is the live previews themselves, persisted in
+  `state.json`: a stale one is dropped at boot like any other, which frees its phone.
 - **Capacity counts what is actually booted**: devices holding a handle (a failed preview's
   included, since they stay booted for the grace window) plus teardowns still in flight. A
   preview that failed during clone or build never booted anything and must not consume a slot.
@@ -623,7 +691,7 @@ only this interface:
 interface StreamingBackend {
   // Attach to an already-booted device; idempotent. Resolves when the stream
   // endpoint is up — a first frame is a separate wait (see AttachedStream).
-  attach(device: { platform: "ios" | "android"; udid: string; serial?: string }): Promise<AttachedStream>;
+  attach(device: { platform: "ios" | "android"; udid: string; serial?: string; physical?: boolean }): Promise<AttachedStream>;
 }
 interface AttachedStream {
   origin: string;                   // loopback upstream, e.g. "http://127.0.0.1:3100"
@@ -718,6 +786,29 @@ premise (that H.264 needed scrcpy) turned out to be false: `screenrecord` is on 
 device already.
 
 `describe` / agent-grade input come from adb independent of the video path either way.
+
+**Phones (2026-11-03)** stream through the same backend by serial. Two facts the emulators had
+hidden: `wm size` on a phone whose resolution was lowered reports a panel size and an Override
+size, and `input` taps in the override one; and Samsung's Android 13 ships `screenrecord` v1.3,
+which refuses `--time-limit=0` on stdout and exits, so the recorder restarts with
+`--time-limit=180` instead of reading as "no encoder". The recorder is started as
+`echo $$; exec screenrecord …` in ONE `exec-out` argument (adb quotes each of several) and is
+stopped by that pid, never by `pkill screenrecord`: on a phone another recorder is somebody
+else's. The orphan sweep still touches emulators only, so a recorder a crashed server left on a
+phone runs until the phone is replugged. The viewer's Rotate writes a rotation setting, so it does
+nothing on a phone.
+
+### iPhone backend: WDA's MJPEG (2026-11-03)
+
+A physical iPhone (`physical: true` on an iOS ref) goes to `streaming/iphoneMjpeg.ts`, never to
+serve-sim, which is simulator-only. WDA already serves an MJPEG of the screen on the phone's
+loopback (9100); the per-phone helper — a server in deckhand's process on 127.0.0.1, registered
+in the router by the two composition roots — re-serves it byte for byte under the same
+`/helper/<udid>/stream.mjpeg` path, and `stream.avcc` answers 404. Viewer touches and keys
+arrive on `ws` in serve-sim's frames and become `ui` actions through the engine, so the
+registered-app-in-front check covers them too; hardware buttons and rotation from the viewer are
+dropped. The viewer starts such a pane on MJPEG directly, offers no Home or Rotate, and labels
+it a physical device: a lower frame rate and more latency than a simulator are expected there.
 
 ### Proxy contract
 
@@ -887,13 +978,49 @@ change eases in/out — nothing snaps.
   **from the public hostname**. Exit non-zero on any failure. Plain `doctor`
   touches no device: it is the paperwork pass, and nothing in it proves video works.
   `--smoke` adds the hardware pass: it creates a simulator and an emulator and checks boot,
-  **first frame** and describe on each — six independent checks, no fixture app and no build.
+  **first frame** and describe on each — six independent checks, no fixture app and no build —
+  plus a physical Android column on the first free phone (attach, stream with its codec,
+  describe, and input: a no-op key, KEYCODE_UNKNOWN, must move `dumpsys power`'s last user
+  activity — nothing on the phone is acted on). With no free phone those four print `?` and do
+  not fail the gate. An iPhone column follows on the first free cabled iPhone: attach (WDA up
+  over the loopback forward; the server's own WDA is used as it is), stream (a first MJPEG frame),
+  describe, and input — a pause-only W3C pointer action, which goes through XCUITest's input path
+  and touches nothing, so no app and no home screen is acted on. With none free, or WDA unable to
+  start, the four print `?` or `✗` with the reason (an Automation Mode prompt waiting at the phone
+  is named). Every doctor run also prints `WDA (physical iPhones)` — present, profile expiry, and
+  the cabled UDIDs the profile does not list — and, where WDA is up, whether the phone's Wi-Fi
+  address refuses WDA's ports: only a refusal is a pass, anything else is "can't tell".
   `--device-only` runs the same set as `--smoke` — every paperwork check still runs and is
   still printed — but its exit code covers only the device checks, so a code gate cannot go
   red on an install problem its author cannot fix.
 - `deckhand serve` — run the server (what launchd invokes).
-- `deckhand token add|rm|list|url`, `deckhand app add|list`,
+- `deckhand token add|rm|list|url`, `deckhand app add|list` (`app add … --eas-project <uuid>`),
   `deckhand env set <appId> KEY=VALUE`.
+- `deckhand phone list|hold|release` — the Android phones and iPhones plugged into this Mac
+  and who has them. `phone hold <id> [--who <name>]` takes a phone off the market: a held phone is never handed
+  to a preview until `phone release <id>`. Holds live in `phone-holds.json` under the deckhand home,
+  apart from `state.json`, because the CLI writes them while the server runs and the server
+  rewrites `state.json` from memory; the server reads the file on every claim.
+- `deckhand secret set|rm expo` — a read-only Expo robot token for the EAS source, from stdin
+  only (an `EXPO_TOKEN` in the environment is often a person's own, so neither the CLI nor the
+  server reads one). `deckhand doctor` prints an `expo token` line: absent, or accepted by the
+  Expo API and able to list builds of each registered EAS project — never the token.
+- **Preparing an iPhone** (runbook; nothing here is automated). On the phone: pair and Trust
+  this Mac by cable, Developer Mode on, Settings → Developer → Enable UI Automation on, Auto-Lock
+  Never and no passcode, not under another party's MDM, and registered with EAS
+  (`eas device:create`) on every team whose builds it should run — then rebuild, since a build
+  runs only on the phones its profile lists. The first WDA start shows an Automation Mode prompt
+  on the phone that someone must approve with Face ID or the passcode; until then `list_devices`
+  and `doctor` name it. Once on the Mac: `sudo xcodebuild -runFirstLaunch`, and
+  `brew install libimobiledevice` (`iproxy`, `idevicesyslog`, `idevice_id`).
+  **Placing WDA:** on a developer's own machine, build WebDriverAgentRunner (appium/WebDriverAgent
+  16.15.3 or newer, the first whose MJPEG honours `USE_IP`) for generic iOS
+  devices with `xcodebuild build-for-testing`, signed by a team whose profile lists every test
+  phone; copy the whole `Build/Products` folder (the `Debug-iphoneos` directory and the
+  `*iphoneos*.xctestrun` beside it) to `wda/Products` under the deckhand home. Deckhand never
+  builds or signs it and never runs that `.xctestrun` as is: it writes
+  `deckhand-loopback-<udid>.xctestrun` beside it with `USE_IP=127.0.0.1` on every test target. Re-sign
+  and copy again when the profile nears expiry or a phone is added; `deckhand doctor` says which.
 - `deckhand secret set|rm typesafe` — the TypeSafe key `navigate` needs, from stdin or
   `TYPESAFE_API_KEY`, never argv. Setting it is the consent: `navigate` then sends screens from
   every app it drives to TypeSafe, and `deckhand doctor` prints a `navigate egress` warning line.
@@ -967,6 +1094,37 @@ change eases in/out — nothing snaps.
    `mcp/` is handed a provider that yields a client or a reason there is none, never the key
    — `navigate/secrets.ts` is named so that "keeps secrets out of the MCP surface" refuses its
    import there.
+   **The Expo robot token** for the EAS source is a deckhand secret too: `deckhand secret set
+   expo` (stdin) into `secrets/expo.token` (0600), read from that file on every request and by
+   `eas/secrets.ts`, which `mcp/` may not import. It is sent in an `Authorization` header to
+   `api.expo.dev` only — never to an artifact download host (artifact URLs are pre-authorised),
+   never in argv, a URL, a log or an MCP response. A robot token is not a personal credential,
+   so item 7 holds.
+   **WebDriverAgent on a physical iPhone** listens with no authentication, and stock WDA binds
+   every interface — anyone on the phone's network could drive it. Deckhand runs only a copy of
+   the `.xctestrun` with `USE_IP=127.0.0.1` on every target (read back after writing; a target
+   left unbound refuses the start), so WDA's HTTP and MJPEG bind the phone's loopback — MJPEG only
+   from WDA 16.15.3, so a WDA that reports an older version, or none, is stopped and refused; the Mac
+   reaches them over USB through `iproxy -s 127.0.0.1`, whose argv a unit test pins because the
+   listen invariant cannot see a spawned binary's bind. A WDA deckhand did not start is kept only
+   if the phone's Wi-Fi address provably refuses its ports; `doctor` repeats that probe with
+   curl from outside the phone, calls any connection a port accepts exposed (the MJPEG stream never
+   ends, so the request itself only times out), and reports "can't tell" rather than "safe" on anything but a
+   refused connection (macOS Local Network privacy can block the probe itself). No Apple ID,
+   certificate or provisioning profile is on the Mac: the WDA Products folder and the EAS `.ipa`
+   arrive signed, so item 7 holds.
+   **None of that bounds a share holder on the same Mac (the 2026-07-27 caveat above).** The
+   forward puts WDA, unauthenticated, on the Mac's loopback, which a simulator shares, and the
+   server keeps it up across previews: once WDA has started on a cabled iPhone it stays reachable,
+   whether a preview holds the phone or not, until the phone is unplugged or the server stops. A
+   holder of ANY simulator share (Safari is one Home press away) or the code under preview there
+   can reach `127.0.0.1:<forward port>` and drive the whole phone — outside the registered app,
+   past the phone preview's PIN. Android is the same through the adb server on `127.0.0.1:5037`,
+   which has no authentication and is up whenever a phone is plugged in. The in-app check
+   (`iphoneControl.ts`, iPhone only — an Android phone has none, and `ui` or the viewer can press
+   its Home or app switcher) and `RegisteredApp` bind deckhand's own client and nothing else, and
+   the PIN default guards the phone's share link, not the phone. This is accepted, not closed: on
+   a Mac that serves untrusted simulator shares, do not cable a phone.
    **Egress — the one destination app content leaves this machine for: TypeSafe's API, from two
    tools under one key.** `navigate` POSTs to `api.typesafe.ai` once per step, `check` once per
    call. What decides it, in order:

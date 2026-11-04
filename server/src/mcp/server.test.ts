@@ -1,4 +1,4 @@
-import { fakeMetro, fakeDevProcs, fakeSimctl, fakeWorktrees } from "../test-support/fakes.ts";
+import { fakeMetro, fakeDevProcs, fakeSimctl, fakeWorktrees, fakePhones, fakeIphones } from "../test-support/fakes.ts";
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -104,6 +104,9 @@ function fakeEngine(): PreviewEngine {
     }),
     runStep: async () => ({ code: 0, timedOut: false, aborted: false }),
     secretsEnv: () => ({}),
+    phones: fakePhones(),
+    phoneHolds: () => ({}),
+    iphones: fakeIphones(),
     simdeck: {
       // SimDeck answers with `roots`/`children` — verified against a live daemon.
       describe: async () => ({
@@ -294,7 +297,7 @@ describe("MCP server (end-to-end over HTTP)", () => {
     const res = parse(await admin.callTool({ name: "get_guide", arguments: {} })) as { guide?: string[] };
     assert.deepEqual(res.guide, [
       "Start with `list_apps`. When you can run commands on the deckhand host, prefer its existing checkout: register it with `deckhand app add <id> --path <dir>`; otherwise use `add_app` for a GitHub source. Never ask for or relay a credential or app secret in chat; relay the one-time setup link if `add_app` returns one.",
-      "Before `start_preview`, ask the user to choose public access or a PIN. A public link is open to anyone with its URL; web previews require a PIN. Pass a user-chosen 4–6 digit PIN without repeating it in chat.",
+      "Before `start_preview`, ask the user to choose public access or a PIN. A public link is open to anyone with its URL; web previews require a PIN, and a preview on a physical phone defaults to one (make it public only when the user explicitly asks). Pass a user-chosen 4–6 digit PIN without repeating it in chat.",
       "Give the `start_preview` URL to the user immediately, then poll `preview_status` until the target is ready before driving it. Reuse an equivalent live preview; use `restart_preview` for a local native/dependency change or after pushing new git commits, not for ordinary hot reloads.",
       "For visible, end-to-end work, start a test run, then use `describe` to orient and `ui` to act — `ui` returns the screen after it, and takes a list of `actions` for a known sequence — and `screenshot` to verify. Update each test step as it runs and finish the run with an evidence-based verdict.",
       "When build or launch fails, read `logs` with its default build source. When a ready viewer has no video, read `logs` with source `stream`. Stop previews you no longer need with `stop_preview`.",
@@ -712,15 +715,14 @@ describe("MCP server (end-to-end over HTTP)", () => {
     await admin.close();
   });
 
-  it("list_devices reports available runtimes and says nothing about attached hardware", async () => {
+  it("list_devices reports available runtimes and a physical section", async () => {
     const admin = await client(ADMIN);
     const res = parse(await admin.callTool({ name: "list_devices", arguments: {} })) as {
       ios: { runtimes: unknown[] };
     };
     assert.ok(Array.isArray(res.ios.runtimes));
-    // Physical devices are out (PLAN §2): a scan that reported hardware
-    // start_preview could never build to read to an agent as an offer.
-    assert.equal(Object.hasOwn(res, "physical"), false);
+    // Every phone listed is either a target or names its blocker; with none plugged in, the list is empty, not absent.
+    assert.deepEqual((res as { physical?: unknown }).physical, { phones: [] });
     await admin.close();
   });
 });
@@ -767,6 +769,9 @@ function onboardingEngine(): PreviewEngine {
     audit: { record: () => {} } as unknown as PreviewEngineDeps["audit"],
     runStep: async () => ({ code: 0, timedOut: false, aborted: false }),
     secretsEnv: () => ({}),
+    phones: fakePhones(),
+    phoneHolds: () => ({}),
+    iphones: fakeIphones(),
   };
   return new PreviewEngine(deps);
 }
@@ -931,6 +936,18 @@ describe("MCP onboarding contract (add_app / empty state / setup URL)", () => {
     };
     assert.equal(res.ok, false);
     assert.equal(res.error?.code, "duplicate_app");
+    await admin.close();
+  });
+
+  it("add_app records an EAS project id it is given, and refuses one that is not a UUID", async () => {
+    const admin = await oclient(ADMIN);
+    const bad = parse(await admin.callTool({ name: "add_app", arguments: { repo: "github.com/acme/eas-app", easProjectId: "nope" } })) as { ok: boolean; error?: { code: string } };
+    assert.equal(bad.error?.code, "bad_request");
+    const id = "6ff82c98-0000-4000-8000-000000000009";
+    const res = parse(await admin.callTool({ name: "add_app", arguments: { repo: "github.com/acme/eas-app", easProjectId: id } })) as { ok: boolean; registered?: { easProjectId: string | null } };
+    assert.equal(res.registered?.easProjectId, id);
+    assert.equal(registry.find((a) => a.id === "eas-app")?.easProjectId, id);
+    registry.splice(registry.findIndex((a) => a.id === "eas-app"), 1);
     await admin.close();
   });
 
@@ -1193,6 +1210,36 @@ describe("share PIN protection", () => {
 
     const badPin = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "pin", pin: "12" } } }));
     assert.equal((badPin.error as { code: string }).code, "needs_pin");
+    await admin.close();
+  });
+
+  it("start_preview refuses a physical iPhone without eas, naming why and what to pass", async () => {
+    const admin = await client(ADMIN);
+    const res = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", devices: [{ platform: "ios", id: "00008120-00000000000000AA" }], share: { access: "pin", pin: "4321" } } }));
+    assert.equal((res.error as { code: string }).code, "iphone_needs_eas");
+    assert.match(JSON.stringify(res.error), /no Apple signing credentials.*eas: \{\}/);
+    await admin.close();
+  });
+
+  it("start_preview refuses eas with a ref, and eas on a server with no EAS source, before any device is asked for", async () => {
+    const admin = await client(ADMIN);
+    const withRef = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", ref: "main", eas: {}, share: { access: "public" } } }));
+    assert.equal((withRef.error as { code: string }).code, "bad_request");
+    const noSource = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", eas: { profile: "e2e" }, share: { access: "public" } } }));
+    assert.equal((noSource.error as { code: string }).code, "eas_unavailable");
+    await admin.close();
+  });
+
+  it("start_preview will not make an app's link public while a preview of it drives a phone the call did not name", async () => {
+    const admin = await client(ADMIN);
+    const phone = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-a", devices: [{ platform: "android", id: "RF8N30YRFKY" }], share: { access: "pin", pin: "4821" } } })) as { ok: boolean; shareId: string; previewId: string };
+    assert.equal(phone.ok, true, JSON.stringify(phone));
+    const pub = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-a", devices: [{ platform: "ios" }], share: { access: "public" } } }));
+    assert.equal((pub.error as { code: string } | undefined)?.code, "needs_pin", JSON.stringify(pub));
+    assert.match(JSON.stringify(pub.error), /RF8N30YRFKY/);
+    const state = (await (await fetch(`${base}/s/${phone.shareId}/state`)).json()) as { locked?: boolean };
+    assert.equal(state.locked, true, "the phone's preview was made public by a call that never asked for a phone");
+    await admin.callTool({ name: "stop_preview", arguments: { previewId: phone.previewId } });
     await admin.close();
   });
 

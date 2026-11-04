@@ -4,19 +4,30 @@ import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  checkWda,
+  checkWifiExposure,
+  pickSmokeIphone,
+  unknownIphoneChecks,
   DOCTOR_AVD_NAME,
   DOCTOR_SIM_NAME,
   DOCTOR_SMOKE_SERIAL,
   checkConnectorAuth,
   checkPublicUrl,
   deviceGateExit,
+  formatChecks,
   freshnessVerdict,
+  pickSmokePhone,
+  unknownPhoneChecks,
+  lastUserActivity,
+  inputProof,
+  checkExpoToken,
   readTokens,
   releaseSmokeAvd,
   type Check,
   parseAgentStatus,
 } from "./doctor.ts";
 import { fakeAndroid } from "../test-support/fakes.ts";
+import { blockersFor } from "../devices/iphoneDiscovery.ts";
 import { orphanAvds, orphanSims } from "../engine/reaper.ts";
 import type { Config } from "../config.ts";
 
@@ -417,5 +428,123 @@ describe("parseAgentStatus", () => {
     const live = '{\n\t"LastExitStatus" = 15;\n\t"PID" = 38428;\n};';
     assert.deepEqual(parseAgentStatus(dead), { running: false, lastExit: 19968 });
     assert.deepEqual(parseAgentStatus(live), { running: true, lastExit: 15 });
+  });
+});
+
+describe("the physical phone column", () => {
+  const phone = (id: string, over: object = {}) => ({ id, state: "device", awake: true, locked: false, ...over });
+
+  it("prints ? for attach, stream, describe and input with no phone, and does not fail the gate", () => {
+    const checks = unknownPhoneChecks("no Android phone plugged in");
+    assert.deepEqual(
+      formatChecks(checks).split("\n"),
+      ["attach", "stream", "describe", "input"].map((c) => `? smoke android phone: ${c} — no Android phone plugged in`),
+    );
+    assert.equal(deviceGateExit([...bothPlatforms(), ...checks]).code, 0);
+  });
+
+  it("fails the gate when a phone was tested and one capability failed", () => {
+    assert.equal(deviceGateExit([...bothPlatforms(), { name: "smoke android phone: input", ok: false, gate: true }]).code, 1);
+  });
+
+  it("tests only a phone that is free: not held, in no preview, and usable", () => {
+    const picked = pickSmokePhone([phone("A", { state: "unauthorized" }), phone("B"), phone("C"), phone("D")], { B: { who: "dana", since: "t" } }, { C: "pv1 (app x)" });
+    assert.equal(picked.phone?.id, "D");
+    const none = pickSmokePhone([phone("B"), phone("C")], { B: { who: "dana", since: "t" } }, { C: "pv1 (app x)" });
+    assert.equal(none.phone, null);
+    assert.equal(none.why, "B: held by dana; C: in preview pv1 (app x)");
+  });
+});
+
+describe("the phone input proof", () => {
+  const power = (t: string) => `  mLastUserActivityTime(excludingAttention)=1\n  lastUserActivityTime=${t} (12 ms ago)\n  lastUserActivityTimeNoChangeLights=385529 (9 ms ago)\n`;
+
+  it("reads the power manager's last user activity, not the no-change-lights or excluding-attention fields", () => {
+    assert.equal(lastUserActivity(power("964940013")), 964940013);
+    assert.equal(lastUserActivity("  mLastUserActivityTime=77\n"), 77);
+    assert.equal(lastUserActivity("mWakefulness=Awake\n"), null);
+  });
+
+  it("passes only when the injected no-op key moved the activity clock, and is ? when the field is missing", () => {
+    assert.deepEqual(inputProof(10, 20).ok, true);
+    assert.deepEqual(inputProof(10, 10).ok, false);
+    assert.equal(inputProof(null, 20).ok, null);
+    assert.match(inputProof(null, null).detail, /dumpsys power/);
+  });
+});
+
+describe("the expo token check", () => {
+  const TOKEN = "robot-secret-77";
+  const client = (over: { whoami?: () => Promise<string>; builds?: (id: string) => Promise<never[]> } = {}) => ({
+    whoami: over.whoami ?? (async () => "Robot"),
+    builds: over.builds ?? (async () => []),
+  });
+
+  it("says absent without failing, and how to turn it on", async () => {
+    const c = await checkExpoToken({ state: "missing" }, client(), []);
+    assert.equal(c.skipped, true);
+    assert.match(c.detail ?? "", /deckhand secret set expo/);
+  });
+
+  it("proves the token lists builds of every registered EAS project, and never prints it", async () => {
+    const asked: string[] = [];
+    const c = await checkExpoToken({ state: "ok", token: TOKEN }, client({ builds: async (id) => (asked.push(id), []) }), ["p1", "p2", "p1"]);
+    assert.deepEqual(asked, ["p1", "p2"]);
+    assert.equal(c.ok && !c.warn, true);
+    assert.ok(!formatChecks([c]).includes(TOKEN));
+  });
+
+  it("warns, with the API's reason and not the token, when the Expo API refuses it", async () => {
+    const { EasError } = await import("../eas/client.ts");
+    const c = await checkExpoToken({ state: "ok", token: TOKEN }, client({ whoami: async () => { throw new EasError("the Expo API refused deckhand's token (HTTP 401)", "set a new one"); } }), []);
+    assert.equal(c.warn, true);
+    assert.match(c.detail ?? "", /refused.*401/);
+    assert.ok(!formatChecks([c]).includes(TOKEN));
+  });
+});
+
+describe("the iPhone checks", () => {
+  const now = new Date("2026-11-03T12:00:00Z");
+  const ip = (udid: string, blockers: string[] = []) => ({ udid, name: "QA", model: "iPhone 15", osVersion: "27.0.1", blockers });
+  const wda = { expires: "2027-10-23T14:18:08Z", provisionedDevices: ["00008120-00000000000000AA"], provisionsAllDevices: false };
+
+  it("reports WDA's expiry and the cabled UDIDs its profile does not list, and needs no WDA without an iPhone", () => {
+    assert.equal(checkWda(null, [], "/h/wda/Products", now).skipped, true);
+    assert.equal(checkWda(null, [ip("00008120-00000000000000AA")], "/h/wda/Products", now).ok, false);
+    const ok = checkWda(wda, [ip("00008120-00000000000000aa")], "/h/wda/Products", now);
+    assert.equal(ok.ok, true);
+    assert.match(ok.detail ?? "", /expires 2027-10-23 \(354 days\)/);
+    const missing = checkWda(wda, [ip("00008120-0000000000000BBB")], "/h/wda/Products", now);
+    assert.equal(missing.ok, false);
+    assert.match(missing.detail ?? "", /does NOT list cabled 00008120-0000000000000BBB/);
+    assert.equal(checkWda({ ...wda, expires: "2026-11-20T00:00:00Z" }, [], "/h", now).warn, true);
+    assert.match(checkWda({ ...wda, expires: "2026-01-01T00:00:00Z" }, [], "/h", now).detail ?? "", /EXPIRED/);
+  });
+
+  it("does not fail on an iPhone that is paired but not cabled", () => {
+    const udid = "00008120-0000000000000BBB";
+    const phone = { udid, name: "QA", model: "iPhone 15", productType: null, osVersion: "27.0.1", paired: true, wired: false, developerMode: true };
+    const overWifi = ip(udid, blockersFor(phone, { usb: false, locked: false, wda, productsDir: "/h/wda/Products", now }));
+    assert.equal(checkWda(null, [overWifi], "/h/wda/Products", now).ok, true);
+    const covered = checkWda(wda, [overWifi], "/h/wda/Products", now);
+    assert.equal(covered.ok, true);
+    assert.doesNotMatch(covered.detail ?? "", /0BBB/);
+  });
+
+  it("calls Wi-Fi exposure safe only on a refusal, and says can't tell otherwise", () => {
+    assert.equal(checkWifiExposure("U", { verdict: "exposed", ip: "10.0.0.2", ports: { 8100: "exposed" } }).ok, false);
+    assert.equal(checkWifiExposure("U", { verdict: "not-exposed", ip: "10.0.0.2", ports: { 8100: "refused", 9100: "refused" } }).ok, true);
+    const unsure = checkWifiExposure("U", { verdict: "cant-tell", ip: "10.0.0.2", ports: { 8100: "cant-tell" } });
+    assert.deepEqual([unsure.ok, unsure.warn], [true, true]);
+    assert.match(unsure.detail ?? "", /can't tell/);
+  });
+
+  it("prints ? for every iPhone capability with the reason when no iPhone can be tested, and picks only a free one", () => {
+    assert.deepEqual(formatChecks(unknownIphoneChecks("no iPhone cabled")).split("\n"), ["attach", "stream", "describe", "input"].map((c) => `? smoke iphone: ${c} — no iPhone cabled`));
+    assert.equal(deviceGateExit([...bothPlatforms(), ...unknownIphoneChecks("x")]).code, 0);
+    const blocked = ip("B", ["WDA could not start: someone at the phone must approve the Automation Mode prompt"]);
+    assert.match(pickSmokeIphone([blocked], {}, {}).why, /Automation Mode/);
+    assert.equal(pickSmokeIphone([ip("A"), ip("C")], { A: { who: "dana", since: "t" } }, {}).phone?.udid, "C");
+    assert.equal(pickSmokeIphone([ip("A")], {}, { A: "pv1" }).phone, null);
   });
 });

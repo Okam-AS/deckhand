@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { readFileSync } from "node:fs";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { AvccSource, RECORDER_ARGV, RECORDER_PKILL_PATTERN } from "./androidH264.ts";
+import { AvccSource, PID_PREAMBLE, RECORDER_ARGV, RECORDER_PKILL_PATTERN, recorderArgv, recorderCommand } from "./androidH264.ts";
 import { AVCC_TAG_DELTA, AVCC_TAG_DESCRIPTION, AVCC_TAG_KEYFRAME } from "./h264.ts";
 
 const hdr = (t: number) => 0x60 | t;
@@ -395,7 +395,10 @@ test("the device-side sweep hunts for the argv we actually spawn", () => {
   const src = readFileSync(new URL("./androidH264.ts", import.meta.url), "utf8");
   const decl = /const defaultSpawnRecorder[\s\S]*?;/.exec(src)?.[0];
   assert.ok(decl, "defaultSpawnRecorder is gone or renamed — this check needs updating with it");
-  assert.match(decl, /\.\.\.RECORDER_ARGV/, "the default recorder must spawn RECORDER_ARGV, not its own copy of the flags");
+  assert.match(decl, /recorderCommand\(/, "the default recorder must spawn RECORDER_ARGV (through recorderCommand), not its own copy of the flags");
+  assert.equal(recorderCommand(false), `echo $$; exec ${RECORDER_ARGV.join(" ")}`);
+  assert.deepEqual(recorderArgv(false), [...RECORDER_ARGV]);
+  assert.deepEqual(recorderArgv(true).slice(0, 2), [...RECORDER_ARGV].slice(0, 2), "the bounded recorder must still match the sweep's pattern");
   const literals = [...decl.matchAll(/"([^"]*)"|'([^']*)'|`([^`]*)`/g)].map((m) => m[1] ?? m[2] ?? m[3]);
   assert.deepEqual(
     literals,
@@ -411,4 +414,56 @@ test("the device-side sweep hunts for the argv we actually spawn", () => {
   // Narrower than "any screenrecord", which would also match a capture the
   // developer started themselves.
   assert.ok(RECORDER_PKILL_PATTERN.includes(" "), "the pattern names flags, not just the binary");
+});
+
+test("stops exactly the recorder it started, by the pid the device printed — never every screenrecord by name", async () => {
+  const kills: [string, number][] = [];
+  const spawned: FakeRecorder[] = [];
+  const source = new AvccSource(
+    "RF8N30YRFKY",
+    () => {
+      const rec = new FakeRecorder();
+      spawned.push(rec);
+      return rec as unknown as ChildProcessWithoutNullStreams;
+    },
+    0,
+    (serial, pid) => kills.push([serial, pid]),
+  );
+  const ready = source.ready();
+  await tick();
+  spawned[0]!.stdout.write(Buffer.concat([Buffer.from("4321\n"), annexb(SPS, PPS, IDR)]));
+  assert.equal(await ready, true, "the pid line must not reach the H.264 parser");
+  source.dispose();
+  assert.deepEqual(kills, [["RF8N30YRFKY", 4321]]);
+  const src = readFileSync(new URL("./androidH264.ts", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "");
+  assert.doesNotMatch(src, /"pkill"/, "a kill by name would take a phone's other recorders with ours");
+});
+
+test("restarts bounded when screenrecord v1.3 refuses an unlimited recording, instead of calling the encoder dead", async () => {
+  const bounds: boolean[] = [];
+  const spawned: FakeRecorder[] = [];
+  const source = new AvccSource(
+    "RF8N30YRFKY",
+    (_serial, bounded) => {
+      bounds.push(bounded);
+      const rec = new FakeRecorder();
+      spawned.push(rec);
+      return rec as unknown as ChildProcessWithoutNullStreams;
+    },
+    0,
+    () => {},
+  );
+  const ready = source.ready();
+  await tick();
+  spawned[0]!.stdout.write(Buffer.from("77\nTime limit 0s outside acceptable range [1,180]\n"));
+  spawned[0]!.emit("close", 1);
+  await new Promise((r) => setTimeout(r, 150));
+  assert.deepEqual(bounds, [false, true]);
+  spawned[1]!.stdout.write(Buffer.concat([Buffer.from("78\n"), annexb(SPS, PPS, IDR)]));
+  assert.equal(await ready, true);
+  source.dispose();
+});
+
+test("the device shell execs the recorder in place, so the pid it prints is the recorder's", () => {
+  assert.deepEqual([...PID_PREAMBLE], ["echo", "$$;", "exec"]);
 });

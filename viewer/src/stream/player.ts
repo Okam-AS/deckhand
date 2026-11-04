@@ -64,6 +64,8 @@ export class DevicePlayer {
     private readonly canvas: HTMLCanvasElement,
     private readonly baseUrl: string, // /s/<shareId>/dev/<deviceId>
     private readonly cb: PlayerCallbacks = {},
+    /** A physical iPhone serves MJPEG only; probing H.264 first would only cost a 404 and a delay. */
+    private readonly opts: { mjpegOnly?: boolean } = {},
   ) {
     const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
     if (!ctx) throw new Error("2d canvas context unavailable");
@@ -92,7 +94,10 @@ export class DevicePlayer {
   start(): void {
     if (this.disposed) return;
     this.cb.onStatus?.("connecting");
-    if (isAvccSupported()) {
+    if (this.opts.mjpegOnly) {
+      this.report("start", "mjpeg (physical iPhone)");
+      this.startMjpeg();
+    } else if (isAvccSupported()) {
       this.report("start", "avcc (WebCodecs)");
       this.startAvcc();
     } else {

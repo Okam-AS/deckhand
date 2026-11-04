@@ -52,7 +52,7 @@ If it is red, stop. Do not read further; there is nothing to review yet.
 
 Touched the device, streaming or control path? `npm run test:device` too — it boots a
 real simulator AND a real emulator, takes minutes, and is the only check that touches
-hardware. If you cannot run it, say which of its six checks is unverified and who has
+hardware. If you cannot run it, say which of its checks is unverified and who has
 to run it. `?` is an honest answer; a tick you did not earn is not.
 
 ## 2. Did you change what a user types, or what an agent is told?

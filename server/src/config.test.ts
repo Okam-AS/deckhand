@@ -13,7 +13,10 @@ import {
   configSchema,
   githubPrivateKeyPath,
   loadAppsForBoot,
+  appEnvironments,
 } from "./config.ts";
+import { parse as parseYaml, stringify as toYaml } from "yaml";
+import { appsSchema } from "./config.ts";
 
 let dir: string;
 before(() => {
@@ -368,5 +371,45 @@ describe("loadAppsForBoot", () => {
     const r = loadAppsForBoot(join(tmpdir(), "deckhand-nope", "apps.yaml"));
     assert.deepEqual(r.apps, []);
     assert.ok(r.error, "still reported, so a typo'd DECKHAND_HOME is visible rather than silent");
+  });
+});
+
+describe("app environments and the EAS project", () => {
+  const app = (extra: string[]) =>
+    ["apps:", "  - id: my-app", "    repo: github.com/acme/my-app", "    type: expo", ...extra].join("\n");
+  const envs = [
+    "    easProjectId: 6ff82c98-0000-4000-8000-000000000001",
+    "    environments:",
+    "      default: uat",
+    "      uat:",
+    "        easProfile: { android: e2e, ios: development, iosSimulator: development-sim }",
+    "        launchArgs: { APP_ENV: test }",
+    "        logMarker: 'Launching.*test'",
+    "      prod:",
+    "        easProfile: { android: production }",
+  ];
+
+  it("loads a default environment with a profile per artifact, launch args and a log marker, and round-trips through YAML", () => {
+    const apps = loadApps(write("apps-env.yaml", app(envs)));
+    const e = appEnvironments(apps[0]!)!;
+    assert.equal(e.default, "uat");
+    assert.deepEqual([...e.byName.keys()], ["uat", "prod"]);
+    assert.deepEqual(e.byName.get("uat")!.launchArgs, { APP_ENV: "test" });
+    assert.deepEqual(e.byName.get("prod")!.launchArgs, {});
+    assert.ok(appsSchema.safeParse(parseYaml(toYaml({ apps }))).success);
+  });
+
+  it("has no environments unless the app declares them", () => {
+    assert.equal(appEnvironments(loadApps(write("apps-noenv.yaml", app([])))[0]!), null);
+  });
+
+  it("refuses a default that names no environment, a launch argument that could escape, and a marker that is not a regex", () => {
+    const bad = (lines: string[], re: RegExp) => assert.throws(() => loadApps(write("apps-env-bad.yaml", app(lines))), (e: unknown) => e instanceof ConfigError && re.test(e.message));
+    bad(["    environments:", "      default: staging", "      uat: {}"], /default "staging" is not one of/);
+    bad(["    environments:", "      default: uat", "      uat: { launchArgs: { APP_ENV: 'test; reboot' } }"], /launch argument value/);
+    bad(["    environments:", "      default: uat", "      uat: { launchArgs: { APP_ENV: '-flag' } }"], /launch argument value/);
+    bad(["    environments:", "      default: uat", "      uat: { launchArgs: { 'A B': x } }"], /launch argument key/);
+    bad(["    environments:", "      default: uat", "      uat: { logMarker: '(' }"], /valid regular expression/);
+    bad(["    easProjectId: not-a-uuid"], /easProjectId/);
   });
 });

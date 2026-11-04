@@ -33,6 +33,17 @@ Hardest rules, each with the check that enforces it:
   "sends no credential to SimDeck" (the same recursive source scan, so a path nobody exercises is
   still covered).
 
+**A phone is not SimDeck's.** SimDeck 0.2.0 resolves Android only as `android:<AVD name>` and
+answers a phone's serial with "Android emulator `<serial>` is not running", so `describe`/`ui` on a
+phone go to `adbControl.ts` behind the same `ControlBackend` interface, returning the tree in the
+shape `screen.ts` reads. Its rules: the dump goes to stdout so nothing is left on the phone;
+`input text` is ASCII-only, so non-ASCII is a 422 naming the characters, never a mangled string;
+nothing that changes the phone (dark mode, power, volume) is pressed; and `openUrl` is addressed to
+the registered app only. → `adbControl.test.ts` "refuses non-ASCII text with a clear error and
+types nothing", "never changes a setting: no dark-mode toggle, no power or volume button"
+
+**An iPhone is WDA's, and only inside the app.** `iphoneControl.ts` drives a physical iPhone over WebDriverAgent's REST on the Mac's loopback forward, with no token, the same rules as SimDeck. Every touch and keystroke first asks WDA which app is in front — again right before a touch that follows a wait or a scroll — and refuses unless it is the preview's registered bundle; `home`, hardware buttons, `openUrl` and `toggleAppearance` are refused outright, because each acts outside the app or changes a setting. Coordinates are WDA's points. The client refuses any base URL but `http://127.0.0.1`. These rules bind deckhand's own client and nothing else: WDA has no token, a simulator shares the Mac's loopback, and the server keeps WDA and its forward up across previews, so for as long as an iPhone is cabled and its WDA has started a simulator share holder can reach WDA directly — the adb server on `127.0.0.1:5037` likewise for any plugged-in Android phone (PLAN §11 item 1; accepted, not closed). Never describe the in-app check or the phone PIN as a boundary around the phone, and never as an Android rule: an Android phone has no app-in-front check, so `ui` can press its Home or app switcher. → `iphoneControl.test.ts` "never touches or types while another app is in front", `iphoneControl.test.ts` "asks again which app is in front after waiting or scrolling, before it touches", `iphoneControl.test.ts` "refuses home, hardware buttons, openUrl and appearance with a reason, sending nothing", `preview.test.ts` "drives describe/ui/screenshot through WDA, and refuses a touch while another app is in front"
+
 Two facts about the daemon that no check in this repo can see, because it is not our process:
 
 - **Never start SimDeck with `--bind 0.0.0.0`.** It binds loopback by default, and a LAN mode

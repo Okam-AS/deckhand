@@ -38,4 +38,15 @@ describe("StreamingRouter", () => {
     assert.ok(calls.includes("android:reap"));
     assert.ok(calls.includes("web:reap"));
   });
+
+  it("sends a physical iPhone to the iPhone backend, never to serve-sim, and refuses one when none is registered", async () => {
+    const calls: string[] = [];
+    const router = new StreamingRouter(fakeBackend("ios", calls), fakeBackend("android", calls), fakeBackend("web", calls), fakeBackend("iphone", calls));
+    assert.equal((await router.attach({ platform: "ios", udid: "00008120-00000000000000AA", physical: true })).origin, "http://iphone");
+    await router.reapOrphans();
+    assert.deepEqual(calls.filter((c) => c.startsWith("ios")), ["ios:reap"]);
+    assert.ok(calls.includes("iphone:reap"));
+    const bare = new StreamingRouter(fakeBackend("ios", []), fakeBackend("android", []), fakeBackend("web", []));
+    await assert.rejects(bare.attach({ platform: "ios", udid: "U", physical: true }), /physical iPhone/);
+  });
 });

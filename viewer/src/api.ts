@@ -7,6 +7,8 @@ export interface ShareDevice {
   detail?: string;
   /** The build sub-step ("Compiling react-native-svg") shown under the headline. */
   step?: string;
+  /** A phone cabled to the deckhand Mac, not a simulator or emulator. */
+  physical?: boolean;
 }
 
 export type TestStepStatus = "pending" | "running" | "passed" | "failed";
@@ -52,7 +54,7 @@ export interface ShareState {
   ref: string;
   repo: string;
   /** "local" = dev-mode preview of a working copy; "git" = a ref checkout. */
-  source?: "git" | "local";
+  source?: "git" | "local" | "eas";
   /** Whether the rebuild button applies right now (local + settled). */
   canRestart?: boolean;
   /** What the preview is doing while it has no devices yet — see shareState on the server. */

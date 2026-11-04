@@ -28,6 +28,8 @@ import { AndroidAdbBackend } from "./streaming/androidAdb.ts";
 import { WebBackend } from "./streaming/web.ts";
 import { refreshVersion, versionStatus } from "./version.ts";
 import { StreamingRouter } from "./streaming/router.ts";
+import { IphoneMjpegBackend } from "./streaming/iphoneMjpeg.ts";
+import { Iphones } from "./devices/iphones.ts";
 import { buildTokenResolver } from "./github/credentials.ts";
 import { createMcpRouter } from "./mcp/index.ts";
 import {
@@ -49,6 +51,8 @@ import { serverInfo } from "./meta.ts";
 import { LiveShareRegistry, createLiveShareRouter } from "./share/liveShares.ts";
 import { typesafeProvider } from "./navigate/secrets.ts";
 import type { JevProvider } from "./navigate/jev.ts";
+import { EasPreviews } from "./eas/source.ts";
+import { expoTokenSource } from "./eas/secrets.ts";
 
 export interface AppDeps {
   engine: PreviewEngine;
@@ -193,10 +197,27 @@ export function createServer(): DeckhandServer {
 
   const [lo, hi] = config.streaming.serveSim.helperPortRange;
   const mid = Math.floor((lo + hi) / 2);
+  // A cabled iPhone is one stream per phone, so its helpers take the top few ports of the range.
+  const iphoneLo = Math.max(mid + 2, hi - 7);
+  const iphones = new Iphones();
+  // The MJPEG backend acts and describes through the engine (which checks the preview's app is in
+  // front); the engine is built below, after the router it needs.
+  let engineRef: PreviewEngine | null = null;
+  const viaEngine = (): PreviewEngine => {
+    if (!engineRef) throw new Error("the engine is not up yet");
+    return engineRef;
+  };
   const streaming = new StreamingRouter(
     new ServeSimBackend({ portRange: [lo, mid], bin: vendoredServeSimBin() }),
-    new AndroidAdbBackend({ portRange: [mid + 1, hi] }),
+    new AndroidAdbBackend({ portRange: [mid + 1, iphoneLo - 1] }),
     new WebBackend(),
+    new IphoneMjpegBackend({
+      portRange: [iphoneLo, hi],
+      mjpegUrl: (udid) => iphones.mjpegUrl(udid),
+      lease: (udid) => viaEngine().iphoneStreamLease(udid),
+      act: (udid, action, lease) => viaEngine().iphoneStreamAction(udid, action, lease),
+      describe: (udid) => viaEngine().iphoneStreamDescribe(udid),
+    }),
   );
 
   const simctl = new Simctl();
@@ -214,7 +235,10 @@ export function createServer(): DeckhandServer {
     metro: new MetroManager(),
     store: new StateStore(),
     audit: new AuditLog(),
+    eas: new EasPreviews(expoTokenSource()),
+    iphones,
   });
+  engineRef = engine;
 
   const pinGate = createPinGate(engine, resolveShareSecret(config));
   const viewerDist = resolveViewerDist();

@@ -114,7 +114,7 @@ function parseJsonSafe(text: string | null): unknown | null {
 export async function detectFromRepo(
   read: (path: string) => Promise<string | null>,
   hasEntry: (path: string) => Promise<boolean>,
-): Promise<{ type: AppType | null; bundleId: string | null }> {
+): Promise<{ type: AppType | null; bundleId: string | null; easProjectId: string | null }> {
   const [pkgText, hasNsTs, hasNsJs, hasIosDir, hasAndroidDir] = await Promise.all([
     read("package.json"),
     hasEntry("nativescript.config.ts"),
@@ -130,13 +130,45 @@ export async function detectFromRepo(
   });
 
   let bundleId: string | null = null;
+  let easProjectId: string | null = null;
   if (type === "expo") {
-    bundleId = expoBundleId(parseJsonSafe(await read("app.json")) as ExpoConfig | null, "ios");
+    const appJson = await read("app.json");
+    bundleId = expoBundleId(parseJsonSafe(appJson) as ExpoConfig | null, "ios");
+    easProjectId = easProjectIdFromConfigText(appJson, await Promise.all(EXPO_DYNAMIC_CONFIG_FILES.map(read)));
   } else if (type === "nativescript") {
     const cfg = (await read("nativescript.config.ts")) ?? (await read("nativescript.config.js"));
     if (cfg) bundleId = /id:\s*['"]([^'"]+)['"]/.exec(cfg)?.[1] ?? null;
   }
-  return { type, bundleId };
+  return { type, bundleId, easProjectId };
+}
+
+const EAS_PROJECT_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * `extra.eas.projectId` from app.json, else a `projectId: "<uuid>"` written literally in an
+ * app.config.* — read as text, never evaluated. Null when neither names exactly one.
+ */
+export function easProjectIdFromConfigText(appJson: string | null, dynamicConfigs: (string | null)[]): string | null {
+  const fromJson = (parseJsonSafe(appJson) as { expo?: { extra?: { eas?: { projectId?: unknown } } }; extra?: { eas?: { projectId?: unknown } } } | null);
+  const id = fromJson?.expo?.extra?.eas?.projectId ?? fromJson?.extra?.eas?.projectId;
+  if (typeof id === "string" && EAS_PROJECT_UUID.test(id)) return id;
+  const found = new Set<string>();
+  for (const text of dynamicConfigs) {
+    for (const m of (text ?? "").matchAll(/projectId["']?\s*[:=]\s*["']([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']/g)) found.add(m[1]!);
+  }
+  return found.size === 1 ? [...found][0]! : null;
+}
+
+/** The same, from a checkout on disk. Read-only. */
+export function easProjectIdFromDir(dir: string): string | null {
+  const read = (f: string): string | null => {
+    try {
+      return readFileSync(join(dir, f), "utf8");
+    } catch {
+      return null;
+    }
+  };
+  return easProjectIdFromConfigText(read("app.json"), EXPO_DYNAMIC_CONFIG_FILES.map(read));
 }
 
 // --- bundle id -------------------------------------------------------------

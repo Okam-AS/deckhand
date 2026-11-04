@@ -271,7 +271,7 @@ describe("PLAN §8 — the streaming seam", () => {
     // `import\(?` rather than `import\(`, and both quote characters: a side-effect import
     // (`import "../streaming/serveSim.ts";`) has no `from` and no paren, and passed the whole
     // check — verified by mutation. The specifier may be `.ts` or `.js` for the same reason.
-    const backends = /(?:from|import\(?)\s*["'](?:\.\.?\/)+(?:streaming\/)?(?:serveSim|androidAdb|androidH264|web)\.[tj]s["']/;
+    const backends = /(?:from|import\(?)\s*["'](?:\.\.?\/)+(?:streaming\/)?(?:serveSim|androidAdb|androidH264|iphoneMjpeg|web)\.[tj]s["']/;
     for (const file of sourceFiles()) {
       if (rel(file).startsWith("server/src/streaming/") || roots.has(rel(file))) continue;
       assert.doesNotMatch(
@@ -850,8 +850,8 @@ describe("fakes are complete", () => {
     // how anyone writing a standalone fake would name it, and that form passed until mutation
     // put `{} as unknown as Simctl` in a test file and nothing failed. The quote class is for
     // the same reason — `Deps['simctl']` is the same cast.
-    const covered = "simctl|android|worktrees|reaper|metro|devProcs";
-    const classes = "Simctl|AndroidManager|WorktreeManager|Reaper|MetroManager|DevProcessManager";
+    const covered = "simctl|android|worktrees|reaper|metro|devProcs|phones|eas|iphones";
+    const classes = "Simctl|AndroidManager|WorktreeManager|Reaper|MetroManager|DevProcessManager|AndroidPhones|EasPreviews|Iphones";
     const banned = new RegExp(`as unknown as (?:\\w*Deps\\[["'](${covered})["']\\]|(${classes})\\b)`);
     const fakeFor: Record<string, string> = {
       simctl: "fakeSimctl",
@@ -860,12 +860,18 @@ describe("fakes are complete", () => {
       reaper: "fakeReaper",
       metro: "fakeMetro",
       devProcs: "fakeDevProcs",
+      phones: "fakePhones",
       Simctl: "fakeSimctl",
       AndroidManager: "fakeAndroid",
       WorktreeManager: "fakeWorktrees",
       Reaper: "fakeReaper",
       MetroManager: "fakeMetro",
       DevProcessManager: "fakeDevProcs",
+      AndroidPhones: "fakePhones",
+      eas: "fakeEas",
+      EasPreviews: "fakeEas",
+      iphones: "fakeIphones",
+      Iphones: "fakeIphones",
     };
     for (const file of testFiles()) {
       const m = banned.exec(read(file));

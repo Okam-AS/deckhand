@@ -11,10 +11,24 @@ import { ServeSimBackend, vendoredServeSimBin } from "../streaming/serveSim.ts";
 import { AndroidAdbBackend } from "../streaming/androidAdb.ts";
 import { AndroidManager, AVD_PREFIX, selectSystemImage, serialForPort } from "../devices/android.ts";
 import { SIM_PREFIX } from "../engine/reaper.ts";
+import { AndroidPhones, usabilityBlocker, type PhoneInfo } from "../devices/androidPhone.ts";
+import { loadPhoneHolds, type PhoneHolds } from "../devices/phoneHolds.ts";
+import { AdbControl, type UiNode } from "../testing/adbControl.ts";
+import { phoneTenants } from "./phone.ts";
+import type { PersistedState } from "../state.ts";
 import { detectWebFrameworkFromDir, webHostingMode } from "../engine/detect.ts";
 import { repoRoot } from "../version.ts";
 import { lookupTypesafeKey, type KeyLookup } from "../navigate/secrets.ts";
 import { EGRESS_HOST } from "../navigate/egress.ts";
+import { EasClient, type EasError } from "../eas/client.ts";
+import { discoverIphones, isCabled, readWdaProfile, type PhysicalIphone, type WdaProfile } from "../devices/iphoneDiscovery.ts";
+import { profileIncludes } from "../devices/iphoneApps.ts";
+import { portAnswers, runningIproxyForwards, wdaPortsFor } from "../devices/iproxy.ts";
+import { WdaRunner, wifiExposure, type WifiExposure } from "../devices/wdaRunner.ts";
+import { WdaClient } from "../testing/wdaClient.ts";
+import { IphoneControl } from "../testing/iphoneControl.ts";
+import { IphoneMjpegBackend } from "../streaming/iphoneMjpeg.ts";
+import { expoTokenSource, lookupExpoToken, type ExpoTokenLookup } from "../eas/secrets.ts";
 
 /** Helper ports for the Android smoke leg — outside the configured preview range, so a gate run cannot evict a live preview's helper. */
 const ANDROID_SMOKE_PORTS: [number, number] = [3290, 3299];
@@ -78,6 +92,8 @@ export interface Check {
   gate?: true;
   /** The check that actually boots a device, tagged by platform. Its absence must fail the gate, not pass it. */
   smoke?: SmokePlatform;
+  /** Not run, and not known either way (no phone plugged in): printed `?`, never a tick. */
+  unknown?: true;
 }
 
 /** Both must appear in a gate run. A device gate that covered one platform is half a gate. */
@@ -326,6 +342,26 @@ function checkWebHost(config: Config, apps: App[]): Check {
 }
 
 /**
+ * Whether previews of EAS builds can work: the Expo token is set, the Expo API accepts it, and it
+ * can list builds of each registered EAS project. Never prints the token. Absent is not a failure:
+ * the EAS source is opt-in.
+ */
+export async function checkExpoToken(key: ExpoTokenLookup, client: Pick<EasClient, "whoami" | "builds">, projectIds: string[]): Promise<Check> {
+  const name = "expo token";
+  if (key.state === "missing") return { name, ok: true, skipped: true, detail: "not set — previews of EAS builds are off. On: `deckhand secret set expo`" };
+  if (key.state === "error") return { name, ok: true, warn: true, detail: key.message };
+  try {
+    const who = await client.whoami();
+    const ids = [...new Set(projectIds)];
+    for (const id of ids) await client.builds(id, { limit: 1 });
+    return { name, ok: true, detail: `set; the Expo API accepts it (${who})${ids.length ? ` and it lists builds of ${ids.length} registered EAS project(s)` : "; no app has an easProjectId yet"}` };
+  } catch (e) {
+    const err = e as EasError;
+    return { name, ok: true, warn: true, detail: `set, but ${err.message}${err.hint ? ` — ${err.hint}` : ""}` };
+  }
+}
+
+/**
  * A warning while app content can leave this machine through `navigate`.
  * No line at all without a key file: an install that never set one is exactly what it was before navigate.
  */
@@ -486,6 +522,131 @@ async function smokeAndroid(): Promise<Check[]> {
   return checks;
 }
 
+/** Helper ports for the phone leg, beside the emulator leg's and outside the preview range. */
+const PHONE_SMOKE_PORTS: [number, number] = [3280, 3289];
+export const PHONE_CAPS = ["attach", "stream", "describe", "input"] as const;
+
+/** The first phone free to test: targetable, not held, and in no live preview (read from state.json). */
+export function pickSmokePhone(phones: PhoneInfo[], holds: PhoneHolds, busy: Record<string, string>): { phone: PhoneInfo | null; why: string } {
+  const free = phones.find((p) => !usabilityBlocker(p) && !holds[p.id] && !busy[p.id]);
+  if (free) return { phone: free, why: "" };
+  if (!phones.length) return { phone: null, why: "no Android phone plugged in" };
+  return {
+    phone: null,
+    why: phones
+      .map((p) => `${p.id}: ${holds[p.id] ? `held by ${holds[p.id]!.who}` : busy[p.id] ? `in preview ${busy[p.id]}` : (usabilityBlocker(p)?.blocker ?? "?")}`)
+      .join("; "),
+  };
+}
+
+/** The power manager's clock of the last user activity, which every injected input event moves. */
+export function lastUserActivity(dumpsysPower: string): number | null {
+  const m = /^\s*m?[lL]astUserActivityTime=(\d+)/m.exec(dumpsysPower);
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * The phone is shared hardware, so the proof acts on nothing: `input keyevent 0` (KEYCODE_UNKNOWN)
+ * maps to no action in any app or in the system, yet it goes through the same injection path as a
+ * tap and the power manager records it as user activity.
+ */
+export function inputProof(before: number | null, after: number | null): { ok: boolean | null; detail: string } {
+  if (before === null || after === null) return { ok: null, detail: "this phone's dumpsys power reports no lastUserActivityTime, so a no-op key cannot be observed — not proven either way" };
+  return after > before
+    ? { ok: true, detail: "an injected no-op key (KEYCODE_UNKNOWN) reached the input pipeline: the power manager recorded it as user activity" }
+    : { ok: false, detail: "an injected no-op key (KEYCODE_UNKNOWN) left no trace — input injection is not reaching this phone" };
+}
+
+/** `?` for every capability: nothing was run, so nothing is claimed. */
+export function unknownPhoneChecks(why: string): Check[] {
+  return PHONE_CAPS.map((cap) => ({ name: `smoke android phone: ${cap}`, ok: false, skipped: true, unknown: true as const, detail: why }));
+}
+
+/**
+ * The physical-phone column: attach (usable), stream (first frame, and whether it is H.264),
+ * describe (uiautomator over adb) and input — the one place input injection fails silently. With no
+ * free phone every check is `?`, not a tick.
+ */
+export async function smokePhone(): Promise<Check[]> {
+  const label = (cap: string) => `smoke android phone: ${cap}`;
+  const phones = new AndroidPhones();
+  let picked: ReturnType<typeof pickSmokePhone>;
+  try {
+    let state: PersistedState | null = null;
+    try {
+      state = JSON.parse(readFileSync(paths.state(), "utf8")) as PersistedState;
+    } catch {
+      state = null;
+    }
+    picked = pickSmokePhone(await phones.list(), loadPhoneHolds(), phoneTenants(state));
+  } catch (e) {
+    return unknownPhoneChecks(`could not list phones: ${(e as Error).message.slice(0, 120)}`);
+  }
+  const phone = picked.phone;
+  if (!phone) return unknownPhoneChecks(picked.why);
+  const serial = phone.id;
+  const checks: Check[] = [];
+  const done = (cap: string, ok: boolean, detail: string) => checks.push({ name: label(cap), ok, gate: true, detail });
+  try {
+    const info = await phones.waitUsable(serial, 15_000);
+    done("attach", true, `${serial} — ${[info.manufacturer, info.model, info.os].filter(Boolean).join(" ")}`);
+
+    const backend = new AndroidAdbBackend({ portRange: PHONE_SMOKE_PORTS });
+    const stream = await backend.attach({ platform: "android", udid: serial, serial });
+    try {
+      const framed = await stream.waitForFirstFrame();
+      let codec = "";
+      if (framed) {
+        const ctl = new AbortController();
+        const t = setTimeout(() => ctl.abort(), 8_000);
+        try {
+          const res = await fetch(`${stream.origin}${stream.helperBasePath}/stream.avcc`, { signal: ctl.signal });
+          if (res.ok && res.body) {
+            const reader = res.body.getReader();
+            const first = await reader.read();
+            codec = first.value?.length ? ", H.264" : ", no H.264 bytes";
+            await reader.cancel().catch(() => {});
+          } else codec = `, no H.264 (stream.avcc ${res.status}) — MJPEG fallback`;
+        } catch {
+          codec = ", no H.264 within 8s — MJPEG fallback";
+        } finally {
+          clearTimeout(t);
+        }
+      }
+      done("stream", framed, framed ? `first frame${codec}` : "no first frame");
+    } finally {
+      await stream.detach().catch(() => {});
+    }
+
+    const control = new AdbControl();
+    const tree = await control.tree(serial, 30_000);
+    let n = 0;
+    const walk = (node: UiNode): void => {
+      for (const c of node.children) {
+        n++;
+        walk(c);
+      }
+    };
+    walk(tree.roots[0]!);
+    done("describe", n > 0, `${n} elements`);
+
+    const power = () =>
+      new Promise<string>((resolve) =>
+        execFile("adb", ["-s", serial, "shell", "dumpsys", "power"], { timeout: 10_000, maxBuffer: 16 * 1024 * 1024 }, (_e, out) => resolve(String(out ?? ""))),
+      );
+    const before = lastUserActivity(await power());
+    await new Promise<void>((resolve) => execFile("adb", ["-s", serial, "shell", "input", "keyevent", "0"], { timeout: 10_000 }, () => resolve()));
+    await new Promise((r) => setTimeout(r, 500));
+    const proof = inputProof(before, lastUserActivity(await power()));
+    if (proof.ok === null) checks.push({ name: label("input"), ok: false, skipped: true, unknown: true, detail: proof.detail });
+    else done("input", proof.ok, proof.detail);
+  } catch (e) {
+    const have = new Set(checks.map((c) => c.name));
+    for (const cap of PHONE_CAPS) if (!have.has(label(cap))) done(cap, false, (e as Error).message.slice(0, 160));
+  }
+  return checks;
+}
+
 /**
  * Release the gate's emulator, and delete its AVD only if the emulator confirmed it
  * had gone.
@@ -632,6 +793,170 @@ export function readTokens(): { tokens: { name: string }[]; unreadable?: string 
   }
 }
 
+/** Helper ports for the iPhone smoke leg, outside the configured preview range. */
+const IPHONE_SMOKE_PORTS: [number, number] = [3270, 3279];
+
+/**
+ * The pre-signed WDA under the deckhand home: present, when its profile expires, and which cabled
+ * iPhones it does not list. Nothing here fails doctor unless an iPhone is plugged in to need it.
+ */
+export function checkWda(profile: WdaProfile | null, paired: PhysicalIphone[], productsDir: string, now: Date): Check {
+  const name = "WDA (physical iPhones)";
+  const phones = paired.filter(isCabled);
+  if (!profile) {
+    return phones.length
+      ? { name, ok: false, detail: `no WebDriverAgent at ${productsDir}, and ${phones.length} iPhone(s) are cabled — copy a WDA Products folder built and signed for them there (see PLAN §10)` }
+      : { name, ok: true, skipped: true, detail: `no WDA at ${productsDir} — only needed to preview on a physical iPhone` };
+  }
+  const days = profile.expires ? Math.floor((Date.parse(profile.expires) - now.getTime()) / 86_400_000) : null;
+  const uncovered = phones.filter((p) => !profileIncludes(profile, p.udid)).map((p) => `${p.udid} (${p.model ?? p.name})`);
+  const covers = profile.provisionsAllDevices ? "every device" : `${profile.provisionedDevices.length} device(s)`;
+  const expiry = days === null ? "expiry unknown" : days < 0 ? `EXPIRED on ${profile.expires}` : `expires ${profile.expires!.slice(0, 10)} (${days} days)`;
+  const detail = `profile covers ${covers}, ${expiry}${uncovered.length ? `; does NOT list cabled ${uncovered.join(", ")} — register them with the signing team, re-sign WDA and copy the new Products folder` : ""}`;
+  if ((days !== null && days < 0) || uncovered.length) return { name, ok: false, detail };
+  return { name, ok: true, ...(days !== null && days < 30 ? { warn: true } : {}), detail };
+}
+
+/** WDA must refuse on the phone's Wi-Fi address; anything other than a refusal is not "safe". */
+export function checkWifiExposure(udid: string, e: WifiExposure): Check {
+  const name = `iPhone ${udid}: WDA not reachable over Wi-Fi`;
+  const ports = Object.entries(e.ports).map(([p, v]) => `${p} ${v}`).join(", ");
+  if (e.verdict === "exposed") return { name, ok: false, detail: `WDA answers on ${e.ip} (${ports}) — anyone on that network can drive the phone. Stop it and let deckhand start its loopback-only copy` };
+  if (e.verdict === "not-exposed") return { name, ok: true, detail: `${e.ip} refuses WDA's ports (${ports})` };
+  if (e.verdict === "no-wifi") return { name, ok: true, detail: "the phone reports no Wi-Fi address" };
+  return { name, ok: true, warn: true, detail: `can't tell (${e.ip}: ${ports}) — macOS Local Network privacy can block the probe; keep test phones off shared Wi-Fi` };
+}
+
+export const IPHONE_CAPS = ["attach", "stream", "describe", "input"] as const;
+
+export function unknownIphoneChecks(why: string): Check[] {
+  return IPHONE_CAPS.map((cap) => ({ name: `smoke iphone: ${cap}`, ok: false, skipped: true, unknown: true as const, detail: why }));
+}
+
+/** The first cabled iPhone with no discovery blocker, not held, and in no live preview. */
+export function pickSmokeIphone(phones: PhysicalIphone[], holds: PhoneHolds, busy: Record<string, string>): { phone: PhysicalIphone | null; why: string } {
+  const free = phones.find((p) => !p.blockers.length && !holds[p.udid] && !busy[p.udid]);
+  if (free) return { phone: free, why: "" };
+  if (!phones.length) return { phone: null, why: "no iPhone cabled (devicectl lists none paired)" };
+  return { phone: null, why: phones.map((p) => `${p.udid}: ${holds[p.udid] ? `held by ${holds[p.udid]!.who}` : busy[p.udid] ? `in preview ${busy[p.udid]}` : p.blockers[0]}`).join("; ") };
+}
+
+/**
+ * The iPhone column: attach (WDA up over the loopback forward), stream (a first MJPEG frame),
+ * describe (WDA's tree) and input. The input proof acts on nothing: a pause-only W3C pointer
+ * action goes through XCUITest's event synthesis and touches no point of the screen, so it
+ * proves the input path without acting on whatever app is in front. A WDA the server already
+ * runs is used as it is, and left running.
+ */
+async function smokeIphone(): Promise<{ checks: Check[]; wifi: Check | null }> {
+  const label = (cap: string) => `smoke iphone: ${cap}`;
+  let picked: ReturnType<typeof pickSmokeIphone>;
+  try {
+    picked = pickSmokeIphone(await discoverIphones(), loadPhoneHolds(), phoneTenants(readStateFile()));
+  } catch (e) {
+    return { checks: unknownIphoneChecks(`could not list iPhones: ${(e as Error).message.slice(0, 120)}`), wifi: null };
+  }
+  const phone = picked.phone;
+  if (!phone) return { checks: unknownIphoneChecks(picked.why), wifi: null };
+  const udid = phone.udid;
+  const checks: Check[] = [];
+  const done = (cap: string, ok: boolean, detail: string) => checks.push({ name: label(cap), ok, gate: true, detail });
+  let runner: WdaRunner | null = null;
+  let wifi: Check | null = null;
+  try {
+    const forwards = await runningIproxyForwards();
+    const servers = forwards?.get(udid.toUpperCase());
+    let ports: { http: number; mjpeg: number };
+    let client: WdaClient;
+    let st = servers && (await portAnswers(servers.http)) ? await new WdaClient({ baseUrl: `http://127.0.0.1:${servers.http}` }).status() : null;
+    if (servers && st?.ready) {
+      ports = servers;
+      client = new WdaClient({ baseUrl: `http://127.0.0.1:${ports.http}` });
+    } else {
+      ports = wdaPortsFor(udid, new Set([...(forwards?.values() ?? [])].flatMap((f) => [f.http, f.mjpeg])));
+      runner = new WdaRunner({ udid, ports });
+      st = await runner.ensureRunning();
+      client = runner.client;
+    }
+    done("attach", true, `${udid} — ${phone.model ?? phone.name} iOS ${st.iosVersion ?? phone.osVersion ?? "?"}, WDA ${st.build ?? "?"}${runner ? " (started for this check)" : " (the server's)"}`);
+    wifi = checkWifiExposure(udid, await wifiExposure(st.wifiIp));
+
+    const backend = new IphoneMjpegBackend({
+      portRange: IPHONE_SMOKE_PORTS,
+      mjpegUrl: async () => `http://127.0.0.1:${ports.mjpeg}/`,
+      lease: () => null,
+      act: async () => {
+        throw new Error("doctor sends no viewer input");
+      },
+      describe: async () => "",
+    });
+    const stream = await backend.attach({ platform: "ios", udid, physical: true });
+    try {
+      done("stream", await stream.waitForFirstFrame(), "first MJPEG frame from WDA");
+    } finally {
+      await stream.detach().catch(() => {});
+    }
+
+    const control = new IphoneControl({ clientFor: async () => client });
+    const tree = await control.describe({ platform: "ios", udid });
+    let n = 0;
+    const walk = (node: { children?: unknown[] }): void => {
+      for (const c of (node.children ?? []) as { children?: unknown[] }[]) {
+        n++;
+        walk(c);
+      }
+    };
+    for (const r of tree.roots) walk(r as { children?: unknown[] });
+    done("describe", n > 0, `${n} elements`);
+
+    await client.pointer([{ type: "pause", duration: 10 }]);
+    done("input", true, "a pause-only pointer action went through XCUITest's input path (it touches nothing)");
+  } catch (e) {
+    const have = new Set(checks.map((c) => c.name));
+    const hint = (e as { hint?: string }).hint;
+    for (const cap of IPHONE_CAPS) if (!have.has(label(cap))) done(cap, false, `${(e as Error).message.slice(0, 160)}${hint ? ` — ${hint}` : ""}`);
+  } finally {
+    runner?.stop();
+  }
+  return { checks, wifi };
+}
+
+function readStateFile(): PersistedState | null {
+  try {
+    return JSON.parse(readFileSync(paths.state(), "utf8")) as PersistedState;
+  } catch {
+    return null;
+  }
+}
+
+/** Cabled iPhones and the WDA they need; the Wi-Fi probe runs only against a WDA already up. */
+export async function checkIphones(smoke: boolean): Promise<Check[]> {
+  let phones: PhysicalIphone[] = [];
+  let listError: string | null = null;
+  try {
+    phones = await discoverIphones();
+  } catch (e) {
+    listError = (e as Error).message;
+  }
+  const out: Check[] = [checkWda(readWdaProfile(), phones, paths.wdaProducts(), new Date())];
+  if (listError) out.push({ name: "physical iPhones", ok: true, warn: true, detail: `devicectl could not list them: ${listError.slice(0, 160)}` });
+  else if (phones.length) out.push({ name: "physical iPhones", ok: true, detail: phones.map((p) => `${p.udid} ${p.model ?? p.name}: ${p.blockers.length ? p.blockers.join("; ") : "targetable"}`).join(" | ") });
+  if (smoke) {
+    const r = await smokeIphone();
+    if (r.wifi) out.push(r.wifi);
+    out.push(...r.checks);
+    return out;
+  }
+  const forwards = await runningIproxyForwards();
+  for (const p of phones) {
+    const http = forwards?.get(p.udid.toUpperCase())?.http;
+    if (!http || !(await portAnswers(http))) continue;
+    const st = await new WdaClient({ baseUrl: `http://127.0.0.1:${http}` }).status();
+    if (st?.ready) out.push(checkWifiExposure(p.udid, await wifiExposure(st.wifiIp)));
+  }
+  return out;
+}
+
 export async function runDoctor(opts: { smoke?: boolean } = {}): Promise<{ checks: Check[]; ok: boolean }> {
   const checks: Check[] = [];
 
@@ -659,14 +984,18 @@ export async function runDoctor(opts: { smoke?: boolean } = {}): Promise<{ check
     checks.push(checkWebHost(config, apps));
     const egress = checkNavigateEgress(lookupTypesafeKey());
     if (egress) checks.push(egress);
+    checks.push(await checkExpoToken(lookupExpoToken(), new EasClient(expoTokenSource()), apps.flatMap((a) => (a.easProjectId ? [a.easProjectId] : []))));
     checks.push(await checkServerFreshness(config));
     checks.push(await checkPublicUrl(config));
+    if (!opts.smoke) checks.push(...(await checkIphones(false)));
     if (opts.smoke) {
       // Sequential, not parallel: both legs create and boot a device, and an emulator booting
       // beside a simulator on the same machine is exactly the CPU contention that made the
       // Android stream look broken in the first place. The gate is allowed to be slow.
       checks.push(...(await smokeIos(config)));
       checks.push(...(await smokeAndroid()));
+      checks.push(...(await smokePhone()));
+      checks.push(...(await checkIphones(true)));
     }
   }
 
@@ -676,6 +1005,6 @@ export async function runDoctor(opts: { smoke?: boolean } = {}): Promise<{ check
 
 export function formatChecks(checks: Check[]): string {
   return checks
-    .map((c) => `${c.skipped ? "•" : c.warn ? "⚠" : c.ok ? "✓" : "✗"} ${c.name}${c.detail ? ` — ${c.detail}` : ""}`)
+    .map((c) => `${c.unknown ? "?" : c.skipped ? "•" : c.warn ? "⚠" : c.ok ? "✓" : "✗"} ${c.name}${c.detail ? ` — ${c.detail}` : ""}`)
     .join("\n");
 }

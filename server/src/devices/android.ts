@@ -458,6 +458,8 @@ export class AndroidManager {
    * and `trimPool` deleted AVDs without calling this at all.
    */
   async shutdown(serial: string, timeoutMs = 20_000): Promise<boolean> {
+    // A phone answers `get-state` until it is unplugged, and is never deckhand's to kill.
+    if (!/^emulator-\d+$/.test(serial)) throw new AndroidError(`refusing to shut down ${serial}: it is a physical device, not an emulator deckhand booted`);
     await this.adb(serial, ["emu", "kill"]).catch(() => {});
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {

@@ -69,7 +69,7 @@ const IDLE_FLUSH_MS = 120;
  *
  * Without this, every reconnect — and the viewer reconnects routinely, to pull
  * a fresh keyframe — tore down screenrecord and immediately started it again.
- * The teardown's device-side `pkill screenrecord` then raced the new process
+ * The teardown's device-side kill of the recorder then raced the new process
  * and sometimes killed it, which read as "this device cannot encode" and
  * dropped the viewer. Lingering makes a reconnect reuse the live recorder.
  */
@@ -90,7 +90,10 @@ export interface AvccSubscriber {
   close: () => void;
 }
 
-export type SpawnRecorder = (serial: string) => ChildProcessWithoutNullStreams;
+/** `bounded`: this device's screenrecord refused an unlimited recording, so ask for its maximum. */
+export type SpawnRecorder = (serial: string, bounded: boolean) => ChildProcessWithoutNullStreams;
+/** Stop the device-side recorder with this pid — the one this source started, and only that one. */
+export type KillRecorder = (serial: string, pid: number) => void;
 
 /**
  * The device-side argv of our recorder. `adb exec-out <these>` runs them as a
@@ -119,7 +122,31 @@ export const RECORDER_ARGV = [
  */
 export const RECORDER_PKILL_PATTERN = RECORDER_ARGV.slice(0, 2).join(" ");
 
-const defaultSpawnRecorder: SpawnRecorder = (serial) => spawn("adb", ["-s", serial, "exec-out", ...RECORDER_ARGV]);
+/** screenrecord before v1.4 (Samsung's Android 13 among them) refuses `--time-limit=0` on stdout and exits. */
+const REFUSED_UNLIMITED = /time limit .*outside acceptable range/i;
+
+/** RECORDER_ARGV, with the time limit at screenrecord v1.3's maximum when the device refused an unlimited one. */
+export function recorderArgv(bounded: boolean): string[] {
+  return RECORDER_ARGV.map((a) => (bounded && a === "--time-limit=0" ? "--time-limit=180" : a));
+}
+
+/**
+ * The device shell prints its own pid and then `exec`s the recorder in place, so the first line
+ * of stdout is the recorder's pid on the device: stop() kills that pid, never every screenrecord
+ * by name — on a phone, another recorder is somebody else's.
+ */
+export const PID_PREAMBLE = ["echo", "$$;", "exec"] as const;
+
+/** ONE argument: `adb exec-out` quotes each of several arguments, which would print `$$` literally. */
+export function recorderCommand(bounded: boolean): string {
+  return [...PID_PREAMBLE, ...recorderArgv(bounded)].join(" ");
+}
+
+const defaultSpawnRecorder: SpawnRecorder = (serial, bounded) => spawn("adb", ["-s", serial, "exec-out", recorderCommand(bounded)]);
+
+const defaultKillRecorder: KillRecorder = (serial, pid) => {
+  spawn("adb", ["-s", serial, "shell", "kill", "-INT", String(pid)], { stdio: "ignore" }).unref();
+};
 
 /** One screenrecord process per device, fanned out to every viewer. */
 export class AvccSource {
@@ -146,12 +173,20 @@ export class AvccSource {
   private failedAt = 0;
   private settleReady: ((ok: boolean) => void) | null = null;
   private readyTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The running recorder's pid on the device, read from the first line of its stdout. */
+  private devicePid: number | null = null;
+  /** Bytes before the H.264 starts (the pid line, screenrecord's own complaints); null once streaming. */
+  private preamble: Buffer | null = null;
+  private bounded = false;
+  /** The recorder just refused an unlimited recording: restart it bounded rather than call the encoder dead. */
+  private retryBounded = false;
 
   constructor(
     private readonly serial: string,
     private readonly spawnRecorder: SpawnRecorder = defaultSpawnRecorder,
     /** Backoff after a failed probe. Injected by tests; 0 re-probes immediately. */
     private readonly retryAfterMs: number = RETRY_AFTER_MS,
+    private readonly killRecorder: KillRecorder = defaultKillRecorder,
   ) {}
 
   /**
@@ -289,10 +324,12 @@ export class AvccSource {
     this.stopped = false;
     this.parser.reset();
     this.startedAt = Date.now();
+    this.devicePid = null;
+    this.preamble = Buffer.alloc(0);
 
     let child: ChildProcessWithoutNullStreams;
     try {
-      child = this.spawnRecorder(this.serial);
+      child = this.spawnRecorder(this.serial, this.bounded);
     } catch {
       this.settle(false);
       return;
@@ -331,32 +368,40 @@ export class AvccSource {
     } catch {
       /* already gone */
     }
-    // `adb exec-out` dying does not always take the device-side recorder with
-    // it; a stray screenrecord would hold the encoder against the next start.
-    // By NAME, deliberately broader than the orphan sweep's `pkill -f
-    // <RECORDER_PKILL_PATTERN>` (androidAdb.ts), which proves ownership four
-    // ways because it may be looking at a device we do not own. This is our own
-    // teardown of our own stream, and the serial can only be an emulator
-    // deckhand booted — deckhand never targets physical hardware (PLAN §2 "NO
-    // physical devices"), so
-    // there is no third party's recorder on it to catch, and the encoder is
-    // single-instance across emulators, so one we fail to kill costs every
-    // other device its H.264.
-    try {
-      spawn("adb", ["-s", this.serial, "shell", "pkill", "-INT", "screenrecord"], { stdio: "ignore" }).unref();
-    } catch {
-      /* best effort */
-    }
+    // `adb exec-out` dying does not always take the device-side recorder with it, and one left
+    // running holds the encoder against the next start. Killed by the pid it printed, so a phone's
+    // other recorders are left alone.
+    this.killDeviceRecorder();
     this.description = null;
     this.gop = [];
     this.gopBytes = 0;
     this.parser.reset();
   }
 
+  private killDeviceRecorder(): void {
+    const pid = this.devicePid;
+    this.devicePid = null;
+    if (pid === null) return;
+    try {
+      this.killRecorder(this.serial, pid);
+    } catch {
+      /* best effort */
+    }
+  }
+
   private onExit(): void {
     const lived = Date.now() - this.startedAt;
     for (const ev of this.parser.flush()) this.emit(ev.type, ev.payload);
     this.child = null;
+    this.devicePid = null;
+    if (this.retryBounded && !this.stopped) {
+      this.retryBounded = false;
+      this.restartTimer = setTimeout(() => {
+        this.restartTimer = null;
+        if (!this.stopped) this.start();
+      }, RESTART_DELAY_MS);
+      return;
+    }
 
     // No viewers left, or we're shutting down: let it stay down.
     if (this.stopped || this.subscribers.size === 0) {
@@ -387,7 +432,32 @@ export class AvccSource {
     }, RESTART_DELAY_MS);
   }
 
-  private onBytes(buf: Buffer): void {
+  /** Take the pid line and any refusal off the front of stdout; return what is H.264. */
+  private takePreamble(buf: Buffer): Buffer {
+    let pending = Buffer.concat([this.preamble ?? Buffer.alloc(0), buf]);
+    for (;;) {
+      // Annex-B opens with a zero byte; text lines never do.
+      if (pending.length && pending[0] === 0x00) break;
+      const nl = pending.indexOf(0x0a);
+      if (nl < 0) {
+        if (pending.length <= 512) {
+          this.preamble = pending;
+          return Buffer.alloc(0);
+        }
+        break;
+      }
+      const line = pending.subarray(0, nl).toString("latin1").trim();
+      pending = pending.subarray(nl + 1);
+      if (this.devicePid === null && /^\d+$/.test(line)) this.devicePid = Number(line);
+      else if (!this.bounded && REFUSED_UNLIMITED.test(line)) this.bounded = this.retryBounded = true;
+    }
+    this.preamble = null;
+    return pending;
+  }
+
+  private onBytes(chunk: Buffer): void {
+    const buf = this.preamble === null ? chunk : this.takePreamble(chunk);
+    if (buf.length === 0) return;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     for (const ev of this.parser.push(buf)) this.emit(ev.type, ev.payload);
     this.idleTimer = setTimeout(() => {
@@ -440,5 +510,6 @@ export class AvccSource {
     } catch {
       /* already gone */
     }
+    this.killDeviceRecorder();
   }
 }

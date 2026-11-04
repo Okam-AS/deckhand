@@ -47,6 +47,8 @@ export interface BuildPlanInput {
    * livesync process (see `nativescriptDevRun`) instead of plan steps.
    */
   local?: boolean;
+  /** The Android package deckhand will verify and drive; a source build on a phone must produce it. */
+  androidPackage?: string;
 }
 
 /**
@@ -349,6 +351,26 @@ const expoAndroidRun = (serial: string): string =>
     `npx expo run:android --device "$_avd" --no-bundler`,
   ].join("\n");
 
+/**
+ * A phone's expo device name is the `model:` adb lists for it (`SM_G980F`), not its serial.
+ * Two phones of one model are the same name to expo, which installs on the first one adb lists,
+ * so that build is refused rather than sent to a phone this preview does not hold.
+ * expo installs before deckhand can check what it built, so the resolved config's package is
+ * checked first. A Gradle flavour's applicationIdSuffix is not in that config and gets through.
+ */
+const expoPhoneRun = (serial: string, pkg: string | undefined): string => {
+  if (!pkg || !/^[A-Za-z0-9_.]+$/.test(pkg)) throw new Error(`a source build on phone ${serial} needs a valid registered Android package, got ${JSON.stringify(pkg)}`);
+  return [
+    `_pkg=$(npx expo config --json 2>/dev/null | node -e 'let s="";process.stdin.on("data",(d)=>(s+=d)).on("end",()=>{try{process.stdout.write(String(JSON.parse(s).android?.package??""))}catch{}})')`,
+    `[ "$_pkg" = '${pkg}' ] || { echo "this checkout builds Android package \${_pkg:-(none: expo config --json gave no android.package)}, not ${pkg}, and expo run:android would install it on the borrowed phone before deckhand could check it. Make android.package in app.json/app.config match, or register the right bundleId for the app." >&2; exit 1; }`,
+    `_name=$(adb devices -l | awk '$1 == "${serial}" { for (i = 2; i <= NF; i++) if ($i ~ /^model:/) { sub(/^model:/, "", $i); print $i } }')`,
+    `[ -n "$_name" ] || { echo "adb lists no model for ${serial}, and expo run:android names a phone by its model" >&2; exit 1; }`,
+    `_same=$(adb devices -l | awk -v m="model:$_name" '{ for (i = 2; i <= NF; i++) if ($i == m) n++ } END { print n + 0 }')`,
+    `[ "$_same" = 1 ] || { echo "$_same devices of model $_name are plugged in, and expo run:android picks a phone by its model, so it could install on one this preview does not hold. Unplug the others while this builds, or preview an EAS build (start_preview eas), which installs by serial." >&2; exit 1; }`,
+    `npx expo run:android --device "$_name" --no-bundler`,
+  ].join("\n");
+};
+
 function androidPlan(i: BuildPlanInput): CommandStep[] {
   // `i.udid` carries the adb serial for Android.
   const serial = i.udid;
@@ -356,7 +378,7 @@ function androidPlan(i: BuildPlanInput): CommandStep[] {
     if (i.type === "expo") {
       return {
         name: "build",
-        run: { kind: "shell", script: expoAndroidRun(serial) },
+        run: { kind: "shell", script: /^emulator-\d+$/.test(serial) ? expoAndroidRun(serial) : expoPhoneRun(serial, i.androidPackage) },
         cwd: i.worktreePath,
         env: i.appEnv,
         idleTimeoutMs: GENERAL_IDLE_MS,

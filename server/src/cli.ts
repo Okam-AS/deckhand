@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from "node
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { stringify as toYaml } from "yaml";
-import { loadConfig, loadApps, loadTokens, parseRepo } from "./config.ts";
+import { loadConfig, loadApps, loadTokens, parseRepo, EAS_PROJECT_ID_RE } from "./config.ts";
 import { paths } from "./paths.ts";
 import {
   addTokenEntry,
@@ -15,6 +15,7 @@ import {
   writeApps,
   writeSecretEnv,
   writeTypesafeKey,
+  writeExpoToken,
 } from "./cli/configWrite.ts";
 import { runDoctor, formatChecks, deviceGateExit } from "./cli/doctor.ts";
 
@@ -74,11 +75,18 @@ Everything else, for when you already know what you want:
   deckhand app add <id> --path /abs/dir [--repo owner/name] [--type ...]   local dev mode (type auto-detected)
   deckhand app add <id> --path /abs/dir --type web                        local web dev server (Vite)
       any of the above also take [--migrates-from <id>]                   the app this one is a port of
+                             and [--eas-project <uuid>]                   its EAS project, for previews of EAS builds
   deckhand app list
   deckhand env set <appId> KEY=VALUE
   deckhand secret set typesafe                     store the TypeSafe API key that turns on \`navigate\`
                                                    (read from TYPESAFE_API_KEY or stdin, never argv)
-  deckhand secret rm typesafe`;
+  deckhand secret rm typesafe
+  deckhand secret set expo                         store a read-only Expo robot token, for previews of EAS builds
+                                                   (read from stdin, never argv)
+  deckhand secret rm expo
+  deckhand phone list                              Android phones plugged in: free, held, or in a preview
+  deckhand phone hold <id> [--who <name>]          keep a phone out of every preview until released
+  deckhand phone release <id>                      give a held phone back to previews`;
 
 /**
  * Keep one bad request from taking every live preview down with it.
@@ -184,14 +192,25 @@ async function main(): Promise<void> {
       return fail(`unknown app subcommand; see 'deckhand'`);
 
     case "secret":
-      if (_[2] !== "typesafe") return fail("usage: deckhand secret set|rm typesafe");
-      if (sub === "set") return cmdSecretSetTypesafe();
-      if (sub === "rm") return cmdSecretRmTypesafe();
-      return fail("usage: deckhand secret set|rm typesafe");
+      if (_[2] === "typesafe" && sub === "set") return cmdSecretSetTypesafe();
+      if (_[2] === "typesafe" && sub === "rm") return cmdSecretRmTypesafe();
+      if (_[2] === "expo" && sub === "set") return cmdSecretSetExpo();
+      if (_[2] === "expo" && sub === "rm") return cmdSecretRmExpo();
+      return fail("usage: deckhand secret set|rm typesafe|expo");
 
     case "env":
       if (sub === "set") return cmdEnvSet(_[2], _[3]);
       return fail(`unknown env subcommand; see 'deckhand'`);
+
+    case "phone": {
+      const { cmdPhone } = await import("./cli/phone.ts");
+      try {
+        console.log(await cmdPhone(sub, _[2], str(flags.who)));
+      } catch (e) {
+        return fail((e as Error).message);
+      }
+      return;
+    }
 
     default:
       console.log(USAGE);
@@ -389,13 +408,16 @@ async function cmdAppAdd(id: string | undefined, repo: string | undefined, flags
   }
   let type = str(flags.type);
   let bundleId = str(flags["bundle-id"]);
+  let easProjectId = str(flags["eas-project"]);
+  if (easProjectId && !EAS_PROJECT_ID_RE.test(easProjectId)) fail(`--eas-project "${easProjectId}" is not an EAS project id (a UUID)`);
   if (path) {
     // Local dev mode: the folder is right here — detect what the CLI can.
     if (!existsSync(path)) fail(`--path ${path} does not exist`);
-    const { detectAppTypeFromDir, detectBundleIdFromDir, resolveExpoConfigFromDir, expoBundleId } =
+    const { detectAppTypeFromDir, detectBundleIdFromDir, resolveExpoConfigFromDir, expoBundleId, easProjectIdFromDir } =
       await import("./engine/detect.ts");
     type = type ?? detectAppTypeFromDir(path) ?? undefined;
     if (type === "expo") {
+      easProjectId = easProjectId ?? easProjectIdFromDir(path) ?? undefined;
       // Expo apps may declare the bundle id in a dynamic app.config.* — resolve it.
       const { config, error } = await resolveExpoConfigFromDir(path);
       bundleId = bundleId ?? expoBundleId(config, "ios") ?? undefined;
@@ -445,10 +467,11 @@ async function cmdAppAdd(id: string | undefined, repo: string | undefined, flags
     ...(str(flags.branch) ? { defaultBranch: str(flags.branch)! } : {}),
     ...(bundleId ? { bundleId } : {}),
     ...(migratesFrom ? { migratesFrom } : {}),
+    ...(easProjectId ? { easProjectId } : {}),
   });
   writeApps(apps);
   console.log(
-    `registered app "${id}" (${type}${path ? `, local: ${path}` : ""}${repo ? `, repo: ${repo}` : ""}${migratesFrom ? `, migrates from: ${migratesFrom}` : ""})`,
+    `registered app "${id}" (${type}${path ? `, local: ${path}` : ""}${repo ? `, repo: ${repo}` : ""}${migratesFrom ? `, migrates from: ${migratesFrom}` : ""}${easProjectId ? `, EAS project: ${easProjectId}` : ""})`,
   );
 }
 
@@ -480,6 +503,22 @@ async function cmdSecretSetTypesafe(): Promise<void> {
 function cmdSecretRmTypesafe(): void {
   rmSync(paths.typesafeKey(), { force: true });
   console.log("removed the TypeSafe key — navigate is off (unless TYPESAFE_API_KEY is set in the server's environment)");
+}
+
+async function cmdSecretSetExpo(): Promise<void> {
+  if (process.stdin.isTTY) console.error("Paste a read-only Expo robot token (expo.dev → Account settings → Robot users), then press Enter and Ctrl-D:");
+  const chunks: Buffer[] = [];
+  for await (const c of process.stdin) chunks.push(c as Buffer);
+  const token = Buffer.concat(chunks).toString("utf8").trim();
+  if (!token) fail("no token: pipe the Expo robot token on stdin");
+  if (/\s/.test(token)) fail("that token contains whitespace — paste only the token");
+  writeExpoToken(token);
+  console.log(`stored the Expo token at ${paths.expoToken()} (0600, sent only to api.expo.dev, never exposed via MCP). Check it with \`deckhand doctor\`. Undo: deckhand secret rm expo`);
+}
+
+function cmdSecretRmExpo(): void {
+  rmSync(paths.expoToken(), { force: true });
+  console.log("removed the Expo token — previews from EAS builds are off until one is set again");
 }
 
 function str(v: string | boolean | undefined): string | undefined {
