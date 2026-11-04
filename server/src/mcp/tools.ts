@@ -27,7 +27,7 @@ import { drive, isMutating, rotationWarning } from "../testing/drive.ts";
 import { FLOWS_FILENAME, readFlow } from "../engine/flows.ts";
 import { RefError as ScreenRefError } from "../testing/screen.ts";
 import type { JevProvider } from "../navigate/jev.ts";
-import { navigate, waitSettled } from "../navigate/loop.ts";
+import { navigate, SETTLE_TIMEOUT_MS, waitSettled } from "../navigate/loop.ts";
 import { check, MAX_CHECKS, PASS_AT, FAIL_AT, HEALTH_FAIL_AT } from "../navigate/check.ts";
 import { readScreen, pngSize } from "../navigate/screen.ts";
 import { EGRESS_HOST } from "../navigate/egress.ts";
@@ -1269,7 +1269,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Check that a screen looks right (TypeSafe Jev, screenshot)",
       description:
-        "Verify what a screen SHOWS in one call: deckhand waits for the screen to settle, takes the screenshot and asks a vision model (TypeSafe Jev) one yes/no question per statement — `expect` must hold, `expectNot` must not — plus four built-in health questions (an error or crash screen, a developer overlay such as the Expo dev menu or a redbox, a blank or half-loaded page, overlapping text or controls), which fail at ≥" +
+        `Verify what a screen SHOWS in one call: deckhand waits up to ${SETTLE_TIMEOUT_MS / 1000} s for the screen to settle (one still moving comes back \`unsure\`, with \`unsettled\` naming it), ` +
+        "takes the screenshot and asks a vision model (TypeSafe Jev) one yes/no question per statement — `expect` must hold, `expectNot` must not — plus four built-in health questions (an error or crash screen, a developer overlay such as the Expo dev menu or a redbox, a blank or half-loaded page, overlapping text or controls), which fail at ≥" +
         `${HEALTH_FAIL_AT}. ` +
         `Each statement comes back with the model's probability and a verdict: pass at ≥${PASS_AT} (≤${FAIL_AT} for expectNot), fail at the other end, unsure between. ` +
         "Pass `referenceDeviceId` (another device in this preview, e.g. the reference app shown alongside) — or `referencePreviewId`+`referenceDeviceId` — to also ask whether the two screens match in content and layout: the parity check. " +
@@ -1297,12 +1298,16 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         }
         if (n === 0 && !args.referenceDeviceId) return fail("nothing_to_check", "pass `expect`, `expectNot` or `referenceDeviceId`", "state what the screen should show");
         const appId = engine.appIdFor(args.previewId);
+        const refDevice = args.referenceDeviceId;
+        const refAudit = refDevice ? { referenceApp: engine.appIdFor(refPreview), referencePreviewId: refPreview, referenceDeviceId: refDevice } : {};
         const locale = args.uiLanguage ?? (await engine.uiLanguage(args.previewId, args.deviceId));
         const frame = () => within(engine.screenshot(args.previewId, args.deviceId), 30_000, "the screenshot");
         let result: Awaited<ReturnType<typeof check>>;
         try {
           result = await onDevice(args.previewId, args.deviceId, async () => {
+          const unsettled: Array<"screenshot" | "reference"> = [];
           const settled = await waitSettled(frame, Date.now);
+          if (!settled.settled) unsettled.push("screenshot");
           const shot = settled.shot ?? (await frame());
           let screenLines: string[] | undefined;
           try {
@@ -1310,19 +1315,27 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           } catch {
             screenLines = undefined;
           }
-          const reference = args.referenceDeviceId ? await within(engine.screenshot(refPreview, args.referenceDeviceId), 30_000, "the reference screenshot") : null;
+          let reference: Buffer | null = null;
+          if (refDevice) {
+            // Not under onDevice(refDevice): two checks referencing each other would deadlock.
+            const refFrame = () => within(engine.screenshot(refPreview, refDevice), 30_000, "the reference screenshot");
+            const refSettled = await waitSettled(refFrame, Date.now);
+            if (!refSettled.settled) unsettled.push("reference");
+            reference = refSettled.shot ?? (await refFrame());
+          }
           return check(
             { expect: args.expect ?? {}, expectNot: args.expectNot, screenLines, locale },
             {
               shot,
               reference,
+              unsettled,
               jev: decider,
               onEgress: (e) => {
                 if (!ctx.jev?.().ok) throw new Error("the TypeSafe key was removed");
                 audit.record({
                   actor: principal.name,
                   tool: "check:egress",
-                  args: { app: appId, previewId: args.previewId, deviceId: args.deviceId, to: EGRESS_HOST, questions: e.questions, bytes: e.bytes, images: e.images },
+                  args: { app: appId, previewId: args.previewId, deviceId: args.deviceId, ...refAudit, to: EGRESS_HOST, questions: e.questions, bytes: e.bytes, images: e.images },
                   result: "ok",
                 });
               },
@@ -1332,8 +1345,9 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         } catch (e) {
           return fail("check_failed", `check could not run: ${e instanceof Error ? e.message : String(e)}`, "take a `screenshot` and judge the screen yourself");
         }
-        const nextStep =
-          result.verdict === "pass"
+        const nextStep = result.unsettled
+          ? `${result.unsettled.length > 1 ? "Both screens were" : result.unsettled[0] === "reference" ? "The reference screen was" : "The screen was"} still changing after ${SETTLE_TIMEOUT_MS / 1000} s, so the answers describe one frame of a moving screen and the verdict is unsure. Wait for it to finish and check again, or take a \`screenshot\` and judge it yourself.`
+          : result.verdict === "pass"
             ? "Every statement held. Record it as evidence (update_test_run evidence: the check names and p) — a pass is the model's reading, strong but not proof."
             : result.verdict === "fail"
               ? "At least one statement failed. Take a `screenshot` and look before you report it: confirm it is the app, not a dev overlay or a statement the screen cannot show."

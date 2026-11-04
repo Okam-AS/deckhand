@@ -1937,4 +1937,45 @@ describe("check (one Jev request about the screen)", () => {
       await admin.close();
     }
   });
+
+  it("names the reference device in the egress audit, and calls a screen that never settled unsure", async () => {
+    const admin = await client(ADMIN);
+    const realShot = engine.screenshot;
+    try {
+      const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "public" } } }));
+      await waitReadyByApp(admin, "app-local");
+      const { access } = noulJev();
+      jevAccess = access;
+      // A first frame that fails leaves waitSettled unsettled at once; the fallback frame is then a moving screen's.
+      const failFirst = (deviceId: string) => {
+        let calls = 0;
+        engine.screenshot = async (_p, d) => {
+          if (d === deviceId && calls++ === 0) throw new Error("mid-transition");
+          return shot;
+        };
+      };
+      failFirst("ios-ref");
+      audited.length = 0;
+      const r = parse(await admin.callTool({ name: "check", arguments: { previewId: started.previewId, deviceId: "ios-0", referenceDeviceId: "ios-ref" } }));
+      assert.equal(r.verdict, "unsure", JSON.stringify(r));
+      assert.deepEqual(r.unsettled, ["reference"]);
+      assert.match(String(r.nextStep), /reference screen was still changing/);
+      const egress = audited.filter((e) => e.tool === "check:egress");
+      assert.equal(egress.length, 1);
+      assert.equal(egress[0]!.args?.images, 2);
+      assert.deepEqual(
+        { app: egress[0]!.args?.referenceApp, preview: egress[0]!.args?.referencePreviewId, device: egress[0]!.args?.referenceDeviceId },
+        { app: "app-local", preview: started.previewId, device: "ios-ref" },
+      );
+
+      failFirst("ios-0");
+      const own = parse(await admin.callTool({ name: "check", arguments: { previewId: started.previewId, deviceId: "ios-0", expect: { price: "costs 325,-" } } }));
+      assert.deepEqual(own.unsettled, ["screenshot"]);
+      assert.equal(own.verdict, "unsure");
+    } finally {
+      engine.screenshot = realShot;
+      jevAccess = { ok: false, code: "navigate_disabled", message: "navigate is off", hint: "deckhand secret set typesafe" };
+      await admin.close();
+    }
+  });
 });

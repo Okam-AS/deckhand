@@ -47,6 +47,8 @@ export interface CheckDeps {
   shot: Buffer;
   /** Another screenshot the screen should match (the reference app or device), when comparing. */
   reference?: Buffer | null;
+  /** Which of the two frames was still changing when it was taken: the answer about it is one frame of a moving screen. */
+  unsettled?: Array<"screenshot" | "reference">;
   jev: JevChooser;
   /** Called with the size of the request BEFORE it is sent; throwing refuses the send. */
   onEgress?: (e: { questions: number; bytes: number; images: number }) => void;
@@ -68,6 +70,8 @@ export interface CheckItem {
 export interface CheckResult {
   verdict: Verdict;
   items: CheckItem[];
+  /** Present when a frame never settled; the overall verdict is then `unsure` whatever the items say. */
+  unsettled?: Array<"screenshot" | "reference">;
   model: string;
   ms: number;
   inputTokens: number | null;
@@ -133,6 +137,13 @@ export async function check(req: CheckRequest, deps: CheckDeps): Promise<CheckRe
     const p = Math.round(a.noul * 1000) / 1000;
     return { name: c.name, statement: c.statement, p, expected: c.expected, verdict: verdictFor(p, c.expected, c.health === true), ...(c.health ? { health: true as const } : {}) };
   });
-  const verdict: Verdict = items.some((x) => x.verdict === "fail") ? "fail" : items.some((x) => x.verdict === "unsure") ? "unsure" : "pass";
-  return { verdict, items, model: res.model, ms: now() - started, inputTokens: res.usage?.input_tokens ?? null };
+  const unsettled = deps.unsettled?.length ? deps.unsettled : undefined;
+  const verdict: Verdict = unsettled
+    ? "unsure"
+    : items.some((x) => x.verdict === "fail")
+      ? "fail"
+      : items.some((x) => x.verdict === "unsure")
+        ? "unsure"
+        : "pass";
+  return { verdict, items, ...(unsettled ? { unsettled } : {}), model: res.model, ms: now() - started, inputTokens: res.usage?.input_tokens ?? null };
 }

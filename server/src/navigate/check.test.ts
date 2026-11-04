@@ -53,6 +53,17 @@ describe("check", () => {
     assert.equal(r.verdict, "pass");
   });
 
+  it("calls the whole check unsure when a frame never settled, even if every statement held", async () => {
+    const jev = jevAnswering({ "same screen": 0.95, "325,-": 0.97, "`screenshot`": 0.01 });
+    const r = await check({ expect: { price: "costs 325,-" } }, { shot, reference: shot, unsettled: ["reference"], jev });
+    assert.ok(r.items.every((i) => i.verdict === "pass"));
+    assert.equal(r.verdict, "unsure");
+    assert.deepEqual(r.unsettled, ["reference"]);
+    const still = await check({ expect: { price: "costs 325,-" } }, { shot, unsettled: [], jev });
+    assert.equal(still.verdict, "pass");
+    assert.equal(still.unsettled, undefined);
+  });
+
   it("reports the request to the egress hook before sending, and sends nothing if it refuses", async () => {
     const jev = jevAnswering({});
     await assert.rejects(check({ expect: { a: "abc" } }, { shot, jev, onEgress: () => { throw new Error("key removed"); } }), /key removed/);
