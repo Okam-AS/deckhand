@@ -3,11 +3,12 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { appendFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createServer, type AddressInfo } from "node:net";
 import { join } from "node:path";
 import type { ChildProcess, spawn } from "node:child_process";
 import { IPHONE_MARKER_ENV, IproxyForward, iproxyArgs, wdaPortsFor } from "./iproxy.ts";
 import {
-  loopbackXctestrunName, WdaRunner, WdaStartError, parseServerUrl, probeWifiPort, startFailureHint, wifiExposure, xctestrunTargets,
+  bindsMjpegToLoopback, loopbackXctestrunName, WdaRunner, WdaStartError, parseServerUrl, probeWifiPort, startFailureHint, wifiExposure, xctestrunTargets,
 } from "./wdaRunner.ts";
 import { defaultExec, type Exec } from "./ios.ts";
 import { fakeWda } from "../test-support/wdaFake.ts";
@@ -215,6 +216,24 @@ describe("WdaRunner", () => {
     }
   });
 
+  it("refuses a WDA too old to keep its screen stream off Wi-Fi, and stops the runner it started", async () => {
+    for (const build of ["16.15.2", "9.0.0", ""]) {
+      const f = runnerFixture();
+      f.wda.state.build = build;
+      try {
+        await assert.rejects(() => f.runner.ensureRunning(), (e: unknown) => e instanceof WdaStartError && /16\.15\.3 or newer/.test(e.hint ?? ""), build);
+        const x = f.spawned.find((s) => s.cmd === "xcodebuild")!;
+        assert.deepEqual(x.child.killed, ["SIGTERM"], `${build}: the old WDA was left running`);
+        assert.deepEqual(f.runner.livePids(), []);
+      } finally {
+        f.runner.stop();
+        rmSync(f.dir, { recursive: true, force: true });
+      }
+    }
+    assert.deepEqual(["16.15.3", "16.16.0", "17.0.0", "16.15.10"].map(bindsMjpegToLoopback), [true, true, true, true]);
+    assert.deepEqual(["16.14.9", "15.99.99", "1.0", undefined].map(bindsMjpegToLoopback), [false, false, false, false]);
+  });
+
   it("says what the phone needs when xcodebuild gives up", async () => {
     const f = runnerFixture({
       onSpawn: (s, log) => {
@@ -304,6 +323,24 @@ describe("Wi-Fi exposure", () => {
     assert.deepEqual((await wifiExposure("192.168.1.20", curl(7))).verdict, "not-exposed");
     assert.deepEqual((await wifiExposure("192.168.1.20", curl(28))).verdict, "cant-tell");
     assert.deepEqual((await wifiExposure(undefined, noExec)).verdict, "no-wifi");
+  });
+
+  it("calls a port that streams forever exposed, with the real curl", async () => {
+    const mjpeg = createServer((sock) => {
+      sock.once("data", () => {
+        sock.write("HTTP/1.0 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=--BoundaryString\r\n\r\n");
+        const t = setInterval(() => sock.write("--BoundaryString\r\nContent-Length: 4\r\n\r\nJPEG\r\n"), 100);
+        sock.on("close", () => clearInterval(t));
+        sock.on("error", () => clearInterval(t));
+      });
+    });
+    await new Promise<void>((r) => mjpeg.listen(0, "127.0.0.1", () => r()));
+    try {
+      const port = (mjpeg.address() as AddressInfo).port;
+      assert.equal(await probeWifiPort("127.0.0.1", port), "exposed", "WDA's never-ending MJPEG stream read as can't tell");
+    } finally {
+      mjpeg.close();
+    }
   });
 
   it("probes both WDA ports, and an answer on either is exposure", async () => {

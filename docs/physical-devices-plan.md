@@ -330,6 +330,8 @@ One PR at a time, each landed before the next is opened (AGENTS.md):
      input path and touches nothing, rather than a tap: a tap acts on whatever app is in front.
    - **iOS simulators** still capture no `app` log, so an environment marker is checked on
      physical iPhones and Android only; a simulator's stays unverified, and says so.
+   - **MJPEG binds USE_IP only from WDA 16.15.3**, so the loopback copy alone did not keep the
+     screen stream off Wi-Fi: an older WDA is refused at start.
    - Found on hardware: a forward left by a process that exited still holds the phone's port, and
      a new forward refuses rather than reuse it until the boot reap removes it.
 

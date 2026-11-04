@@ -1007,7 +1007,8 @@ change eases in/out — nothing snaps.
   on the phone that someone must approve with Face ID or the passcode; until then `list_devices`
   and `doctor` name it. Once on the Mac: `sudo xcodebuild -runFirstLaunch`, and
   `brew install libimobiledevice` (`iproxy`, `idevicesyslog`, `idevice_id`).
-  **Placing WDA:** on a developer's own machine, build WebDriverAgentRunner for generic iOS
+  **Placing WDA:** on a developer's own machine, build WebDriverAgentRunner (appium/WebDriverAgent
+  16.15.3 or newer, the first whose MJPEG honours `USE_IP`) for generic iOS
   devices with `xcodebuild build-for-testing`, signed by a team whose profile lists every test
   phone; copy the whole `Build/Products` folder (the `Debug-iphoneos` directory and the
   `*iphoneos*.xctestrun` beside it) to `wda/Products` under the deckhand home. Deckhand never
@@ -1096,11 +1097,13 @@ change eases in/out — nothing snaps.
    **WebDriverAgent on a physical iPhone** listens with no authentication, and stock WDA binds
    every interface — anyone on the phone's network could drive it. Deckhand runs only a copy of
    the `.xctestrun` with `USE_IP=127.0.0.1` on every target (read back after writing; a target
-   left unbound refuses the start), so WDA's HTTP and MJPEG bind the phone's loopback; the Mac
+   left unbound refuses the start), so WDA's HTTP and MJPEG bind the phone's loopback — MJPEG only
+   from WDA 16.15.3, so a WDA that reports an older version, or none, is stopped and refused; the Mac
    reaches them over USB through `iproxy -s 127.0.0.1`, whose argv a unit test pins because the
    listen invariant cannot see a spawned binary's bind. A WDA deckhand did not start is kept only
    if the phone's Wi-Fi address provably refuses its ports; `doctor` repeats that probe with
-   curl from outside the phone and reports "can't tell" rather than "safe" on anything but a
+   curl from outside the phone, calls any connection a port accepts exposed (the MJPEG stream never
+   ends, so the request itself only times out), and reports "can't tell" rather than "safe" on anything but a
    refused connection (macOS Local Network privacy can block the probe itself). No Apple ID,
    certificate or provisioning profile is on the Mac: the WDA Products folder and the EAS `.ipa`
    arrive signed, so item 7 holds.

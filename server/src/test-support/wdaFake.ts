@@ -15,6 +15,8 @@ export interface FakeWdaState {
   source: unknown | (() => unknown);
   window: { width: number; height: number };
   wifiIp?: string;
+  /** What `/status` reports as `build.version`. */
+  build: string;
   /** path → [status, value]: the next request to that path answers this once. */
   failOnce: Map<string, [number, unknown]>;
 }
@@ -27,6 +29,7 @@ export function fakeWda(over: Partial<FakeWdaState> = {}): { fetch: typeof fetch
     bundleId: "com.example.app",
     source: { type: "Application", label: "Demo", isVisible: "1", rect: { x: 0, y: 0, width: 390, height: 844 }, children: [] },
     window: { width: 390, height: 844 },
+    build: "16.15.3",
     failOnce: new Map(),
     ...over,
   };
@@ -45,7 +48,7 @@ export function fakeWda(over: Partial<FakeWdaState> = {}): { fetch: typeof fetch
       state.failOnce.delete(url.pathname);
       return answer(failure[0], failure[1]);
     }
-    if (path === "/status") return answer(200, { ready: true, os: { version: "27.0.1" }, ios: { ip: state.wifiIp ?? "192.168.1.20" }, build: { version: "9.0.0" } });
+    if (path === "/status") return answer(200, { ready: true, os: { version: "27.0.1" }, ios: { ip: state.wifiIp ?? "192.168.1.20" }, build: { version: state.build } });
     if (path === "/source?format=json") return answer(200, typeof state.source === "function" ? (state.source as () => unknown)() : state.source);
     if (path === "/wda/activeAppInfo") return answer(200, { bundleId: state.bundleId, name: "", pid: 4242 });
     if (path === "/screenshot") return answer(200, PNG.toString("base64"));

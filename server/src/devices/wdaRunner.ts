@@ -78,18 +78,30 @@ function at(json: unknown, keypath: string): unknown {
   return keypath.split(".").reduce<unknown>((o, k) => (o && typeof o === "object" ? (o as Record<string, unknown>)[k] : undefined), json);
 }
 
+/** The first appium/WebDriverAgent release whose MJPEG server honours USE_IP. */
+export const MIN_WDA_VERSION = "16.15.3";
+
+export function bindsMjpegToLoopback(version: string | undefined): boolean {
+  const have = /^(\d+)\.(\d+)\.(\d+)/.exec(version ?? "")?.slice(1).map(Number);
+  if (!have) return false;
+  const want = MIN_WDA_VERSION.split(".").map(Number);
+  for (let i = 0; i < 3; i++) if (have[i] !== want[i]) return have[i]! > want[i]!;
+  return true;
+}
+
 export type Exposure = "exposed" | "refused" | "cant-tell";
 
 /**
  * Whether something answers on the phone's Wi-Fi address. Probed with curl, not Node: macOS Local
  * Network privacy can block this process's own sockets to LAN hosts, which would read as "safe".
- * Only a refused connection (curl exit 7) is `refused`; anything else unexplained is `cant-tell`.
+ * A connection the port accepted is `exposed` however the request ends — WDA's MJPEG stream never
+ * ends, so curl times out on it. Only a refused connection (curl exit 7) is `refused`.
  */
 export async function probeWifiPort(ip: string, port: number, exec: Exec = defaultExec): Promise<Exposure> {
   if (isIP(ip) === 0) return "cant-tell";
   const host = isIP(ip) === 6 ? `[${ip}]` : ip;
-  const res = await exec("curl", ["-s", "-o", "/dev/null", "-m", "3", `http://${host}:${port}/status`], { timeoutMs: 6_000 });
-  if (res.code === 0) return "exposed";
+  const res = await exec("curl", ["-s", "-o", "/dev/null", "-m", "3", "-w", "%{num_connects}", `http://${host}:${port}/status`], { timeoutMs: 6_000 });
+  if (res.code === 0 || Number(res.stdout.toString().trim()) > 0) return "exposed";
   if (res.code === 7) return "refused";
   return "cant-tell";
 }
@@ -293,7 +305,16 @@ export class WdaRunner {
         throw new WdaStartError(`xcodebuild exited before WDA came up on ${this.udid}: ${tail}`, startFailureHint(this.readLog()));
       }
       url ??= parseServerUrl(this.readLog());
-      if (url && (await this.client.status(2_000))?.ready) {
+      const st = url ? await this.client.status(2_000) : null;
+      if (st?.ready) {
+        if (!bindsMjpegToLoopback(st.build)) {
+          if (this.runner === runner) this.runner = undefined;
+          killGroup(runner);
+          throw new WdaStartError(
+            `the WebDriverAgent under ${this.productsDir} is ${st.build ? `version ${st.build}` : "of an unknown version"}; before ${MIN_WDA_VERSION} it serves the phone's screen stream on every interface whatever USE_IP says`,
+            `build WebDriverAgentRunner from appium/WebDriverAgent ${MIN_WDA_VERSION} or newer, re-sign it, and copy the new Products folder to ${this.productsDir}`,
+          );
+        }
         this.lastError = undefined;
         this.cameUp = runner;
         this.log(`WDA up on ${this.udid}: it reports ${url}, reached over USB at ${this.client.baseUrl}`);
