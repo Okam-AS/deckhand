@@ -3676,6 +3676,21 @@ describe("physical iPhones", () => {
     assert.throws(() => start(h, { devices: [{ platform: "ios", serial: "not-a-udid" }] }), (e: unknown) => e instanceof PreviewError && e.code === "bad_request");
   });
 
+  it("a UDID asked for in lower case is the same phone: busy while another preview holds it, held when the hold was written in lower case", () => {
+    let n = 0;
+    const listed = { list: async () => [{ udid: IPHONE, name: "QA", model: "iPhone 15", osVersion: "27.0.1", blockers: [] }] };
+    const h = makeEngine({ eas: fakeEas({}, [], { "ios-device": ipaBuild }), genPreviewId: () => `pv${++n}`, genShareId: () => `share-${n}`, iphones: fakeIphones(listed, [], { devicectl: devicectl() }) });
+    start(h);
+    const other: App = { ...iosApp, id: "other-app" };
+    assert.throws(
+      () => h.engine.startPreview({ app: other, source: "eas", devices: [{ platform: "ios", serial: IPHONE.toLowerCase() }], access: "password" }),
+      (e: unknown) => e instanceof PreviewError && e.code === "device_busy",
+    );
+
+    const held = makeEngine({ eas: fakeEas({}, [], { "ios-device": ipaBuild }), phoneHolds: () => ({ [IPHONE.toLowerCase()]: { who: "dana", since: "t" } }), iphones: fakeIphones(listed, [], { devicectl: devicectl() }) });
+    assert.throws(() => start(held), (e: unknown) => e instanceof PreviewError && e.code === "device_busy" && /dana/.test(e.message));
+  });
+
   it("an EAS run stopped during its download never installs, launches, logs or streams on the phone it gave back", async () => {
     const log: string[] = [];
     let release!: () => void;

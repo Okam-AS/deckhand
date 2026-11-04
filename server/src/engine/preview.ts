@@ -410,6 +410,11 @@ export interface PhysicalListing {
 /** An iPhone UDID: 25 characters (`00008120-…`) on current phones, 40 hex on older ones. */
 const UDID_RE = /^(?:[0-9A-Fa-f]{8}-[0-9A-Fa-f]{16}|[0-9A-Fa-f]{40})$/;
 
+/** devicectl reports a UDID in upper case; every claim and hold compares in that form, or one phone takes two tenants. */
+function canonicalPhone<D extends DeviceRequest>(d: D): D {
+  return d.platform === "ios" && d.serial && UDID_RE.test(d.serial) ? { ...d, serial: d.serial.toUpperCase() } : d;
+}
+
 /** discoverIphones writes each blocker as "what: how to clear it". */
 function splitBlocker(text: string): { blocker: string; fix: string } {
   const i = text.indexOf(": ");
@@ -735,7 +740,7 @@ export class PreviewEngine {
 
   /** Why this phone cannot be handed to a new preview, as the structured `device_busy` error; null when it can. */
   private phoneBusy(serial: string, holds: PhoneHolds): PreviewError | null {
-    const hold = holds[serial];
+    const hold = holds[serial] ?? (UDID_RE.test(serial) ? Object.entries(holds).find(([k]) => k.toUpperCase() === serial)?.[1] : undefined);
     if (hold) {
       return new PreviewError(
         `phone ${serial} is held by ${hold.who} (since ${hold.since})`,
@@ -1416,6 +1421,7 @@ export class PreviewEngine {
   // --- start -----------------------------------------------------------------
 
   startPreview(req: StartPreviewRequest): StartPreviewResult {
+    req = { ...req, devices: req.devices.map(canonicalPhone) };
     if (req.devices.length === 0) throw new PreviewError("no devices requested");
     if (req.source === "local" && !req.app.path) {
       throw new PreviewError(
@@ -1616,6 +1622,7 @@ export class PreviewEngine {
    * immediately and polls for readiness. Booting and building happen behind it.
    */
   addDevices(previewId: string, specs: DeviceRequest[]): LiveDevice[] {
+    specs = specs.map(canonicalPhone);
     const p = this.active(previewId);
     if (!p) throw new PreviewError(`no active preview "${previewId}"`);
     if (p.devices.some((d) => d.record.platform === "web") || specs.some((sp) => sp.platform === "web")) {
