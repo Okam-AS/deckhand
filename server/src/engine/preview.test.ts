@@ -3251,6 +3251,32 @@ describe("physical Android phones", () => {
     assert.ok(!phoneLog.some((c) => c.includes("uninstall")));
   });
 
+  it("a restart that fails before the install stays failed, though an earlier run resolved a conflict", async () => {
+    const phoneLog: string[] = [];
+    let run = 0;
+    const h = makeEngine({
+      phones: fakePhones({}, phoneLog, (args) => ({ stdout: Buffer.from(args.includes("path") ? "package:/data/app/base.apk" : "Success") })),
+      runStep: async (step, opts) => {
+        if (run === 0 && step.name === "build") {
+          opts?.onLog?.("adb: failed to install app-debug.apk: Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: signatures do not match]", "stderr");
+          return { code: 1, timedOut: false, aborted: false };
+        }
+        if (run === 1 && step.name === "install-deps") {
+          opts?.onLog?.("npm ERR! code ERESOLVE", "stderr");
+          return { code: 1, timedOut: false, aborted: false };
+        }
+        return { code: 0, timedOut: false, aborted: false };
+      },
+    });
+    startPhone(h);
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+    run = 1;
+    phoneLog.length = 0;
+    h.engine.restartPreview("pv1");
+    assert.equal(await waitForPhase(h.engine, "pv1", ["failed"]), "failed");
+    assert.deepEqual(phoneLog.filter((c) => /uninstall|install -r/.test(c)), [], "the stale conflict uninstalled the app and installed the last run's APK");
+  });
+
   it("ends the device with an error when the phone leaves adb, instead of staying ready", async () => {
     let state = "device";
     const h = makeEngine({ phones: fakePhones({ adbState: async () => state }) });

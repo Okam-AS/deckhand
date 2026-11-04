@@ -526,6 +526,16 @@ export class PreviewError extends Error {
   }
 }
 
+/** A build step that exited non-zero, carrying only the lines that step printed. */
+class BuildStepFailed extends PreviewError {
+  constructor(
+    message: string,
+    readonly output: readonly string[],
+  ) {
+    super(message);
+  }
+}
+
 /**
  * Strip host-identifying material out of a failure reason before it crosses
  * into `shareState`.
@@ -2457,7 +2467,7 @@ export class PreviewEngine {
       try {
         await this.runBuildPlan(p, builder, platform, builderHandle, sourceDir, appEnv, local);
       } catch (e) {
-        if (!(await this.resolveInstallConflict(p, builder, builderHandle, sourceDir))) throw e;
+        if (!(e instanceof BuildStepFailed) || !(await this.resolveInstallConflict(p, builder, builderHandle, sourceDir, e.output))) throw e;
       }
       // Android only: its dev-client deep link carries the slug; iOS launches with --initialUrl.
       if (platform === "android" && usesMetroDeepLink(p.app.type)) slug = await this.resolveExpoSlug(sourceDir, appEnv);
@@ -2958,9 +2968,9 @@ export class PreviewEngine {
    * installed, and the log says what was removed. Anything else stays a failed build.
    * Returns whether it resolved the failure.
    */
-  private async resolveInstallConflict(p: LivePreview, dev: LiveDevice, serial: string, sourceDir: string): Promise<boolean> {
+  private async resolveInstallConflict(p: LivePreview, dev: LiveDevice, serial: string, sourceDir: string, stepOutput: readonly string[]): Promise<boolean> {
     if (!dev.record.physical || !dev.appPackage) return false;
-    const conflict = classifyInstallFailure(dev.logs.build.slice(-200).join("\n"));
+    const conflict = classifyInstallFailure(stepOutput.join("\n"));
     if (!(conflict instanceof InstallConflictError)) return false;
     const apk = await this.android().findApk(sourceDir);
     if (!apk) return false;
@@ -2999,9 +3009,11 @@ export class PreviewEngine {
     const env = platform === "android" ? androidBuildEnv(appEnv) : appEnv;
     const plan = buildPlan({ type: p.app.type, platform, udid, worktreePath, appEnv: env, local });
     for (const step of plan) {
+      const output: string[] = [];
       const res = await this.d.runStep!(step, {
         signal: dev.abort.signal,
         onLog: (line) => {
+          if (output.push(line) > LOG_CAP) output.shift();
           this.appendLog(dev, "build", `[${step.name}] ${line}`);
           this.noteProgress(p);
           // Live build sub-step for the viewer: the phase headline alone can't be
@@ -3016,9 +3028,10 @@ export class PreviewEngine {
         // viewer shows one line with no way to act on it. The cause is always in the log we
         // just captured, so lift it into the error itself.
         const cause = buildFailureCause(dev.logs.build);
-        throw new PreviewError(
+        throw new BuildStepFailed(
           `build step "${step.name}" failed${res.timedOut ? " (idle timeout)" : ""}${res.aborted ? " (aborted)" : ""}` +
             (cause ? ` — ${cause}` : ""),
+          output,
         );
       }
     }
