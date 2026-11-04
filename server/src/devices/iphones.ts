@@ -8,10 +8,10 @@ import type { WdaClient } from "../testing/wdaClient.ts";
 
 // ---------------------------------------------------------------------------
 // The physical iPhones cabled to this Mac, as the server owns them: one WDA runner (and its
-// loopback iproxy forward) per phone, up only while a preview holds the phone — WDA has no
-// authentication and a simulator shares the Mac's loopback — and reaped by IPHONE_MARKER_ENV
-// when the next server boots. Previews borrow a phone's app handle (registered bundle only) and
-// syslog stream; they never own WDA.
+// loopback iproxy forward) per phone, started on first use and kept up across previews — a cold
+// WDA start costs ~30 s — and reaped by IPHONE_MARKER_ENV when the next server boots. Previews
+// borrow a phone's app handle (registered bundle only) and syslog stream; they never own WDA.
+// Kept up means reachable, unauthenticated, from the loopback a simulator shares (PLAN §11 item 1).
 // ---------------------------------------------------------------------------
 
 export interface StartFailure {
@@ -110,13 +110,6 @@ export class Iphones {
   /** Pids of every runner and forward this server spawned and still has — the keep-set of the marker reap. */
   livePids(): number[] {
     return [...this.runners.values()].flatMap((r) => r.livePids());
-  }
-
-  /** No preview holds the phone any more: WDA and its forward go, and the next preview starts them cold. */
-  release(udid: string): void {
-    this.runners.get(udid)?.stop();
-    this.runners.delete(udid);
-    this.failures.delete(udid);
   }
 
   stopAll(): void {

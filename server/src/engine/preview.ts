@@ -2185,7 +2185,7 @@ export class PreviewEngine {
 
   /**
    * An iPhone is not booted either. It must be listed paired, cabled and unblocked, and its WDA —
-   * owned by the server while a preview holds the phone — must answer before the app is touched: a phone
+   * owned by the server, kept across previews — must answer before the app is touched: a phone
    * deckhand cannot see or drive gets no install. A locked phone is waited for, like Android's.
    */
   private async bootIphone(p: LivePreview, dev: LiveDevice): Promise<string> {
@@ -4634,10 +4634,10 @@ export class PreviewEngine {
   private async releasePhone(dev: LiveDevice): Promise<void> {
     const serial = dev.record.serial;
     if (this.isIphone(dev)) {
+      // WDA and its forward stay up for the next preview on this phone: a cold start costs ~30 s.
       if (serial && dev.appPackage) await this.iphoneApps(dev).terminate(dev.appPackage).catch(() => false);
       dev.syslog?.stop();
       dev.syslog = undefined;
-      if (serial) this.iphones().release(serial);
       return;
     }
     if (serial) {

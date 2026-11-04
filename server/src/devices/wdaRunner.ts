@@ -288,7 +288,7 @@ export class WdaRunner {
       killGroup(old);
     }
     const xctestrun = await this.loopbackXctestrun();
-    if (this.stopped) throw new WdaStartError(`WDA on ${this.udid} was released before it started`);
+    if (this.stopped) throw new WdaStartError(`WDA on ${this.udid} was stopped before it started`);
     mkdirSync(dirname(this.logPath), { recursive: true });
     const fd = openSync(this.logPath, "w");
     let runner: ChildProcess;

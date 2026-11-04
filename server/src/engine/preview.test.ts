@@ -3832,7 +3832,6 @@ describe("physical iPhones", () => {
     assert.ok(log.some((l) => l.startsWith(`devicectl device process terminate --device ${IPHONE} --pid 812`)), log.join("\n"));
     assert.ok(!h.simctlCalls.some((c) => c.includes(IPHONE)), `no simctl call may name the phone: ${h.simctlCalls.join(", ")}`);
     assert.ok(!log.some((l) => /uninstall/.test(l)), "nothing was uninstalled");
-    assert.ok(log.includes(`wda release ${IPHONE}`), "WDA outlived the preview that held the phone");
   });
 
   it("checks the .ipa's profile against this phone before the phone is touched", async () => {

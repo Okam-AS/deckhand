@@ -259,7 +259,7 @@ doctor-builds, reports `ready` → agent offers the first `start_preview`.
 | `stop_preview` | `{previewId|app}` → teardown (devices deleted, worktree removed per policy; a local app's source dir is never touched) |
 | `stop_device` | `{previewId|app, deviceId}` → tear down ONE device, leave the rest running and the URL unchanged. The way back from `start_preview` with an extra platform. Refuses the last device — that is `stop_preview`, which also frees the worktree and the share |
 | `screenshot` | `{previewId, deviceId}` → MCP image content (PNG). iOS: `xcrun simctl io <udid> screenshot`; Android (emulator or phone): `adb -s <serial> exec-out screencap -p`; a physical iPhone: WDA's `/screenshot` |
-| `describe` | `{previewId, deviceId, format?, source?, interactiveOnly?, maxDepth?}` → the accessibility tree from SimDeck (iOS by UDID, Android via `uiautomator`); on an Android phone from adb's `uiautomator dump` (`testing/adbControl.ts`), in the same shape, because SimDeck cannot address a phone. On a physical iPhone both come from WDA (`testing/iphoneControl.ts`): the tree from `/source`, taps as W3C pointer actions in points, typing through `/wda/keys`, and every touch or keystroke refused while any app but the registered one is in front; `home`, hardware buttons, `openUrl` and `toggleAppearance` are refused there outright. On an Android phone `ui` refuses non-ASCII `type` (adb `input text` would mangle it), `toggleAppearance`, and power/volume buttons (all settings), and `openUrl` is addressed to the registered app only. `format: "text"` returns it as one line per element with a ref (`e12`) instead of JSON, and makes that the base the next `ui` screen is diffed against. |
+| `describe` | `{previewId, deviceId, format?, source?, interactiveOnly?, maxDepth?}` → the accessibility tree from SimDeck (iOS by UDID, Android via `uiautomator`); on an Android phone from adb's `uiautomator dump` (`testing/adbControl.ts`), in the same shape, because SimDeck cannot address a phone. On a physical iPhone both come from WDA (`testing/iphoneControl.ts`): the tree from `/source`, taps as W3C pointer actions in points, typing through `/wda/keys`, and every touch or keystroke refused while any app but the registered one is in front; `home`, hardware buttons, `openUrl` and `toggleAppearance` are refused there outright. On an Android phone `ui` refuses non-ASCII `type` (adb `input text` would mangle it), `toggleAppearance`, and power/volume buttons (all settings), and `openUrl` is addressed to the registered app only; it has no app-in-front check, so Home and the app switcher take it out of the app. `format: "text"` returns it as one line per element with a ref (`e12`) instead of JSON, and makes that the base the next `ui` screen is diffed against. |
 | `ui` | `{previewId, deviceId, action \| actions \| flow, observe?}` → one action, a list run in order (stops at the first failure; max 25), or a list saved by name in the checkout's `deckhand.flows.yaml`. Selectors take `ref` (from the screen listing) besides `id`/`text`/`label`. After an action that can move the screen it captures until two captures agree (iOS; Android waits a fixed beat) and returns `screen`: the whole listing the first time, then only what changed. See "One call per step" below. |
 | `navigate` | `{previewId, deviceId, goal, maxSteps?=10, minConfidence?, text?: {name: value}, uiLanguage?}` → a server-side loop: wait for a still screen → `describe` → a closed candidate list (tap the centre of an on-screen interactive element, scroll toward one past the edge, back, scroll up/down, type a caller-supplied value by NAME into a text field, `done`, `stuck`; capped at 255) → one TypeSafe Jev Choice + a "goal reached?" Noul, with the settled screenshot attached as an image when the tree describes the screen poorly (`treeIsWeak`) → `ui` → repeat. Returns `outcome` (`done`/`escalated`/`limit`), a `reason` on hand-back (`NavigateReason` in `navigate/loop.ts`), a per-step trace (choice, confidence and the threshold it needed, top alternatives, settle/describe/decide/act ms, estimated and billed tokens) and `finalScreen`. **Exists only while a TypeSafe key is configured**: with none, `tools/list` does not carry it and nothing an agent reads mentions it, so an install that never set a key is exactly what it was before `navigate`. The key is looked up on every MCP request (each builds a fresh server), so `deckhand secret set|rm typesafe` takes effect on the next call with no restart. Once listed it works on every live preview (§11 item 5). |
 | `check` | `{previewId, deviceId, expect?: {name: statement}, expectNot?: {name: statement}, referenceDeviceId?, referencePreviewId?, uiLanguage?}` → waits for a still screen (one that never settles, this device's or the reference's, makes the overall verdict `unsure` and is named in `unsettled`), then ONE Jev request carrying the screenshot (plus the reference device's, when given) and the screen's minimised tree lines: a Noul per statement, "matches the reference?" when comparing, and four health questions (error/crash screen, developer overlay, blank or half-loaded page, overlapping text or controls — four narrow questions because one broad "looks broken?" read a normal list as broken). Returns each probability and a verdict (`pass` ≥ 0.8, `fail` ≤ 0.2, else `unsure`; inverted for `expectNot`; health questions fail at ≥ 0.6 and pass below 0.5) and an overall verdict. It reports the model's reading of pixels, never a finding: the caller confirms a fail with a screenshot. **Exists only while a TypeSafe key is configured**, like `navigate`, and audited as `check:egress` with its image count. |
@@ -593,11 +593,12 @@ default wildcard bind costs).
   janitor asks adb every pass and fails a phone's device once adb no longer lists it.
 - **iPhones** (2026-11-03): the UDID is the handle (on `serial`; `udid` stays a simulator's, so
   no simulator path can reach a phone). "Boot" is: listed paired, cabled and unblocked (a locked
-  phone is waited for up to two minutes), then WDA up — the server starts one per phone and keeps
-  it only while a preview holds the phone, restarting it at most three times in ten minutes; a
-  cold start costs about 30 s per preview, the price of not leaving an unauthenticated WDA on the
-  Mac's loopback (§11 item 1). Then install, syslog, launch. Teardown terminates the registered
-  app, ends the device's syslog and takes WDA and its forward down. The janitor asks `idevice_id -l`
+  phone is waited for up to two minutes), then WDA up — the server starts one per phone on first
+  use and keeps it across previews, since a cold start costs about 30 s, restarting it at most
+  three times in ten minutes. Then install, syslog, launch. Teardown terminates the registered
+  app and ends the device's syslog; WDA and its forward stay up, idle or not, which leaves an
+  unauthenticated WDA on the Mac's loopback for as long as the phone is cabled (§11 item 1).
+  The janitor asks `idevice_id -l`
   every pass and fails the device once the phone is gone.
 - Tool env resolution (JAVA_HOME/ANDROID_HOME/PATH) is fiddly on macOS — port the approach
   described in the learnings doc.
@@ -1110,15 +1111,17 @@ change eases in/out — nothing snaps.
    certificate or provisioning profile is on the Mac: the WDA Products folder and the EAS `.ipa`
    arrive signed, so item 7 holds.
    **None of that bounds a share holder on the same Mac (the 2026-07-27 caveat above).** The
-   forward puts WDA, unauthenticated, on the Mac's loopback, which a simulator shares. While a
-   preview holds an iPhone, a holder of ANY simulator share (Safari is one Home press away) or the
-   code under preview there can reach `127.0.0.1:<forward port>` and drive the whole phone — outside
-   the registered app, past the phone preview's PIN. Android is the same through the adb server on
-   `127.0.0.1:5037`, which has no authentication and is up whenever a phone is plugged in. The
-   in-app check (`iphoneControl.ts`) and `RegisteredApp` bind deckhand's own client and nothing
-   else, and the PIN default guards the phone's share link, not the phone. What deckhand does:
-   WDA and its forward exist only while a preview holds the phone. What it cannot: close the
-   window while it does — on a Mac that serves untrusted simulator shares, do not cable a phone.
+   forward puts WDA, unauthenticated, on the Mac's loopback, which a simulator shares, and the
+   server keeps it up across previews: once WDA has started on a cabled iPhone it stays reachable,
+   whether a preview holds the phone or not, until the phone is unplugged or the server stops. A
+   holder of ANY simulator share (Safari is one Home press away) or the code under preview there
+   can reach `127.0.0.1:<forward port>` and drive the whole phone — outside the registered app,
+   past the phone preview's PIN. Android is the same through the adb server on `127.0.0.1:5037`,
+   which has no authentication and is up whenever a phone is plugged in. The in-app check
+   (`iphoneControl.ts`, iPhone only — an Android phone has none, and `ui` or the viewer can press
+   its Home or app switcher) and `RegisteredApp` bind deckhand's own client and nothing else, and
+   the PIN default guards the phone's share link, not the phone. This is accepted, not closed: on
+   a Mac that serves untrusted simulator shares, do not cable a phone.
    **Egress — the one destination app content leaves this machine for: TypeSafe's API, from two
    tools under one key.** `navigate` POSTs to `api.typesafe.ai` once per step, `check` once per
    call. What decides it, in order:

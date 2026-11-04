@@ -134,26 +134,6 @@ describe("iproxy", () => {
     assert.notDeepEqual(seen.get(a), seen.get(b), "two phones were given one forward");
   });
 
-  it("takes a phone's WDA and forward down once no preview holds it, and starts a fresh one for the next", async () => {
-    const made: { udid: string; stopped: number }[] = [];
-    const iphones = new Iphones({
-      runnerFor: (udid, ports) => {
-        const forward = new IproxyForward({ udid, pairs: [[ports.http, 8100]], spawnImpl: fakeSpawn().impl, portAnswersImpl: async () => true });
-        const runner = new WdaRunner({ udid, ports, forward, productsDir: join(tmpdir(), "deckhand-no-such-wda") });
-        const rec = { udid, stopped: 0 };
-        made.push(rec);
-        const stop = runner.stop.bind(runner);
-        runner.stop = () => (rec.stopped++, stop());
-        return runner;
-      },
-    });
-    await iphones.client(UDID).catch(() => {});
-    iphones.release(UDID);
-    assert.deepEqual(made, [{ udid: UDID, stopped: 1 }]);
-    await iphones.client(UDID).catch(() => {});
-    assert.equal(made.length, 2, "the released runner was handed to the next preview");
-  });
-
   it("reads which phone each running iproxy forwards, so doctor never takes one phone's WDA for another's", () => {
     const ps = [
       "/sbin/launchd",
@@ -248,12 +228,12 @@ function runnerFixture(opts: { ready?: () => boolean; onSpawn?: (s: Spawned, log
 }
 
 describe("WdaRunner", () => {
-  it("spawns nothing when it is released while a start is still preparing", async () => {
+  it("spawns nothing when the server stops it while a start is still preparing", async () => {
     const f = runnerFixture({ ready: () => false });
     try {
       const starting = f.runner.ensureRunning();
       f.runner.stop();
-      await assert.rejects(starting, (e: unknown) => e instanceof WdaStartError && /released before it started/.test(e.message));
+      await assert.rejects(starting, (e: unknown) => e instanceof WdaStartError && /stopped before it started/.test(e.message));
       assert.equal(f.spawned.length, 0);
     } finally {
       f.runner.stop();
