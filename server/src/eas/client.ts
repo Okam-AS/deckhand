@@ -129,8 +129,15 @@ export class EasClient {
     const id = idOrPrefix.toLowerCase();
     if (!/^[0-9a-f-]{4,36}$/.test(id)) throw new EasError(`"${idOrPrefix}" is not an EAS build id or id prefix`, "pass the build id EAS shows (a UUID), or its first 8 characters", "bad_request");
     if (UUID_RE.test(id)) {
-      const data = await this.query<{ builds: { byId: EasBuild | null } }>(`query($id: ID!) { builds { byId(buildId: $id) { ${BUILD_FIELDS} } } }`, { id });
-      return data.builds.byId;
+      // byId is a global lookup: a build of another project with the same app id would pass vetting.
+      const data = await this.query<{ builds: { byId: (EasBuild & { project?: { id: string } | null }) | null } }>(
+        `query($id: ID!) { builds { byId(buildId: $id) { ${BUILD_FIELDS} project { id } } } }`,
+        { id },
+      );
+      const found = data.builds.byId;
+      if (!found || found.project?.id !== projectId) return null;
+      const { project: _project, ...b } = found;
+      return b;
     }
     const matches = (await this.builds(projectId, { limit: 100 })).filter((b) => b.id.startsWith(id));
     if (matches.length > 1) {

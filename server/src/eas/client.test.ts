@@ -40,6 +40,15 @@ function build(over: Partial<EasBuild> = {}): EasBuild {
 const ok = () => expoTokenSource(() => ({ state: "ok", token: TOKEN }));
 
 describe("EasClient", () => {
+  it("looks a full build id up only within the app's own EAS project", async () => {
+    const id = "9a14f495-ad71-4e37-9648-b51a4620cea5";
+    const owned = (projectId: string) => recorder(() => ({ body: { data: { builds: { byId: { ...build({ id }), project: { id: projectId } } } } } })).fetchImpl;
+    assert.equal(await new EasClient(ok(), owned("0d7c1b6a-0000-4000-8000-0000000000ff")).build(PROJECT, id), null);
+    const mine = await new EasClient(ok(), owned(PROJECT)).build(PROJECT, id);
+    assert.equal(mine?.id, id);
+    assert.equal((mine as unknown as Record<string, unknown>).project, undefined);
+  });
+
   it("sends the token only to the Expo GraphQL endpoint, in the Authorization header", async () => {
     const { calls, fetchImpl } = recorder(() => ({ body: { data: { app: { byId: { builds: [build()] } } } } }));
     const got = await new EasClient(ok(), fetchImpl).latest(PROJECT, "e2e", "ANDROID");
