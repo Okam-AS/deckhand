@@ -365,6 +365,7 @@ export function fakeIphones(over: Partial<Iphones> = {}, log: string[] = [], opt
       return new IphoneSyslog({ udid, ...(appProcess ? { appProcess } : {}), spawnImpl });
     },
     livePids: () => [],
+    release: (udid: string) => void log.push(`wda release ${udid}`),
     stopAll: () => {},
   };
   return Object.assign(complete as unknown as Iphones, over);

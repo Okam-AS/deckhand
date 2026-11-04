@@ -2185,7 +2185,7 @@ export class PreviewEngine {
 
   /**
    * An iPhone is not booted either. It must be listed paired, cabled and unblocked, and its WDA —
-   * owned by the server, kept across previews — must answer before the app is touched: a phone
+   * owned by the server while a preview holds the phone — must answer before the app is touched: a phone
    * deckhand cannot see or drive gets no install. A locked phone is waited for, like Android's.
    */
   private async bootIphone(p: LivePreview, dev: LiveDevice): Promise<string> {
@@ -2209,6 +2209,7 @@ export class PreviewEngine {
       dev.record.detail = `phone is ${first.blocker} — ${first.fix}`;
       await new Promise((r) => setTimeout(r, 3_000).unref());
     }
+    this.stillWanted(dev);
     this.setPhase(p, dev, "booting", "starting WebDriverAgent on the phone (a cold start takes about 30 s)");
     try {
       await iphones.client(udid);
@@ -4633,11 +4634,10 @@ export class PreviewEngine {
   private async releasePhone(dev: LiveDevice): Promise<void> {
     const serial = dev.record.serial;
     if (this.isIphone(dev)) {
-      // The registered app is stopped and this device's syslog ends; WDA and its forward stay up,
-      // owned by the server for the next preview on this phone.
       if (serial && dev.appPackage) await this.iphoneApps(dev).terminate(dev.appPackage).catch(() => false);
       dev.syslog?.stop();
       dev.syslog = undefined;
+      if (serial) this.iphones().release(serial);
       return;
     }
     if (serial) {

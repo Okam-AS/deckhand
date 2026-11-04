@@ -3721,6 +3721,23 @@ describe("physical iPhones", () => {
     assert.throws(() => start(held), (e: unknown) => e instanceof PreviewError && e.code === "device_busy" && /dana/.test(e.message));
   });
 
+  it("a preview stopped while it lists the iPhones starts no WDA on the phone afterwards", async () => {
+    const log: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const h = makeEngine({
+      eas: fakeEas({}, [], { "ios-device": ipaBuild }),
+      iphones: fakeIphones({ list: async () => (await gate, [{ udid: IPHONE, name: "QA", model: "iPhone 15", osVersion: "27.0.1", blockers: [] }]) }, log, { devicectl: devicectl() }),
+    });
+    start(h);
+    await new Promise((r) => setTimeout(r, 30));
+    await h.engine.stopPreview("pv1");
+    const at = log.length;
+    release();
+    await new Promise((r) => setTimeout(r, 100));
+    assert.deepEqual(log.slice(at).filter((l) => l.startsWith("wda ")), []);
+  });
+
   it("an EAS run stopped while it asks what the phone holds removes and installs nothing once devicectl answers", async () => {
     const log: string[] = [];
     let release!: () => void;
@@ -3815,6 +3832,7 @@ describe("physical iPhones", () => {
     assert.ok(log.some((l) => l.startsWith(`devicectl device process terminate --device ${IPHONE} --pid 812`)), log.join("\n"));
     assert.ok(!h.simctlCalls.some((c) => c.includes(IPHONE)), `no simctl call may name the phone: ${h.simctlCalls.join(", ")}`);
     assert.ok(!log.some((l) => /uninstall/.test(l)), "nothing was uninstalled");
+    assert.ok(log.includes(`wda release ${IPHONE}`), "WDA outlived the preview that held the phone");
   });
 
   it("checks the .ipa's profile against this phone before the phone is touched", async () => {

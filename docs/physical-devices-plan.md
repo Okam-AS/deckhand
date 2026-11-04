@@ -318,9 +318,11 @@ One PR at a time, each landed before the next is opened (AGENTS.md):
    - **D4** is reversed for the registered app here too: a signer/team/version conflict
      uninstalls the preview's own bundle and installs again, logged and audited; a downgrade of
      it is allowed. `freshApp` on an iPhone is always a reinstall (iOS cannot clear in place).
-   - **WDA is the server's, not the preview's.** One runner and forward per phone, kept across
-     previews (a cold start is about 30 s), restarted at most three times in ten minutes,
-     reaped by `IPHONE_MARKER_ENV` at the next boot. Teardown stops only the app and its syslog.
+   - **WDA is the server's, not the preview's.** One runner and forward per phone, up only
+     while a preview holds the phone (so a cold start, about 30 s, is paid per preview: an
+     unauthenticated WDA on the loopback a simulator shares is reachable by its share holders),
+     restarted at most three times in ten minutes, reaped by `IPHONE_MARKER_ENV` at the next
+     boot. Teardown stops the app, its syslog, and WDA with its forward.
    - **The Automation Mode prompt** is a human step the plan did not foresee: the first WDA start
      on a phone waits for it. Listing never starts WDA, so `list_devices` names it only after a
      start has failed on it; `doctor --smoke` and a `start_preview` both surface it with the fix.

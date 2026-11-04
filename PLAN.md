@@ -593,10 +593,11 @@ default wildcard bind costs).
   janitor asks adb every pass and fails a phone's device once adb no longer lists it.
 - **iPhones** (2026-11-03): the UDID is the handle (on `serial`; `udid` stays a simulator's, so
   no simulator path can reach a phone). "Boot" is: listed paired, cabled and unblocked (a locked
-  phone is waited for up to two minutes), then WDA up — the server starts one per phone on first
-  use and keeps it across previews, since a cold start costs about 30 s, restarting it at most
-  three times in ten minutes. Then install, syslog, launch. Teardown terminates the registered
-  app and ends the device's syslog; WDA and its forward stay up. The janitor asks `idevice_id -l`
+  phone is waited for up to two minutes), then WDA up — the server starts one per phone and keeps
+  it only while a preview holds the phone, restarting it at most three times in ten minutes; a
+  cold start costs about 30 s per preview, the price of not leaving an unauthenticated WDA on the
+  Mac's loopback (§11 item 1). Then install, syslog, launch. Teardown terminates the registered
+  app, ends the device's syslog and takes WDA and its forward down. The janitor asks `idevice_id -l`
   every pass and fails the device once the phone is gone.
 - Tool env resolution (JAVA_HOME/ANDROID_HOME/PATH) is fiddly on macOS — port the approach
   described in the learnings doc.
@@ -1108,6 +1109,16 @@ change eases in/out — nothing snaps.
    refused connection (macOS Local Network privacy can block the probe itself). No Apple ID,
    certificate or provisioning profile is on the Mac: the WDA Products folder and the EAS `.ipa`
    arrive signed, so item 7 holds.
+   **None of that bounds a share holder on the same Mac (the 2026-07-27 caveat above).** The
+   forward puts WDA, unauthenticated, on the Mac's loopback, which a simulator shares. While a
+   preview holds an iPhone, a holder of ANY simulator share (Safari is one Home press away) or the
+   code under preview there can reach `127.0.0.1:<forward port>` and drive the whole phone — outside
+   the registered app, past the phone preview's PIN. Android is the same through the adb server on
+   `127.0.0.1:5037`, which has no authentication and is up whenever a phone is plugged in. The
+   in-app check (`iphoneControl.ts`) and `RegisteredApp` bind deckhand's own client and nothing
+   else, and the PIN default guards the phone's share link, not the phone. What deckhand does:
+   WDA and its forward exist only while a preview holds the phone. What it cannot: close the
+   window while it does — on a Mac that serves untrusted simulator shares, do not cable a phone.
    **Egress — the one destination app content leaves this machine for: TypeSafe's API, from two
    tools under one key.** `navigate` POSTs to `api.typesafe.ai` once per step, `check` once per
    call. What decides it, in order:

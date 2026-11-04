@@ -90,10 +90,13 @@ PLAN describes the architecture. The invariants that bind every change:
   command runs. `describe`/`ui` on an Android phone go over adb (`testing/adbControl.ts`): SimDeck
   addresses Android only by AVD name. On an iPhone they go over WebDriverAgent
   (`testing/iphoneControl.ts`), which refuses every touch while another app is in front and never
-  presses home. An iPhone runs only an EAS internal `.ipa` whose profile lists it — deckhand holds
+  presses home. Those rules, `RegisteredApp` and the PIN default bind deckhand's own client and
+  the share link, **not the phone**: WDA and the adb server have no authentication and sit on the
+  Mac's loopback, which a simulator shares, so a simulator share holder can drive a phone some
+  preview holds (PLAN §11 item 1). An iPhone runs only an EAS internal `.ipa` whose profile lists it — deckhand holds
   no Apple credentials and builds nothing for a phone. WDA is signed elsewhere and placed under the
-  deckhand home; the server keeps one WDA runner and one loopback-only `iproxy` per phone
-  (`devices/iphones.ts`), reaped by marker on boot, and a cold WDA start costs about 30 s. The
+  deckhand home; the server runs one WDA runner and one loopback-only `iproxy` per phone, only while
+  a preview holds it (`devices/iphones.ts`), reaped by marker on boot, and a cold WDA start costs about 30 s per preview. The
   first start on a phone waits for a person to approve its Automation Mode prompt.
   `list_devices` names that, like every other blocker, with the fix to relay. **Never start
   a second `deckhand serve` to try a phone, even under a scratch `DECKHAND_HOME`:** its boot reap
