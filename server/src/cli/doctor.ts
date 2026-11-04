@@ -884,6 +884,7 @@ async function smokeIphone(): Promise<{ checks: Check[]; wifi: Check | null }> {
     const backend = new IphoneMjpegBackend({
       portRange: IPHONE_SMOKE_PORTS,
       mjpegUrl: async () => `http://127.0.0.1:${ports.mjpeg}/`,
+      lease: () => null,
       act: async () => {
         throw new Error("doctor sends no viewer input");
       },

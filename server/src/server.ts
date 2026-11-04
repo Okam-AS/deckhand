@@ -214,7 +214,8 @@ export function createServer(): DeckhandServer {
     new IphoneMjpegBackend({
       portRange: [iphoneLo, hi],
       mjpegUrl: (udid) => iphones.mjpegUrl(udid),
-      act: (udid, action) => viaEngine().iphoneStreamAction(udid, action),
+      lease: (udid) => viaEngine().iphoneStreamLease(udid),
+      act: (udid, action, lease) => viaEngine().iphoneStreamAction(udid, action, lease),
       describe: (udid) => viaEngine().iphoneStreamDescribe(udid),
     }),
   );

@@ -3914,10 +3914,15 @@ export class PreviewEngine {
     return t && this.isIphone(t.dev) ? t : null;
   }
 
-  /** One viewer gesture or key on an iPhone's stream, as a `ui` action on the preview holding it. */
-  async iphoneStreamAction(udid: string, action: UiAction): Promise<unknown> {
+  /** The preview an iPhone's stream input is bound to when a viewer connects. */
+  iphoneStreamLease(udid: string): string | null {
+    return this.iphoneTenant(udid)?.p.record.previewId ?? null;
+  }
+
+  /** One viewer gesture or key on an iPhone's stream, as a `ui` action on the preview that leased it. */
+  async iphoneStreamAction(udid: string, action: UiAction, lease: string): Promise<unknown> {
     const t = this.iphoneTenant(udid);
-    if (!t) throw new PreviewError(`no live preview drives iPhone ${udid}`);
+    if (!t || t.p.record.previewId !== lease) throw new PreviewError(`no live preview ${lease} drives iPhone ${udid}`);
     this.markActive(t.p);
     return this.ui(t.p.record.previewId, t.dev.record.deviceId, action);
   }

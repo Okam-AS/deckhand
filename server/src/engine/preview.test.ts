@@ -3883,8 +3883,10 @@ describe("physical iPhones", () => {
     assert.ok(wda.calls.some((c) => c.path.endsWith("/actions")));
     await assert.rejects(h.engine.ui("pv1", "ios-0", { type: "home" }), /never presses home/);
     assert.equal((await h.engine.screenshot("pv1", "ios-0")).readUInt32BE(0), 0x89504e47);
-    await h.engine.iphoneStreamAction(IPHONE, { type: "tap", x: 0.1, y: 0.1 });
-    await assert.rejects(h.engine.iphoneStreamAction("00008120-0000000000000BBB", { type: "tap", x: 0.1, y: 0.1 }), /no live preview drives/);
+    assert.equal(h.engine.iphoneStreamLease(IPHONE), "pv1");
+    await h.engine.iphoneStreamAction(IPHONE, { type: "tap", x: 0.1, y: 0.1 }, "pv1");
+    await assert.rejects(h.engine.iphoneStreamAction(IPHONE, { type: "tap", x: 0.1, y: 0.1 }, "pv0"), /no live preview pv0 drives/);
+    await assert.rejects(h.engine.iphoneStreamAction("00008120-0000000000000BBB", { type: "tap", x: 0.1, y: 0.1 }, "pv1"), /no live preview pv1 drives/);
     await h.engine.stopPreview("pv1");
   });
 

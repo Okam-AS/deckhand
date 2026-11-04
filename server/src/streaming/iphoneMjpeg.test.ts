@@ -23,6 +23,7 @@ function backend(url: string, acted: UiAction[] = []) {
   return new IphoneMjpegBackend({
     portRange: [0, 0],
     mjpegUrl: async () => url,
+    lease: () => "pv1",
     act: async (_udid, a) => void acted.push(a),
     describe: async () => "e1 Button \"Start\"",
   });
@@ -39,7 +40,7 @@ async function freePort(): Promise<number> {
 
 async function backendOnFreePort(url: string, acted: UiAction[] = []) {
   const port = await freePort();
-  return new IphoneMjpegBackend({ portRange: [port, port], mjpegUrl: async () => url, act: async (_u, a) => void acted.push(a), describe: async () => "screen" });
+  return new IphoneMjpegBackend({ portRange: [port, port], mjpegUrl: async () => url, lease: () => "pv1", act: async (_u, a) => void acted.push(a), describe: async () => "screen" });
 }
 
 describe("the iPhone MJPEG helper", () => {
@@ -82,7 +83,7 @@ describe("the iPhone MJPEG helper", () => {
     let release!: () => void;
     const started = new Promise<void>((r) => (release = r));
     const port = await freePort();
-    const b = new IphoneMjpegBackend({ portRange: [port, port], mjpegUrl: async () => (await started, url), act: async () => {}, describe: async () => "" });
+    const b = new IphoneMjpegBackend({ portRange: [port, port], mjpegUrl: async () => (await started, url), lease: () => "pv1", act: async () => {}, describe: async () => "" });
     try {
       const s = await b.attach({ platform: "ios", udid: UDID });
       const ac = new AbortController();
@@ -138,6 +139,56 @@ describe("the iPhone MJPEG helper", () => {
       assert.deepEqual(acted[3], { type: "key", name: "enter" });
     } finally {
       ws.close();
+      await s.detach();
+    }
+  });
+
+  it("drops input still queued when its viewer socket closes, and binds what it sends to the lease it connected under", async () => {
+    const acted: { a: UiAction; lease: string }[] = [];
+    let release!: () => void;
+    const blocked = new Promise<void>((r) => (release = r));
+    const port = await freePort();
+    let tenant: string | null = "pvA";
+    const b = new IphoneMjpegBackend({
+      portRange: [port, port],
+      mjpegUrl: async () => "http://127.0.0.1:1/",
+      lease: () => tenant,
+      act: async (_u, a, lease) => {
+        acted.push({ a, lease });
+        await blocked;
+      },
+      describe: async () => "",
+    });
+    const s = await b.attach({ platform: "ios", udid: UDID });
+    const ws = new WebSocket(`ws://127.0.0.1:${port}${s.helperBasePath}/ws`);
+    try {
+      await new Promise((r, j) => ws.once("open", r).once("error", j));
+      const frame = (o: object) => ws.send(Buffer.concat([Buffer.from([0x06]), Buffer.from(JSON.stringify(o))]));
+      frame({ type: "down", usage: 4, char: "a" });
+      frame({ type: "down", usage: 5, char: "b" });
+      for (let i = 0; i < 50 && acted.length < 1; i++) await new Promise((r) => setTimeout(r, 20));
+      ws.close();
+      await new Promise((r) => setTimeout(r, 100));
+      tenant = "pvB";
+      release();
+      await new Promise((r) => setTimeout(r, 100));
+      assert.deepEqual(acted, [{ a: { type: "type", text: "a" }, lease: "pvA" }], "a queued keystroke from a closed viewer was sent on");
+    } finally {
+      await s.detach();
+    }
+  });
+
+  it("closes a viewer socket when no preview drives the phone", async () => {
+    const acted: UiAction[] = [];
+    const port = await freePort();
+    const b = new IphoneMjpegBackend({ portRange: [port, port], mjpegUrl: async () => "http://127.0.0.1:1/", lease: () => null, act: async (_u, a) => void acted.push(a), describe: async () => "" });
+    const s = await b.attach({ platform: "ios", udid: UDID });
+    const ws = new WebSocket(`ws://127.0.0.1:${port}${s.helperBasePath}/ws`);
+    try {
+      const code = await new Promise<number>((r) => ws.once("close", (c) => r(c)));
+      assert.equal(code, 1008);
+      assert.deepEqual(acted, []);
+    } finally {
       await s.detach();
     }
   });

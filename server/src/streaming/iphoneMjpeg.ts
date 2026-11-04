@@ -20,8 +20,10 @@ export interface IphoneMjpegOptions {
   portRange: [number, number];
   /** WDA's MJPEG for this phone on loopback (WdaRunner.mjpegUrl, once ensureRunning resolved). */
   mjpegUrl(udid: string): Promise<string>;
-  /** One viewer gesture or keystroke as a `ui` action. */
-  act(udid: string, action: UiAction): Promise<unknown>;
+  /** The preview driving this phone now; a viewer socket is bound to it when it connects. */
+  lease(udid: string): string | null;
+  /** One viewer gesture or keystroke as a `ui` action, refused unless `lease` still drives the phone. */
+  act(udid: string, action: UiAction, lease: string): Promise<unknown>;
   /** The `describe` text for this phone. */
   describe(udid: string): Promise<string>;
   /** Told when a viewer action failed; input is fire-and-forget for the viewer. */
@@ -173,11 +175,16 @@ export class IphoneMjpegBackend implements StreamingBackend {
   }
 
   private wireInput(ws: WebSocket, udid: string): void {
+    const lease = this.opts.lease(udid);
+    if (!lease) return void ws.close(1008, "no preview drives this phone");
+    let closed = false;
+    ws.once("close", () => (closed = true));
     let start: { x: number; y: number } | null = null;
     let downAt = 0;
     let queue = Promise.resolve();
+    // A queued action outliving its socket would land on whichever preview holds the phone next.
     const send = (a: UiAction) => {
-      queue = queue.then(() => this.opts.act(udid, a).then(() => undefined, (e: unknown) => this.opts.onInputError?.(udid, e)));
+      queue = queue.then(() => (closed ? undefined : this.opts.act(udid, a, lease).then(() => undefined, (e: unknown) => this.opts.onInputError?.(udid, e))));
     };
     ws.on("message", (data, isBinary) => {
       if (!isBinary) return;
