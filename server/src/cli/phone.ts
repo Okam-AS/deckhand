@@ -2,7 +2,7 @@ import { discoverIphones, type PhysicalIphone } from "../devices/iphoneDiscovery
 import { readFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { AndroidPhones, usabilityBlocker, type PhoneInfo } from "../devices/androidPhone.ts";
-import { loadPhoneHolds, savePhoneHolds, type PhoneHolds } from "../devices/phoneHolds.ts";
+import { loadPhoneHolds, updatePhoneHolds, type PhoneHolds } from "../devices/phoneHolds.ts";
 import { paths } from "../paths.ts";
 import type { PersistedState } from "../state.ts";
 
@@ -72,14 +72,12 @@ export async function cmdPhone(sub: string | undefined, id: string | undefined, 
   }
   if (!id || !/^[A-Za-z0-9._:-]{1,64}$/.test(id)) throw new Error(`usage: deckhand phone ${sub === "release" ? "release <id>" : "hold <id> [--who <name>]"} — the id is the serial \`deckhand phone list\` shows`);
   if (sub === "hold") {
-    const r = holdPhone(loadPhoneHolds(), id, who || userInfo().username, new Date());
-    savePhoneHolds(r.holds);
+    const r = updatePhoneHolds((holds) => holdPhone(holds, id, who || userInfo().username, new Date()));
     const tenant = phoneTenants(readState())[holdKey(id)];
     return tenant ? `${r.said}\nnote: preview ${tenant} still drives it until that preview stops (stop_preview)` : r.said;
   }
   if (sub === "release") {
-    const r = releasePhone(loadPhoneHolds(), id);
-    savePhoneHolds(r.holds);
+    const r = updatePhoneHolds((holds) => releasePhone(holds, id));
     return r.said;
   }
   throw new Error("usage: deckhand phone list | hold <id> [--who <name>] | release <id>");

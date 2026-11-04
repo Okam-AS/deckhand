@@ -1,10 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { formatPhones, holdPhone, phoneTenants, releasePhone } from "./phone.ts";
-import { loadPhoneHolds, savePhoneHolds } from "../devices/phoneHolds.ts";
+import { loadPhoneHolds, savePhoneHolds, updatePhoneHolds } from "../devices/phoneHolds.ts";
 
 describe("deckhand phone", () => {
   it("holds and releases a phone, saying who has it", () => {
@@ -75,6 +75,27 @@ describe("deckhand phone", () => {
       assert.throws(() => loadPhoneHolds(file));
       writeFileSync(file, JSON.stringify({ RF8: { who: "dana" } }));
       assert.throws(() => loadPhoneHolds(file), /RF8/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("changes the holds only under a lock that another phone command holding it keeps it waiting for", () => {
+    const dir = mkdtempSync(join(tmpdir(), "dh-holds-"));
+    try {
+      const file = join(dir, "phone-holds.json");
+      savePhoneHolds({ RF8: { who: "dana", since: "t" } }, file);
+      const add = (serial: string) => (holds: Record<string, { who: string; since: string }>) => ({ holds: { ...holds, [serial]: { who: "kim", since: "t" } } });
+      writeFileSync(`${file}.lock`, "");
+      assert.throws(() => updatePhoneHolds(add("R5C"), file, 200), /held by another/);
+      assert.deepEqual(Object.keys(loadPhoneHolds(file)), ["RF8"]);
+      const old = new Date(Date.now() - 60_000);
+      utimesSync(`${file}.lock`, old, old);
+      updatePhoneHolds(add("R5C"), file, 200);
+      assert.deepEqual(Object.keys(loadPhoneHolds(file)), ["RF8", "R5C"], "a stale lock from a dead command is broken");
+      assert.throws(() => updatePhoneHolds(() => { throw new Error("boom"); }, file, 200), /boom/);
+      updatePhoneHolds(add("XYZ"), file, 200);
+      assert.deepEqual(Object.keys(loadPhoneHolds(file)), ["RF8", "R5C", "XYZ"], "a failed change left its lock behind");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
