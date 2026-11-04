@@ -20,14 +20,21 @@ export function phoneTenants(state: Pick<PersistedState, "previews"> | null): Re
   return out;
 }
 
-export function holdPhone(holds: PhoneHolds, id: string, who: string, now: Date): { holds: PhoneHolds; said: string } {
+/** devicectl's upper case for an iPhone UDID, so a hold names the phone the way listing and the engine do; an adb serial is left as typed. */
+export function holdKey(id: string): string {
+  return /^(?:[0-9A-Fa-f]{8}-[0-9A-Fa-f]{16}|[0-9A-Fa-f]{40})$/.test(id) ? id.toUpperCase() : id;
+}
+
+export function holdPhone(holds: PhoneHolds, typed: string, who: string, now: Date): { holds: PhoneHolds; said: string } {
+  const id = holdKey(typed);
   const prior = holds[id];
   if (prior && prior.who === who) return { holds, said: `${id} is already held by ${who} (since ${prior.since})` };
   const next = { ...holds, [id]: { who, since: now.toISOString() } };
   return { holds: next, said: prior ? `${id} was held by ${prior.who}; now held by ${who}` : `${id} is held by ${who}: no preview will be given it until \`deckhand phone release ${id}\`` };
 }
 
-export function releasePhone(holds: PhoneHolds, id: string): { holds: PhoneHolds; said: string } {
+export function releasePhone(holds: PhoneHolds, typed: string): { holds: PhoneHolds; said: string } {
+  const id = holdKey(typed);
   if (!holds[id]) return { holds, said: `${id} was not held` };
   const { [id]: _gone, ...rest } = holds;
   return { holds: rest, said: `${id} is released: previews may use it again` };
@@ -67,7 +74,7 @@ export async function cmdPhone(sub: string | undefined, id: string | undefined, 
   if (sub === "hold") {
     const r = holdPhone(loadPhoneHolds(), id, who || userInfo().username, new Date());
     savePhoneHolds(r.holds);
-    const tenant = phoneTenants(readState())[id];
+    const tenant = phoneTenants(readState())[holdKey(id)];
     return tenant ? `${r.said}\nnote: preview ${tenant} still drives it until that preview stops (stop_preview)` : r.said;
   }
   if (sub === "release") {

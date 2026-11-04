@@ -18,6 +18,15 @@ describe("deckhand phone", () => {
     assert.match(releasePhone({}, "RF8").said, /was not held/);
   });
 
+  it("holds an iPhone under devicectl's upper-case UDID however it was typed, and leaves an adb serial as typed", () => {
+    const now = new Date("2026-11-03T12:00:00Z");
+    const udid = "00008120-001A2B3C4D5E6F70";
+    const held = holdPhone({}, udid.toLowerCase(), "dana", now);
+    assert.deepEqual(Object.keys(held.holds), [udid]);
+    assert.deepEqual(releasePhone(held.holds, udid.toLowerCase()).holds, {});
+    assert.deepEqual(Object.keys(holdPhone({}, "emulator-5554x", "dana", now).holds), ["emulator-5554x"]);
+  });
+
   it("lists free, held, busy and blocked phones, and a held phone that is unplugged", () => {
     const out = formatPhones(
       [
