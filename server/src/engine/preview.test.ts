@@ -3307,6 +3307,21 @@ describe("physical Android phones", () => {
     assert.match(dev.error ?? "", /left adb.*unplugged/);
   });
 
+  it("rebuilds a phone that left adb and came back when the preview is restarted", async () => {
+    let state = "device";
+    const h = makeEngine({
+      phones: fakePhones({ adbState: async () => state }),
+      runStep: async (_step, opts) => (opts?.signal?.aborted ? { code: 124, timedOut: false, aborted: true } : { code: 0, timedOut: false, aborted: false }),
+    });
+    startPhone(h);
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+    state = "missing";
+    assert.deepEqual(await h.engine.checkPhones(), ["android-0"]);
+    state = "device";
+    h.engine.restartPreview("pv1");
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready"]), "ready", JSON.stringify(h.engine.getStatus("pv1")!.devices));
+  });
+
   it("never hands a physical serial to the reaper or the emulator teardown, and keeps its stream at the boot sweep", async () => {
     const calls: string[] = [];
     let keep: ReadonlySet<string> = new Set();

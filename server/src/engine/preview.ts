@@ -202,6 +202,8 @@ interface LiveDevice {
   record: PersistedDevice;
   logs: Record<LogSource, string[]>;
   abort: AbortController;
+  /** Aborted because the phone went away, not because anyone stopped it: a restart gets a fresh controller. */
+  lost?: boolean;
   /** Pool slot held by this device (see leaseName) — released, not deleted, on teardown. */
   poolName?: string;
   /**
@@ -1690,7 +1692,10 @@ export class PreviewEngine {
       );
     }
 
-    for (const dev of doomed) dev.abort.abort();
+    for (const dev of doomed) {
+      dev.lost = false;
+      dev.abort.abort();
+    }
 
     // The livesync process is keyed by app+PLATFORM, not by device — so removing a
     // device only ends it if that platform is leaving with it. Unconditional here ONLY
@@ -3256,6 +3261,11 @@ export class PreviewEngine {
     }
     // A verdict is a claim about a build, and this replaces the build.
     this.clearTestRun(previewId);
+    for (const dev of p.devices) {
+      if (!dev.lost) continue;
+      dev.lost = false;
+      dev.abort = new AbortController();
+    }
     p.record.phase = "running";
     p.record.updatedAt = this.iso();
     this.persist();
@@ -3730,6 +3740,7 @@ export class PreviewEngine {
 
   private losePhone(p: LivePreview, dev: LiveDevice, error: string): void {
     dev.abort.abort();
+    dev.lost = true;
     const stream = p.attached.get(dev.record.deviceId);
     p.attached.delete(dev.record.deviceId);
     void stream?.detach().catch(() => {});
