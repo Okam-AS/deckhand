@@ -356,7 +356,7 @@ describe("WdaRunner", () => {
   });
 
   it("keeps a WDA it did not start only when its Wi-Fi address refuses WDA's ports", async () => {
-    const refused = runnerFixture({ ready: () => true, wifi: async () => ({ code: 7, stdout: Buffer.alloc(0), stderr: "" }) });
+    const refused = runnerFixture({ ready: () => true, wifi: async () => ({ code: 7, stdout: Buffer.alloc(0), stderr: "* connect to 10.0.0.7 port 8100 from 10.0.0.5 port 50000 failed: Connection refused\n" }) });
     const exposed = runnerFixture({ ready: () => true, wifi: async () => ({ code: 0, stdout: Buffer.alloc(0), stderr: "" }) });
     try {
       await refused.runner.ensureRunning();
@@ -372,13 +372,17 @@ describe("WdaRunner", () => {
 });
 
 describe("Wi-Fi exposure", () => {
-  const curl = (code: number): Exec => async () => ({ code, stdout: Buffer.alloc(0), stderr: "" });
+  const REFUSED = "*   Trying 192.168.1.20:8100...\n* connect to 192.168.1.20 port 8100 from 192.168.1.5 port 50000 failed: Connection refused\n* Failed to connect to 192.168.1.20 port 8100 after 3 ms: Couldn't connect to server\n";
+  const NO_ROUTE = "* Immediate connect fail for 192.168.1.20: No route to host\n* Failed to connect to 192.168.1.20 port 8100 after 1 ms: Couldn't connect to server\n";
+  const curl = (code: number, stderr = ""): Exec => async () => ({ code, stdout: Buffer.alloc(0), stderr });
 
   it("reads only a refusal as not exposed, and anything unexplained as can't tell", async () => {
     assert.equal(await probeWifiPort("192.168.1.20", 8100, curl(0)), "exposed");
-    assert.equal(await probeWifiPort("192.168.1.20", 8100, curl(7)), "refused");
+    assert.equal(await probeWifiPort("192.168.1.20", 8100, curl(7, REFUSED)), "refused");
+    assert.equal(await probeWifiPort("192.168.1.20", 8100, curl(7, NO_ROUTE)), "cant-tell", "an unreachable address read as refused");
     assert.equal(await probeWifiPort("192.168.1.20", 8100, curl(28)), "cant-tell");
-    assert.deepEqual((await wifiExposure("192.168.1.20", curl(7))).verdict, "not-exposed");
+    assert.deepEqual((await wifiExposure("192.168.1.20", curl(7, REFUSED))).verdict, "not-exposed");
+    assert.deepEqual((await wifiExposure("192.168.1.20", curl(7, NO_ROUTE))).verdict, "cant-tell");
     assert.deepEqual((await wifiExposure("192.168.1.20", curl(28))).verdict, "cant-tell");
     assert.deepEqual((await wifiExposure(undefined, noExec)).verdict, "no-wifi");
   });
@@ -399,6 +403,15 @@ describe("Wi-Fi exposure", () => {
     } finally {
       mjpeg.close();
     }
+  });
+
+  it("calls a closed port refused and an unroutable address can't tell, with the real curl", async () => {
+    const closed = createServer();
+    await new Promise<void>((r) => closed.listen(0, "127.0.0.1", () => r()));
+    const port = (closed.address() as AddressInfo).port;
+    await new Promise<void>((r) => closed.close(() => r()));
+    assert.equal(await probeWifiPort("127.0.0.1", port), "refused");
+    assert.equal(await probeWifiPort("2001:db8::1", 8100), "cant-tell", "an address with no route read as refused");
   });
 
   it("probes both WDA ports, and an answer on either is exposure", async () => {

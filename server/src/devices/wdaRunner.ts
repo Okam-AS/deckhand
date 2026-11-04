@@ -95,14 +95,15 @@ export type Exposure = "exposed" | "refused" | "cant-tell";
  * Whether something answers on the phone's Wi-Fi address. Probed with curl, not Node: macOS Local
  * Network privacy can block this process's own sockets to LAN hosts, which would read as "safe".
  * A connection the port accepted is `exposed` however the request ends — WDA's MJPEG stream never
- * ends, so curl times out on it. Only a refused connection (curl exit 7) is `refused`.
+ * ends, so curl times out on it. Only a connect the host actively refused is `refused`: curl exits 7
+ * on every failed connect (no route, unreachable, a privacy block), and only `-v` names the refusal.
  */
 export async function probeWifiPort(ip: string, port: number, exec: Exec = defaultExec): Promise<Exposure> {
   if (isIP(ip) === 0) return "cant-tell";
   const host = isIP(ip) === 6 ? `[${ip}]` : ip;
-  const res = await exec("curl", ["-s", "-o", "/dev/null", "-m", "3", "-w", "%{num_connects}", `http://${host}:${port}/status`], { timeoutMs: 6_000 });
+  const res = await exec("curl", ["-v", "-s", "-o", "/dev/null", "-m", "3", "-w", "%{num_connects}", `http://${host}:${port}/status`], { timeoutMs: 6_000 });
   if (res.code === 0 || Number(res.stdout.toString().trim()) > 0) return "exposed";
-  if (res.code === 7) return "refused";
+  if (res.code === 7 && /failed: Connection refused$/m.test(res.stderr)) return "refused";
   return "cant-tell";
 }
 
