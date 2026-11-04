@@ -3078,7 +3078,7 @@ export class PreviewEngine {
     // A LaunchAgent inherits no shell env, so without this every Android build dies
     // at "SDK location not found" even with platform-tools on PATH.
     const env = platform === "android" ? androidBuildEnv(appEnv) : appEnv;
-    const plan = buildPlan({ type: p.app.type, platform, udid, worktreePath, appEnv: env, local });
+    const plan = buildPlan({ type: p.app.type, platform, udid, worktreePath, appEnv: env, local, ...(dev.appPackage ? { androidPackage: dev.appPackage } : {}) });
     for (const step of plan) {
       const output: string[] = [];
       const res = await this.d.runStep!(step, {

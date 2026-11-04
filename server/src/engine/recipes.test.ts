@@ -197,25 +197,30 @@ describe("buildPlan — android", () => {
   });
 
   it("expo on a phone names it by the model adb lists, since expo matches device names, not serials", () => {
-    const plan = buildPlan({ ...androidInput, udid: "RF8N30YRFKY", type: "expo" });
+    const plan = buildPlan({ ...androidInput, udid: "RF8N30YRFKY", type: "expo", androidPackage: "no.example.app" });
     const script = (plan[1]!.run as { script: string }).script;
     assert.doesNotMatch(script, /emu avd name/);
     assert.match(script, /adb devices -l \| awk '\$1 == "RF8N30YRFKY"/);
     assert.match(script, /npx expo run:android --device "\$_name" --no-bundler/);
   });
 
+  /** Runs a phone build script against a fake adb listing `devices` and an expo whose config declares `pkg`. */
+  const runPhoneScript = (script: string, devices: string, pkg: string | null = "no.example.app") => {
+    const bin = fs.mkdtempSync(path.join(os.tmpdir(), "deckhand-adb-"));
+    try {
+      fs.writeFileSync(path.join(bin, "adb"), `#!/bin/sh\nprintf '%s\\n' 'List of devices attached' ${devices.split("\n").map((l) => `'${l}'`).join(" ")}\n`, { mode: 0o755 });
+      const config = JSON.stringify({ slug: "x", android: pkg ? { package: pkg } : {} });
+      fs.writeFileSync(path.join(bin, "npx"), `#!/bin/sh\nif [ "$2" = config ]; then printf '%s' '${config}'; else echo "npx $*"; fi\n`, { mode: 0o755 });
+      return spawnSync("/bin/sh", ["-c", script], { env: { PATH: `${bin}:${path.dirname(process.execPath)}:/usr/bin:/bin` }, encoding: "utf8" });
+    } finally {
+      fs.rmSync(bin, { recursive: true, force: true });
+    }
+  };
+  const ONE_PHONE = "RF8N30YRFKY device usb:1-1 product:x1s model:SM_G980F device:x1s transport_id:1";
+
   it("expo on a phone refuses to build when another device of its model is plugged in", () => {
-    const script = (buildPlan({ ...androidInput, udid: "RF8N30YRFKY", type: "expo" })[1]!.run as { script: string }).script;
-    const run = (devices: string) => {
-      const bin = fs.mkdtempSync(path.join(os.tmpdir(), "deckhand-adb-"));
-      try {
-        fs.writeFileSync(path.join(bin, "adb"), `#!/bin/sh\nprintf '%s\\n' 'List of devices attached' ${devices.split("\n").map((l) => `'${l}'`).join(" ")}\n`, { mode: 0o755 });
-        fs.writeFileSync(path.join(bin, "npx"), `#!/bin/sh\necho "npx $*"\n`, { mode: 0o755 });
-        return spawnSync("/bin/sh", ["-c", script], { env: { PATH: `${bin}:/usr/bin:/bin` }, encoding: "utf8" });
-      } finally {
-        fs.rmSync(bin, { recursive: true, force: true });
-      }
-    };
+    const script = (buildPlan({ ...androidInput, udid: "RF8N30YRFKY", type: "expo", androidPackage: "no.example.app" })[1]!.run as { script: string }).script;
+    const run = (devices: string) => runPhoneScript(script, devices);
     const alone = run("RF8N30YRFKY device usb:1-1 product:x1s model:SM_G980F device:x1s transport_id:1");
     assert.equal(alone.status, 0, alone.stderr);
     assert.match(alone.stdout, /npx expo run:android --device SM_G980F --no-bundler/);
@@ -223,6 +228,18 @@ describe("buildPlan — android", () => {
     assert.notEqual(twins.status, 0);
     assert.doesNotMatch(twins.stdout, /npx expo/, "built onto whichever of two same-model phones adb lists first");
     assert.match(twins.stderr, /2 devices of model SM_G980F/);
+  });
+
+  it("expo on a phone refuses to build a package other than the one deckhand will check", () => {
+    const script = (buildPlan({ ...androidInput, udid: "RF8N30YRFKY", type: "expo", androidPackage: "no.example.app" })[1]!.run as { script: string }).script;
+    assert.equal(runPhoneScript(script, ONE_PHONE).status, 0);
+    for (const pkg of ["com.someone.else", null]) {
+      const r = runPhoneScript(script, ONE_PHONE, pkg);
+      assert.notEqual(r.status, 0);
+      assert.doesNotMatch(r.stdout, /expo run:android/, `installed ${pkg} on a borrowed phone before deckhand checked it`);
+      assert.match(r.stderr, new RegExp(`builds Android package ${pkg ?? "\\(none: expo config --json gave no android\\.package\\)"}, not no\\.example\\.app`));
+    }
+    assert.throws(() => buildPlan({ ...androidInput, udid: "RF8N30YRFKY", type: "expo" }), /registered Android package/);
   });
 
   it("bare react-native android uses run-android --deviceId", () => {

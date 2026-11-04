@@ -587,6 +587,9 @@ default wildcard bind costs).
   phone to be awake and unlocked (one wake key, never a passcode), measures its clock offset, and
   builds on it with the app's own tool (`expo run:android --device <adb model>`, since expo names
   a phone by model, so an expo build is refused while another device of that model is plugged in).
+  That tool installs before deckhand can check what it built, so an expo build is refused unless
+  `expo config`'s `android.package` is the package deckhand will check. Not covered: a Gradle
+  flavour's `applicationIdSuffix`, and react-native and NativeScript builds, checked only once installed.
   A phone is its own build group, never handed another device's APK.
   Teardown force-stops the registered app and removes deckhand's own `adb reverse` rules; it never
   `emu kill`s or deletes anything (`AndroidManager.shutdown` refuses a non-emulator serial). The
