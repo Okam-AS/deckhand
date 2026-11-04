@@ -49,16 +49,18 @@ describe("WDA source → describe tree", () => {
     assert.equal(tree.roots[0]!.children![0]!.value, " alice ");
   });
 
-  it("holds an unfocused text view's contents as its value, which navigate never sends", () => {
+  it("holds an unfocused text view's contents as its value, which navigate never sends, and offers it a fill", () => {
     const typed = "Dear diary, the code to the shed is 4471";
     const tree = wdaSourceToTree({
-      value: node({ type: "Application", children: [node({ type: "TextView", value: typed, rawIdentifier: "entry_title", isAccessible: "1", rect: { x: 0, y: 200, width: 390, height: 120 } })] }),
+      value: node({ type: "Application", rect: { x: 0, y: 0, width: 390, height: 844 }, children: [node({ type: "TextView", value: typed, rawIdentifier: "entry_title", isAccessible: "1", rect: { x: 0, y: 200, width: 390, height: 120 } })] }),
     });
     const view = tree.roots[0]!.children![0]!;
-    assert.deepEqual([view.label, view.value], [undefined, typed]);
+    assert.deepEqual([view.role, view.label, view.value, view.tappable], ["TextArea", undefined, typed, true]);
     const screen = readScreen(tree);
-    const sent = JSON.stringify([screen.lines, candidatesFor(screen, [])]);
+    const { candidates } = candidatesFor(screen, ["body"]);
+    const sent = JSON.stringify([screen.lines, candidates]);
     assert.ok(!sent.includes("4471") && !sent.includes("Dear diary"), sent);
+    assert.ok(candidates.some((c) => c.kind === "fill" && c.typeKey === "body"), sent);
   });
 
   it("names a field by its label and holds what was typed as its value; keeps spinners; marks disabled", () => {

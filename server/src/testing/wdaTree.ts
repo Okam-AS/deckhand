@@ -48,11 +48,11 @@ export class WdaSourceError extends Error {
 
 const yes = (v: string | boolean | undefined) => v === true || v === "1";
 
-const INPUT = /^(TextField|SecureTextField|SearchField|TextView)$/;
-const TAPPABLE = /^(Button|Cell|Link|Switch|Toggle|TextField|SecureTextField|SearchField|Tab|Key|MenuItem|SegmentedControl|Slider|Stepper|PickerWheel|Image)$/;
+const INPUT = /^(TextField|SecureTextField|SearchField|TextArea)$/;
+const TAPPABLE = /^(Button|Cell|Link|Switch|Toggle|TextField|SecureTextField|SearchField|TextArea|Tab|Key|MenuItem|SegmentedControl|Slider|Stepper|PickerWheel|Image)$/;
 const SCROLLER = /^(ScrollView|Table|CollectionView|WebView)$/;
 /** Kept even when VoiceOver would skip them: a reader needs to see a spinner or a field. */
-const ALWAYS_KEEP = /^(ActivityIndicator|ProgressIndicator|TextField|SecureTextField|SearchField|Switch|Alert|WebView)$/;
+const ALWAYS_KEEP = /^(ActivityIndicator|ProgressIndicator|TextField|SecureTextField|SearchField|TextArea|Switch|Alert|WebView)$/;
 
 /**
  * WDA reports every XCUIElement, including the StaticTexts inside a button that repeat its label.
@@ -126,7 +126,8 @@ function rectOf(n: WdaNode): PhoneNode["frame"] | undefined {
 }
 
 function toNode(n: WdaNode): PhoneNode | null {
-  const role = n.type ?? "";
+  // Android's TextView is a read-only label, so an editable iOS one takes navigate's multiline-input role.
+  const role = n.type === "TextView" ? "TextArea" : (n.type ?? "");
   if (role === "Application" || role === "Window" || !role) return null;
   if (!yes(n.isVisible)) return null;
   const frame = rectOf(n);
@@ -143,7 +144,7 @@ function toNode(n: WdaNode): PhoneNode | null {
   let label: string | undefined;
   let value: string | undefined;
   if (INPUT.test(role)) {
-    // A TextView is editable: its contents are a value, which navigate never sends, never a label.
+    // An editable field's contents are a value, which navigate never sends, never a label.
     label = rawLabel !== rawValue ? rawLabel : undefined;
     value = rawValue;
   } else if (isSwitch) {
