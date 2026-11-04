@@ -3653,7 +3653,7 @@ describe("EAS builds and environments", () => {
     const launched: string[] = [];
     const phoneLog: string[] = [];
     const h = makeEngine({
-      simctl: fakeSimctl({ launch: async (_u: string, b: string, args: string[] = []) => void launched.push(`simctl ${b} ${args.join(" ")}`), appContainer: async () => "/c" }),
+      simctl: fakeSimctl({ launch: async (_u: string, b: string, opts: { args?: string[] } = {}) => void launched.push(`simctl ${b} ${(opts.args ?? []).join(" ")}`), appContainer: async () => "/c" }),
       phones: fakePhones({}, phoneLog, phoneAdb()),
     });
     const rnEnv = appSchema.parse({ ...rnApp, environments: { default: "stage", stage: { launchArgs: { API: "stage" } } } });
