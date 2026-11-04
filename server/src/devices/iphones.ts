@@ -3,6 +3,7 @@ import { discoverIphones, type PhysicalIphone } from "./iphoneDiscovery.ts";
 import { IphoneApps } from "./iphoneApps.ts";
 import { IphoneSyslog } from "./iphoneSyslog.ts";
 import { WdaRunner, WdaStartError } from "./wdaRunner.ts";
+import { wdaPortsFor } from "./iproxy.ts";
 import type { WdaClient } from "../testing/wdaClient.ts";
 
 // ---------------------------------------------------------------------------
@@ -22,14 +23,14 @@ export interface IphonesOptions {
   exec?: Exec;
   productsDir?: string;
   discover?: () => Promise<PhysicalIphone[]>;
-  runnerFor?: (udid: string) => WdaRunner;
+  runnerFor?: (udid: string, ports: { http: number; mjpeg: number }) => WdaRunner;
   now?: () => number;
 }
 
 export class Iphones {
   private readonly exec: Exec;
   private readonly discover: () => Promise<PhysicalIphone[]>;
-  private readonly runnerFor: (udid: string) => WdaRunner;
+  private readonly runnerFor: (udid: string, ports: { http: number; mjpeg: number }) => WdaRunner;
   private readonly now: () => number;
   private readonly runners = new Map<string, WdaRunner>();
   private readonly failures = new Map<string, StartFailure>();
@@ -38,7 +39,7 @@ export class Iphones {
     this.exec = opts.exec ?? defaultExec;
     this.now = opts.now ?? (() => Date.now());
     this.discover = opts.discover ?? (() => discoverIphones({ exec: this.exec, ...(opts.productsDir ? { productsDir: opts.productsDir } : {}) }));
-    this.runnerFor = opts.runnerFor ?? ((udid) => new WdaRunner({ udid, exec: this.exec, ...(opts.productsDir ? { productsDir: opts.productsDir } : {}) }));
+    this.runnerFor = opts.runnerFor ?? ((udid, ports) => new WdaRunner({ udid, ports, exec: this.exec, ...(opts.productsDir ? { productsDir: opts.productsDir } : {}) }));
   }
 
   /**
@@ -70,7 +71,8 @@ export class Iphones {
   private runner(udid: string): WdaRunner {
     let r = this.runners.get(udid);
     if (!r) {
-      r = this.runnerFor(udid);
+      const taken = new Set([...this.runners.values()].flatMap((other) => [other.ports.http, other.ports.mjpeg]));
+      r = this.runnerFor(udid, wdaPortsFor(udid, taken));
       this.runners.set(udid, r);
     }
     return r;

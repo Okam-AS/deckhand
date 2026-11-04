@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { connect } from "node:net";
+import { defaultExec, type Exec } from "./ios.ts";
 
 // ---------------------------------------------------------------------------
 // The USB forward from this Mac to a phone's loopback-bound WebDriverAgent. `iproxy` listens on the
@@ -21,15 +22,46 @@ export class IproxyError extends Error {
   }
 }
 
-/** Mac-side ports for one phone, stable across runs and clear of WDA's own 8100/9100. */
-export function wdaPortsFor(udid: string): { http: number; mjpeg: number } {
+const PORT_SLOTS = 100;
+
+/** Mac-side ports for one phone: its hashed slot, or the next one no port in `taken` uses. Clear of WDA's own 8100/9100. */
+export function wdaPortsFor(udid: string, taken: ReadonlySet<number> = new Set()): { http: number; mjpeg: number } {
   let h = 0;
   for (const c of udid.toUpperCase()) h = (h * 31 + c.charCodeAt(0)) >>> 0;
-  return { http: 18400 + (h % 100), mjpeg: 18500 + (h % 100) };
+  for (let i = 0; i < PORT_SLOTS; i++) {
+    const slot = (h + i) % PORT_SLOTS;
+    const ports = { http: 18400 + slot, mjpeg: 18500 + slot };
+    if (!taken.has(ports.http) && !taken.has(ports.mjpeg)) return ports;
+  }
+  throw new IproxyError(`every WDA port slot is taken, so ${udid} cannot be forwarded`);
+}
+
+export type IproxyForwards = Map<string, { http: number; mjpeg: number }>;
+
+/** `ps -axo args=` → each running iproxy's phone (UDID upper-cased) and the Mac ports it forwards to WDA. */
+export function parseIproxyForwards(psArgs: string): IproxyForwards {
+  const out: IproxyForwards = new Map();
+  for (const line of psArgs.split("\n")) {
+    const argv = line.trim().split(/\s+/);
+    if (!/(^|\/)iproxy$/.test(argv[0] ?? "")) continue;
+    const udid = argv[argv.indexOf("-u") + 1];
+    if (!argv.includes("-u") || !udid) continue;
+    const local = (device: number) => argv.map((a) => /^(\d+):(\d+)$/.exec(a)).find((m) => m && Number(m[2]) === device)?.[1];
+    const http = local(WDA_DEVICE_PORT);
+    const mjpeg = local(WDA_MJPEG_DEVICE_PORT);
+    if (http && mjpeg) out.set(udid.toUpperCase(), { http: Number(http), mjpeg: Number(mjpeg) });
+  }
+  return out;
 }
 
 export function iproxyArgs(udid: string, pairs: readonly (readonly [number, number])[]): string[] {
   return ["-u", udid, "-s", "127.0.0.1", ...pairs.map(([local, device]) => `${local}:${device}`)];
+}
+
+/** The forwards running on this Mac by phone, from any process; null when `ps` cannot be asked. */
+export async function runningIproxyForwards(exec: Exec = defaultExec): Promise<IproxyForwards | null> {
+  const r = await exec("ps", ["-axo", "args="], { timeoutMs: 10_000 }).catch(() => null);
+  return r && r.code === 0 ? parseIproxyForwards(r.stdout.toString()) : null;
 }
 
 export function portAnswers(port: number, timeoutMs = 1_000): Promise<boolean> {

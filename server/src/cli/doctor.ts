@@ -23,7 +23,7 @@ import { EGRESS_HOST } from "../navigate/egress.ts";
 import { EasClient, type EasError } from "../eas/client.ts";
 import { discoverIphones, isCabled, readWdaProfile, type PhysicalIphone, type WdaProfile } from "../devices/iphoneDiscovery.ts";
 import { profileIncludes } from "../devices/iphoneApps.ts";
-import { portAnswers, wdaPortsFor } from "../devices/iproxy.ts";
+import { portAnswers, runningIproxyForwards, wdaPortsFor } from "../devices/iproxy.ts";
 import { WdaRunner, wifiExposure, type WifiExposure } from "../devices/wdaRunner.ts";
 import { WdaClient } from "../testing/wdaClient.ts";
 import { IphoneControl } from "../testing/iphoneControl.ts";
@@ -864,13 +864,17 @@ async function smokeIphone(): Promise<{ checks: Check[]; wifi: Check | null }> {
   let runner: WdaRunner | null = null;
   let wifi: Check | null = null;
   try {
-    const ports = wdaPortsFor(udid);
+    const forwards = await runningIproxyForwards();
+    const servers = forwards?.get(udid.toUpperCase());
+    let ports: { http: number; mjpeg: number };
     let client: WdaClient;
-    let st = (await portAnswers(ports.http)) ? await new WdaClient({ baseUrl: `http://127.0.0.1:${ports.http}` }).status() : null;
-    if (st?.ready) {
+    let st = servers && (await portAnswers(servers.http)) ? await new WdaClient({ baseUrl: `http://127.0.0.1:${servers.http}` }).status() : null;
+    if (servers && st?.ready) {
+      ports = servers;
       client = new WdaClient({ baseUrl: `http://127.0.0.1:${ports.http}` });
     } else {
-      runner = new WdaRunner({ udid });
+      ports = wdaPortsFor(udid, new Set([...(forwards?.values() ?? [])].flatMap((f) => [f.http, f.mjpeg])));
+      runner = new WdaRunner({ udid, ports });
       st = await runner.ensureRunning();
       client = runner.client;
     }
@@ -942,9 +946,10 @@ export async function checkIphones(smoke: boolean): Promise<Check[]> {
     out.push(...r.checks);
     return out;
   }
+  const forwards = await runningIproxyForwards();
   for (const p of phones) {
-    const http = wdaPortsFor(p.udid).http;
-    if (!(await portAnswers(http))) continue;
+    const http = forwards?.get(p.udid.toUpperCase())?.http;
+    if (!http || !(await portAnswers(http))) continue;
     const st = await new WdaClient({ baseUrl: `http://127.0.0.1:${http}` }).status();
     if (st?.ready) out.push(checkWifiExposure(p.udid, await wifiExposure(st.wifiIp)));
   }

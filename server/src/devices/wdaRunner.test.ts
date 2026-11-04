@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { createServer, type AddressInfo } from "node:net";
 import { join } from "node:path";
 import type { ChildProcess, spawn } from "node:child_process";
-import { IPHONE_MARKER_ENV, IproxyForward, iproxyArgs, wdaPortsFor } from "./iproxy.ts";
+import { IPHONE_MARKER_ENV, IproxyForward, iproxyArgs, parseIproxyForwards, wdaPortsFor } from "./iproxy.ts";
+import { Iphones } from "./iphones.ts";
 import {
   bindsMjpegToLoopback, loopbackXctestrunName, WdaRunner, WdaStartError, parseServerUrl, probeWifiPort, startFailureHint, wifiExposure, xctestrunTargets,
 } from "./wdaRunner.ts";
@@ -114,6 +115,36 @@ describe("iproxy", () => {
     assert.deepEqual(p, wdaPortsFor(UDID.toLowerCase()));
     assert.ok(p.http >= 18400 && p.http < 18500 && p.mjpeg >= 18500 && p.mjpeg < 18600);
     assert.notEqual(p.http, 8100);
+  });
+
+  it("gives two cabled iPhones whose UDIDs hash alike different ports", async () => {
+    const a = "00008120-0000000000000001";
+    const b = "00008120-0000000000000038";
+    assert.deepEqual(wdaPortsFor(a), wdaPortsFor(b), "the fixture no longer collides; pick two UDIDs that do");
+    const seen = new Map<string, { http: number; mjpeg: number }>();
+    const iphones = new Iphones({
+      runnerFor: (udid, ports) => {
+        seen.set(udid, ports);
+        const forward = new IproxyForward({ udid, pairs: [[ports.http, 8100]], spawnImpl: fakeSpawn().impl, portAnswersImpl: async () => true });
+        return new WdaRunner({ udid, ports, forward, productsDir: join(tmpdir(), "deckhand-no-such-wda") });
+      },
+    });
+    await iphones.client(a).catch(() => {});
+    await iphones.client(b).catch(() => {});
+    assert.notDeepEqual(seen.get(a), seen.get(b), "two phones were given one forward");
+  });
+
+  it("reads which phone each running iproxy forwards, so doctor never takes one phone's WDA for another's", () => {
+    const ps = [
+      "/sbin/launchd",
+      `/opt/homebrew/bin/iproxy -u ${UDID.toLowerCase()} -s 127.0.0.1 18451:8100 18551:9100`,
+      "iproxy -u 00008110-000000000000AAAA -s 127.0.0.1 18452:8100 18552:9100",
+      "grep iproxy -u NOPE 1:8100 2:9100",
+    ].join("\n");
+    const f = parseIproxyForwards(ps);
+    assert.deepEqual(f.get(UDID), { http: 18451, mjpeg: 18551 });
+    assert.deepEqual(f.get("00008110-000000000000AAAA"), { http: 18452, mjpeg: 18552 });
+    assert.equal(f.size, 2);
   });
 });
 
