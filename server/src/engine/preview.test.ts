@@ -17,7 +17,7 @@ import type { AndroidManager } from "../devices/android.ts";
 import type { RunResult } from "./procs.ts";
 import type { CommandStep } from "./recipes.ts";
 import type { DevRunSpec } from "./devProcess.ts";
-import type { AttachedStream, StreamDeviceRef } from "../streaming/backend.ts";
+import type { AttachedStream, StreamDeviceRef, StreamingBackend } from "../streaming/backend.ts";
 import { StateStore } from "../state.ts";
 import { LiveShareRegistry } from "../share/liveShares.ts";
 
@@ -225,7 +225,7 @@ function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (
       },
     }),
     simctl,
-    streaming: streaming as unknown as PreviewEngineDeps["streaming"],
+    streaming: streaming satisfies StreamingBackend,
     metro: fakeMetro(),
     store,
     audit: { record: (e: { tool: string; args: unknown }) => void audit.push({ tool: e.tool, args: e.args }) } as unknown as PreviewEngineDeps["audit"],
@@ -3367,7 +3367,7 @@ describe("physical Android phones", () => {
         deleteAvd: async (name: string) => void calls.push(`avd delete ${name}`),
       }),
       phones: fakePhones(),
-      streaming: { attach: async () => ({ origin: "o", helperBasePath: "/h", waitForFirstFrame: async () => true, describe: async () => "", detach: async () => {} }), reapOrphans: async (k: ReadonlySet<string>) => void (keep = k) } as unknown as PreviewEngineDeps["streaming"],
+      streaming: { attach: async () => ({ origin: "o", helperBasePath: "/h", waitForFirstFrame: async () => true, describe: async () => "", detach: async () => {} }), reapOrphans: async (k: ReadonlySet<string>) => void (keep = k) } satisfies StreamingBackend,
     });
     startPhone(h);
     await waitForPhase(h.engine, "pv1", ["ready", "failed"]);
@@ -3676,6 +3676,38 @@ describe("physical iPhones", () => {
     assert.throws(() => start(h, { devices: [{ platform: "ios", serial: "not-a-udid" }] }), (e: unknown) => e instanceof PreviewError && e.code === "bad_request");
   });
 
+  it("an EAS run stopped during its download never installs, launches, logs or streams on the phone it gave back", async () => {
+    const log: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const base = fakeEas({}, [], { "ios-device": ipaBuild });
+    const slow = fakeEas({
+      prepare: async (...a: Parameters<typeof base.prepare>) => {
+        if (a[3] === iosApp.bundleId) await gate;
+        return base.prepare(...a);
+      },
+    }, [], { "ios-device": ipaBuild });
+    let n = 0;
+    const other: App = { ...iosApp, id: "other-app", bundleId: "com.example.other" };
+    const h = makeEngine({
+      eas: slow,
+      genPreviewId: () => `pv${++n}`,
+      genShareId: () => `share-${n}`,
+      iphones: fakeIphones({ list: async () => [{ udid: IPHONE, name: "QA", model: "iPhone 15", osVersion: "27.0.1", blockers: [] }] }, log, { devicectl: devicectl(), appLines: ["x"] }),
+    });
+    start(h);
+    await new Promise((r) => setTimeout(r, 30));
+    await h.engine.stopPreview("pv1");
+    h.engine.startPreview({ app: other, source: "eas", devices: [{ platform: "ios", serial: IPHONE }], access: "password" });
+    await waitForPhase(h.engine, "pv2", ["ready", "failed"]);
+    const logAtRelease = log.length;
+    const attachesAtRelease = h.attachCalls.length;
+    release();
+    await new Promise((r) => setTimeout(r, 300));
+    assert.deepEqual(log.slice(logAtRelease).filter((l) => /install app|process launch|idevicesyslog/.test(l)), [], log.join("\n"));
+    assert.equal(h.attachCalls.length, attachesAtRelease, "no stream may attach for the stopped preview");
+  });
+
   it("installs the environment's EAS .ipa, starts syslog before a launch with -KEY value, and verifies the environment from the app log", async () => {
     const log: string[] = [];
     const easLog: string[] = [];
@@ -3683,7 +3715,7 @@ describe("physical iPhones", () => {
     const h = makeEngine({
       eas: fakeEas({}, easLog, { "ios-device": ipaBuild }),
       iphones: fakeIphones({ list: async () => [{ udid: IPHONE, name: "QA", model: "iPhone 15", osVersion: "27.0.1", blockers: [] }] }, log, { devicectl: devicectl(), appLines: ["** Launching ** test", "Running main"] }),
-      streaming: { attach: async (d: StreamDeviceRef) => (attached.push(d), { origin: "o", helperBasePath: "/h", waitForFirstFrame: async () => true, describe: async () => "", detach: async () => {} }), reapOrphans: async () => {} } as unknown as PreviewEngineDeps["streaming"],
+      streaming: { attach: async (d: StreamDeviceRef) => (attached.push(d), { origin: "o", helperBasePath: "/h", waitForFirstFrame: async () => true, describe: async () => "", detach: async () => {} }), reapOrphans: async () => {} } satisfies StreamingBackend,
     });
     start(h);
     assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready", JSON.stringify(h.engine.getStatus("pv1")));

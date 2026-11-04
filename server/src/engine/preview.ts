@@ -2023,8 +2023,14 @@ export class PreviewEngine {
     return (dev.record.platform === "android" || dev.record.physical ? dev.record.serial : dev.record.udid) ?? "";
   }
 
+  /** A borrowed phone outlives its preview, so every step that touches one first asks whether the preview still wants it. */
+  private stillWanted(dev: LiveDevice): void {
+    if (dev.abort.signal.aborted) throw new PreviewError("preview was stopped while its device was starting");
+  }
+
   private async bootDevice(p: LivePreview, dev: LiveDevice): Promise<string> {
     if (dev.record.physical && dev.record.serial) await this.releasingPhones.get(dev.record.serial);
+    if (dev.record.physical) this.stillWanted(dev);
     if (this.isIphone(dev)) return this.bootIphone(p, dev);
     return dev.record.platform === "android" ? this.bootAndroid(p, dev) : this.bootIos(p, dev);
   }
@@ -2645,6 +2651,7 @@ export class PreviewEngine {
 
   private async easInstallAndLaunch(p: LivePreview, dev: LiveDevice, handle: string, prep: PreparedBuild): Promise<void> {
     const platform = dev.record.platform;
+    this.stillWanted(dev);
     this.setPhase(p, dev, "installing-app", `installing EAS build ${prep.build.id.slice(0, 8)}`);
     if (this.isIphone(dev)) {
       await this.installEasIpa(p, dev, prep);
@@ -2656,8 +2663,10 @@ export class PreviewEngine {
       await this.silenceDevOverlays(platform, handle, prep.bundleId);
       await this.freshAfterInstall(p, dev, handle);
     }
+    this.stillWanted(dev);
     this.setPhase(p, dev, "launching", "launching app");
     await this.launchEas(p, dev, handle, prep);
+    this.stillWanted(dev);
     await this.attachAndReady(p, dev, platform, handle);
   }
 
@@ -2774,8 +2783,12 @@ export class PreviewEngine {
     dev.syslog.start();
     dev.launchedAt = this.d.now!();
     try {
+      this.stillWanted(dev);
       await apps.launch(apps.bundleId, { args, ...(payloadUrl ? { payloadUrl } : {}) });
+      this.stillWanted(dev);
     } catch (e) {
+      dev.syslog?.stop();
+      dev.syslog = undefined;
       throw this.iphoneAppError(e);
     }
   }
@@ -3209,6 +3222,7 @@ export class PreviewEngine {
     /** Pre-resolved Expo slug (once per build); required for metro-deep-link apps on Android. */
     slug: string | null,
   ): Promise<void> {
+    if (dev.record.physical) this.stillWanted(dev);
     const args = this.launchArgs(p);
     const hasArgs = Object.keys(args).length > 0;
     dev.env = { source: hasArgs ? "launch-args" : "build-default", verified: false };
