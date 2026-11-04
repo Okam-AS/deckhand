@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { fakeMetro, fakeDevProcs, fakeSimctl, fakeAndroid, fakeWorktrees, fakeReaper, fakePhones, fakeIphones, fakeEas, easBuild, FAKE_IPHONE } from "../test-support/fakes.ts";
 import { fakeWda } from "../test-support/wdaFake.ts";
 import { IPHONE_MARKER_ENV } from "../devices/iproxy.ts";
+import { RegisteredApp } from "../devices/androidPhone.ts";
 import { appSchema } from "../config.ts";
 import { createHash } from "node:crypto";
 import type { ExecResult } from "../devices/android.ts";
@@ -3298,6 +3299,43 @@ describe("physical Android phones", () => {
     const dev = h.engine.getStatus("pv1")!.devices[0]!;
     assert.equal(dev.phase, "failed");
     assert.match(dev.error ?? "", /left adb.*unplugged/);
+  });
+
+  it("a retry waits for the failed preview to let go of the phone before it launches there", async () => {
+    const order: string[] = [];
+    let n = 0;
+    let failBuilds = true;
+    const h = makeEngine({
+      genPreviewId: () => `pv${++n}`,
+      android: androidFake([], {
+        shutdown: async () => {
+          order.push("emulator shutdown begins");
+          await new Promise((r) => setTimeout(r, 300));
+          return true;
+        },
+        launch: async (serial: string, b: string) => void order.push(`launch ${b} on ${serial}`),
+      }),
+      phones: fakePhones({
+        registeredApp: (serial: string, pkg: string) =>
+          new RegisteredApp(async (_cmd, args) => {
+            if (args.includes("force-stop")) await new Promise((r) => setTimeout(r, 200));
+            order.push(`adb ${args.join(" ")}`);
+            return { code: 0, stdout: Buffer.from("Success"), stderr: "" };
+          }, serial, pkg),
+      }, order),
+      runStep: async (step) => ({ code: failBuilds && step.name === "build" ? 1 : 0, timedOut: false, aborted: false }),
+    });
+    const req = { app: rnApp, source: "git" as const, spec: { kind: "branch" as const, branch: "main" }, access: "password" as const };
+    h.engine.startPreview({ ...req, devices: [{ platform: "android" }, { platform: "android", serial: PHONE }] });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "failed");
+    failBuilds = false;
+    order.length = 0;
+    h.engine.startPreview({ ...req, devices: [{ platform: "android", serial: PHONE }] });
+    assert.equal(await waitForPhase(h.engine, "pv2", ["ready", "failed"]), "ready", JSON.stringify(h.engine.getStatus("pv2")));
+    await new Promise((r) => setTimeout(r, 600));
+    const launched = order.findIndex((c) => c.startsWith("launch "));
+    assert.ok(launched >= 0, order.join("\n"));
+    assert.equal(order.findIndex((c, i) => i > launched && c.includes("force-stop")), -1, `the old preview's teardown stopped the app the retry launched:\n${order.join("\n")}`);
   });
 
   it("rebuilds a phone that left adb and came back when the preview is restarted", async () => {

@@ -658,6 +658,8 @@ export class PreviewEngine {
   private readonly unstoppedAvds = new Set<string>();
   /** Devices whose teardown is still in flight (they hold real resources until it finishes). */
   private tearingDown = 0;
+  /** A forgotten preview's teardown of a phone, still stopping its app there: the next tenant's boot waits for it. */
+  private releasingPhones = new Map<string, Promise<void>>();
 
   constructor(deps: PreviewEngineDeps) {
     this.d = {
@@ -1893,6 +1895,14 @@ export class PreviewEngine {
    * reached", which is precisely the flow this path exists to serve.
    */
   private releaseInBackground(p: LivePreview): () => number {
+    const phones = p.devices.filter((d) => d.record.physical);
+    let resolve!: () => void;
+    const releasing = new Promise<void>((r) => (resolve = r));
+    for (const dev of phones) if (dev.record.serial) this.releasingPhones.set(dev.record.serial, releasing);
+    const phonesReleased = (): void => {
+      for (const dev of phones) if (dev.record.serial && this.releasingPhones.get(dev.record.serial) === releasing) this.releasingPhones.delete(dev.record.serial);
+      resolve();
+    };
     let held = p.devices.filter((d) => !d.record.physical).length;
     this.tearingDown += held;
     const releaseOne = (): void => {
@@ -1913,7 +1923,8 @@ export class PreviewEngine {
             this.d.devProcs?.stop(devKey(p.app.id, platform), p.record.previewId);
           }
         }
-        await this.teardownDevices(p, releaseOne);
+        await this.teardownDevices(p, undefined, phones).finally(phonesReleased);
+        await this.teardownDevices(p, releaseOne, p.devices.filter((d) => !d.record.physical));
         this.stopMetroIfUnused(p.app.id);
         if (p.record.source === "git") {
           await this.d.worktrees.removeWorktree(p.app, p.record.previewId).catch(() => {});
@@ -1921,6 +1932,7 @@ export class PreviewEngine {
       } finally {
         // Whatever teardownDevices didn't reach (it threw part-way through).
         while (held > 0) releaseOne();
+        phonesReleased();
       }
     })().catch(() => {});
     return () => held;
@@ -2002,6 +2014,7 @@ export class PreviewEngine {
   }
 
   private async bootDevice(p: LivePreview, dev: LiveDevice): Promise<string> {
+    if (dev.record.physical && dev.record.serial) await this.releasingPhones.get(dev.record.serial);
     if (this.isIphone(dev)) return this.bootIphone(p, dev);
     return dev.record.platform === "android" ? this.bootAndroid(p, dev) : this.bootIos(p, dev);
   }
@@ -4591,7 +4604,8 @@ export class PreviewEngine {
       for (const port of dev.reversed ?? []) await this.phones().removeReverse(serial, port);
     }
     dev.reversed = undefined;
-    // The serial stays on the record (a phone has no handle to lose); the preview leaving the map is what frees it.
+    // The serial stays on the record (a phone has no handle to lose); the preview leaving the map frees it, and a
+    // background release holds the next tenant's boot (releasingPhones) until this has returned.
   }
 
   /**
