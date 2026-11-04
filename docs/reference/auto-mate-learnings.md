@@ -98,11 +98,14 @@ is the code that holds them. Do not restore them from an older copy of this file
   on-device that it binds Metro to IPv6 `::1` ONLY — the 127.0.0.1 readiness probe and the
   app's `REACT_NATIVE_PACKAGER_HOSTNAME=127.0.0.1` connection both fail. The default bind
   covers 127.0.0.1 (`engine/metro.ts`).
-- Launch is a **deep link**, not `simctl launch`:
-  `exp+<slug>://expo-development-client/?url=<metro-manifest-url>&disableOnboarding=1`
-  opened via `simctl openurl` — after pre-approving the custom scheme with `PlistBuddy` in
-  the sim's `schemeapproval.plist` (otherwise iOS shows a confirmation dialog nobody can
-  click headlessly).
+- Launch: the predecessor opened a **deep link**,
+  `exp+<slug>://expo-development-client/?url=<metro-manifest-url>&disableOnboarding=1`, via
+  `simctl openurl`, after pre-approving the scheme in the sim's `schemeapproval.plist`.
+  **Deckhand does not, on iOS:** on iOS 27 that deep link raised "Open in «App»?" over the
+  app and landed in the process `run:ios` had started on its LAN-IP URL. iOS cold-starts
+  instead — `simctl launch --terminate-running-process <udid> <bundle> --initialUrl
+  <metro-manifest-url>`, expo-dev-launcher's launch argument — and Android keeps the deep
+  link (`engine/preview.ts`). Do not restore the iOS deep link.
 - Clean recovery: `rm -rf ios && npm install && (pod cache clean --all || true)`.
 
 ### Bare React Native iOS
