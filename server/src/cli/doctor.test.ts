@@ -27,6 +27,7 @@ import {
   parseAgentStatus,
 } from "./doctor.ts";
 import { fakeAndroid } from "../test-support/fakes.ts";
+import { blockersFor } from "../devices/iphoneDiscovery.ts";
 import { orphanAvds, orphanSims } from "../engine/reaper.ts";
 import type { Config } from "../config.ts";
 
@@ -518,6 +519,16 @@ describe("the iPhone checks", () => {
     assert.match(missing.detail ?? "", /does NOT list cabled 00008120-0000000000000BBB/);
     assert.equal(checkWda({ ...wda, expires: "2026-11-20T00:00:00Z" }, [], "/h", now).warn, true);
     assert.match(checkWda({ ...wda, expires: "2026-01-01T00:00:00Z" }, [], "/h", now).detail ?? "", /EXPIRED/);
+  });
+
+  it("does not fail on an iPhone that is paired but not cabled", () => {
+    const udid = "00008120-0000000000000BBB";
+    const phone = { udid, name: "QA", model: "iPhone 15", productType: null, osVersion: "27.0.1", paired: true, wired: false, developerMode: true };
+    const overWifi = ip(udid, blockersFor(phone, { usb: false, locked: false, wda, productsDir: "/h/wda/Products", now }));
+    assert.equal(checkWda(null, [overWifi], "/h/wda/Products", now).ok, true);
+    const covered = checkWda(wda, [overWifi], "/h/wda/Products", now);
+    assert.equal(covered.ok, true);
+    assert.doesNotMatch(covered.detail ?? "", /0BBB/);
   });
 
   it("calls Wi-Fi exposure safe only on a refusal, and says can't tell otherwise", () => {

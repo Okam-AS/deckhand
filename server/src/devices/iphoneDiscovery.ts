@@ -97,13 +97,20 @@ export function readWdaProfile(productsDir: string = paths.wdaProducts()): WdaPr
   return { expires: p.profileExpires, provisionedDevices: p.provisionedDevices, provisionsAllDevices: p.provisionsAllDevices };
 }
 
+const NOT_CABLED = "not connected by USB";
+
+/** False for a phone devicectl knows only over Wi-Fi or from an earlier pairing. */
+export function isCabled(phone: PhysicalIphone): boolean {
+  return !phone.blockers.some((b) => b.startsWith(NOT_CABLED));
+}
+
 export function blockersFor(
   phone: DevicectlPhone,
   ctx: { usb: boolean | null; locked: boolean | null; wda: WdaProfile | null; productsDir: string; now: Date },
 ): string[] {
   const out: string[] = [];
   if (!phone.paired) out.push("not paired with this Mac: unlock the phone, cable it, and tap Trust");
-  if (ctx.usb === false || (ctx.usb === null && !phone.wired)) out.push("not connected by USB: cable it to this Mac (a Wi-Fi pairing is not a target)");
+  if (ctx.usb === false || (ctx.usb === null && !phone.wired)) out.push(`${NOT_CABLED}: cable it to this Mac (a Wi-Fi pairing is not a target)`);
   if (phone.developerMode === false) out.push("Developer Mode is off: turn it on in Settings → Privacy & Security → Developer Mode");
   if (ctx.locked) out.push("locked: unlock it, remove its passcode, and set Auto-Lock to Never");
   if (!ctx.wda) {

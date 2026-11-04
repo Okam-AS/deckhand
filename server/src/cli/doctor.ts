@@ -21,7 +21,7 @@ import { repoRoot } from "../version.ts";
 import { lookupTypesafeKey, type KeyLookup } from "../navigate/secrets.ts";
 import { EGRESS_HOST } from "../navigate/egress.ts";
 import { EasClient, type EasError } from "../eas/client.ts";
-import { discoverIphones, readWdaProfile, type PhysicalIphone, type WdaProfile } from "../devices/iphoneDiscovery.ts";
+import { discoverIphones, isCabled, readWdaProfile, type PhysicalIphone, type WdaProfile } from "../devices/iphoneDiscovery.ts";
 import { profileIncludes } from "../devices/iphoneApps.ts";
 import { portAnswers, wdaPortsFor } from "../devices/iproxy.ts";
 import { WdaRunner, wifiExposure, type WifiExposure } from "../devices/wdaRunner.ts";
@@ -800,8 +800,9 @@ const IPHONE_SMOKE_PORTS: [number, number] = [3270, 3279];
  * The pre-signed WDA under the deckhand home: present, when its profile expires, and which cabled
  * iPhones it does not list. Nothing here fails doctor unless an iPhone is plugged in to need it.
  */
-export function checkWda(profile: WdaProfile | null, phones: PhysicalIphone[], productsDir: string, now: Date): Check {
+export function checkWda(profile: WdaProfile | null, paired: PhysicalIphone[], productsDir: string, now: Date): Check {
   const name = "WDA (physical iPhones)";
+  const phones = paired.filter(isCabled);
   if (!profile) {
     return phones.length
       ? { name, ok: false, detail: `no WebDriverAgent at ${productsDir}, and ${phones.length} iPhone(s) are cabled — copy a WDA Products folder built and signed for them there (see PLAN §10)` }
