@@ -113,6 +113,7 @@ export function fakeSimctl(over: Partial<Simctl> = {}, log: string[] = []): Simc
     isBooted: async () => true,
     install: async (udid: string, appPath: string) => void log.push(`simctl install ${udid} ${appPath}`),
     silenceDevOverlays: async () => {},
+    reduceTransparency: async () => {},
     launch: async (udid: string, bundleId: string, opts?: { args?: string[]; terminateRunning?: boolean }) =>
       void log.push(`simctl launch ${udid} ${bundleId}${opts?.terminateRunning ? " (restart)" : ""}${opts?.args?.length ? ` ${opts.args.join(" ")}` : ""}`),
     openUrl: async (udid: string, url: string) => void log.push(`simctl openUrl ${udid} ${url}`),

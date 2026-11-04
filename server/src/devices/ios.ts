@@ -336,6 +336,16 @@ export class Simctl {
   }
 
   /**
+   * Settings → Accessibility → Reduce Transparency, on the whole device. It is the system's own
+   * accessibility switch (UIAccessibilityIsReduceTransparencyEnabled reads this key), so it renders
+   * exactly as on a phone with it on; an app reads it at launch, so write it before launching.
+   * Best-effort like the overlays: a preference must not fail a preview.
+   */
+  async reduceTransparency(udid: string): Promise<void> {
+    await this.run(["spawn", udid, "defaults", "write", "com.apple.Accessibility", "EnhancedBackgroundContrastEnabled", "-bool", "YES"]).catch(() => undefined);
+  }
+
+  /**
    * `args` go to the app's process (after the bundle id); `terminateRunning` restarts it if it is
    * already up, so the launch is a cold start that reads its preferences afresh.
    */

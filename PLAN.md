@@ -123,6 +123,9 @@ githubApp:                        # EITHER a GitHub App (multi-org)…
 githubAmbient: true               # no PAT/App → fall back to the deckhand user's gh CLI session (§11 item 4 note)
 allowPublicRepos: false           # public repos from owners without an app installation; also
                                   # gates anonymous git for credential-less installs
+# ios:
+#   reduceTransparency: true      # Settings → Accessibility → Reduce Transparency on every iOS device deckhand
+#                                 #   prepares: Liquid Glass bars and sheets draw solid. Off by default — it changes rendering
 limits:
   maxDevicesPerPreview: 4
   maxTotalDevices: 6

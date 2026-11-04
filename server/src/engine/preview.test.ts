@@ -683,6 +683,21 @@ describe("local (dev-mode) previews", () => {
     assert.equal(h.attachCalls.length, before + 1, "a fresh helper must be attached in its place");
   });
 
+  it("writes Reduce Transparency before livesync launches the app, on start and on restart", async () => {
+    const livesyncStartsAtWrite: number[] = [];
+    const h: Harness = makeEngine({
+      config: { ...config, ios: { reduceTransparency: true } },
+      simctl: fakeSimctl({
+        reduceTransparency: async () => void livesyncStartsAtWrite.push(h.devProcCalls.filter((c) => c.startsWith("start ")).length),
+      }),
+    });
+    startLocal(h);
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+    h.engine.restartPreview("pv1");
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+    assert.deepEqual(livesyncStartsAtWrite, [0, 1]);
+  });
+
   it("restart while a build is in flight fails with an actionable error", () => {
     const h = makeEngine();
     startLocal(h);
@@ -3072,5 +3087,27 @@ describe("Expo dev-client launch on iOS", () => {
     } finally {
       rmSync(noSlug, { recursive: true, force: true });
     }
+  });
+});
+
+describe("ios.reduceTransparency", () => {
+  const run = async (reduce: boolean | undefined) => {
+    const turnedOn: string[] = [];
+    const h = makeEngine({
+      config: { ...config, ...(reduce === undefined ? {} : { ios: { reduceTransparency: reduce } }) },
+      simctl: fakeSimctl({ reduceTransparency: async (udid: string) => void turnedOn.push(udid) }),
+    });
+    h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready");
+    return turnedOn;
+  };
+
+  it("turns Reduce Transparency on for each iOS device it prepares when the operator set it", async () => {
+    assert.equal((await run(true)).length, 1);
+  });
+
+  it("leaves the device as it is by default, and when set false", async () => {
+    assert.deepEqual(await run(undefined), []);
+    assert.deepEqual(await run(false), []);
   });
 });

@@ -92,6 +92,17 @@ export const configSchema = z.object({
     })
     .strict()
     .optional(),
+  // iOS simulator appearance. reduceTransparency turns on Settings → Accessibility → Reduce
+  // Transparency on every iOS device deckhand prepares: iOS 26's Liquid Glass (tab bars, sheets,
+  // pills) then draws solid, so content no longer shows through controls — easier for a person
+  // in the viewer and for a vision model to read. It changes how the app renders compared with a
+  // default device, so it is off unless the operator turns it on.
+  ios: z
+    .object({
+      reduceTransparency: z.boolean().default(false),
+    })
+    .strict()
+    .optional(),
   limits: z
     .object({
       maxDevicesPerPreview: z.number().int().positive().default(4),
