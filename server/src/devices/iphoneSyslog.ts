@@ -18,8 +18,8 @@ export interface SyslogLine {
   message: string;
 }
 
-/** `Oct 23 16:31:52.062552 proc(Subsystem)[135] <Notice>: message` */
-const LINE = /^([A-Z][a-z]{2}) +(\d{1,2}) (\d{2}):(\d{2}):(\d{2})(?:\.(\d+))? (\S+?)(?:\(([^)]*)\))?\[(\d+)\] <(\w+)>: ?(.*)$/;
+/** `Oct 23 16:31:52.062552 proc(Subsystem)[135] <Notice>: message`; the process name may hold spaces. */
+const LINE = /^([A-Z][a-z]{2}) +(\d{1,2}) (\d{2}):(\d{2}):(\d{2})(?:\.(\d+))? ([^\s[(](?:[^[(]*[^\s[(])?)(?:\(([^)]*)\))?\[(\d+)\] <(\w+)>: ?(.*)$/;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const LEVELS: Record<string, SyslogLevel> = { Debug: "D", Info: "I", Notice: "I", Warning: "W", Error: "E", Fault: "F", Critical: "F" };
 

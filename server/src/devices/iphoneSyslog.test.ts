@@ -44,6 +44,14 @@ describe("idevicesyslog lines", () => {
     assert.equal(lines[1]!.message, "[javascript] TypeError: undefined is not a function\n    at render (index.bundle:1:2)");
   });
 
+  it("reads a process name with spaces, with or without a subsystem", () => {
+    const lines = parseIdeviceSyslog(["Oct 23 16:31:53 My App(React)[4412] <Error>: boom", "Oct 23 16:31:54 My App[4412] <Notice>: hi"].join("\n"), now);
+    assert.deepEqual(lines.map((l) => [l.process, l.subsystem, l.pid, l.message]), [
+      ["My App", "React", 4412, "boom"],
+      ["My App", undefined, 4412, "hi"],
+    ]);
+  });
+
   it("puts a December line read in January in last year", () => {
     const [l] = parseIdeviceSyslog("Dec 31 23:59:59 SpringBoard[34] <Notice>: hi", new Date(2027, 0, 1, 0, 0, 5));
     assert.equal(l!.at.getFullYear(), 2026);
