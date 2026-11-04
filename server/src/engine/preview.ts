@@ -2491,7 +2491,14 @@ export class PreviewEngine {
     if (usesMetroDeepLink(p.app.type)) {
       if (!slug) throw new PreviewError("could not resolve the Expo slug from app.json or app.config.*");
       const metro = await this.d.metro.ensure(p.app.id, worktreePath, appEnv);
-      await this.d.simctl.openUrl(handle, expoDevClientUrl(slug, metro.manifestUrl));
+      // A cold start told its server by launch argument, not a deep link. expo-dev-launcher reads
+      // `--initialUrl <url>` from its process arguments and loads that bundle (on a simulator it skips
+      // the local-network gate). A deep link instead (a) makes iOS 27 ask "Open in «App»?" — a
+      // system alert that sat over the app until someone tapped it — and (b) lands in a process
+      // `expo run:ios` already started on its own LAN-IP URL, whose failed first load and dev menu
+      // stayed on screen. Restarting the process reads the dev-menu preferences written just
+      // before (silenceDevOverlays) and leaves nothing of that first load behind.
+      await this.d.simctl.launch(handle, bundleId, { terminateRunning: true, args: ["--initialUrl", metro.manifestUrl] });
     } else {
       await this.d.simctl.launch(handle, bundleId);
     }

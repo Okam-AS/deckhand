@@ -158,10 +158,12 @@ function makeEngine(overrides: Partial<PreviewEngineDeps> = {}, runStepResult: (
     install: async (udid: string, p: string) => {
       simctlCalls.push(`install ${udid} ${p}`);
     },
-    launch: async (_udid: string, b: string) => {
-      simctlCalls.push(`launch ${b}`);
+    launch: async (_udid: string, b: string, opts?: { args?: string[]; terminateRunning?: boolean }) => {
+      simctlCalls.push(`launch ${b}${opts?.terminateRunning ? " (restart)" : ""}${opts?.args?.length ? ` ${opts.args.join(" ")}` : ""}`);
     },
-    openUrl: async () => {},
+    openUrl: async (_udid: string, url: string) => {
+      simctlCalls.push(`openUrl ${url}`);
+    },
     shutdown: async (u: string) => {
       simctlCalls.push(`shutdown ${u}`);
     },
@@ -3039,5 +3041,23 @@ describe("a live share", () => {
     assert.equal(h.engine.findByShareId("live1"), null);
     assert.equal(h.engine.shareState("live1"), null);
     assert.equal(h.engine.liveShareRevoked("live1"), true);
+  });
+});
+
+describe("Expo dev-client launch on iOS", () => {
+  let dir: string;
+  before(() => {
+    dir = mkdtempSync(join(tmpdir(), "deckhand-expo-"));
+    writeFileSync(join(dir, "app.json"), JSON.stringify({ expo: { slug: "my-expo", ios: { bundleIdentifier: "com.example.expo" } } }));
+  });
+  after(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("cold-starts the app with --initialUrl pointing at Metro, and opens no deep link", async () => {
+    const h = makeEngine();
+    const app: App = { id: "expo-app", path: dir, type: "expo", defaultBranch: "main", bundleId: "com.example.expo", env: {} };
+    h.engine.startPreview({ app, source: "local", devices: [{ platform: "ios" }], access: "public" });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready", JSON.stringify(h.engine.getStatus("pv1")?.devices));
+    assert.deepEqual(h.simctlCalls.filter((c) => c.startsWith("launch ")), ["launch com.example.expo (restart) --initialUrl http://127.0.0.1:8081"]);
+    assert.deepEqual(h.simctlCalls.filter((c) => c.startsWith("openUrl ")), [], "a deep link makes iOS 27 ask before opening the app");
   });
 });
