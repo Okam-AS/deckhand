@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { wdaSourceToTree, WdaSourceError } from "./wdaTree.ts";
 import { flattenTree, renderNode, ScreenBook } from "./screen.ts";
+import { candidatesFor, readScreen } from "../navigate/screen.ts";
 
 // Captured from an iPhone 15 (iOS 27.0.1) with WDA, Settings > Developer, pruned to the visible nodes.
 const settings = JSON.parse(readFileSync(join(import.meta.dirname, "fixtures", "wda-settings-developer.json"), "utf8")) as unknown;
@@ -41,6 +42,23 @@ describe("WDA source → describe tree", () => {
     assert.ok(ref, text);
     assert.deepEqual(book.resolve(ref), { kind: "selector", selector: { id: "BackButton" } });
     assert.deepEqual(book.snapshot?.bounds, { x: 0, y: 0, width: 393, height: 852 });
+  });
+
+  it("keeps a field's value exactly as the app holds it, surrounding spaces included", () => {
+    const tree = wdaSourceToTree({ value: node({ type: "Application", children: [node({ type: "TextField", label: "Navn", value: " alice ", isAccessible: "1" })] }) });
+    assert.equal(tree.roots[0]!.children![0]!.value, " alice ");
+  });
+
+  it("holds an unfocused text view's contents as its value, which navigate never sends", () => {
+    const typed = "Dear diary, the code to the shed is 4471";
+    const tree = wdaSourceToTree({
+      value: node({ type: "Application", children: [node({ type: "TextView", value: typed, rawIdentifier: "entry_title", isAccessible: "1", rect: { x: 0, y: 200, width: 390, height: 120 } })] }),
+    });
+    const view = tree.roots[0]!.children![0]!;
+    assert.deepEqual([view.label, view.value], [undefined, typed]);
+    const screen = readScreen(tree);
+    const sent = JSON.stringify([screen.lines, candidatesFor(screen, [])]);
+    assert.ok(!sent.includes("4471") && !sent.includes("Dear diary"), sent);
   });
 
   it("names a field by its label and holds what was typed as its value; keeps spinners; marks disabled", () => {

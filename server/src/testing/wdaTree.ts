@@ -116,7 +116,7 @@ function unwrap(source: unknown): WdaNode {
 }
 
 function str(v: unknown): string | undefined {
-  return typeof v === "string" && v.trim() ? v.trim() : undefined;
+  return typeof v === "string" && v.trim() ? v : undefined;
 }
 
 function rectOf(n: WdaNode): PhoneNode["frame"] | undefined {
@@ -142,10 +142,9 @@ function toNode(n: WdaNode): PhoneNode | null {
 
   let label: string | undefined;
   let value: string | undefined;
-  if (role === "TextView" && !yes(n.isFocused)) {
-    label = rawValue ?? rawLabel;
-  } else if (INPUT.test(role)) {
-    label = rawLabel;
+  if (INPUT.test(role)) {
+    // A TextView is editable: its contents are a value, which navigate never sends, never a label.
+    label = rawLabel !== rawValue ? rawLabel : undefined;
     value = rawValue;
   } else if (isSwitch) {
     label = rawLabel;
