@@ -723,6 +723,16 @@ export class PreviewEngine {
     return null;
   }
 
+  /** Serials of the phones this app's live previews hold. */
+  livePhonesForApp(appId: string): string[] {
+    const out = new Set<string>();
+    for (const p of this.previews.values()) {
+      if (p.record.appId !== appId || p.record.phase === "stopped") continue;
+      for (const dev of p.devices) if (dev.record.physical && dev.record.serial) out.add(dev.record.serial);
+    }
+    return [...out];
+  }
+
   /** Why this phone cannot be handed to a new preview, as the structured `device_busy` error; null when it can. */
   private phoneBusy(serial: string, holds: PhoneHolds): PreviewError | null {
     const hold = holds[serial];

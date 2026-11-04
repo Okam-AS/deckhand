@@ -661,6 +661,15 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             "Ask the user for a 4–6 digit code, then call again with share: { access: \"pin\", pin: \"<4-6 digits>\" }. Don't repeat the PIN in chat.",
           );
         }
+        // The PIN is the app's, so public here also opens a phone preview of this app that this call did not ask for.
+        const livePhones = isWeb ? [] : engine.livePhonesForApp(resolved.id);
+        if (access === "public" && !wantsPhone && livePhones.length) {
+          return fail(
+            "needs_pin",
+            `app "${resolved.id}" has a live preview on phone ${livePhones.join(", ")}, and the app's link is shared by its previews: making it public would let anyone with it drive that whole phone.`,
+            `Keep it PIN-protected: share: { access: "pin", pin: "<digits>" }. Only if the user explicitly wants that phone's preview public, call again with the phone in devices (id: "${livePhones[0]}") and share: { access: "public" }, or stop_preview it first.`,
+          );
+        }
 
         // PIN FIRST, then boot: the share URL is stable per app and the gate
         // reads the live PIN record, so setting it afterwards leaves a window
@@ -746,8 +755,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           (access === "pin"
             ? " This link is PIN-protected: viewers must enter the PIN the user set (don't repeat the PIN in chat)."
             : " This link is public — anyone with the URL can open it.") +
-          (wantsPhone
-            ? ` It drives a real phone (${devices.flatMap((d) => ("serial" in d && d.serial ? [d.serial] : [])).join(", ")}): deckhand only installs, stops and wipes this app on it, and never another app or a setting.` +
+          (wantsPhone || livePhones.length
+            ? ` It drives a real phone (${[...new Set([...devices.flatMap((d) => ("serial" in d && d.serial ? [d.serial] : [])), ...livePhones])].join(", ")}): deckhand only installs, stops and wipes this app on it, and never another app or a setting.` +
               (access === "public" ? " ⚠ A public link lets anyone with it drive that whole phone." : "")
             : "");
         // A subdomain-hosted web framework (Nuxt/Next/static) needs a configured

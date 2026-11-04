@@ -1230,6 +1230,19 @@ describe("share PIN protection", () => {
     await admin.close();
   });
 
+  it("start_preview will not make an app's link public while a preview of it drives a phone the call did not name", async () => {
+    const admin = await client(ADMIN);
+    const phone = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-a", devices: [{ platform: "android", id: "RF8N30YRFKY" }], share: { access: "pin", pin: "4821" } } })) as { ok: boolean; shareId: string; previewId: string };
+    assert.equal(phone.ok, true, JSON.stringify(phone));
+    const pub = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-a", devices: [{ platform: "ios" }], share: { access: "public" } } }));
+    assert.equal((pub.error as { code: string } | undefined)?.code, "needs_pin", JSON.stringify(pub));
+    assert.match(JSON.stringify(pub.error), /RF8N30YRFKY/);
+    const state = (await (await fetch(`${base}/s/${phone.shareId}/state`)).json()) as { locked?: boolean };
+    assert.equal(state.locked, true, "the phone's preview was made public by a call that never asked for a phone");
+    await admin.callTool({ name: "stop_preview", arguments: { previewId: phone.previewId } });
+    await admin.close();
+  });
+
   it("access:pin protects the share (proxy /state locks); set_pin removes it", async () => {
     const admin = await client(ADMIN);
     const started = parse(await admin.callTool({ name: "start_preview", arguments: { app: "app-local", share: { access: "pin", pin: "4821" } } })) as {
