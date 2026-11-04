@@ -10,7 +10,7 @@ how deckhand would then drive phones plugged into the Mac by cable and install b
 EAS already made. Built since (see the status above); the design text below is the proposal as written. Tool parameters, config keys and file names
 below are proposals; PLAN and AGENTS change only in the PR that ships each piece.
 
-It assumes `check` and `navigate`'s `see` (the screenshot-to-Jev work) have landed on `main`.
+It assumes `navigate`'s `see` (the screenshot-to-Jev work) has landed on `main`.
 
 ## Why now
 
@@ -116,7 +116,7 @@ and `server/src/engine/reaper.ts` branch on the device kind:
   must key on the serial. An iPhone running a dev client cannot reach the Mac's loopback over
   USB; for iPhones the dev-client path loads an EAS Update instead (see EAS source).
 
-### Control (`describe`, `ui`, `navigate`, `check`)
+### Control (`describe`, `ui`, `navigate`)
 
 The `ui` action list, `ref` model and settle rules stay exactly as they are; only the
 backend behind `server/src/testing/control.ts` gains implementations:
@@ -131,7 +131,7 @@ backend behind `server/src/testing/control.ts` gains implementations:
   - Taps are W3C pointer actions at the element centre, and typing goes through `/wda/keys`.
   - `back` uses the nav-bar back button, else a left-edge swipe; neither works on a modal,
     and `describe` says so.
-- `navigate` and `check` need no change: they consume `describe` and screenshots. The egress
+- `navigate` needs no change: it consumes `describe` and screenshots. The egress
   rule is unchanged, so set the TypeSafe key only on a machine whose phones show test data.
 
 ### WDA on this Mac
@@ -234,7 +234,7 @@ is the caller's job (it can read `logs`).
 - **Share links:** a link to a phone controls a real device that can call, buy and log in.
   The default access is PIN (D5), and `list_devices` says to sign phones in to test accounts
   only.
-- **Egress:** `navigate` and `check` send screens to a third party. A phone is no exception
+- **Egress:** `navigate` sends screens to a third party. A phone is no exception
   to "only on a machine whose apps show test data".
 - **Host hygiene:** §11 item 7 is unchanged. No Apple credentials and no personal tokens are
   on the Mac; the WDA Products folder and an Expo robot token are neither.
@@ -293,14 +293,14 @@ One PR at a time, each landed before the next is opened (AGENTS.md):
      backend unless the user asks otherwise — is the default rather than a convention. Environments
      apply to every source, not only EAS.
    - **Proving the backend is deckhand's, where it can:** `preview_status` `environment.verified`
-     is true once the Android `app` log matches the environment's `logMarker`. On iOS it stays
-     false (no app log yet).
+     is true once the Android `app` log matches the environment's `logMarker`. On iOS it stayed
+     false until item 4 gave physical iPhones an app log.
    - **"Already installed"** is the same versionName/versionCode *and* the same bytes (the
      installed `base.apk`'s sha256): an e2e APK can declare one versionCode for every build, and
      there is no install record to consult. On a simulator the build is always installed.
    - **Install conflicts** from an EAS APK use the D4 reversal of item 2: the registered app only.
-   - The `.ipa` vetting exists (`eas/artifact.ts` `inspectIpa`, `vetIpa`) and is not reachable
-     yet: a physical iPhone is item 4. `iosLaunchArgs` (`engine/environment.ts`) is the
+   - The `.ipa` vetting exists (`eas/artifact.ts` `inspectIpa`, `vetIpa`) and was not reachable
+     until item 4, the physical iPhone. `iosLaunchArgs` (`engine/environment.ts`) is the
      `-KEY value` form `devicectl device process launch` takes; `devClientUpdateUrl` and
      `EasPreviews.latestUpdate` are the dev-client update lookup it needs.
    - The phone column's input check no longer swipes the notification shade (it acted outside any

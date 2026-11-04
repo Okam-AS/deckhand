@@ -108,8 +108,8 @@ PLAN describes the architecture. The invariants that bind every change:
   check it before signing in or submitting anything. An app with no environments is "unknown";
   never invent one.
   **Three known gaps, so do not imply otherwise:** the local (`path`) livesync build path is
-  unvalidated on-device, the `metro` `logs` source (and `app` on iOS) is accepted and captures
-  nothing, and PLAN §11 item 7's
+  unvalidated on-device, the `metro` `logs` source (and `app` on an iOS simulator) is accepted and
+  captures nothing, and PLAN §11 item 7's
   host hygiene (dedicated macOS user, no personal credentials, FileVault) is stated in PLAN
   and in no runbook — nothing tells an operator how to set it up or check it holds.
 
@@ -328,7 +328,8 @@ code, not work (`cli.ts`, and PLAN §10 says which is for what). Nothing else in
 touches a device; plain `doctor` and `npm run ci` are paperwork. It is not in the hook and
 not in CI, because GitHub runners cannot do Android emulators and a green run there would
 mean "half the devices" while reading as "all of them" — so run it by hand; it takes
-several minutes. Three capabilities on **both** platforms, as six independent checks:
+several minutes. Three capabilities per kind of device, each an independent check, plus input on
+the two phone columns:
 
 |  | boot | stream | describe |
 |---|---|---|---|
@@ -343,7 +344,7 @@ while one check covered both.
 
 **Do not report a change to the device, streaming or control path as tested without
 pasting this output.** Not "tests pass" — that is `npm run ci`, which never touches a
-device. If you cannot run it, say which of the six is unverified and who has to run it.
+device. If you cannot run it, say which of these checks is unverified and who has to run it.
 `?` is an honest answer; a tick you did not earn is not. It does NOT cover **input
 injection** on simulators and emulators: `describe` proves the control path can READ, nothing
 more. The phone column has a fourth check, **input**, because a phone is where input fails silently:

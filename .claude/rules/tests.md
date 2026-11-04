@@ -12,7 +12,7 @@ Say in the commit message that you saw it fail. That sentence is the only eviden
 
 **2. Fakes are complete or they lie.** Use `test-support/fakes.ts`; never `as unknown as X` on an object literal. That form disables missing-property checking, so adding a method to a real class leaves every fake silently behind and the failure surfaces far from the cause. It has cost four bugs in one day, and once made the entire orphan sweep a no-op **that reported success**.
 
-`fakes.ts` covers the eight injected dependencies that are classes — `phones` (`AndroidPhones`, whose fake hands back the REAL guarded `RegisteredApp` over a recording adb), `eas` (`EasPreviews`, no network), `metro`, `devProcs`,
+`fakes.ts` covers the injected dependencies that are classes — `phones` (`AndroidPhones`, whose fake hands back the REAL guarded `RegisteredApp` over a recording adb), `eas` (`EasPreviews`, no network), `iphones` (`Iphones`), `metro`, `devProcs`,
 `simctl`, `android`, `worktrees`, `reaper` — and a guardrail fails any test file that
 hand-rolls one of them instead. A one- or two-member interface (`audit`, `streaming`) is
 still fine inline: the rule is not "never write this syntax", it is "do not hand-roll a
@@ -20,7 +20,7 @@ partial stand-in for a fourteen-method class when a complete one is a function c
 
 Two known limits of that mechanism, so you do not over-trust it: method parameters are **bivariant**, so an override with a wrong-but-compatible signature still compiles; and optional members may be omitted entirely.
 
-The guardrail that enforces it reads both spellings of the cast — `as unknown as Deps["simctl"]` and `as unknown as Simctl` — for those eight classes only. A hand-rolled partial of anything else (`PreviewEngine`, a router's deps) is still yours to judge; the check has no opinion about it.
+The guardrail that enforces it reads both spellings of the cast — `as unknown as Deps["simctl"]` and `as unknown as Simctl` — for those classes only. A hand-rolled partial of anything else (`PreviewEngine`, a router's deps) is still yours to judge; the check has no opinion about it.
 
 Also worth knowing here:
 
