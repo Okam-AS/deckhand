@@ -133,6 +133,8 @@ const KEYCODES: Record<string, number> = {
 const BUTTONS: Record<string, number> = { back: 4, menu: 82 };
 const LEAVES_APP = /^(home|app-?switch(er)?|recents?)$/i;
 const TOUCHES = new Set<UiAction["type"]>(["tap", "tapElement", "type", "key", "swipe", "gesture", "scrollUntilVisible"]);
+/** Read the tree first, which can wait out an animation, so focus is checked after it, right before the touch. */
+const CHECKED_AT_THE_TOUCH = new Set<UiAction["type"]>(["tapElement", "scrollUntilVisible"]);
 const LEAVES_APP_MESSAGE =
   "a physical phone is driven only inside the preview's app, so deckhand never presses home or the app switcher on it. Use `back`, or relaunch the app with restart_preview.";
 
@@ -155,6 +157,29 @@ export function focusedWindow(dumpsys: string): { pkg: string } | { window: stri
     if (app) return { pkg: app };
   }
   return { window: cur };
+}
+
+type Frame = UiNode["frame"];
+
+/**
+ * The visible navigation bar(s) in `dumpsys window displays`, in the rotated pixels `input tap` uses.
+ * With three-button navigation its Home and Recents are a tap away while the app still has focus.
+ */
+export function navigationBars(dumpsys: string): Frame[] {
+  const out: Frame[] = [];
+  for (const m of dumpsys.matchAll(/type=(?:navigationBars|ITYPE_NAVIGATION_BAR) frame=\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\] visible=true/g)) {
+    const [x1, y1, x2, y2] = [m[1], m[2], m[3], m[4]].map(Number) as [number, number, number, number];
+    out.push({ x: x1, y: y1, width: x2 - x1, height: y2 - y1 });
+  }
+  return out;
+}
+
+function refuseOnNavigationBar(bars: Frame[], x: number, y: number): void {
+  if (!bars.some((f) => x >= f.x && x < f.x + f.width && y >= f.y && y < f.y + f.height)) return;
+  throw new SimDeckActionError(
+    `(${x}, ${y}) is on the phone's navigation bar, whose Home and Recents leave the preview's app, so deckhand does not touch it on a phone. Aim at the app's content, or use \`back\`.`,
+    422,
+  );
 }
 
 const describeSelector = (s: Selector): string => JSON.stringify(Object.fromEntries(Object.entries(s).filter(([, v]) => v != null)));
@@ -244,15 +269,17 @@ export class AdbControl implements ControlBackend {
   }
 
   /** The preview's app (or a window it opened, PART_OF_APP_FLOW) must have input focus before deckhand touches the phone. */
-  private async inApp(serial: string): Promise<void> {
+  private async inApp(serial: string): Promise<Frame[]> {
     const app = this.appOf(serial);
     if (!app) throw new SimDeckActionError("deckhand drives a phone only inside the preview's app, and it is not installed yet — wait for preview_status ready", 409);
     let seen: ReturnType<typeof focusedWindow> = null;
+    let dumpsys = "";
     for (let i = 0; i < 4 && !seen; i++) {
       if (i) await this.sleep(250);
-      seen = focusedWindow(await this.shell(serial, ["dumpsys", "window", "displays"]));
+      dumpsys = await this.shell(serial, ["dumpsys", "window", "displays"]);
+      seen = focusedWindow(dumpsys);
     }
-    if (seen && "pkg" in seen && (seen.pkg === app.pkg || PART_OF_APP_FLOW.test(seen.pkg))) return;
+    if (seen && "pkg" in seen && (seen.pkg === app.pkg || PART_OF_APP_FLOW.test(seen.pkg))) return navigationBars(dumpsys);
     const what = !seen ? "no window with input focus (locked or asleep?)" : "pkg" in seen ? seen.pkg : `the system window ${seen.window}`;
     throw new SimDeckActionError(
       `the phone is showing ${what}, not the preview's app (${app.pkg}); deckhand never acts outside it. \`back\` closes a shade or dialog; otherwise relaunch the app with restart_preview, then retry.`,
@@ -260,9 +287,10 @@ export class AdbControl implements ControlBackend {
     );
   }
 
-  private async tapNode(serial: string, n: UiNode): Promise<{ x: number; y: number }> {
+  private async tapNode(serial: string, n: UiNode, bars: Frame[]): Promise<{ x: number; y: number }> {
     const x = Math.round(n.frame.x + n.frame.width / 2);
     const y = Math.round(n.frame.y + n.frame.height / 2);
+    refuseOnNavigationBar(bars, x, y);
     await this.shell(serial, ["input", "tap", String(x), String(y)]);
     return { x, y };
   }
@@ -290,18 +318,19 @@ export class AdbControl implements ControlBackend {
     // Everything that touches or types first checks what is in front, like the iPhone control.
     // `back` and dismissKeyboard are left out: back launches nothing, and it is how an agent
     // closes a shade or dialog it did not mean to open.
-    if ((TOUCHES.has(a.type) || (a.type === "button" && a.name.toLowerCase() !== "back")) && a.type !== "tapElement") await this.inApp(serial);
+    const bars =
+      (TOUCHES.has(a.type) || (a.type === "button" && a.name.toLowerCase() !== "back")) && !CHECKED_AT_THE_TOUCH.has(a.type) ? await this.inApp(serial) : [];
     switch (a.type) {
       case "tap": {
         const [x, y] = await this.px(serial, a.x, a.y);
+        refuseOnNavigationBar(bars, x, y);
         await this.shell(serial, ["input", "tap", String(x), String(y)]);
         return { action: "tap", x, y };
       }
       case "tapElement": {
         const { tree, held } = await this.poll(serial, a.waitTimeoutMs ?? 0, (t) => findAll(t, a.selector, a.type).length > 0);
         if (!held) throw miss(a.selector);
-        await this.inApp(serial);
-        return { action: "tap", ...(await this.tapNode(serial, findAll(tree, a.selector, a.type)[0]!)) };
+        return { action: "tap", ...(await this.tapNode(serial, findAll(tree, a.selector, a.type)[0]!, await this.inApp(serial))) };
       }
       case "type": {
         let arg: string;
@@ -331,6 +360,7 @@ export class AdbControl implements ControlBackend {
         await this.shell(serial, ["input", "keyevent", "4"]);
         return { action: "back", method: "keyevent" };
       case "swipe":
+        refuseOnNavigationBar(bars, ...(await this.px(serial, a.startX, a.startY)));
         await this.swipe(serial, a.startX, a.startY, a.endX, a.endY, a.durationMs ?? 300);
         return { action: "swipe" };
       case "gesture": {
@@ -359,7 +389,7 @@ export class AdbControl implements ControlBackend {
         for (let i = 0; i < 12; i++) {
           if (findAll(await this.tree(serial), a.selector, a.type).length) return { action: "scrollUntilVisible", scrolls: i };
           const [sx, sy, ex, ey] = presetSwipe("scroll-down");
-          if (i > 0) await this.inApp(serial);
+          await this.inApp(serial);
           await this.swipe(serial, sx, sy, ex, ey, PRESET_DURATION_MS);
           await this.sleep(400);
         }

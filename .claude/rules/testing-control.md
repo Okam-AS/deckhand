@@ -48,9 +48,17 @@ window the app opened and the user returns from (the runtime-permission prompt, 
 Chrome or Samsung Internet Custom Tab); a bare system window such as `NotificationShade` is outside
 the app even though `mFocusedApp` still names it, and an app's own `PopupWindow:` is inside it.
 `home` and the app-switch/recents buttons are refused; `back` and `dismissKeyboard` are not checked,
-because back launches nothing and is how an agent closes a shade. → `adbControl.test.ts` "never
+because back launches nothing and is how an agent closes a shade. A `tapElement` or
+`scrollUntilVisible` reads the tree first, which can wait out an animation, so its focus check runs
+after the tree, right before each touch. With three-button navigation, Home and Recents are taps on
+the navigation bar while the app keeps focus, so a tap or a swipe start inside a visible
+`navigationBars` frame from that same `dumpsys` is refused, in the rotated pixels `input` uses. When
+no visible bar is found (hidden, or a format the parser does not know) the tap goes through: that
+is decided, because refusing would block every immersive app. → `adbControl.test.ts` "never
 touches or types while the launcher, the shade or another app has focus", "never presses home or
-the app switcher on a phone, and touches nothing"
+the app switcher on a phone, and touches nothing", "checks focus after the first tree of a scroll,
+which can wait while the shade comes down", "never touches the three-button navigation bar, whose
+Home and Recents leave the app with it still focused"
 
 **A swipe from a phone's top or bottom edge is refused** (`phoneEdges.ts`, y < 0.07 or > 0.95), on
 both platforms: the OS owns it — Control Center, the notification shade, home — and it leaves the

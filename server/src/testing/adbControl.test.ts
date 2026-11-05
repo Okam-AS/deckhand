@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { ExecResult } from "../devices/android.ts";
 import { RegisteredApp } from "../devices/androidPhone.ts";
-import { AdbControl, findAll, parseUiAutomatorTree } from "./adbControl.ts";
+import { AdbControl, findAll, navigationBars, parseUiAutomatorTree } from "./adbControl.ts";
 import { SimDeckActionError, type UiAction } from "./control.ts";
 import { ScreenBook } from "./screen.ts";
 
@@ -17,13 +17,13 @@ const XML =
 const IN_APP =
   "  mCurrentFocus=Window{6419467 u0 no.example.app/no.example.app.MainActivity}\n  mFocusedApp=ActivityRecord{1aa2b9b u0 no.example.app/.MainActivity} t11}\n";
 
-function harness(opts: { dump?: string; app?: RegisteredApp | null; focus?: string | (() => string) } = {}) {
+function harness(opts: { dump?: string | (() => string); app?: RegisteredApp | null; focus?: string | (() => string) } = {}) {
   const calls: string[] = [];
   const exec = async (_cmd: string, args: string[]): Promise<ExecResult> => {
     calls.push(args.join(" "));
     const say = (s: string): ExecResult => ({ code: 0, stdout: Buffer.from(s), stderr: "" });
     if (args.includes("size")) return say("Physical size: 1440x3200\nOverride size: 1080x2400\n");
-    if (args.includes("dump")) return say(opts.dump ?? XML);
+    if (args.includes("dump")) return say(typeof opts.dump === "function" ? opts.dump() : (opts.dump ?? XML));
     if (args.includes("input_method")) return say("mInputShown=true");
     if (args.includes("window")) return say(typeof opts.focus === "function" ? opts.focus() : (opts.focus ?? IN_APP));
     return say("");
@@ -57,6 +57,18 @@ describe("the adb control backend's tree", () => {
     assert.equal(findAll(tree, { text: "ola@example.no" }, "assert").length, 0);
     assert.equal(findAll(tree, { text: "ola@example.no" }, "query").length, 1);
     assert.equal(findAll(tree, { id: "title" }, "tapElement")[0]?.label, "Logg inn");
+  });
+});
+
+describe("navigationBars", () => {
+  it("reads the visible bar from `dumpsys window displays`, in either spelling, and skips a hidden one", () => {
+    const api36 = "        InsetsSource id=cbff0001 type=navigationBars frame=[1184,0][1280,720] visible=true flags=INSETS_ROUNDED_CORNER sideHint=RIGHT boundingRects=null\n";
+    const api30 = "      InsetsSource type=ITYPE_NAVIGATION_BAR frame=[0,2274][1080,2400] visible=true\n";
+    const hidden = "        InsetsSource id=cbff0001 type=navigationBars frame=[0,2274][1080,2400] visible=false flags= sideHint=BOTTOM boundingRects=null\n";
+    assert.deepEqual(navigationBars(api36), [{ x: 1184, y: 0, width: 96, height: 720 }]);
+    assert.deepEqual(navigationBars(api30), [{ x: 0, y: 2274, width: 1080, height: 126 }]);
+    assert.deepEqual(navigationBars(hidden), []);
+    assert.deepEqual(navigationBars(IN_APP), []);
   });
 });
 
@@ -189,6 +201,40 @@ describe("the adb control backend's actions", () => {
     const leaves = harness({ dump: XML, focus: () => (scrolls++ < 1 ? IN_APP : "  mCurrentFocus=Window{3 u0 NotificationShade}\n") });
     await assert.rejects(leaves.control.action(leaves.target, { type: "scrollUntilVisible", selector: { text: "Ikke her" } }), /never acts outside/);
     assert.equal(leaves.calls.filter((c) => c.includes("input swipe")).length, 1, "one scroll, then the shade stopped it");
+  });
+
+  it("checks focus after the first tree of a scroll, which can wait while the shade comes down", async () => {
+    let dumped = false;
+    const { control, target, calls } = harness({
+      dump: () => ((dumped = true), XML),
+      focus: () => (dumped ? "  mCurrentFocus=Window{3 u0 NotificationShade}\n" : IN_APP),
+    });
+    await assert.rejects(control.action(target, { type: "scrollUntilVisible", selector: { text: "Ikke her" } }), /never acts outside/);
+    assert.ok(!calls.some((c) => c.includes("input swipe")), calls.join("\n"));
+  });
+
+  it("never touches the three-button navigation bar, whose Home and Recents leave the app with it still focused", async () => {
+    const bar = (frame: string, side: string) => `${IN_APP}        InsetsSource id=cbff0001 type=navigationBars frame=${frame} visible=true flags=INSETS_ROUNDED_CORNER sideHint=${side} boundingRects=null\n`;
+    const navNode = (bounds: string) => `<node index="3" text="" resource-id="android:id/navigationBarBackground" class="android.view.View" package="no.example.app" content-desc="" clickable="false" bounds="${bounds}" />`;
+    const portrait = harness({ focus: bar("[0,2274][1080,2400]", "BOTTOM"), dump: XML.replace("</node></hierarchy>", `${navNode("[0,2274][1080,2400]")}</node></hierarchy>`) });
+    for (const a of [
+      { type: "tap", x: 0.5, y: 0.97 },
+      { type: "tapElement", selector: { id: "navigationBarBackground" } },
+      { type: "swipe", startX: 0.5, startY: 0.948, endX: 0.5, endY: 0.5 },
+    ] as UiAction[]) {
+      await assert.rejects(portrait.control.action(portrait.target, a), (e: unknown) => e instanceof SimDeckActionError && e.status === 422 && /navigation bar/.test(e.message), JSON.stringify(a));
+    }
+    assert.ok(!portrait.calls.some((c) => / input (tap|swipe)/.test(c)), portrait.calls.join("\n"));
+    await portrait.control.action(portrait.target, { type: "tap", x: 0.5, y: 0.9 });
+    assert.ok(portrait.calls.includes("-s RF8 shell input tap 540 2159"));
+
+    // Turned to landscape the bar is on the right, and uiautomator reports the rotated frame.
+    const landscape = harness({
+      focus: bar("[2274,0][2400,1080]", "RIGHT"),
+      dump: XML.replace('rotation="0"', 'rotation="1"').replace("</node></hierarchy>", `${navNode("[2274,0][2400,1080]")}</node></hierarchy>`),
+    });
+    await assert.rejects(landscape.control.action(landscape.target, { type: "tapElement", selector: { id: "navigationBarBackground" } }), /navigation bar/);
+    assert.ok(!landscape.calls.some((c) => c.includes("input tap")), landscape.calls.join("\n"));
   });
 
   it("refuses to touch a phone whose app is not installed yet", async () => {
