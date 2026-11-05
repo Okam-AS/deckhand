@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { basePathFromStreamUrl, portFromDetach, ServeSimBackend } from "./serveSim.ts";
+import { basePathFromStreamUrl, DESCRIBE_TIMEOUT_MS, portFromDetach, ServeSimBackend } from "./serveSim.ts";
 
 describe("basePathFromStreamUrl", () => {
   it("derives /helper/<udid> from a detach streamUrl", () => {
@@ -521,10 +521,19 @@ describe("ServeSimBackend describe", () => {
       fetchImpl,
     }).attach({ platform: "ios", udid: "UDID-AX" });
 
-  it("waits as long as the caller asks, for a simulator whose first tree is slow", async () => {
-    const stream = await attach(slowAx(120));
-    assert.match(await stream.describe(2_000), /Kart/);
-    await stream.detach();
+  it("waits past the default timeout when the caller asks for longer, for a simulator whose first tree is slow", async (t) => {
+    const arrivesAfter = DESCRIBE_TIMEOUT_MS + 1_000;
+    const stream = await attach(slowAx(arrivesAfter));
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      const tree = stream.describe(DESCRIBE_TIMEOUT_MS * 6);
+      await new Promise((r) => setImmediate(r));
+      t.mock.timers.tick(arrivesAfter);
+      assert.match(await tree, /Kart/);
+    } finally {
+      t.mock.timers.reset();
+      await stream.detach();
+    }
   });
 
   it("says the tree did not answer in time, instead of a bare abort", async () => {
