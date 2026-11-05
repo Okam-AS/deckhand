@@ -3,6 +3,7 @@ import { WdaClient, WdaError, keyText } from "./wdaClient.ts";
 import { wdaSourceToTree, WdaSourceError, type PhoneTree } from "./wdaTree.ts";
 import { flattenTree, shapeOf, type ScreenNode } from "./screen.ts";
 import { presetSwipe, PRESET_DURATION_MS } from "./orientation.ts";
+import { phoneEdgeSwipeRefusal } from "./phoneEdges.ts";
 
 // ---------------------------------------------------------------------------
 // `describe` and `ui` for a physical iPhone, over WebDriverAgent (wdaClient.ts). Same contract as
@@ -79,6 +80,10 @@ export class IphoneControl implements DeviceControl<IphoneTarget> {
     if ("selector" in a && a.selector.ref != null) throw new IphoneActionError(`ref ${a.selector.ref} reached the iPhone control unresolved`, 400);
     const refused = REFUSED[a.type];
     if (refused) throw new IphoneActionError(refused, 422);
+    if (a.type === "swipe") {
+      const edge = phoneEdgeSwipeRefusal(a.startY, "ios");
+      if (edge) throw new IphoneActionError(edge, 422);
+    }
     const client = await this.client(target);
     switch (a.type) {
       case "sleep":
