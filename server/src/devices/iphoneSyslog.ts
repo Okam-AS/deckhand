@@ -52,6 +52,20 @@ const APP_CRASH = /Terminating app due to uncaught exception|\bEXC_(BAD_ACCESS|C
 const REPORTERS = /^(ReportCrash|osanalyticshelper)$/;
 
 /**
+ * Apple's frameworks log from inside the app's own process, under the app's name, with the
+ * framework in parentheses: `Elton(CoreFoundation)[9732] <Debug>: … CFPrefsPlistSource …`. On an
+ * iPhone 15 those Debug lines were nearly every line of the `app` log, pushing the app's own output
+ * out of the tail and its bounded buffer. Only Debug level from a system image is dropped: the
+ * app's code (its binary, `X.debug.dylib`, React, Hermes) and every Info-or-louder line stay.
+ */
+const SYSTEM_IMAGE =
+  /^(CoreFoundation|Foundation|CFNetwork|UIKitCore|UIKitServices|BaseBoard|BackBoardServices|FrontBoardServices|RunningBoardServices|CoreData|CoreText|CoreUI|QuartzCore|Security|TextInputCore|CoreMotion|CoreLocation|AudioToolbox|libsystem_\w+\.dylib|libdispatch\.dylib|libxpc\.dylib|libnetwork\.dylib|libboringssl\.dylib|libcoreanalytics\.dylib)$/;
+
+export function isSystemDebugNoise(l: SyslogLine): boolean {
+  return l.level === "D" && !!l.subsystem && SYSTEM_IMAGE.test(l.subsystem);
+}
+
+/**
  * Lines that record the app crashing: its own fatal messages, or the crash reporter naming its
  * process. Facts, not a verdict — a terminate deckhand sent is not among them.
  */
@@ -90,6 +104,8 @@ export class IphoneSyslog {
   private rest = "";
   /** Set when the stream ended without stop(): what it holds stops at that moment. */
   ended: string | undefined;
+  /** Debug lines Apple's frameworks wrote from the app's process, kept out of its lines (isSystemDebugNoise). */
+  systemDebugLeftOut = 0;
 
   constructor(opts: IphoneSyslogOptions) {
     this.udid = opts.udid;
@@ -139,7 +155,13 @@ export class IphoneSyslog {
     this.last = parsed.at(-1);
     this.buffer.push(...parsed);
     if (this.buffer.length > this.maxLines) this.buffer.splice(0, this.buffer.length - this.maxLines);
-    const own = parsed.filter((l) => l.process === this.appProcess || REPORTERS.test(l.process));
+    const own = parsed.filter((l) => {
+      if (REPORTERS.test(l.process)) return true;
+      if (l.process !== this.appProcess) return false;
+      if (!isSystemDebugNoise(l)) return true;
+      this.systemDebugLeftOut++;
+      return false;
+    });
     if (!own.length) return;
     this.appBuffer.push(...own);
     if (this.appBuffer.length > this.maxLines) this.appBuffer.splice(0, this.appBuffer.length - this.maxLines);

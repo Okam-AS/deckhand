@@ -3486,6 +3486,7 @@ export class PreviewEngine {
       `process ${apps.bundleId} (${dev.appProcess ?? "?"}): ${running === null ? "unknown (devicectl did not answer)" : running ? "running" : "NOT running"}`,
       ...(crashes.length ? [`crash markers: ${crashes.length} — last: ${syslogText(crashes.at(-1)!)}`] : []),
       ...(dev.syslog?.ended ? [`syslog: ${dev.syslog.ended}`] : []),
+      ...(dev.syslog?.systemDebugLeftOut ? [`left out: ${dev.syslog.systemDebugLeftOut} Debug lines Apple's frameworks (CoreFoundation, UIKitCore, …) wrote from the app's process`] : []),
     ];
     return [...head, ...lines.slice(-tailLines)].join("\n");
   }

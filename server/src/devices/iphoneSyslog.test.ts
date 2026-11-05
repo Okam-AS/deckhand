@@ -140,6 +140,38 @@ describe("the syslog stream", () => {
     assert.deepEqual(log.crashes("com.example.preview").map((l) => l.process), ["Demo", "ReportCrash"]);
   });
 
+  it("keeps Apple frameworks' Debug lines out of the app's lines, and counts them", async () => {
+    const spawned: FakeChild[] = [];
+    const impl = (() => {
+      const c = new FakeChild();
+      spawned.push(c);
+      return c as unknown as ChildProcess;
+    }) as unknown as typeof spawn;
+    const log = new IphoneSyslog({ udid: "U1", appProcess: "Elton", spawnImpl: impl, now: () => now });
+    log.start();
+    // As an iPhone 15 wrote them: thousands of these per minute under the app's own process name.
+    const noise = `Oct 23 18:04:13.489000 Elton(CoreFoundation)[9732] <Debug>: CFPrefsPlistSource<0x152520820> (Domain: group.no.vg.lab.zapp.onesignal, User: kCFPreferencesCurrentUser) skipping setting already-present value for key <private>`;
+    spawned[0]!.stdout.write(
+      [
+        ...Array(40).fill(noise),
+        `Oct 23 18:04:13.500000 Elton(libsystem_info.dylib)[9732] <Debug>: lookup`,
+        `Oct 23 18:04:14.000000 Elton(React)[9732] <Debug>: [javascript] console.debug from the app`,
+        `Oct 23 18:04:14.100000 Elton(Elton.debug.dylib)[9732] <Debug>: the app's own native debug line`,
+        `Oct 23 18:04:14.200000 Elton(CoreFoundation)[9732] <Error>: *** Terminating app due to uncaught exception 'X'`,
+        `Oct 23 18:04:14.300000 Elton[9732] <Notice>: no image in parentheses`,
+      ].join("\n") + "\n",
+    );
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(
+      log.lines({ process: "Elton" }).map((l) => l.subsystem ?? "-"),
+      ["React", "Elton.debug.dylib", "CoreFoundation", "-"],
+      "the app's Debug lines and every louder line stay, CoreFoundation's Error included",
+    );
+    assert.equal(log.systemDebugLeftOut, 41);
+    assert.equal(log.crashes("no.vg.lab.zapp").length, 1);
+    assert.equal(log.lines().length, 45, "the phone-wide buffer still holds everything");
+  });
+
   it("says when the stream ended by itself, and not when it was stopped", () => {
     const a = stream();
     a.log.start();
