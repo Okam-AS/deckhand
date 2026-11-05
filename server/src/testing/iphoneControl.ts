@@ -1,6 +1,6 @@
 import { SimDeckActionError, type DescribeOptions, type Selector, type UiAction } from "./control.ts";
 import { WdaClient, WdaError, keyText } from "./wdaClient.ts";
-import { wdaSourceToTree, WdaSourceError, type PhoneTree } from "./wdaTree.ts";
+import { wdaSourceToTree, WdaSourceError, type PhoneNode, type PhoneTree } from "./wdaTree.ts";
 import { flattenTree, shapeOf, type ScreenNode } from "./screen.ts";
 import { presetSwipe, PRESET_DURATION_MS } from "./orientation.ts";
 import { phoneEdgeSwipeRefusal } from "./phoneEdges.ts";
@@ -152,7 +152,7 @@ export class IphoneControl implements DeviceControl<IphoneTarget> {
       case "back":
         return this.back(client, target);
       case "dismissKeyboard":
-        return this.dismissKeyboard(client);
+        return this.dismissKeyboard(client, target);
       case "scrollUntilVisible":
         return this.scrollUntilVisible(client, target, a.selector);
     }
@@ -248,24 +248,33 @@ export class IphoneControl implements DeviceControl<IphoneTarget> {
    * IDENTIFIER is the UIReturnKeyType's English name whatever the language, so it is found by that
    * instead. Pressing it is what `enter` does — it may submit the field — and the result says so.
    */
-  private async dismissKeyboard(client: WdaClient): Promise<unknown> {
+  private async dismissKeyboard(client: WdaClient, target: IphoneTarget): Promise<unknown> {
     const keyboardUp = (nodes: ScreenNode[]) => nodes.some((n) => n.role === "Key");
-    const before = nodesOf(await this.tree(client));
-    if (!keyboardUp(before)) return { action: "dismissKeyboard", shown: false };
-    try {
-      await client.dismissKeyboard();
-      return { action: "dismissKeyboard", shown: true, method: "wda" };
-    } catch (e) {
-      if (!(e instanceof WdaError)) throw e;
-    }
-    const keyTop = Math.min(...before.filter((n) => n.role === "Key" && n.frame).map((n) => n.frame!.y));
-    const ret = before.find((n) => n.role === "Button" && n.id && RETURN_KEY_IDS.has(n.id) && !n.offscreen && n.frame && n.frame.y >= keyTop - 1);
+    if (!keyboardUp(nodesOf(await this.tree(client)))) return { action: "dismissKeyboard", shown: false };
+    await this.inApp(client, target);
+    const dismissed = await wrap(async () => {
+      try {
+        await client.dismissKeyboard();
+        return true;
+      } catch (e) {
+        // Only WDA's own "could not" is safe to follow with a press; a timeout may already have hidden it.
+        if (e instanceof WdaError && e.status === 400 && /invalid element state/.test(e.message)) return false;
+        throw e;
+      }
+    }, "the keyboard may already be gone — describe the screen before retrying");
+    if (dismissed) return { action: "dismissKeyboard", shown: true, method: "wda" };
+    const tree = await this.tree(client);
+    if (!keyboardUp(nodesOf(tree))) return { action: "dismissKeyboard", shown: true, method: "wda" };
+    const ret = keyboardsOf(tree)
+      .flatMap((k) => nodesOf({ roots: [k] }))
+      .find((n) => n.role === "Button" && n.id && RETURN_KEY_IDS.has(n.id) && n.frame);
     if (!ret) {
       throw new IphoneActionError(
         "this keyboard has no return key deckhand can find, and an iPhone has no key that only hides it — tap the app's own Done or a non-field area, or scroll the content",
         409,
       );
     }
+    await this.inApp(client, target);
     await this.tapNode(client, ret);
     const gone = await this.poll(client, 1_500, (nodes) => (keyboardUp(nodes) ? null : true));
     if (!gone) throw new IphoneActionError(`pressed the keyboard's return key ("${ret.label ?? ret.id}"), and the keyboard is still up — this field keeps it (a multiline field, or one that moves to the next field)`, 409);
@@ -298,6 +307,16 @@ export class IphoneControl implements DeviceControl<IphoneTarget> {
 
 function nodesOf(tree: PhoneTree): ScreenNode[] {
   return flattenTree(tree);
+}
+
+function keyboardsOf(tree: PhoneTree): PhoneNode[] {
+  const out: PhoneNode[] = [];
+  const walk = (n: PhoneNode): void => {
+    if (n.role === "Keyboard") out.push(n);
+    else n.children?.forEach(walk);
+  };
+  tree.roots.forEach(walk);
+  return out;
 }
 
 function clamp(v: number): number {
