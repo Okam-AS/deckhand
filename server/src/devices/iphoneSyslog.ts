@@ -52,6 +52,34 @@ const APP_CRASH = /Terminating app due to uncaught exception|\bEXC_(BAD_ACCESS|C
 const REPORTERS = /^(ReportCrash|osanalyticshelper)$/;
 
 /**
+ * Apple's frameworks log from inside the app's own process, under the app's name, with the
+ * framework in parentheses: `Elton(CoreFoundation)[9732] <Debug>: … CFPrefsPlistSource …`. On an
+ * iPhone 15 these were nearly every line of the `app` log — 19 000 CoreFoundation Debug lines in a
+ * few minutes, then UIKitCore background-task and UIAccessibility/AXRuntime lines that WDA's own
+ * reads cause — pushing the app's output out of the tail and the bounded buffer. From a system
+ * image only Warning, Error and Fault are kept (idevicesyslog reads Info and Notice alike, so both
+ * go); the app's own images (its binary, `X.debug.dylib`), React, Hermes and third-party SDKs keep
+ * every level, and crash markers are Error lines, so they stay.
+ */
+const SYSTEM_IMAGE = new RegExp(
+  "^(" +
+    [
+      "Foundation", "CFNetwork", "Network", "Security", "QuartzCore", "Metal", "IOSurface", "ImageIO",
+      "Core\\w+", "UIKit\\w*", "UIFoundation", "UIAccessibility", "AX\\w+", "\\w*Accessibility\\w*",
+      "TextInput\\w*", "InputAnalytics", "\\w+Services", "FrontBoard", "BaseBoard", "RunningBoard",
+      "PowerLog", "HangTracer", "XCT\\w+", "AppSSO\\w*", "AnimationKit", "GenerativeModels\\w*", "WebKit", "SwiftUI", "MapKit", "StoreKit", "AVF\\w*",
+      "MediaToolbox", "Photos\\w*", "ManagedConfiguration", "UserNotifications\\w*", "LocalAuthentication",
+      "AuthenticationServices", "SafariServices", "SystemConfiguration", "GraphicsServices", "libsystem_\\w+\\.dylib",
+      "lib(?!hermes)[\\w+-]+\\.dylib",
+    ].join("|") +
+    ")$",
+);
+
+export function isSystemNoise(l: SyslogLine): boolean {
+  return (l.level === "D" || l.level === "I") && !!l.subsystem && l.subsystem !== l.process && SYSTEM_IMAGE.test(l.subsystem);
+}
+
+/**
  * Lines that record the app crashing: its own fatal messages, or the crash reporter naming its
  * process. Facts, not a verdict — a terminate deckhand sent is not among them.
  */
@@ -90,6 +118,8 @@ export class IphoneSyslog {
   private rest = "";
   /** Set when the stream ended without stop(): what it holds stops at that moment. */
   ended: string | undefined;
+  /** Debug/Info lines Apple's frameworks wrote from the app's process, kept out of its lines (isSystemNoise). */
+  systemNoiseLeftOut = 0;
 
   constructor(opts: IphoneSyslogOptions) {
     this.udid = opts.udid;
@@ -139,7 +169,13 @@ export class IphoneSyslog {
     this.last = parsed.at(-1);
     this.buffer.push(...parsed);
     if (this.buffer.length > this.maxLines) this.buffer.splice(0, this.buffer.length - this.maxLines);
-    const own = parsed.filter((l) => l.process === this.appProcess || REPORTERS.test(l.process));
+    const own = parsed.filter((l) => {
+      if (REPORTERS.test(l.process)) return true;
+      if (l.process !== this.appProcess) return false;
+      if (!isSystemNoise(l)) return true;
+      this.systemNoiseLeftOut++;
+      return false;
+    });
     if (!own.length) return;
     this.appBuffer.push(...own);
     if (this.appBuffer.length > this.maxLines) this.appBuffer.splice(0, this.appBuffer.length - this.maxLines);
