@@ -53,6 +53,8 @@ export interface ServeSimOptions {
 }
 
 const FIRST_FRAME_TIMEOUT_MS = 20_000; // the daemon needs ~8s to attach to a cold sim
+/** serve-sim's /ax answers in ~1.5 s on a warm simulator; a caller that knows it is cold passes more. */
+export const DESCRIBE_TIMEOUT_MS = 5_000;
 
 interface DetachResult {
   streamUrl: string;
@@ -218,7 +220,7 @@ export class ServeSimBackend implements StreamingBackend {
       origin,
       helperBasePath: base,
       waitForFirstFrame: (timeoutMs) => backend.probeFirstFrame(origin, base, timeoutMs),
-      describe: () => backend.describe(origin, base),
+      describe: (timeoutMs) => backend.describe(origin, base, timeoutMs),
       detach: () => backend.detach(device.udid),
     };
   }
@@ -269,9 +271,9 @@ export class ServeSimBackend implements StreamingBackend {
     }
   }
 
-  private async describe(origin: string, base: string): Promise<string> {
+  private async describe(origin: string, base: string, timeoutMs = DESCRIBE_TIMEOUT_MS): Promise<string> {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 5000);
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       const res = await this.fetchImpl(`${origin}${base}/ax`, { headers: { accept: "text/event-stream" }, signal: ctrl.signal });
       if (!res.ok || !res.body) throw new Error(`ax endpoint ${res.status}`);
@@ -291,6 +293,10 @@ export class ServeSimBackend implements StreamingBackend {
         .map((l) => l.slice(5).trim())
         .join("\n");
       return data || buf.trim();
+    } catch (e) {
+      // A bare "This operation was aborted" was all `doctor --smoke` printed for this.
+      if (ctrl.signal.aborted) throw new Error(`serve-sim's accessibility tree (/ax) did not answer within ${timeoutMs} ms`);
+      throw e;
     } finally {
       clearTimeout(timer);
     }

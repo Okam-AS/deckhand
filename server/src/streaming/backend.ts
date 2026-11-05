@@ -29,8 +29,8 @@ export interface AttachedStream {
   helperBasePath: string; // e.g. "/helper/<udid>"
   /** Resolve when the helper has produced a first frame (avcc or mjpeg). */
   waitForFirstFrame(timeoutMs?: number): Promise<boolean>;
-  /** Token-efficient accessibility tree for the `describe` tool. */
-  describe(): Promise<string>;
+  /** Token-efficient accessibility tree; `timeoutMs` where the backend can wait longer (serve-sim). */
+  describe(timeoutMs?: number): Promise<string>;
   /** Kill the helper and release its port. Idempotent. */
   detach(): Promise<void>;
 }

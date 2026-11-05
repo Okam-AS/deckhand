@@ -384,6 +384,9 @@ export function checkNavigateEgress(key: KeyLookup): Check | null {
  * the device). That rides the WebSocket bridge, which needs a viewer on the other end, and a
  * check that pretended to cover it would be the same lie as a green gate that booted nothing.
  */
+/** How long the iOS smoke check waits for the first accessibility tree of a freshly booted simulator. */
+export const COLD_DESCRIBE_TIMEOUT_MS = 30_000;
+
 async function smokeIos(config: Config): Promise<Check[]> {
   const label = (cap: string) => `smoke ios: ${cap}`;
   const simctl = new Simctl();
@@ -407,7 +410,10 @@ async function smokeIos(config: Config): Promise<Check[]> {
       // attached fails for the reason we already reported, and two red lines for one cause
       // is how a gate starts getting skimmed.
       if (framed) {
-        const tree = await stream.describe();
+        // The first accessibility read after a boot is slow — ~11 s on Xcode 27.1 / iOS 27.0, against
+        // ~1.5 s after it — and this check always boots a fresh simulator, so the default 5 s
+        // failed it every run with "This operation was aborted".
+        const tree = await stream.describe(COLD_DESCRIBE_TIMEOUT_MS);
         const ok = typeof tree === "string" && tree.length > 0;
         checks.push({ name: label("describe"), ok, gate: true, detail: ok ? `${tree.length} chars` : "empty tree" });
       }

@@ -495,3 +495,41 @@ describe("ServeSimBackend.attach — surviving helpers", () => {
     assert.equal(spawns.length, 2, "a dead helper is replaced instead of trusted");
   });
 });
+
+describe("ServeSimBackend describe", () => {
+  // /ax on a just-booted simulator: nothing for a while (~11 s seen on Xcode 27.1), then the tree.
+  const slowAx = (afterMs: number) =>
+    (async (input: unknown, init?: RequestInit) => {
+      if (!String(input).endsWith("/ax")) return new Response(new Uint8Array(8192));
+      await new Promise<void>((resolve, reject) => {
+        const t = setTimeout(resolve, afterMs);
+        init?.signal?.addEventListener("abort", () => {
+          clearTimeout(t);
+          reject(new DOMException("This operation was aborted", "AbortError"));
+        });
+      });
+      return new Response('[{"AXLabel":"Kart","type":"Button"}]\n\n');
+    }) as unknown as typeof fetch;
+  const attach = (fetchImpl: typeof fetch) =>
+    new ServeSimBackend({
+      portRange: [3100, 3110],
+      detachImpl: async (_bin, args) => {
+        const udid = args[args.length - 1]!;
+        return JSON.stringify({ url: "http://127.0.0.1:3100", streamUrl: `http://127.0.0.1:3100/helper/${udid}/stream.mjpeg`, port: 3100, device: udid });
+      },
+      killImpl: async () => {},
+      fetchImpl,
+    }).attach({ platform: "ios", udid: "UDID-AX" });
+
+  it("waits as long as the caller asks, for a simulator whose first tree is slow", async () => {
+    const stream = await attach(slowAx(120));
+    assert.match(await stream.describe(2_000), /Kart/);
+    await stream.detach();
+  });
+
+  it("says the tree did not answer in time, instead of a bare abort", async () => {
+    const stream = await attach(slowAx(5_000));
+    await assert.rejects(stream.describe(60), /accessibility tree \(\/ax\) did not answer within 60 ms/);
+    await stream.detach();
+  });
+});
