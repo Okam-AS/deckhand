@@ -1,6 +1,6 @@
 import { SimDeckActionError, type DescribeOptions, type Selector, type UiAction } from "./control.ts";
 import { WdaClient, WdaError, keyText } from "./wdaClient.ts";
-import { wdaSourceToTree, WdaSourceError, type PhoneTree } from "./wdaTree.ts";
+import { wdaSourceToTree, WdaSourceError, type PhoneNode, type PhoneTree } from "./wdaTree.ts";
 import { flattenTree, shapeOf, type ScreenNode } from "./screen.ts";
 import { presetSwipe, PRESET_DURATION_MS } from "./orientation.ts";
 import { phoneEdgeSwipeRefusal } from "./phoneEdges.ts";
@@ -48,6 +48,8 @@ const DEFAULT_WAIT_MS = 5_000;
 const POLL_MS = 300;
 const SCROLL_TRIES = 10;
 const BACK_LABEL = /\b(back|tilbake)\b/i;
+/** The return key's accessibility identifier per UIReturnKeyType; the label is localized ("gå"), these are not. */
+const RETURN_KEY_IDS = new Set(["Return", "Done", "Go", "Search", "Send", "Next", "Join", "Route", "Continue", "Google", "Yahoo", "Emergency call"]);
 
 const REFUSED: Partial<Record<UiAction["type"], string>> = {
   home: "a physical phone is driven only inside the preview's app, so deckhand never presses home on it. Use `back`, or relaunch the app with restart_preview.",
@@ -150,11 +152,7 @@ export class IphoneControl implements DeviceControl<IphoneTarget> {
       case "back":
         return this.back(client, target);
       case "dismissKeyboard":
-        await wrap(
-          () => client.dismissKeyboard(),
-          "this keyboard has no Done or Return key deckhand can press — tap outside the field, or send key {name: \"enter\"}",
-        );
-        return { action: "dismissKeyboard" };
+        return this.dismissKeyboard(client, target);
       case "scrollUntilVisible":
         return this.scrollUntilVisible(client, target, a.selector);
     }
@@ -243,6 +241,52 @@ export class IphoneControl implements DeviceControl<IphoneTarget> {
     };
   }
 
+  /**
+   * An iPhone keyboard has no hide key, and nothing in XCUITest resigns a field, so WDA can only
+   * press a key: its own dismiss looks for one LABELLED Done/Return, which a Norwegian keyboard's
+   * "gå" (or "søk", "send") is not, and it then failed on an iPhone 15. The return key's
+   * IDENTIFIER is the UIReturnKeyType's English name whatever the language, so it is found by that
+   * instead. Pressing it is what `enter` does — it may submit the field — and the result says so.
+   */
+  private async dismissKeyboard(client: WdaClient, target: IphoneTarget): Promise<unknown> {
+    const keyboardUp = (nodes: ScreenNode[]) => nodes.some((n) => n.role === "Key");
+    if (!keyboardUp(nodesOf(await this.tree(client)))) return { action: "dismissKeyboard", shown: false };
+    await this.inApp(client, target);
+    const dismissed = await wrap(async () => {
+      try {
+        await client.dismissKeyboard();
+        return true;
+      } catch (e) {
+        // Only WDA's own "could not" is safe to follow with a press; a timeout may already have hidden it.
+        if (e instanceof WdaError && e.status === 400 && /invalid element state/.test(e.message)) return false;
+        throw e;
+      }
+    }, "the keyboard may already be gone — describe the screen before retrying");
+    if (dismissed) return { action: "dismissKeyboard", shown: true, method: "wda" };
+    const tree = await this.tree(client);
+    if (!keyboardUp(nodesOf(tree))) return { action: "dismissKeyboard", shown: true, method: "wda" };
+    const ret = keyboardsOf(tree)
+      .flatMap((k) => nodesOf({ roots: [k] }))
+      .find((n) => n.role === "Button" && n.id && RETURN_KEY_IDS.has(n.id) && n.frame);
+    if (!ret) {
+      throw new IphoneActionError(
+        "this keyboard has no return key deckhand can find, and an iPhone has no key that only hides it — tap the app's own Done or a non-field area, or scroll the content",
+        409,
+      );
+    }
+    await this.inApp(client, target);
+    await this.tapNode(client, ret);
+    const gone = await this.poll(client, 1_500, (nodes) => (keyboardUp(nodes) ? null : true));
+    if (!gone) throw new IphoneActionError(`pressed the keyboard's return key ("${ret.label ?? ret.id}"), and the keyboard is still up — this field keeps it (a multiline field, or one that moves to the next field)`, 409);
+    return {
+      action: "dismissKeyboard",
+      shown: true,
+      method: "returnKey",
+      key: ret.label ?? ret.id,
+      note: `An iPhone keyboard has no hide key, so deckhand pressed its return key ("${ret.label ?? ret.id}"). Like key enter, that may also submit the field.`,
+    };
+  }
+
   private async scrollUntilVisible(client: WdaClient, target: IphoneTarget, selector: Selector): Promise<unknown> {
     let before = "";
     for (let i = 0; i <= SCROLL_TRIES; i++) {
@@ -263,6 +307,16 @@ export class IphoneControl implements DeviceControl<IphoneTarget> {
 
 function nodesOf(tree: PhoneTree): ScreenNode[] {
   return flattenTree(tree);
+}
+
+function keyboardsOf(tree: PhoneTree): PhoneNode[] {
+  const out: PhoneNode[] = [];
+  const walk = (n: PhoneNode): void => {
+    if (n.role === "Keyboard") out.push(n);
+    else n.children?.forEach(walk);
+  };
+  tree.roots.forEach(walk);
+  return out;
 }
 
 function clamp(v: number): number {

@@ -51,8 +51,8 @@ const yes = (v: string | boolean | undefined) => v === true || v === "1";
 const INPUT = /^(TextField|SecureTextField|SearchField|TextArea)$/;
 const TAPPABLE = /^(Button|Cell|Link|Switch|Toggle|TextField|SecureTextField|SearchField|TextArea|Tab|Key|MenuItem|SegmentedControl|Slider|Stepper|PickerWheel|Image)$/;
 const SCROLLER = /^(ScrollView|Table|CollectionView|WebView)$/;
-/** Kept even when VoiceOver would skip them: a reader needs to see a spinner or a field. */
-const ALWAYS_KEEP = /^(ActivityIndicator|ProgressIndicator|TextField|SecureTextField|SearchField|TextArea|Switch|Alert|WebView)$/;
+/** Kept even when VoiceOver would skip them: a reader needs to see a spinner or a field, and dismissKeyboard the keyboard its keys belong to. */
+const ALWAYS_KEEP = /^(ActivityIndicator|ProgressIndicator|TextField|SecureTextField|SearchField|TextArea|Switch|Alert|WebView|Keyboard)$/;
 
 /**
  * WDA reports every XCUIElement, including the StaticTexts inside a button that repeat its label.
