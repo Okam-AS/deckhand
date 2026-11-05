@@ -76,7 +76,7 @@ const SYSTEM_IMAGE = new RegExp(
 );
 
 export function isSystemNoise(l: SyslogLine): boolean {
-  return (l.level === "D" || l.level === "I") && !!l.subsystem && SYSTEM_IMAGE.test(l.subsystem);
+  return (l.level === "D" || l.level === "I") && !!l.subsystem && l.subsystem !== l.process && SYSTEM_IMAGE.test(l.subsystem);
 }
 
 /**

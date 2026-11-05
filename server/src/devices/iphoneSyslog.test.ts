@@ -179,6 +179,30 @@ describe("the syslog stream", () => {
     assert.equal(log.lines().length, 52, "the phone-wide buffer still holds everything");
   });
 
+  it("keeps every line from the app's own image when its executable is named like an Apple framework", async () => {
+    const spawned: FakeChild[] = [];
+    const impl = (() => {
+      const c = new FakeChild();
+      spawned.push(c);
+      return c as unknown as ChildProcess;
+    }) as unknown as typeof spawn;
+    const log = new IphoneSyslog({ udid: "U1", appProcess: "CoreDemo", spawnImpl: impl, now: () => now });
+    log.start();
+    spawned[0]!.stdout.write(
+      [
+        `Oct 23 18:04:13.100000 CoreDemo(CoreDemo)[9732] <Info>: DECKHAND_ENV=staging`,
+        `Oct 23 18:04:13.200000 CoreDemo(CoreDemo)[9732] <Debug>: the app's own native debug line`,
+        `Oct 23 18:04:13.300000 CoreDemo(CoreFoundation)[9732] <Debug>: CFPrefsPlistSource`,
+      ].join("\n") + "\n",
+    );
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(
+      log.lines({ process: "CoreDemo" }).map((l) => l.message),
+      ["DECKHAND_ENV=staging", "the app's own native debug line"],
+    );
+    assert.equal(log.systemNoiseLeftOut, 1);
+  });
+
   it("says when the stream ended by itself, and not when it was stopped", () => {
     const a = stream();
     a.log.start();
