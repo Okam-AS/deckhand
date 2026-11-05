@@ -1120,9 +1120,9 @@ change eases in/out — nothing snaps.
    holder of ANY simulator share (Safari is one Home press away) or the code under preview there
    can reach `127.0.0.1:<forward port>` and drive the whole phone — outside the registered app,
    past the phone preview's PIN. Android is the same through the adb server on `127.0.0.1:5037`,
-   which has no authentication and is up whenever a phone is plugged in. The in-app check
-   (`iphoneControl.ts`, iPhone only — an Android phone has none, and `ui` or the viewer can press
-   its Home or app switcher) and `RegisteredApp` bind deckhand's own client and nothing else, and
+   which has no authentication and is up whenever a phone is plugged in. The in-app checks
+   (`iphoneControl.ts` over WDA, `adbControl.ts` over `dumpsys window`; a person in the viewer can
+   still press an Android phone's Home) and `RegisteredApp` bind deckhand's own client and nothing else, and
    the PIN default guards the phone's share link, not the phone. This is accepted, not closed: on
    a Mac that serves untrusted simulator shares, do not cable a phone.
    **Egress — the one destination app content leaves this machine for: TypeSafe's API, from two

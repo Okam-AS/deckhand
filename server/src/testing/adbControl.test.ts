@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { ExecResult } from "../devices/android.ts";
 import { RegisteredApp } from "../devices/androidPhone.ts";
 import { AdbControl, findAll, parseUiAutomatorTree } from "./adbControl.ts";
-import { SimDeckActionError } from "./control.ts";
+import { SimDeckActionError, type UiAction } from "./control.ts";
 import { ScreenBook } from "./screen.ts";
 
 const XML =
@@ -14,7 +14,10 @@ const XML =
   '<node index="2" text="" resource-id="" class="android.view.ViewGroup" package="no.example.app" content-desc="Fortsett &amp; lagre" clickable="true" bounds="[40,500][1040,640]" />' +
   "</node></hierarchy>UI hierchary dumped to: /dev/stdout\n";
 
-function harness(opts: { dump?: string; app?: RegisteredApp | null } = {}) {
+const IN_APP =
+  "  mCurrentFocus=Window{6419467 u0 no.example.app/no.example.app.MainActivity}\n  mFocusedApp=ActivityRecord{1aa2b9b u0 no.example.app/.MainActivity} t11}\n";
+
+function harness(opts: { dump?: string; app?: RegisteredApp | null; focus?: string | (() => string) } = {}) {
   const calls: string[] = [];
   const exec = async (_cmd: string, args: string[]): Promise<ExecResult> => {
     calls.push(args.join(" "));
@@ -22,9 +25,11 @@ function harness(opts: { dump?: string; app?: RegisteredApp | null } = {}) {
     if (args.includes("size")) return say("Physical size: 1440x3200\nOverride size: 1080x2400\n");
     if (args.includes("dump")) return say(opts.dump ?? XML);
     if (args.includes("input_method")) return say("mInputShown=true");
+    if (args.includes("window")) return say(typeof opts.focus === "function" ? opts.focus() : (opts.focus ?? IN_APP));
     return say("");
   };
-  const control = new AdbControl({ exec, appOf: () => opts.app ?? null, sleep: async () => {} });
+  const app = "app" in opts ? opts.app : new RegisteredApp(exec, "RF8", "no.example.app");
+  const control = new AdbControl({ exec, appOf: () => app ?? null, sleep: async () => {} });
   const target = { platform: "android" as const, udid: "RF8" };
   return { control, target, calls };
 }
@@ -111,6 +116,85 @@ describe("the adb control backend's actions", () => {
     const { control, target, calls } = harness();
     assert.deepEqual(await control.action(target, { type: "dismissKeyboard" }), { action: "dismissKeyboard", shown: true });
     assert.ok(calls.includes("-s RF8 shell input keyevent 4"));
+  });
+
+  it("never presses home or the app switcher on a phone, and touches nothing", async () => {
+    const { control, target, calls } = harness();
+    for (const a of [{ type: "home" }, { type: "button", name: "home" }, { type: "button", name: "app-switch" }, { type: "button", name: "appSwitch" }] as UiAction[]) {
+      await assert.rejects(control.action(target, a), (e: unknown) => e instanceof SimDeckActionError && e.status === 422 && /never presses home or the app switcher/.test(e.message), JSON.stringify(a));
+    }
+    assert.ok(!calls.some((c) => / keyevent (3|187)$/.test(c)), calls.join("\n"));
+    await control.action(target, { type: "button", name: "back" });
+    assert.ok(calls.includes("-s RF8 shell input keyevent 4"));
+  });
+
+  it("refuses a swipe that starts on the top or bottom edge, where Android pulls the shade or goes home", async () => {
+    const { control, target, calls } = harness();
+    await assert.rejects(control.action(target, { type: "swipe", startX: 0.5, startY: 0.01, endX: 0.5, endY: 0.6 }), /notification shade/);
+    await assert.rejects(control.action(target, { type: "swipe", startX: 0.5, startY: 0.99, endX: 0.5, endY: 0.5 }), /recent apps/);
+    assert.ok(!calls.some((c) => c.includes("input swipe")));
+    await control.action(target, { type: "swipe", startX: 0.5, startY: 0.8, endX: 0.5, endY: 0.2 });
+    assert.ok(calls.some((c) => c.includes("input swipe")));
+  });
+
+  it("never touches or types while the launcher, the shade or another app has focus", async () => {
+    const outside = [
+      ["  mCurrentFocus=Window{6419467 u0 com.sec.android.app.launcher/com.sec.android.app.launcher.activities.LauncherActivity}\n", /com\.sec\.android\.app\.launcher/],
+      // The shade over the app: mFocusedApp still names the app, mCurrentFocus does not.
+      ["  mCurrentFocus=Window{3eaecf1 u0 NotificationShade}\n  mFocusedApp=ActivityRecord{1aa2b9b u0 no.example.app/.MainActivity} t11}\n", /system window NotificationShade/],
+      ["  mCurrentFocus=Window{1 u0 com.google.android.gm/com.google.android.gm.ConversationListActivityGmail}\n", /com\.google\.android\.gm\b/],
+    ] as const;
+    for (const [focus, says] of outside) {
+      for (const a of [
+        { type: "tap", x: 0.5, y: 0.5 },
+        { type: "tapElement", selector: { label: "Fortsett & lagre" } },
+        { type: "type", text: "x" },
+        { type: "key", name: "enter" },
+        { type: "swipe", startX: 0.5, startY: 0.8, endX: 0.5, endY: 0.2 },
+        { type: "gesture", preset: "scroll-down" },
+        { type: "button", name: "menu" },
+      ] as UiAction[]) {
+        const { control, target, calls } = harness({ focus });
+        await assert.rejects(control.action(target, a), (e: unknown) => e instanceof SimDeckActionError && e.status === 409 && /never acts outside/.test(e.message) && says.test(e.message), `${a.type} ${focus}`);
+        assert.ok(!calls.some((c) => / input (tap|text|swipe|keyevent)/.test(c)), `${a.type}: ${calls.join("\n")}`);
+      }
+    }
+    // back still closes the shade, and reading the screen is never refused.
+    const { control, target } = harness({ focus: outside[1][0] });
+    await control.action(target, { type: "back" });
+    await control.action(target, { type: "assert", selector: { text: "Logg inn" } });
+  });
+
+  it("drives the app's own popups, its permission prompt, Google sign-in and a Custom Tab", async () => {
+    for (const focus of [
+      "  mCurrentFocus=Window{5 u0 PopupWindow:9a1b2c}\n  mFocusedApp=ActivityRecord{1aa2b9b u0 no.example.app/.MainActivity} t11}\n",
+      "  mCurrentFocus=Window{5 u0 com.google.android.permissioncontroller/com.android.permissioncontroller.permission.ui.GrantPermissionsActivity}\n",
+      "  mCurrentFocus=Window{5 u0 com.google.android.gms/com.google.android.gms.auth.api.signin.ui.SignInActivity}\n",
+      "  mCurrentFocus=Window{5 u0 com.android.chrome/org.chromium.chrome.browser.customtabs.CustomTabActivity}\n",
+    ]) {
+      const { control, target, calls } = harness({ focus });
+      await control.action(target, { type: "tap", x: 0.5, y: 0.5 });
+      assert.ok(calls.includes("-s RF8 shell input tap 540 1200"), focus);
+    }
+  });
+
+  it("asks again when focus is between windows, and checks before each scroll and after waiting", async () => {
+    let reads = 0;
+    const { control, target, calls } = harness({ focus: () => (++reads < 3 ? "  mCurrentFocus=null\n" : IN_APP) });
+    await control.action(target, { type: "tap", x: 0.5, y: 0.5 });
+    assert.equal(reads, 3);
+    assert.ok(calls.includes("-s RF8 shell input tap 540 1200"));
+
+    let scrolls = 0;
+    const leaves = harness({ dump: XML, focus: () => (scrolls++ < 1 ? IN_APP : "  mCurrentFocus=Window{3 u0 NotificationShade}\n") });
+    await assert.rejects(leaves.control.action(leaves.target, { type: "scrollUntilVisible", selector: { text: "Ikke her" } }), /never acts outside/);
+    assert.equal(leaves.calls.filter((c) => c.includes("input swipe")).length, 1, "one scroll, then the shade stopped it");
+  });
+
+  it("refuses to touch a phone whose app is not installed yet", async () => {
+    const { control, target, calls } = harness({ app: null });
+    await assert.rejects(control.action(target, { type: "tap", x: 0.5, y: 0.5 }), /not installed yet/);
+    assert.ok(!calls.some((c) => c.includes("input tap")));
   });
 
   it("fails a verifier that does not hold with a 404, like SimDeck", async () => {

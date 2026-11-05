@@ -2,6 +2,7 @@ import { makeDefaultExec, type Exec } from "../devices/android.ts";
 import { escapeInputText, NonAsciiTextError, type RegisteredApp } from "../devices/androidPhone.ts";
 import { SimDeckActionError, type ControlBackend, type DescribeOptions, type Selector, type SimDeckTarget, type UiAction } from "./control.ts";
 import { presetSwipe, PRESET_DURATION_MS } from "./orientation.ts";
+import { phoneEdgeSwipeRefusal } from "./phoneEdges.ts";
 
 // ---------------------------------------------------------------------------
 // `describe` and `ui` for a physical Android phone, over adb. SimDeck addresses
@@ -125,8 +126,36 @@ const KEYCODES: Record<string, number> = {
   enter: 66, return: 66, backspace: 67, tab: 61, escape: 111, space: 62, delete: 112,
   up: 19, down: 20, left: 21, right: 22,
 };
-/** Buttons a phone may be pressed with. Power and volume change the phone's state, not the app's. */
-const BUTTONS: Record<string, number> = { home: 3, back: 4, menu: 82, "app-switch": 187, appswitch: 187 };
+/**
+ * Buttons a phone may be pressed with. Power and volume change the phone's state, not the app's;
+ * home and the app switcher leave the app, after which a tap lands on the launcher or another app.
+ */
+const BUTTONS: Record<string, number> = { back: 4, menu: 82 };
+const LEAVES_APP = /^(home|app-?switch(er)?|recents?)$/i;
+const TOUCHES = new Set<UiAction["type"]>(["tap", "tapElement", "type", "key", "swipe", "gesture", "scrollUntilVisible"]);
+const LEAVES_APP_MESSAGE =
+  "a physical phone is driven only inside the preview's app, so deckhand never presses home or the app switcher on it. Use `back`, or relaunch the app with restart_preview.";
+
+/**
+ * Windows outside the app's own package that are still the app's flow, because the app opened them
+ * and the user returns from them: the runtime-permission prompt, Google sign-in and account
+ * pickers, and a browser Custom Tab (where most web logins run).
+ */
+const PART_OF_APP_FLOW = /^(com\.(google\.)?android\.permissioncontroller|com\.google\.android\.gms|com\.android\.chrome|com\.sec\.android\.app\.sbrowser)$/;
+
+/** What `dumpsys window displays` says has input focus: a package, or a bare system window such as NotificationShade. */
+export function focusedWindow(dumpsys: string): { pkg: string } | { window: string } | null {
+  const cur = /mCurrentFocus=Window\{\S+ u\d+ ([^}\s]+)\}/.exec(dumpsys)?.[1];
+  if (!cur) return null; // mCurrentFocus=null: a transition; ask again
+  const slash = cur.indexOf("/");
+  if (slash > 0) return { pkg: cur.slice(0, slash) };
+  // An app's popup menu or dropdown is a bare `PopupWindow:<hash>`, owned by the focused activity.
+  if (/^PopupWindow:/.test(cur)) {
+    const app = /mFocusedApp=ActivityRecord\{\S+ u\d+ ([^/\s]+)\//.exec(dumpsys)?.[1];
+    if (app) return { pkg: app };
+  }
+  return { window: cur };
+}
 
 const describeSelector = (s: Selector): string => JSON.stringify(Object.fromEntries(Object.entries(s).filter(([, v]) => v != null)));
 
@@ -214,6 +243,23 @@ export class AdbControl implements ControlBackend {
     await this.shell(serial, ["input", "swipe", String(a), String(b), String(c), String(d), String(Math.round(ms))]);
   }
 
+  /** The preview's app (or a window it opened, PART_OF_APP_FLOW) must have input focus before deckhand touches the phone. */
+  private async inApp(serial: string): Promise<void> {
+    const app = this.appOf(serial);
+    if (!app) throw new SimDeckActionError("deckhand drives a phone only inside the preview's app, and it is not installed yet — wait for preview_status ready", 409);
+    let seen: ReturnType<typeof focusedWindow> = null;
+    for (let i = 0; i < 4 && !seen; i++) {
+      if (i) await this.sleep(250);
+      seen = focusedWindow(await this.shell(serial, ["dumpsys", "window", "displays"]));
+    }
+    if (seen && "pkg" in seen && (seen.pkg === app.pkg || PART_OF_APP_FLOW.test(seen.pkg))) return;
+    const what = !seen ? "no window with input focus (locked or asleep?)" : "pkg" in seen ? seen.pkg : `the system window ${seen.window}`;
+    throw new SimDeckActionError(
+      `the phone is showing ${what}, not the preview's app (${app.pkg}); deckhand never acts outside it. \`back\` closes a shade or dialog; otherwise relaunch the app with restart_preview, then retry.`,
+      409,
+    );
+  }
+
   private async tapNode(serial: string, n: UiNode): Promise<{ x: number; y: number }> {
     const x = Math.round(n.frame.x + n.frame.width / 2);
     const y = Math.round(n.frame.y + n.frame.height / 2);
@@ -236,6 +282,15 @@ export class AdbControl implements ControlBackend {
     if ("selector" in a && a.selector.ref != null) throw new SimDeckActionError(`ref ${a.selector.ref} reached the adb backend unresolved`, 400);
     const serial = target.udid;
     const miss = (s: Selector) => new SimDeckActionError(`No accessibility element matched ${describeSelector(s)}.`, 404);
+    if (a.type === "home" || (a.type === "button" && LEAVES_APP.test(a.name))) throw new SimDeckActionError(LEAVES_APP_MESSAGE, 422);
+    if (a.type === "swipe") {
+      const edge = phoneEdgeSwipeRefusal(a.startY, "android");
+      if (edge) throw new SimDeckActionError(edge, 422);
+    }
+    // Everything that touches or types first checks what is in front, like the iPhone control.
+    // `back` and dismissKeyboard are left out: back launches nothing, and it is how an agent
+    // closes a shade or dialog it did not mean to open.
+    if ((TOUCHES.has(a.type) || (a.type === "button" && a.name.toLowerCase() !== "back")) && a.type !== "tapElement") await this.inApp(serial);
     switch (a.type) {
       case "tap": {
         const [x, y] = await this.px(serial, a.x, a.y);
@@ -245,6 +300,7 @@ export class AdbControl implements ControlBackend {
       case "tapElement": {
         const { tree, held } = await this.poll(serial, a.waitTimeoutMs ?? 0, (t) => findAll(t, a.selector, a.type).length > 0);
         if (!held) throw miss(a.selector);
+        await this.inApp(serial);
         return { action: "tap", ...(await this.tapNode(serial, findAll(tree, a.selector, a.type)[0]!)) };
       }
       case "type": {
@@ -266,14 +322,11 @@ export class AdbControl implements ControlBackend {
       case "button": {
         const code = BUTTONS[a.name.toLowerCase()];
         if (code == null) {
-          throw new SimDeckActionError(`button "${a.name}" is not pressed on a phone — power and volume change the phone, not the app (try: home, back, menu, app-switch)`, 400);
+          throw new SimDeckActionError(`button "${a.name}" is not pressed on a phone — power and volume change the phone, not the app (try: back, menu)`, 400);
         }
         await this.shell(serial, ["input", "keyevent", String(code)]);
         return { action: "button", button: a.name };
       }
-      case "home":
-        await this.shell(serial, ["input", "keyevent", "3"]);
-        return { action: "home" };
       case "back":
         await this.shell(serial, ["input", "keyevent", "4"]);
         return { action: "back", method: "keyevent" };
@@ -306,6 +359,7 @@ export class AdbControl implements ControlBackend {
         for (let i = 0; i < 12; i++) {
           if (findAll(await this.tree(serial), a.selector, a.type).length) return { action: "scrollUntilVisible", scrolls: i };
           const [sx, sy, ex, ey] = presetSwipe("scroll-down");
+          if (i > 0) await this.inApp(serial);
           await this.swipe(serial, sx, sy, ex, ey, PRESET_DURATION_MS);
           await this.sleep(400);
         }

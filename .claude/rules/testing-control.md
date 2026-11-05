@@ -42,7 +42,23 @@ nothing that changes the phone (dark mode, power, volume) is pressed; and `openU
 the registered app only. → `adbControl.test.ts` "refuses non-ASCII text with a clear error and
 types nothing", "never changes a setting: no dark-mode toggle, no power or volume button"
 
-**An iPhone is WDA's, and only inside the app.** `iphoneControl.ts` drives a physical iPhone over WebDriverAgent's REST on the Mac's loopback forward, with no token, the same rules as SimDeck. Every touch and keystroke first asks WDA which app is in front — again right before a touch that follows a wait or a scroll — and refuses unless it is the preview's registered bundle; `home`, hardware buttons, `openUrl` and `toggleAppearance` are refused outright, because each acts outside the app or changes a setting. Coordinates are WDA's points. The client refuses any base URL but `http://127.0.0.1`. These rules bind deckhand's own client and nothing else: WDA has no token, a simulator shares the Mac's loopback, and the server keeps WDA and its forward up across previews, so for as long as an iPhone is cabled and its WDA has started a simulator share holder can reach WDA directly — the adb server on `127.0.0.1:5037` likewise for any plugged-in Android phone (PLAN §11 item 1; accepted, not closed). Never describe the in-app check or the phone PIN as a boundary around the phone, and never as an Android rule: an Android phone has no app-in-front check, so `ui` can press its Home or app switcher. → `iphoneControl.test.ts` "never touches or types while another app is in front", `iphoneControl.test.ts` "asks again which app is in front after waiting or scrolling, before it touches", `iphoneControl.test.ts` "refuses home, hardware buttons, openUrl and appearance with a reason, sending nothing", `preview.test.ts` "drives describe/ui/screenshot through WDA, and refuses a touch while another app is in front"
+**An Android phone is driven only inside the app too.** Every touch and keystroke first reads
+`dumpsys window displays` and refuses unless `mCurrentFocus` is the registered package, or a
+window the app opened and the user returns from (the runtime-permission prompt, Google sign-in, a
+Chrome or Samsung Internet Custom Tab); a bare system window such as `NotificationShade` is outside
+the app even though `mFocusedApp` still names it, and an app's own `PopupWindow:` is inside it.
+`home` and the app-switch/recents buttons are refused; `back` and `dismissKeyboard` are not checked,
+because back launches nothing and is how an agent closes a shade. → `adbControl.test.ts` "never
+touches or types while the launcher, the shade or another app has focus", "never presses home or
+the app switcher on a phone, and touches nothing"
+
+**A swipe from a phone's top or bottom edge is refused** (`phoneEdges.ts`, y < 0.07 or > 0.95), on
+both platforms: the OS owns it — Control Center, the notification shade, home — and it leaves the
+app in one gesture, before any check on the next action can see it. → `iphoneControl.test.ts`
+"refuses a swipe that starts on the top or bottom edge, where iOS opens Control Center or goes home",
+`adbControl.test.ts` "refuses a swipe that starts on the top or bottom edge, where Android pulls the shade or goes home"
+
+**An iPhone is WDA's, and only inside the app.** `iphoneControl.ts` drives a physical iPhone over WebDriverAgent's REST on the Mac's loopback forward, with no token, the same rules as SimDeck. Every touch and keystroke first asks WDA which app is in front — again right before a touch that follows a wait or a scroll — and refuses unless it is the preview's registered bundle; `home`, hardware buttons, `openUrl` and `toggleAppearance` are refused outright, because each acts outside the app or changes a setting. Coordinates are WDA's points. The client refuses any base URL but `http://127.0.0.1`. These rules bind deckhand's own client and nothing else: WDA has no token, a simulator shares the Mac's loopback, and the server keeps WDA and its forward up across previews, so for as long as an iPhone is cabled and its WDA has started a simulator share holder can reach WDA directly — the adb server on `127.0.0.1:5037` likewise for any plugged-in Android phone (PLAN §11 item 1; accepted, not closed). Never describe the in-app check or the phone PIN as a boundary around the phone: they bind deckhand's own client, and the viewer's Home on an Android phone is a person's choice. → `iphoneControl.test.ts` "never touches or types while another app is in front", `iphoneControl.test.ts` "asks again which app is in front after waiting or scrolling, before it touches", `iphoneControl.test.ts` "refuses home, hardware buttons, openUrl and appearance with a reason, sending nothing", `preview.test.ts` "drives describe/ui/screenshot through WDA, and refuses a touch while another app is in front"
 
 Two facts about the daemon that no check in this repo can see, because it is not our process:
 

@@ -139,6 +139,21 @@ describe("IphoneControl", () => {
     }
   });
 
+  it("refuses a swipe that starts on the top or bottom edge, where iOS opens Control Center or goes home", async () => {
+    for (const [startY, where] of [[0.005, /Control Center/], [0.98, /home or to the app switcher/]] as const) {
+      const { control, calls } = setup();
+      await assert.rejects(
+        () => control.action(target, { type: "swipe", startX: 0.92, startY, endX: 0.92, endY: 0.6 }),
+        (e: unknown) => e instanceof IphoneActionError && e.status === 422 && where.test(e.message),
+      );
+      assert.equal(calls.some((c) => c.path.endsWith("/actions")), false, "nothing reached the phone");
+    }
+    const { control, calls } = setup();
+    await control.action(target, { type: "swipe", startX: 0.5, startY: 0.8, endX: 0.5, endY: 0.2 });
+    await control.action(target, { type: "gesture", preset: "scroll-up" });
+    assert.equal(calls.filter((c) => c.path.endsWith("/actions")).length, 2, "a swipe on the content and a preset still run");
+  });
+
   it("asks again which app is in front after waiting or scrolling, before it touches", async () => {
     const icon = wdaNode({ type: "Icon", label: "Innstillinger", rect: { x: 100, y: 300, width: 60, height: 60 } });
     const backButton = wdaNode({ type: "Button", label: "Back", rawIdentifier: "BackButton", rect: { x: 16, y: 58, width: 44, height: 44 } });

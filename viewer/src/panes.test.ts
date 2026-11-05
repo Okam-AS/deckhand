@@ -442,4 +442,9 @@ describe("deviceChrome", () => {
     assert.deepEqual(deviceChrome({ platform: "ios" }), { home: true, rotate: true, mjpegOnly: false, physicalNote: null });
     assert.equal(deviceChrome({ platform: "android", physical: true }).physicalNote, "Physical device");
   });
+
+  it("offers no rotate on an Android phone, which the server does not turn, and keeps its home", () => {
+    assert.deepEqual(deviceChrome({ platform: "android", physical: true }), { home: true, rotate: false, mjpegOnly: false, physicalNote: "Physical device" });
+    assert.equal(deviceChrome({ platform: "android" }).rotate, true, "an emulator still turns");
+  });
 });
