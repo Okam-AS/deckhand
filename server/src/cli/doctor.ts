@@ -371,6 +371,9 @@ export function checkNavigateEgress(key: KeyLookup): Check | null {
   return { name: "navigate egress", ok: true, warn: true, detail: `navigate and check send screen labels and screenshots from every app they drive to ${EGRESS_HOST} (a third party) — test data and test accounts only. Off: \`deckhand secret rm typesafe\`` };
 }
 
+/** How long the iOS smoke check waits for the first accessibility tree of a freshly booted simulator. */
+export const COLD_DESCRIBE_TIMEOUT_MS = 30_000;
+
 /**
  * The three things a device must do before anything built on it can be called tested:
  * **boot**, **stream** a first frame, and answer a **describe** — the read half of the
@@ -407,7 +410,10 @@ async function smokeIos(config: Config): Promise<Check[]> {
       // attached fails for the reason we already reported, and two red lines for one cause
       // is how a gate starts getting skimmed.
       if (framed) {
-        const tree = await stream.describe();
+        // The first accessibility read after a boot is slow — ~11 s on Xcode 27.1 / iOS 27.0, against
+        // ~1.5 s after it — and this check always boots a fresh simulator, so the default 5 s
+        // failed it every run with "This operation was aborted".
+        const tree = await stream.describe(COLD_DESCRIBE_TIMEOUT_MS);
         const ok = typeof tree === "string" && tree.length > 0;
         checks.push({ name: label("describe"), ok, gate: true, detail: ok ? `${tree.length} chars` : "empty tree" });
       }

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { basePathFromStreamUrl, portFromDetach, ServeSimBackend } from "./serveSim.ts";
+import { basePathFromStreamUrl, DESCRIBE_TIMEOUT_MS, portFromDetach, ServeSimBackend } from "./serveSim.ts";
 
 describe("basePathFromStreamUrl", () => {
   it("derives /helper/<udid> from a detach streamUrl", () => {
@@ -493,5 +493,54 @@ describe("ServeSimBackend.attach — surviving helpers", () => {
     alive = false; // the helper died out from under us
     await backend.attach({ platform: "ios", udid: "UDID-1" });
     assert.equal(spawns.length, 2, "a dead helper is replaced instead of trusted");
+  });
+});
+
+describe("ServeSimBackend describe", () => {
+  // /ax on a just-booted simulator: nothing for a while (~11 s seen on Xcode 27.1), then the tree.
+  const slowAx = (afterMs: number) =>
+    (async (input: unknown, init?: RequestInit) => {
+      if (!String(input).endsWith("/ax")) return new Response(new Uint8Array(8192));
+      await new Promise<void>((resolve, reject) => {
+        const t = setTimeout(resolve, afterMs);
+        init?.signal?.addEventListener("abort", () => {
+          clearTimeout(t);
+          reject(new DOMException("This operation was aborted", "AbortError"));
+        });
+      });
+      return new Response('[{"AXLabel":"Kart","type":"Button"}]\n\n');
+    }) as unknown as typeof fetch;
+  const attach = (fetchImpl: typeof fetch) =>
+    new ServeSimBackend({
+      portRange: [3100, 3110],
+      detachImpl: async (_bin, args) => {
+        const udid = args[args.length - 1]!;
+        return JSON.stringify({ url: "http://127.0.0.1:3100", streamUrl: `http://127.0.0.1:3100/helper/${udid}/stream.mjpeg`, port: 3100, device: udid });
+      },
+      killImpl: async () => {},
+      fetchImpl,
+    }).attach({ platform: "ios", udid: "UDID-AX" });
+
+  it("waits past the default timeout when the caller asks for longer, for a simulator whose first tree is slow", async (t) => {
+    const arrivesAfter = DESCRIBE_TIMEOUT_MS + 1_000;
+    const stream = await attach(slowAx(arrivesAfter));
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      const tree = stream.describe(DESCRIBE_TIMEOUT_MS * 6);
+      await new Promise((r) => setImmediate(r));
+      t.mock.timers.tick(arrivesAfter);
+      assert.match(await tree, /Kart/);
+    } finally {
+      t.mock.timers.reset();
+      await stream.detach();
+    }
+  });
+
+  it("says the tree did not answer in time, instead of a bare abort", async () => {
+    const stream = await attach(slowAx(5_000));
+    const started = Date.now();
+    await assert.rejects(stream.describe(60), /accessibility tree \(\/ax\) did not answer within 60 ms/);
+    assert.ok(Date.now() - started < 2_000, "gave up at the caller's 60 ms, not the 5 s default");
+    await stream.detach();
   });
 });
