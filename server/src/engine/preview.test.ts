@@ -387,6 +387,20 @@ describe("PreviewEngine.startPreview", () => {
     const st = h.engine.getStatus("pv1")!;
     assert.match(st.devices[0]!.error ?? "", /build step "build" failed/);
     assert.ok((st.devices[0]!.logTail ?? "").length > 0);
+    assert.match(h.engine.logs("pv1", "ios-0", "build") ?? "", /\[build\] deckhand: step exited 1 after \d+ s/);
+  });
+
+  it("says a build that exited 0 without installing stopped early, with the last line it printed", async () => {
+    // Seen once on the Mac: an Expo build's log ended at "Installing CocoaPods...", every step
+    // exited 0, and the error blamed a failed install.
+    let t = 0;
+    const h = makeEngine({ simctl: fakeSimctl({ appContainer: async () => null }), now: () => (t += 40_000) });
+    h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["failed", "ready"]), "failed");
+    const dev = h.engine.getStatus("pv1")!.devices[0]!;
+    assert.match(dev.error ?? "", /did not appear installed on the device, although every build step exited 0 — the build log ends at: \[build\] running build/);
+    const log = h.engine.logs("pv1", "ios-0", "build") ?? "";
+    assert.match(log, /\[build\] deckhand: step exited 0 after \d+ s/);
   });
 
   // A failed preview is kept for `failedGraceMinutes` so it can be read and rebuilt,

@@ -81,6 +81,8 @@ import {
 // ---------------------------------------------------------------------------
 
 const LOG_CAP = 500;
+/** The build-log line runBuildPlan writes when a step ends: `[build] deckhand: step exited 0 after 312 s`. */
+const STEP_EXIT_MARK = "deckhand: step exited";
 // "stream" is the diagnostic trace for the path between the browser and the
 // device: helper attach, first-frame probes, every proxied request and its
 // upstream result, WebSocket upgrades, and what the viewer's player reports back.
@@ -2554,7 +2556,9 @@ export class PreviewEngine {
         await this.silenceDevOverlays(platform, builderHandle, bundleId);
       } else {
         this.setPhase(p, builder, "installing-app", "verifying install");
-        await this.verifyInstalled(platform, builderHandle, bundleId);
+        await this.verifyInstalled(platform, builderHandle, bundleId).catch((e: unknown) => {
+          throw this.notInstalledAfterBuild(e, builder, bundleId);
+        });
         await this.silenceDevOverlays(platform, builderHandle, bundleId);
         await this.freshAfterInstall(p, builder, builderHandle);
         this.setPhase(p, builder, "launching", "launching app");
@@ -3083,6 +3087,7 @@ export class PreviewEngine {
     const plan = buildPlan({ type: p.app.type, platform, udid, worktreePath, appEnv: env, local, ...(dev.appPackage ? { androidPackage: dev.appPackage } : {}) });
     for (const step of plan) {
       const output: string[] = [];
+      const started = this.d.now!();
       const res = await this.d.runStep!(step, {
         signal: dev.abort.signal,
         onLog: (line) => {
@@ -3096,18 +3101,36 @@ export class PreviewEngine {
           if (sub && dev.record.phase === "building") dev.record.step = sub;
         },
       });
+      // How each step ended, in the log itself: a step that exits 0 part-way (seen once: an Expo
+      // build whose log stopped at "Installing CocoaPods...") otherwise leaves no trace of it.
+      const exited = `[${step.name}] ${STEP_EXIT_MARK} ${res.code}${res.timedOut ? " (idle timeout)" : ""}${res.aborted ? " (aborted)" : ""} after ${Math.round((this.d.now!() - started) / 1000)} s`;
       if (res.code !== 0 && !step.optional) {
         // `build step "build" failed` is true and useless: the agent gets a dead end and the
         // viewer shows one line with no way to act on it. The cause is always in the log we
         // just captured, so lift it into the error itself.
         const cause = buildFailureCause(dev.logs.build);
+        this.appendLog(dev, "build", exited);
         throw new BuildStepFailed(
           `build step "${step.name}" failed${res.timedOut ? " (idle timeout)" : ""}${res.aborted ? " (aborted)" : ""}` +
             (cause ? ` — ${cause}` : ""),
           output,
         );
       }
+      this.appendLog(dev, "build", exited);
     }
+  }
+
+  /**
+   * The app is not on the device although every build step exited 0: the build stopped early
+   * without failing. Say so, with the last thing it printed, instead of "the build may have failed".
+   */
+  private notInstalledAfterBuild(e: unknown, dev: LiveDevice, bundleId: string): unknown {
+    if (!(e instanceof PreviewError) || !/did not appear installed/.test(e.message)) return e;
+    const last = [...dev.logs.build].reverse().find((l) => l.trim() && !l.includes(` ${STEP_EXIT_MARK} `));
+    return new PreviewError(
+      `app ${bundleId} did not appear installed on the device, although every build step exited 0${last ? ` — the build log ends at: ${last.slice(0, 200)}` : ""}`,
+      "the build stopped before it installed, without failing; read logs source=build, then restart_preview to build again",
+    );
   }
 
   /**
