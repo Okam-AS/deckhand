@@ -54,15 +54,29 @@ const REPORTERS = /^(ReportCrash|osanalyticshelper)$/;
 /**
  * Apple's frameworks log from inside the app's own process, under the app's name, with the
  * framework in parentheses: `Elton(CoreFoundation)[9732] <Debug>: … CFPrefsPlistSource …`. On an
- * iPhone 15 those Debug lines were nearly every line of the `app` log, pushing the app's own output
- * out of the tail and its bounded buffer. Only Debug level from a system image is dropped: the
- * app's code (its binary, `X.debug.dylib`, React, Hermes) and every Info-or-louder line stay.
+ * iPhone 15 these were nearly every line of the `app` log — 19 000 CoreFoundation Debug lines in a
+ * few minutes, then UIKitCore background-task and UIAccessibility/AXRuntime lines that WDA's own
+ * reads cause — pushing the app's output out of the tail and the bounded buffer. From a system
+ * image only Warning, Error and Fault are kept (idevicesyslog reads Info and Notice alike, so both
+ * go); the app's own images (its binary, `X.debug.dylib`), React, Hermes and third-party SDKs keep
+ * every level, and crash markers are Error lines, so they stay.
  */
-const SYSTEM_IMAGE =
-  /^(CoreFoundation|Foundation|CFNetwork|UIKitCore|UIKitServices|BaseBoard|BackBoardServices|FrontBoardServices|RunningBoardServices|CoreData|CoreText|CoreUI|QuartzCore|Security|TextInputCore|CoreMotion|CoreLocation|AudioToolbox|libsystem_\w+\.dylib|libdispatch\.dylib|libxpc\.dylib|libnetwork\.dylib|libboringssl\.dylib|libcoreanalytics\.dylib)$/;
+const SYSTEM_IMAGE = new RegExp(
+  "^(" +
+    [
+      "Foundation", "CFNetwork", "Network", "Security", "QuartzCore", "Metal", "IOSurface", "ImageIO",
+      "Core\\w+", "UIKit\\w*", "UIFoundation", "UIAccessibility", "AX\\w+", "\\w*Accessibility\\w*",
+      "TextInput\\w*", "InputAnalytics", "\\w+Services", "FrontBoard", "BaseBoard", "RunningBoard",
+      "PowerLog", "HangTracer", "XCTAutomationSupport", "WebKit", "SwiftUI", "MapKit", "StoreKit", "AVF\\w*",
+      "MediaToolbox", "Photos\\w*", "ManagedConfiguration", "UserNotifications\\w*", "LocalAuthentication",
+      "AuthenticationServices", "SafariServices", "SystemConfiguration", "GraphicsServices", "libsystem_\\w+\\.dylib",
+      "lib(?!hermes)[\\w+-]+\\.dylib",
+    ].join("|") +
+    ")$",
+);
 
-export function isSystemDebugNoise(l: SyslogLine): boolean {
-  return l.level === "D" && !!l.subsystem && SYSTEM_IMAGE.test(l.subsystem);
+export function isSystemNoise(l: SyslogLine): boolean {
+  return (l.level === "D" || l.level === "I") && !!l.subsystem && SYSTEM_IMAGE.test(l.subsystem);
 }
 
 /**
@@ -104,8 +118,8 @@ export class IphoneSyslog {
   private rest = "";
   /** Set when the stream ended without stop(): what it holds stops at that moment. */
   ended: string | undefined;
-  /** Debug lines Apple's frameworks wrote from the app's process, kept out of its lines (isSystemDebugNoise). */
-  systemDebugLeftOut = 0;
+  /** Debug/Info lines Apple's frameworks wrote from the app's process, kept out of its lines (isSystemNoise). */
+  systemNoiseLeftOut = 0;
 
   constructor(opts: IphoneSyslogOptions) {
     this.udid = opts.udid;
@@ -158,8 +172,8 @@ export class IphoneSyslog {
     const own = parsed.filter((l) => {
       if (REPORTERS.test(l.process)) return true;
       if (l.process !== this.appProcess) return false;
-      if (!isSystemDebugNoise(l)) return true;
-      this.systemDebugLeftOut++;
+      if (!isSystemNoise(l)) return true;
+      this.systemNoiseLeftOut++;
       return false;
     });
     if (!own.length) return;

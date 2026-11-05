@@ -140,7 +140,7 @@ describe("the syslog stream", () => {
     assert.deepEqual(log.crashes("com.example.preview").map((l) => l.process), ["Demo", "ReportCrash"]);
   });
 
-  it("keeps Apple frameworks' Debug lines out of the app's lines, and counts them", async () => {
+  it("keeps Apple frameworks' Debug and Info lines out of the app's lines, and counts them", async () => {
     const spawned: FakeChild[] = [];
     const impl = (() => {
       const c = new FakeChild();
@@ -155,6 +155,12 @@ describe("the syslog stream", () => {
       [
         ...Array(40).fill(noise),
         `Oct 23 18:04:13.500000 Elton(libsystem_info.dylib)[9732] <Debug>: lookup`,
+        `Oct 23 18:04:13.600000 Elton(UIKitCore)[9732] <Info>: Ending background task with UIBackgroundTaskIdentifier: 17`,
+        `Oct 23 18:04:13.700000 Elton(AXRuntime)[9732] <Notice>: the pid{37} for this context id{1323781180} is not the same for the hit testing app`,
+        `Oct 23 18:04:13.800000 Elton(TextInputUI)[9732] <Debug>: keyboard`,
+        `Oct 23 18:04:13.900000 Elton(UIKitCore)[9732] <Warning>: Unable to simultaneously satisfy constraints`,
+        `Oct 23 18:04:13.950000 Elton(OneSignalCore)[9732] <Info>: a third-party SDK in the app`,
+        `Oct 23 18:04:13.960000 Elton(hermes)[9732] <Info>: the JS engine`,
         `Oct 23 18:04:14.000000 Elton(React)[9732] <Debug>: [javascript] console.debug from the app`,
         `Oct 23 18:04:14.100000 Elton(Elton.debug.dylib)[9732] <Debug>: the app's own native debug line`,
         `Oct 23 18:04:14.200000 Elton(CoreFoundation)[9732] <Error>: *** Terminating app due to uncaught exception 'X'`,
@@ -164,12 +170,12 @@ describe("the syslog stream", () => {
     await new Promise((r) => setImmediate(r));
     assert.deepEqual(
       log.lines({ process: "Elton" }).map((l) => l.subsystem ?? "-"),
-      ["React", "Elton.debug.dylib", "CoreFoundation", "-"],
-      "the app's Debug lines and every louder line stay, CoreFoundation's Error included",
+      ["UIKitCore", "OneSignalCore", "hermes", "React", "Elton.debug.dylib", "CoreFoundation", "-"],
+      "the app's and its SDKs' lines at every level stay, and Apple's Warning and Error lines",
     );
-    assert.equal(log.systemDebugLeftOut, 41);
+    assert.equal(log.systemNoiseLeftOut, 44);
     assert.equal(log.crashes("no.vg.lab.zapp").length, 1);
-    assert.equal(log.lines().length, 45, "the phone-wide buffer still holds everything");
+    assert.equal(log.lines().length, 51, "the phone-wide buffer still holds everything");
   });
 
   it("says when the stream ended by itself, and not when it was stopped", () => {
