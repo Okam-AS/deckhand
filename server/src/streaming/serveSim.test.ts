@@ -529,7 +529,9 @@ describe("ServeSimBackend describe", () => {
 
   it("says the tree did not answer in time, instead of a bare abort", async () => {
     const stream = await attach(slowAx(5_000));
+    const started = Date.now();
     await assert.rejects(stream.describe(60), /accessibility tree \(\/ax\) did not answer within 60 ms/);
+    assert.ok(Date.now() - started < 2_000, "gave up at the caller's 60 ms, not the 5 s default");
     await stream.detach();
   });
 });
