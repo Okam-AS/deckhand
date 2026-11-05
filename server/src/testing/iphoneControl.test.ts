@@ -190,6 +190,58 @@ describe("IphoneControl", () => {
     }
   });
 
+  describe("dismissKeyboard", () => {
+    // The Norwegian keyboard an iPhone 15 showed: keys, and a return key labelled "gå" with the id "Go".
+    const field = wdaNode({ type: "TextField", value: "deck.test", rect: { x: 20, y: 300, width: 350, height: 44 } });
+    const keyboard = [
+      wdaNode({ type: "Key", label: "q", rect: { x: 3, y: 560, width: 35, height: 45 } }),
+      wdaNode({ type: "Key", label: "æ", rect: { x: 350, y: 615, width: 35, height: 45 } }),
+      wdaNode({ type: "Button", label: "gå", rawIdentifier: "Go", rect: { x: 290, y: 725, width: 95, height: 45 } }),
+    ];
+    const notDone: [number, unknown] = [400, { error: "invalid element state", message: "Did not know how to dismiss the keyboard." }];
+
+    it("says there was nothing to dismiss when no keyboard is up, and presses nothing", async () => {
+      const { control, calls } = setup({ source: app(field) });
+      assert.deepEqual(await control.action(target, { type: "dismissKeyboard" }), { action: "dismissKeyboard", shown: false });
+      assert.equal(calls.some((c) => c.path.endsWith("/wda/keyboard/dismiss") || c.path.endsWith("/actions")), false);
+    });
+
+    it("uses WDA's own dismiss when it finds a Done or Return key", async () => {
+      const { control, calls } = setup({ source: app(field, ...keyboard) });
+      assert.deepEqual(await control.action(target, { type: "dismissKeyboard" }), { action: "dismissKeyboard", shown: true, method: "wda" });
+      assert.equal(calls.filter((c) => c.path.endsWith("/actions")).length, 0);
+    });
+
+    it("presses the return key by its identifier when its label is not English, and says it may submit", async () => {
+      let pressed = false;
+      const { control, calls, state } = setup({ source: () => (pressed ? app(field) : app(field, ...keyboard)) });
+      state.failOnce.set("/session/S1/wda/keyboard/dismiss", notDone);
+      const origFetch = calls.push.bind(calls);
+      calls.push = (...items) => {
+        if (items.some((c) => c.path.endsWith("/actions"))) pressed = true;
+        return origFetch(...items);
+      };
+      await control.action(target, { type: "tap", x: 0.5, y: 0.1 }); // opens the session S1 the failure is keyed on
+      pressed = false;
+      const r = (await control.action(target, { type: "dismissKeyboard" })) as Record<string, unknown>;
+      assert.deepEqual([r.shown, r.method, r.key], [true, "returnKey", "gå"]);
+      assert.match(String(r.note), /may also submit/);
+      assert.deepEqual(pointerMoves(calls).at(-1), [[338, 748]], "the centre of the gå key");
+    });
+
+    it("refuses with a reason when no return key is found, and when the keyboard stays up", async () => {
+      const noReturn = setup({ source: app(field, keyboard[0]!, keyboard[1]!) });
+      await noReturn.control.action(target, { type: "tap", x: 0.5, y: 0.1 });
+      noReturn.state.failOnce.set("/session/S1/wda/keyboard/dismiss", notDone);
+      await assert.rejects(() => noReturn.control.action(target, { type: "dismissKeyboard" }), (e: unknown) => e instanceof IphoneActionError && e.status === 409 && /no return key/.test(e.message));
+
+      const stays = setup({ source: app(field, ...keyboard) });
+      await stays.control.action(target, { type: "tap", x: 0.5, y: 0.1 });
+      stays.state.failOnce.set("/session/S1/wda/keyboard/dismiss", notDone);
+      await assert.rejects(() => stays.control.action(target, { type: "dismissKeyboard" }), /still up/);
+    });
+  });
+
   it("types through WDA's keyboard, non-ASCII included, and maps named keys", async () => {
     const { control, calls } = setup();
     await control.action(target, { type: "type", text: "blåbær" });
