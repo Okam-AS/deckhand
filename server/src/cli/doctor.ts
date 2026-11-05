@@ -371,6 +371,9 @@ export function checkNavigateEgress(key: KeyLookup): Check | null {
   return { name: "navigate egress", ok: true, warn: true, detail: `navigate and check send screen labels and screenshots from every app they drive to ${EGRESS_HOST} (a third party) — test data and test accounts only. Off: \`deckhand secret rm typesafe\`` };
 }
 
+/** How long the iOS smoke check waits for the first accessibility tree of a freshly booted simulator. */
+export const COLD_DESCRIBE_TIMEOUT_MS = 30_000;
+
 /**
  * The three things a device must do before anything built on it can be called tested:
  * **boot**, **stream** a first frame, and answer a **describe** — the read half of the
@@ -384,9 +387,6 @@ export function checkNavigateEgress(key: KeyLookup): Check | null {
  * the device). That rides the WebSocket bridge, which needs a viewer on the other end, and a
  * check that pretended to cover it would be the same lie as a green gate that booted nothing.
  */
-/** How long the iOS smoke check waits for the first accessibility tree of a freshly booted simulator. */
-export const COLD_DESCRIBE_TIMEOUT_MS = 30_000;
-
 async function smokeIos(config: Config): Promise<Check[]> {
   const label = (cap: string) => `smoke ios: ${cap}`;
   const simctl = new Simctl();
