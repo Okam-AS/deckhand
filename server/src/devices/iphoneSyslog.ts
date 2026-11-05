@@ -67,7 +67,7 @@ const SYSTEM_IMAGE = new RegExp(
       "Foundation", "CFNetwork", "Network", "Security", "QuartzCore", "Metal", "IOSurface", "ImageIO",
       "Core\\w+", "UIKit\\w*", "UIFoundation", "UIAccessibility", "AX\\w+", "\\w*Accessibility\\w*",
       "TextInput\\w*", "InputAnalytics", "\\w+Services", "FrontBoard", "BaseBoard", "RunningBoard",
-      "PowerLog", "HangTracer", "XCTAutomationSupport", "WebKit", "SwiftUI", "MapKit", "StoreKit", "AVF\\w*",
+      "PowerLog", "HangTracer", "XCT\\w+", "AppSSO\\w*", "AnimationKit", "GenerativeModels\\w*", "WebKit", "SwiftUI", "MapKit", "StoreKit", "AVF\\w*",
       "MediaToolbox", "Photos\\w*", "ManagedConfiguration", "UserNotifications\\w*", "LocalAuthentication",
       "AuthenticationServices", "SafariServices", "SystemConfiguration", "GraphicsServices", "libsystem_\\w+\\.dylib",
       "lib(?!hermes)[\\w+-]+\\.dylib",

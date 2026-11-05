@@ -159,6 +159,7 @@ describe("the syslog stream", () => {
         `Oct 23 18:04:13.700000 Elton(AXRuntime)[9732] <Notice>: the pid{37} for this context id{1323781180} is not the same for the hit testing app`,
         `Oct 23 18:04:13.800000 Elton(TextInputUI)[9732] <Debug>: keyboard`,
         `Oct 23 18:04:13.900000 Elton(UIKitCore)[9732] <Warning>: Unable to simultaneously satisfy constraints`,
+        `Oct 23 18:04:13.940000 Elton(XCTTargetBootstrap)[9732] <Info>: WDA, not the app`,
         `Oct 23 18:04:13.950000 Elton(OneSignalCore)[9732] <Info>: a third-party SDK in the app`,
         `Oct 23 18:04:13.960000 Elton(hermes)[9732] <Info>: the JS engine`,
         `Oct 23 18:04:14.000000 Elton(React)[9732] <Debug>: [javascript] console.debug from the app`,
@@ -173,9 +174,9 @@ describe("the syslog stream", () => {
       ["UIKitCore", "OneSignalCore", "hermes", "React", "Elton.debug.dylib", "CoreFoundation", "-"],
       "the app's and its SDKs' lines at every level stay, and Apple's Warning and Error lines",
     );
-    assert.equal(log.systemNoiseLeftOut, 44);
+    assert.equal(log.systemNoiseLeftOut, 45);
     assert.equal(log.crashes("no.vg.lab.zapp").length, 1);
-    assert.equal(log.lines().length, 51, "the phone-wide buffer still holds everything");
+    assert.equal(log.lines().length, 52, "the phone-wide buffer still holds everything");
   });
 
   it("says when the stream ended by itself, and not when it was stopped", () => {
