@@ -3649,6 +3649,21 @@ describe("EAS builds and environments", () => {
     await h.engine.stopPreview("pv1");
   });
 
+  it("turns Reduce Transparency on before it installs an EAS simulator build, when the operator set it", async () => {
+    const log: string[] = [];
+    const h = makeEngine({
+      config: { ...config, ios: { reduceTransparency: true } },
+      eas: fakeEas(),
+      simctl: fakeSimctl({ reduceTransparency: async (udid: string) => void log.push(`reduceTransparency ${udid}`) }, log),
+    });
+    h.engine.startPreview({ app: easApp, source: "eas", devices: [{ platform: "ios" }], access: "public" });
+    assert.equal(await waitForPhase(h.engine, "pv1", ["ready", "failed"]), "ready", JSON.stringify(h.engine.getStatus("pv1")));
+    const reduced = log.findIndex((c) => c.startsWith("reduceTransparency "));
+    assert.ok(reduced >= 0, log.join("\n"));
+    assert.ok(reduced < log.findIndex((c) => c.startsWith("simctl install ")), log.join("\n"));
+    await h.engine.stopPreview("pv1");
+  });
+
   it("passes the environment's launch arguments to a git build on an emulator and a simulator", async () => {
     const launched: string[] = [];
     const phoneLog: string[] = [];
