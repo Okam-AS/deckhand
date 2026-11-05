@@ -3121,14 +3121,14 @@ export class PreviewEngine {
   }
 
   /**
-   * The app is not on the device although every build step exited 0: the build stopped early
+   * The app is not on the device although every required build step exited 0: the build stopped early
    * without failing. Say so, with the last thing it printed, instead of "the build may have failed".
    */
   private notInstalledAfterBuild(e: unknown, dev: LiveDevice, bundleId: string): unknown {
     if (!(e instanceof PreviewError) || !/did not appear installed/.test(e.message)) return e;
-    const last = [...dev.logs.build].reverse().find((l) => l.trim() && !l.includes(` ${STEP_EXIT_MARK} `));
+    const last = dev.logs.build.findLast((l) => l.trim() && !l.includes(` ${STEP_EXIT_MARK} `));
     return new PreviewError(
-      `app ${bundleId} did not appear installed on the device, although every build step exited 0${last ? ` — the build log ends at: ${last.slice(0, 200)}` : ""}`,
+      `app ${bundleId} did not appear installed on the device, although every required build step exited 0${last ? ` — the build log ends at: ${last.slice(0, 200)}` : ""}`,
       "the build stopped before it installed, without failing; read logs source=build, then restart_preview to build again",
     );
   }

@@ -398,7 +398,7 @@ describe("PreviewEngine.startPreview", () => {
     h.engine.startPreview({ app: rnApp, source: "git", spec: { kind: "branch", branch: "main" }, devices: [{ platform: "ios" }], access: "public" });
     assert.equal(await waitForPhase(h.engine, "pv1", ["failed", "ready"]), "failed");
     const dev = h.engine.getStatus("pv1")!.devices[0]!;
-    assert.match(dev.error ?? "", /did not appear installed on the device, although every build step exited 0 — the build log ends at: \[build\] running build/);
+    assert.match(dev.error ?? "", /did not appear installed on the device, although every required build step exited 0 — the build log ends at: \[build\] running build/);
     const log = h.engine.logs("pv1", "ios-0", "build") ?? "";
     assert.match(log, /\[build\] deckhand: step exited 0 after \d+ s/);
   });
